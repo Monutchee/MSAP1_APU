@@ -1,8 +1,10 @@
 #include "msap1/protocol.hpp"
+#include "msap1/visualizer.hpp"
 
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -69,6 +71,51 @@ void sample_batch_round_trip()
 	require(decoded.frames[1][7] == 107, "wrong channel sample");
 }
 
+void adc_health_round_trip()
+{
+	msap1_adc_health_payload health{};
+	health.health_flags = MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
+		MSAP1_ADC_HEALTH_INITIALIZED | MSAP1_ADC_HEALTH_CONFIG_MATCH;
+	health.sample_rate_hz = 32000;
+	health.frame_count = 123456;
+	health.header_error_count = 12;
+	health.expected_decimation = 64;
+	health.status_3 = 0x10;
+	health.dout_format = 0;
+	health.src_n_lsb = 64;
+
+	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
+						23, &health, sizeof(health));
+	const auto message = msap1::decode_message(wire.data(), wire.size());
+	const auto decoded = msap1::decode_adc_health(message);
+	require(decoded.sample_rate_hz == 32000, "wrong health sample rate");
+	require(decoded.frame_count == 123456, "wrong health frame count");
+	require(decoded.header_error_count == 12,
+		"wrong health header error count");
+	require(decoded.expected_decimation == 64,
+		"wrong expected decimation");
+	require(decoded.status_3 == 0x10, "wrong STATUS_3 value");
+}
+
+void voltage_channel_filter()
+{
+	msap1::AdcBatch batch;
+	batch.adc_sample_rate_hz = 32000;
+	batch.display_rate_hz = 1000;
+	batch.frames.push_back({0, 1, 2, 3, 400, 500, 600, 7});
+	std::ostringstream output;
+	msap1::Visualizer visualizer(output, msap1::OutputFormat::table,
+				      {4, 5, 6});
+	visualizer.render(batch);
+	const auto text = output.str();
+	require(text.find("ch4") != std::string::npos, "channel 4 missing");
+	require(text.find("ch5") != std::string::npos, "channel 5 missing");
+	require(text.find("ch6") != std::string::npos, "channel 6 missing");
+	require(text.find("ch0") == std::string::npos, "channel 0 was not filtered");
+	require(text.find("400") != std::string::npos, "channel 4 sample missing");
+	require(text.find("600") != std::string::npos, "channel 6 sample missing");
+}
+
 void rejects_bad_frames()
 {
 	std::vector<std::uint8_t> short_frame(4);
@@ -97,6 +144,8 @@ int main()
 	try {
 		request_round_trip();
 		sample_batch_round_trip();
+		adc_health_round_trip();
+		voltage_channel_filter();
 		rejects_bad_frames();
 		std::cout << "protocol tests passed\n";
 		return 0;

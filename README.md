@@ -41,6 +41,12 @@ and `rpmsg_ctrl` drivers. The viewer discovers the `mncos-r5c0-ctrl` endpoint:
 msap1-apu-app adc-view
 ```
 
+Show only the three voltage channels (AD7771 AIN4/AIN5/AIN6):
+
+```sh
+msap1-apu-app adc-view --channels 4,5,6
+```
+
 Useful export modes are:
 
 ```sh
@@ -48,6 +54,17 @@ msap1-apu-app adc-view --rate 1000 --format table --frames 20
 msap1-apu-app adc-view --rate 1000 --format csv --output adc.csv --duration 10
 msap1-apu-app adc-view --rate 1000 --format jsonl --output adc.jsonl
 ```
+
+Query the RPU for an active AD7771 SPI register readback and PL capture
+health counters:
+
+```sh
+msap1-apu-app adc-health
+```
+
+The command exits successfully only when SPI responds, initialization and
+configuration readback pass, capture is active, and the PL reports neither
+FIFO overflow nor channel-header errors.
 
 The requested rate must be no more than 4,000 frames/s and must divide the
 32,000-frame/s capture rate exactly. Supported examples include 1, 10, 20, 25,
