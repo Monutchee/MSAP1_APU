@@ -16,6 +16,11 @@ static_assert(offsetof(msap1_adc_sample_batch, frames) ==
 static_assert(sizeof(msap1_rpu_msg_header) +
 	      sizeof(msap1_adc_sample_batch) <= MSAP1_RPU_MAX_FRAME_SIZE,
 	      "ADC batch exceeds RPMsg protocol frame");
+static_assert(sizeof(msap1_adc_health_payload) == 48,
+	      "unexpected ADC health payload layout");
+static_assert(sizeof(msap1_rpu_msg_header) +
+	      sizeof(msap1_adc_health_payload) <= MSAP1_RPU_MAX_FRAME_SIZE,
+	      "ADC health response exceeds RPMsg protocol frame");
 
 std::vector<std::uint8_t> encode_request(std::uint8_t type,
 					std::uint32_t sequence,
@@ -96,6 +101,18 @@ AdcBatch decode_adc_batch(const Message &message)
 			    frame_bytes + i * sizeof(msap1_adc_sample_frame),
 			    sizeof(msap1_adc_sample_frame));
 	return batch;
+}
+
+msap1_adc_health_payload decode_adc_health(const Message &message)
+{
+	if (message.header.type != MSAP1_RPU_MSG_ADC_HEALTH ||
+	    message.header.status != MSAP1_RPU_STATUS_OK ||
+	    message.payload.size() != sizeof(msap1_adc_health_payload))
+		throw std::runtime_error("message is not an ADC health response");
+
+	msap1_adc_health_payload health{};
+	std::memcpy(&health, message.payload.data(), sizeof(health));
+	return health;
 }
 
 } // namespace msap1

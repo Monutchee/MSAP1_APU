@@ -27,6 +27,8 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_ADC_STREAM_START = 8,
 	MSAP1_RPU_MSG_ADC_STREAM_STOP = 9,
 	MSAP1_RPU_MSG_ADC_SAMPLE_BATCH = 10,
+	MSAP1_RPU_MSG_ADC_HEALTH_GET = 11,
+	MSAP1_RPU_MSG_ADC_HEALTH = 12,
 };
 
 enum msap1_rpu_status_code {
@@ -45,6 +47,24 @@ enum msap1_rpu_led_mode {
 	MSAP1_RPU_LED_ON = 1,
 	MSAP1_RPU_LED_TOGGLE = 2,
 	MSAP1_RPU_LED_HEARTBEAT = 3,
+};
+
+enum msap1_adc_health_flag {
+	MSAP1_ADC_HEALTH_SPI_RESPONSIVE = 1u << 0,
+	MSAP1_ADC_HEALTH_INITIALIZED = 1u << 1,
+	MSAP1_ADC_HEALTH_INIT_COMPLETE = 1u << 2,
+	MSAP1_ADC_HEALTH_CONFIG_MATCH = 1u << 3,
+	MSAP1_ADC_HEALTH_CAPTURE_ACTIVE = 1u << 4,
+	MSAP1_ADC_HEALTH_NO_OVERFLOW = 1u << 5,
+	MSAP1_ADC_HEALTH_HEADERS_VALID = 1u << 6,
+};
+
+enum msap1_adc_spi_health_error {
+	MSAP1_ADC_SPI_HEALTH_OK = 0,
+	MSAP1_ADC_SPI_HEALTH_NOT_INITIALIZED = 1,
+	MSAP1_ADC_SPI_HEALTH_TRANSFER_FAILED = 2,
+	MSAP1_ADC_SPI_HEALTH_PROTOCOL_FAILED = 3,
+	MSAP1_ADC_SPI_HEALTH_INTERNAL_ERROR = 4,
 };
 
 struct msap1_rpu_msg_header {
@@ -73,6 +93,29 @@ struct msap1_rpu_status_payload {
 
 struct msap1_adc_stream_request {
 	uint32_t display_rate_hz;
+} __attribute__((packed));
+
+struct msap1_adc_health_payload {
+	uint32_t health_flags;
+	uint32_t sample_rate_hz;
+	uint32_t capture_flags;
+	uint32_t frame_count;
+	uint32_t overflow_count;
+	uint32_t header_error_count;
+	uint32_t alert_count;
+	uint32_t packet_count;
+	uint32_t spi_error;
+	uint16_t expected_decimation;
+	uint8_t status_3;
+	uint8_t general_user_config_1;
+	uint8_t general_user_config_2;
+	uint8_t general_user_config_3;
+	uint8_t dout_format;
+	uint8_t src_n_msb;
+	uint8_t src_n_lsb;
+	uint8_t src_if_msb;
+	uint8_t src_if_lsb;
+	uint8_t src_update;
 } __attribute__((packed));
 
 struct msap1_adc_sample_frame {
