@@ -57,20 +57,19 @@ msap1-apu-app adc-health
 
 Expected control and capture results:
 
+- Overall `AD7771 health` is `PASS`.
 - `SPI responsive`, `ADC initialized`, `INIT_COMPLETE`, `Configuration match`,
   and `Capture active` are `yes`.
 - `SPI error` is `none`.
 - `Sample rate` is `32000 frame/s` and `Expected decimation` is `64`.
 - `DMA packets` and `Frames` increase between repeated checks.
 - `FIFO overflows` remains `0` before a high-rate stress test.
-
-Current known limitation:
-
-- Overall health reports `FAIL` because `Header errors` is currently 100%.
-- `Capture flags` commonly reads `0x0000006b`.
-- The PL DOUT parser is not aligned correctly yet. Until that is fixed, the
-  displayed samples and `ADC alerts` counter must not be treated as valid ADC
-  measurements.
+- `Header errors` is `0` and remains `0` on repeated checks.
+- Capture flag bit 5 (`Header error sticky`) remains clear.
+- `ADC alerts` can increase when analogue inputs are open, saturated, or
+  outside their valid common-mode range. Alerts do not by themselves indicate
+  a digital DOUT framing failure.
+- `rate` should be set to 20, don't exceed 40, otherwise, the Rpmsg channel will drain and the RPU firmware will stop working
 
 ## 2. Low-rate functional test
 
@@ -98,7 +97,10 @@ Expected result:
 
 - `FIFO overflows` remains `0`.
 - Capture flag bits 2 (`FIFO full`) and 4 (`FIFO overflow sticky`) remain clear;
-  the currently observed value `0x0000006b` satisfies this condition.
+  bit 5 (`Header error sticky`) also remains clear.
+- Displayed values are usable as raw signed ADC counts. Converting them to
+  voltage or current still requires the sensor-board transfer function and
+  calibration.
 
 This is the current functional-test rate for repeated ADC/RPMsg testing.
 
@@ -160,8 +162,8 @@ The low ten bits of `Capture flags` are:
 | 9 | FIFO read reset busy |
 
 For transport testing, bits 2 and 4 are the important overload indicators.
-Bits 5 and 6 are expected to remain set until the separate DOUT parser alignment
-problem is fixed.
+Bit 5 must remain clear after the DOUT framing fix. Bit 6 can set independently
+when the AD7771 reports an analogue or diagnostic alert.
 
 ## Test record
 
