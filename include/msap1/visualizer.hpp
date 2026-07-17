@@ -1,7 +1,7 @@
 #ifndef MSAP1_APU_VISUALIZER_HPP
 #define MSAP1_APU_VISUALIZER_HPP
 
-#include "msap1/protocol.hpp"
+#include "msap1/adc_sample.hpp"
 
 #include <cstdint>
 #include <iosfwd>

@@ -1,17 +1,20 @@
-# MSAP1 APU ADC viewer
+# MSAP1 Linux FPGA acquisition
 
-`msap1-apu-app` visualizes AD7771 sample data on the Linux APU without taking
-ownership of the ADC hardware.
+`msap1-fpga-acquisition` owns the Linux AD7771 data path. It reads the eight
+channel IIO stream backed by AXI DMA and publishes samples for independent
+Linux consumers. `msap1-apu-app` is the diagnostic viewer and health client.
 
 ## Ownership model
 
-- R5 core 0 is the sole owner of AD7771 SPI control, capture registers, and the
-  AXI DMA S2MM channel.
-- The RPU continues capturing all eight channels at 32,000 frames/s.
-- The APU asks R5 core 0 for a decimated visualization copy over RPMsg. The
-  default display rate is 1,000 frames/s; this does not change the ADC rate.
-- The APU application never opens `/dev/spidev*`, `/dev/mem`, or a Linux DMA
-  driver, so it cannot race the RPU for the ADC peripherals.
+- R5 core 0 owns AD7771 SPI configuration, reset/synchronization, PL capture
+  control, and health.
+- Linux owns AXI DMA S2MM, scatter-gather descriptors, interrupts, and
+  CMA-backed DDR buffers through `msap1_ad7771_iio`.
+- The daemon is the only process that opens `/dev/iio:deviceX` and the R5 core
+  0 RPMsg endpoint. RPMsg carries START, STOP, and health messages only.
+- The daemon writes all 32,000 frames/s to an 8 MiB POSIX shared-memory ring.
+  Each reader has an independent cursor, so one lagging client cannot steal or
+  block another client's data.
 
 Samples are currently exported as raw, signed 24-bit ADC counts stored in
 32-bit integers. Converting them to volts and amperes requires calibration and
@@ -25,8 +28,8 @@ Initialize the Linux OpenAMP helper submodule after cloning the repository:
 git submodule update --init --recursive
 ```
 
-The application uses `mnc::RpmsgChrdev` from that helper for RPMsg service
-discovery, `rpmsg_chrdev` binding, and endpoint I/O.
+The daemon uses `mnc::RpmsgChrdev` from that helper for RPMsg service discovery,
+`rpmsg_chrdev` binding, and endpoint I/O.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -42,10 +45,36 @@ use the `gitsm://` fetcher so the helper submodule is present:
 IMAGE_INSTALL:append = " msap1-apu-app"
 ```
 
-## Run
+## Runtime architecture
 
-Load and start the R5 core 0 firmware first. Linux also needs the `rpmsg_char`
-and `rpmsg_ctrl` drivers. The viewer discovers the `mncos-r5c0-ctrl` endpoint:
+The Yocto package enables `msap1-fpga-acquisition.service`. Its startup order is
+IIO scan setup, buffer/DMA enable, then RPU capture START. Shutdown reverses the
+control edge: RPU STOP, IIO disable, then DMA release.
+
+The default endpoints are:
+
+- IIO device name: `msap1-ad7771`
+- control socket: `/run/msap1/fpga-acquisition.sock`
+- shared memory: `/msap1-fpga-acquisition`
+- ring capacity: 262,144 frames (8 MiB, about 8.2 seconds at 32 kSPS)
+
+Inspect the service and combined Linux/RPU health:
+
+```sh
+systemctl status msap1-fpga-acquisition
+msap1-apu-app adc-health
+```
+
+Control acquisition explicitly when needed:
+
+```sh
+msap1-apu-app adc-stop
+msap1-apu-app adc-start
+```
+
+## View and export
+
+Read a decimated view from the shared ring:
 
 ```sh
 msap1-apu-app adc-view
@@ -65,24 +94,10 @@ msap1-apu-app adc-view --rate 1000 --format csv --output adc.csv --duration 10
 msap1-apu-app adc-view --rate 1000 --format jsonl --output adc.jsonl
 ```
 
-Query the RPU for an active AD7771 SPI register readback and PL capture
-health counters:
+`adc-health` exits successfully only when Linux acquisition is running, IIO has
+published data without read errors, SPI/configuration health passes, capture is
+active, and the PL reports neither FIFO overflow nor channel-header errors.
 
-```sh
-msap1-apu-app adc-health
-```
-
-The command exits successfully only when SPI responds, initialization and
-configuration readback pass, capture is active, and the PL reports neither
-FIFO overflow nor channel-header errors.
-
-The requested rate must be no more than 4,000 frames/s and must divide the
-32,000-frame/s capture rate exactly. Supported examples include 1, 10, 20, 25,
-32, 40, 50, 80, 100, 125, 160, 200, 250, 320, 400, 500, 800, 1,000, 1,280,
-1,600, 2,000, 3,200, and 4,000 frames/s.
-
-For diagnostics, an already-created endpoint can be selected explicitly:
-
-```sh
-msap1-apu-app adc-view --device /dev/rpmsg0
-```
+The requested view rate must be no greater than the capture rate and must
+divide 32,000 exactly. It affects only this reader's cursor; DMA, IIO, the
+shared ring, and other readers continue at the full ADC rate.
