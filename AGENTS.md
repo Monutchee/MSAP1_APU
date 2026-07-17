@@ -8,6 +8,9 @@
   known limitations, read `tests/method/test_adc_rpmsg_procedure.md` instead of
   recording transient results here.
 - Public headers are under `include/msap1/`; implementation is under `src/`.
+- `libs/openamp-helper` is the shared Linux RPMsg transport submodule. Keep
+  service discovery, `rpmsg_chrdev` binding, and generic endpoint I/O there;
+  keep MSAP1 wire-protocol handling in this repository.
 
 ## Architecture contract
 
@@ -39,6 +42,7 @@
 Run from the repository root:
 
 ```sh
+git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure

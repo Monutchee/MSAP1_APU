@@ -5,11 +5,14 @@ project(msap1_apu VERSION 1.0.0 LANGUAGES CXX)
 include(CTest)
 include(GNUInstallDirs)
 
+add_subdirectory(libs/openamp-helper EXCLUDE_FROM_ALL)
+
 add_library(msap1_apu STATIC
     src/protocol.cpp
     src/rpmsg_endpoint.cpp
     src/visualizer.cpp
 )
+target_link_libraries(msap1_apu PRIVATE mnc::rpmsg_chrdev)
 target_include_directories(msap1_apu PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
