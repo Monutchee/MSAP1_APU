@@ -1,178 +1,104 @@
-# AD7771 ADC and RPMsg Test Procedure
+# AD7771 Linux Acquisition Test Procedure
 
-## Purpose
+The filename is retained for test-record compatibility. Sample data no longer
+travels over RPMsg: Linux receives it through IIO/DMAengine, while RPMsg carries
+only ADC capture control and health.
 
-Use this procedure to verify the MSAP1 AD7771 control, capture, and APU
-visualization paths. It also reproduces the current high-rate RPMsg starvation
-problem without confusing the requested display rate with the ADC capture rate.
+## Prerequisites and safety
 
-The RPU always captures all eight ADC channels at 32,000 frames/s. The
-`adc-view --rate` option controls only the decimated copy sent to Linux for
-display; it does not reconfigure the AD7771.
+- Do not connect the sensor board to the electrical grid for digital-path tests.
+- Deploy one coordinated build containing the SG-enabled PL, protocol-v2 RPU,
+  IIO kernel driver/device tree, acquisition daemon, and APU client.
+- Record the PL, RPU, APU, meta-monutchee, and manifest revisions.
+- Confirm `msap1-fpga-acquisition.service` is active and the RPU heartbeat is
+  blinking.
 
-## Safety and prerequisites
-
-- Do not connect the sensor board to the electrical grid for this test.
-- Boot the matching PL bitstream, R5 core 0 firmware, and Linux image.
-- Confirm that the RPU heartbeat LED is blinking before starting.
-- Run the commands as `root` on the MSAP1 Linux target.
-- Reboot the target before repeating a high-rate stress test if RPMsg stops
-  responding.
-
-Record the PL, RPU, APU, and Yocto revisions used for the test.
-
-## Command summary
-
-Query the ADC control and capture health:
+## Command reference
 
 ```sh
+systemctl status msap1-fpga-acquisition
+msap1-apu-app adc-health
+msap1-apu-app adc-view --rate RATE --channels "4,5,6" --duration SECONDS
+msap1-apu-app adc-stop
+msap1-apu-app adc-start
+```
+
+`--rate` is per-reader display decimation. It must divide 32,000 exactly and
+does not alter the ADC, DMA, IIO, shared-ring, or another reader's rate.
+
+| View rate | Cursor stride | Expected 10-second output | Acquisition rate |
+| ---: | ---: | ---: | ---: |
+| 20 frame/s | 1,600 | about 200 frames | 32,000 frame/s |
+| 1,000 frame/s | 32 | about 10,000 frames | 32,000 frame/s |
+| 32,000 frame/s | 1 | about 320,000 frames | 32,000 frame/s |
+
+## 1. Driver and overlay probe
+
+```sh
+dmesg | grep -E 'xilinx.*dma|msap1-ad7771|iio'
+cat /sys/bus/iio/devices/iio:device*/name
+```
+
+Expected results:
+
+- Xilinx AXI DMA probes with its S2MM channel.
+- one IIO name is `msap1-ad7771` and `/dev/iio:deviceX` exists;
+- no Linux driver binds the AD7771 AXI SPI or PL capture-register node;
+- no fixed ADC reserved-memory region is present.
+
+## 2. Baseline health and throughput
+
+Run `msap1-apu-app adc-health` twice, at least five seconds apart. Expect:
+
+- overall result `PASS`;
+- Linux acquisition, SPI response, initialization, configuration, and capture
+  are healthy;
+- IIO frames, bytes, DMA blocks, PL frames, and PL packets increase;
+- IIO read errors, FIFO overflows, and header errors remain zero;
+- sustained IIO throughput is approximately 1,024,000 bytes/s: 32,000 frames/s
+  times eight 32-bit storage words;
+- each PL packet is 256 ordered frames, 8,192 bytes, terminated by `TLAST`.
+
+ADC alert counts may rise with open or out-of-common-mode analogue inputs and
+do not by themselves identify a DOUT framing error.
+
+## 3. Independent-reader test
+
+Run these in separate shells at the same time:
+
+```sh
+msap1-apu-app adc-view --rate 20 --channels "4,5,6" --duration 30
+msap1-apu-app adc-view --rate 1000 --format csv --output /tmp/adc-second.csv --duration 30
+```
+
+Both commands must finish without stealing data from each other, stopping
+capture, blocking the daemon, or disrupting the heartbeat/RPMsg health path.
+A reader that falls more than 262,144 frames behind may report its own
+shared-ring overrun; acquisition and other readers must continue.
+
+## 4. Repeated lifecycle test
+
+Repeat at least ten times:
+
+```sh
+msap1-apu-app adc-stop
+msap1-apu-app adc-start
 msap1-apu-app adc-health
 ```
 
-Display only the three voltage channels for a fixed duration:
+STOP must disable/reset PL capture before Linux releases DMA. START must arm
+IIO/DMA before enabling PL capture. The RPU heartbeat and RPMsg health command
+must remain responsive throughout.
 
-```sh
-msap1-apu-app adc-view --rate RATE_HZ --channels "4,5,6" --duration SECONDS
-```
+## 5. Sustained run
 
-Useful `adc-view` options are:
-
-| Option | Meaning |
-| --- | --- |
-| `--rate HZ` | Decimated visualization rate; it must divide 32,000 exactly. |
-| `--channels LIST` | Comma-separated ADC channels in the range 0 to 7. |
-| `--duration SECONDS` | Stop after the requested elapsed time. |
-| `--frames COUNT` | Stop after the requested number of displayed frames. |
-| `--format terminal\|table\|csv\|jsonl` | Select the output format. |
-| `--output FILE` | Write the selected format to a file. |
-| `--timeout-ms MS` | Set the initial reply/data timeout. |
-
-## 1. Baseline health check
-
-Run:
-
-```sh
-msap1-apu-app adc-health
-```
-
-Expected control and capture results:
-
-- Overall `AD7771 health` is `PASS`.
-- `SPI responsive`, `ADC initialized`, `INIT_COMPLETE`, `Configuration match`,
-  and `Capture active` are `yes`.
-- `SPI error` is `none`.
-- `Sample rate` is `32000 frame/s` and `Expected decimation` is `64`.
-- `DMA packets` and `Frames` increase between repeated checks.
-- `FIFO overflows` remains `0` before a high-rate stress test.
-- `Header errors` is `0` and remains `0` on repeated checks.
-- Capture flag bit 5 (`Header error sticky`) remains clear.
-- `ADC alerts` can increase when analogue inputs are open, saturated, or
-  outside their valid common-mode range. Alerts do not by themselves indicate
-  a digital DOUT framing failure.
-- `rate` should be set to 20, don't exceed 40, otherwise, the Rpmsg channel will drain and the RPU firmware will stop working
-
-## 2. Low-rate functional test
-
-Run:
-
-```sh
-msap1-apu-app adc-view --rate 20 --channels "4,5,6" --duration 10
-```
-
-At 20 displayed frames/s, the RPU selects one frame for every 1,600 captured
-frames. This produces approximately 20 RPMsg sample messages/s.
-
-Expected result:
-
-- The viewer starts, displays channels 4, 5, and 6, and exits normally.
-- A 10-second run should display approximately 200 frames. Record the result
-  if the count differs materially from 200.
-- The heartbeat LED continues blinking during and after the test.
-- No RPMsg acknowledgement timeout is printed.
-- The following command can be run immediately and receives a response:
-
-  ```sh
-  msap1-apu-app adc-health
-  ```
-
-- `FIFO overflows` remains `0`.
-- Capture flag bits 2 (`FIFO full`) and 4 (`FIFO overflow sticky`) remain clear;
-  bit 5 (`Header error sticky`) also remains clear.
-- Displayed values are usable as raw signed ADC counts. Converting them to
-  voltage or current still requires the sensor-board transfer function and
-  calibration.
-
-This is the current functional-test rate for repeated ADC/RPMsg testing.
-
-## 3. High-rate stress test
-
-This test documents a known failure. Run it only when a target reboot is
-acceptable.
-
-```sh
-msap1-apu-app adc-view --rate 1000 --channels "4,5,6" --duration 10
-```
-
-At 1,000 displayed frames/s, each 256-frame DMA packet contains eight selected
-frames. The wire format holds at most six frames per RPMsg message, so the RPU
-sends two messages per DMA packet, or approximately 250 messages/s.
-
-Current expected failure symptoms can include:
-
-- The heartbeat LED stops blinking.
-- Capture flags change to `0x00000077`, which has both `FIFO full` and `FIFO
-  overflow sticky` set.
-- The viewer times out waiting for the STOP acknowledgement.
-- A subsequent `adc-health` or `adc-view` command times out waiting for an RPU
-  acknowledgement.
-
-These symptoms indicate that the priority-3 ADC task is spending too much time
-performing blocking RPMsg sends. The priority-2 control task and priority-1 LED
-task then cannot run reliably. They do not indicate that the AD7771 sampling
-rate changed or that OpenAMP buffers were permanently consumed.
-
-Reboot the target after this failure before continuing other tests.
-
-## Rate comparison
-
-| Property | Low-rate functional test | High-rate stress test |
-| --- | ---: | ---: |
-| ADC capture rate | 32,000 frames/s | 32,000 frames/s |
-| Requested display rate | 20 frames/s | 1,000 frames/s |
-| Decimation stride | 1,600 captured frames | 32 captured frames |
-| Selected frames per 256-frame DMA packet | 0.16 average | 8 |
-| Approximate RPMsg sample messages/s | 20 | 250 |
-| Current expected behavior | Stable | RPU task starvation possible |
-
-## Capture flag reference
-
-The low ten bits of `Capture flags` are:
-
-| Bit | Meaning |
-| ---: | --- |
-| 0 | Capture enabled |
-| 1 | Receiver busy |
-| 2 | FIFO full |
-| 3 | FIFO empty |
-| 4 | FIFO overflow sticky |
-| 5 | Header error sticky |
-| 6 | ADC alert/header alert sticky |
-| 7 | `ADC_DRDY_N` input level |
-| 8 | FIFO write reset busy |
-| 9 | FIFO read reset busy |
-
-For transport testing, bits 2 and 4 are the important overload indicators.
-Bit 5 must remain clear after the DOUT framing fix. Bit 6 can set independently
-when the AD7771 reports an analogue or diagnostic alert.
+Run acquisition for at least ten minutes while periodically checking health
+and running two viewers. Expect no DMA/IIO errors, sequence gaps, FIFO/header
+errors, shared-ring corruption, or RPU starvation. Confirm with RPMsg tracing or
+protocol counters that no ADC sample payloads cross RPMsg.
 
 ## Test record
 
-Record at least:
-
-- Test date and operator.
-- PL, RPU, APU, and Yocto revisions.
-- Exact command used.
-- Whether the heartbeat LED continued blinking.
-- Viewer displayed-frame and message counts.
-- Health output before and after the viewer run.
-- Any timeout, FIFO-full, or overflow indication.
+Record exact revisions and commands, elapsed time, frame/byte/block deltas,
+calculated throughput, viewer overruns, health before/after, heartbeat state,
+and any DMA, IIO, FIFO, header, sequence, or RPMsg errors.

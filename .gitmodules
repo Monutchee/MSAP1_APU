@@ -1,0 +1,4 @@
+[submodule "libs/openamp-helper"]
+	path = libs/openamp-helper
+	url = https://github.com/Monutchee/OpenAMP-helper-APU.git
+	branch = main
