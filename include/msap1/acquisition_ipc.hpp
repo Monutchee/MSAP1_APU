@@ -11,7 +11,7 @@
 namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
-	"/run/msap1/fpga-acquisition.sock";
+	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr const char *acquisition_shm_name =
 	"/msap1-fpga-acquisition";
 inline constexpr std::uint32_t acquisition_ring_capacity = 262144;

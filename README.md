@@ -2,7 +2,8 @@
 
 `msap1-fpga-acquisition` owns the Linux AD7771 data path. It reads the eight
 channel IIO stream backed by AXI DMA and publishes samples for independent
-Linux consumers. `msap1-apu-app` is the diagnostic viewer and health client.
+Linux consumers. `msap1-apu-app` is the diagnostic viewer and health client,
+and `msap1-web-backend` publishes an authenticated JSON API through nginx.
 
 ## Ownership model
 
@@ -22,7 +23,8 @@ the sensor-board analogue transfer functions.
 
 ## Build
 
-Initialize the Linux OpenAMP helper submodule after cloning the repository:
+Initialize the OpenAMP helper, WebEngine, and pinned Glaze 7.9.0 submodules
+after cloning the repository:
 
 ```sh
 git submodule update --init --recursive
@@ -30,6 +32,9 @@ git submodule update --init --recursive
 
 The daemon uses `mnc::RpmsgChrdev` from that helper for RPMsg service discovery,
 `rpmsg_chrdev` binding, and endpoint I/O.
+
+The project builds as C++23. WebEngine remains a platform-neutral library;
+MSAP1 routes and nginx policy are implemented by `apps/web-backend`.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -54,9 +59,29 @@ control edge: RPU STOP, IIO disable, then DMA release.
 The default endpoints are:
 
 - IIO device name: `msap1-ad7771`
-- control socket: `/run/msap1/fpga-acquisition.sock`
+- control socket: `/run/monutchee/fpga-acquisition.sock`
 - shared memory: `/msap1-fpga-acquisition`
 - ring capacity: 262,144 frames (8 MiB, about 8.2 seconds at 32 kSPS)
+
+## Web interface
+
+`msap1-web-backend` owns and monitors the nginx child process. systemd owns the
+backend service and restarts its complete control group if the backend or its
+nginx recovery loop fails. Runtime sockets and nginx state live under
+`/run/monutchee`.
+
+The initial read-only diagnostics API is:
+
+- `POST /api/login` and `POST /api/logout`
+- `GET /api/v1/session`
+- `GET /api/v1/health`
+- `GET /api/v1/adc/metadata`
+- `GET /api/v1/adc/samples?after=SEQ&rate_hz=20&limit=20`
+
+External responses use JSON serialized with Glaze 7.9.0. Internal acquisition
+control remains a fixed binary Unix-socket ABI and samples remain in the
+multi-reader shared-memory ring. The temporary development account is
+`admin` / `admin`; replace `Msap1AuthProvider` before production deployment.
 
 Inspect the service and combined Linux/RPU health:
 
