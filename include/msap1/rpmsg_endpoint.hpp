@@ -3,8 +3,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace mnc {
+class RpmsgChrdev;
+}
 
 namespace msap1 {
 
@@ -23,9 +28,8 @@ public:
 	const std::string &device_path() const noexcept { return device_path_; }
 
 private:
+	std::unique_ptr<mnc::RpmsgChrdev> channel_;
 	int data_fd_ = -1;
-	int control_fd_ = -1;
-	bool created_endpoint_ = false;
 	std::string device_path_;
 };
 

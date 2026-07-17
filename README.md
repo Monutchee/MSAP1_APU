@@ -19,6 +19,15 @@ the sensor-board analogue transfer functions.
 
 ## Build
 
+Initialize the Linux OpenAMP helper submodule after cloning the repository:
+
+```sh
+git submodule update --init --recursive
+```
+
+The application uses `mnc::RpmsgChrdev` from that helper for RPMsg service
+discovery, `rpmsg_chrdev` binding, and endpoint I/O.
+
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -26,7 +35,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The `meta-msap1` Yocto layer provides a `msap1-apu-app` recipe for this CMake
-project and installs the package in `msap1-image`:
+project and installs the package in `msap1-image`. Git-based Yocto fetches must
+use the `gitsm://` fetcher so the helper submodule is present:
 
 ```bitbake
 IMAGE_INSTALL:append = " msap1-apu-app"
