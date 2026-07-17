@@ -2,3 +2,11 @@
 	path = libs/openamp-helper
 	url = https://github.com/Monutchee/OpenAMP-helper-APU.git
 	branch = main
+[submodule "libs/webengine"]
+	path = libs/webengine
+	url = https://github.com/Monutchee/WebEngine.git
+	branch = main
+[submodule "libs/glaze"]
+	path = libs/glaze
+	url = https://github.com/stephenberry/glaze.git
+	branch = main

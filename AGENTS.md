@@ -3,14 +3,19 @@
 ## Purpose and routing
 
 - This repository builds `msap1-fpga-acquisition`, the Linux-side AD7771 IIO
-  acquisition daemon, and `msap1-apu-app`, its diagnostic client.
+  acquisition daemon, `msap1-apu-app`, its diagnostic client, and
+  `msap1-web-backend`, the authenticated external JSON API and nginx owner.
 - Read `README.md` before changing behavior. For ADC bring-up expectations and
   known limitations, read `tests/method/test_adc_rpmsg_procedure.md` instead of
   recording transient results here.
-- Public headers are under `include/msap1/`; implementation is under `src/`.
+- Public headers are under `include/msap1/`; shared implementation is under
+  `src/`, and each executable has its own directory under `apps/`.
 - `libs/openamp-helper` is the shared Linux RPMsg transport submodule. Keep
   service discovery, `rpmsg_chrdev` binding, and generic endpoint I/O there;
   keep MSAP1 wire-protocol handling in this repository.
+- `libs/webengine` and `libs/glaze` are pinned submodules. Keep WebEngine
+  platform-neutral; MSAP1 routes, runtime paths, authentication policy, and
+  systemd integration belong under `apps/web-backend` or `meta-msap1`.
 
 ## Architecture contract
 
@@ -23,6 +28,9 @@
 - CLI and web consumers must use the daemon socket and shared-memory ring. Do
   not open the IIO device, RPMsg endpoint, `/dev/spidev*`, `/dev/mem`, or UIO
   from another process.
+- Internal acquisition control uses the binary `SOCK_SEQPACKET` protocol at
+  `/run/monutchee/fpga-acquisition.sock`; samples use POSIX shared memory. Only
+  the external nginx-facing API uses JSON.
 - The ADC capture rate defaults to 32,000 frames/s. `adc-view --rate` changes
   only the visualization rate; it must not silently reconfigure the ADC.
 - ADC samples never travel over RPMsg. RPMsg carries only control and health.
@@ -54,7 +62,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-- The codebase uses C++17 and should remain warning-clean under `-Wall`,
+- The codebase uses C++23 and should remain warning-clean under `-Wall`,
   `-Wextra`, and `-Wpedantic`.
 - Update `README.md` when CLI behavior changes. Update the ADC test procedure
   when commands, expected results, or known bring-up behavior changes.
