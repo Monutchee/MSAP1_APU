@@ -1,40 +1,29 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 
-project(msap1_apu VERSION 1.0.0 LANGUAGES CXX)
+project(msap1_apu VERSION 1.1.0 LANGUAGES CXX)
 
 include(CTest)
 include(GNUInstallDirs)
 
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(MSAP1_BUILD_WEB_BACKEND "Build the MSAP1 WebEngine/nginx backend" ON)
+
 add_subdirectory(libs/openamp-helper EXCLUDE_FROM_ALL)
+add_subdirectory(lib)
+add_subdirectory(apps/cli)
+add_subdirectory(apps/acquisition)
 
-add_library(msap1_apu STATIC
-    src/acquisition_ipc.cpp
-    src/protocol.cpp
-    src/rpmsg_endpoint.cpp
-    src/shared_ring.cpp
-    src/visualizer.cpp
-)
-target_link_libraries(msap1_apu PRIVATE mnc::rpmsg_chrdev)
-target_include_directories(msap1_apu PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-target_compile_features(msap1_apu PUBLIC cxx_std_17)
-target_compile_options(msap1_apu PRIVATE -Wall -Wextra -Wpedantic)
+if(MSAP1_BUILD_WEB_BACKEND)
+    set(glaze_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(glaze_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(glaze_DEVELOPER_MODE OFF CACHE BOOL "" FORCE)
+    add_subdirectory(libs/glaze EXCLUDE_FROM_ALL)
 
-add_executable(msap1-apu-app src/main.cpp)
-target_link_libraries(msap1-apu-app PRIVATE msap1_apu)
-target_compile_options(msap1-apu-app PRIVATE -Wall -Wextra -Wpedantic)
-
-add_executable(msap1-fpga-acquisition src/acquisition_daemon.cpp)
-target_link_libraries(msap1-fpga-acquisition PRIVATE msap1_apu)
-target_compile_options(msap1-fpga-acquisition PRIVATE -Wall -Wextra -Wpedantic)
-
-install(TARGETS msap1-apu-app msap1-fpga-acquisition
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-if(BUILD_TESTING)
-    add_executable(protocol_test tests/protocol_test.cpp)
-    target_link_libraries(protocol_test PRIVATE msap1_apu)
-    add_test(NAME protocol_test COMMAND protocol_test)
+    set(WEBENGINE_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    set(WEBENGINE_FETCH_DEPS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(libs/webengine/backend EXCLUDE_FROM_ALL)
+    add_subdirectory(apps/web-backend)
 endif()
