@@ -2,8 +2,8 @@
 
 ## Purpose and routing
 
-- This repository builds `msap1-apu-app`, the Linux-side AD7771 diagnostic
-  viewer and RPMsg client.
+- This repository builds `msap1-fpga-acquisition`, the Linux-side AD7771 IIO
+  acquisition daemon, and `msap1-apu-app`, its diagnostic client.
 - Read `README.md` before changing behavior. For ADC bring-up expectations and
   known limitations, read `tests/method/test_adc_rpmsg_procedure.md` instead of
   recording transient results here.
@@ -14,15 +14,21 @@
 
 ## Architecture contract
 
-- R5 core 0 owns AD7771 SPI control, PL capture registers, and the AXI DMA S2MM
-  channel. The APU obtains control/status and a decimated visualization stream
-  through RPMsg.
-- Do not add direct `/dev/spidev*`, `/dev/mem`, UIO, or Linux DMA ownership
-  without an explicit cross-repository architecture change.
+- R5 core 0 owns AD7771 SPI control, reset/synchronization, and PL capture
+  registers. Linux exclusively owns AXI DMA S2MM, scatter-gather descriptors,
+  interrupts, and CMA-backed DDR buffers through IIO/DMAengine.
+- `msap1-fpga-acquisition` is the sole IIO and RPMsg lifecycle owner. It arms
+  IIO before requesting capture START, requests STOP before disabling IIO, and
+  publishes the full-rate stream through the shared-memory ring.
+- CLI and web consumers must use the daemon socket and shared-memory ring. Do
+  not open the IIO device, RPMsg endpoint, `/dev/spidev*`, `/dev/mem`, or UIO
+  from another process.
 - The ADC capture rate defaults to 32,000 frames/s. `adc-view --rate` changes
   only the visualization rate; it must not silently reconfigure the ADC.
-- RPMsg sample streaming is a bring-up/visualization path, not the final
-  high-throughput meter data path.
+- ADC samples never travel over RPMsg. RPMsg carries only control and health.
+- Every shared-ring reader owns an independent sequence cursor. A slow reader
+  reports its own overrun and must never block the acquisition producer or
+  another reader.
 - Samples are raw signed 24-bit ADC counts represented as `int32_t`. Do not
   label them volts or amperes without board calibration and analogue transfer
   functions.

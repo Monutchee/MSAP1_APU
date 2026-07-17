@@ -8,8 +8,10 @@ include(GNUInstallDirs)
 add_subdirectory(libs/openamp-helper EXCLUDE_FROM_ALL)
 
 add_library(msap1_apu STATIC
+    src/acquisition_ipc.cpp
     src/protocol.cpp
     src/rpmsg_endpoint.cpp
+    src/shared_ring.cpp
     src/visualizer.cpp
 )
 target_link_libraries(msap1_apu PRIVATE mnc::rpmsg_chrdev)
@@ -24,7 +26,12 @@ add_executable(msap1-apu-app src/main.cpp)
 target_link_libraries(msap1-apu-app PRIVATE msap1_apu)
 target_compile_options(msap1-apu-app PRIVATE -Wall -Wextra -Wpedantic)
 
-install(TARGETS msap1-apu-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+add_executable(msap1-fpga-acquisition src/acquisition_daemon.cpp)
+target_link_libraries(msap1-fpga-acquisition PRIVATE msap1_apu)
+target_compile_options(msap1-fpga-acquisition PRIVATE -Wall -Wextra -Wpedantic)
+
+install(TARGETS msap1-apu-app msap1-fpga-acquisition
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(BUILD_TESTING)
     add_executable(protocol_test tests/protocol_test.cpp)
