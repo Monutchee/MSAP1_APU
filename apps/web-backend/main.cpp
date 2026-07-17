@@ -295,12 +295,13 @@ std::string getenv_or(const char *name, const char *fallback)
 	return value != nullptr && value[0] != '\0' ? value : fallback;
 }
 
-std::uint16_t http_port()
+std::uint16_t web_port(const char *environment_name, const char *fallback)
 {
-	const auto value = getenv_or("MSAP1_WEB_HTTP_PORT", "80");
+	const auto value = getenv_or(environment_name, fallback);
 	const auto port = std::stoul(value);
 	if (port == 0 || port > std::numeric_limits<std::uint16_t>::max())
-		throw std::invalid_argument("MSAP1_WEB_HTTP_PORT is out of range");
+		throw std::invalid_argument(std::string(environment_name) +
+			" is out of range");
 	return static_cast<std::uint16_t>(port);
 }
 
@@ -332,8 +333,11 @@ int main()
 		nginx_options.pidfile = getenv_or("MSAP1_NGINX_PIDFILE", nginx_pid_path);
 		nginx_options.temp_root =
 			getenv_or("MSAP1_NGINX_TEMP_ROOT", nginx_temp_path);
-		nginx_options.http_port = http_port();
-		nginx_options.https_enabled = false;
+		nginx_options.http_port =
+			web_port("MSAP1_WEB_HTTP_PORT", "80");
+		nginx_options.https_port =
+			web_port("MSAP1_WEB_HTTPS_PORT", "443");
+		nginx_options.https_enabled = true;
 		webengine::NginxController nginx(std::move(nginx_options));
 
 		webengine::WebEngine engine(auth);

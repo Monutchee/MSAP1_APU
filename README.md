@@ -68,7 +68,11 @@ The default endpoints are:
 `msap1-web-backend` owns and monitors the nginx child process. systemd owns the
 backend service and restarts its complete control group if the backend or its
 nginx recovery loop fails. Runtime sockets and nginx state live under
-`/run/monutchee`.
+`/run/monutchee`. The product serves both HTTP on port 80 and HTTPS on port 443.
+On first boot, the Yocto service creates a device-local development certificate
+under `/var/lib/monutchee/tls`; browsers will warn because it is self-signed.
+Provisioning a production certificate is done by replacing `msap1-web.crt` and
+`msap1-web.key` in that directory and restarting `msap1-web-backend`.
 
 The initial read-only diagnostics API is:
 
