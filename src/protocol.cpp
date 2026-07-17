@@ -8,14 +8,6 @@ namespace msap1 {
 
 static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
-static_assert(sizeof(msap1_adc_sample_frame) == 32,
-	      "unexpected ADC frame layout");
-static_assert(offsetof(msap1_adc_sample_batch, frames) ==
-	      MSAP1_ADC_SAMPLE_BATCH_HEADER_SIZE,
-	      "unexpected ADC batch header layout");
-static_assert(sizeof(msap1_rpu_msg_header) +
-	      sizeof(msap1_adc_sample_batch) <= MSAP1_RPU_MAX_FRAME_SIZE,
-	      "ADC batch exceeds RPMsg protocol frame");
 static_assert(sizeof(msap1_adc_health_payload) == 48,
 	      "unexpected ADC health payload layout");
 static_assert(sizeof(msap1_rpu_msg_header) +
@@ -65,42 +57,6 @@ Message decode_message(const void *data, std::size_t size)
 	const auto *bytes = static_cast<const std::uint8_t *>(data);
 	message.payload.assign(bytes + sizeof(message.header), bytes + size);
 	return message;
-}
-
-AdcBatch decode_adc_batch(const Message &message)
-{
-	if (message.header.type != MSAP1_RPU_MSG_ADC_SAMPLE_BATCH ||
-	    message.payload.size() < MSAP1_ADC_SAMPLE_BATCH_HEADER_SIZE)
-		throw std::runtime_error("message is not an ADC sample batch");
-
-	msap1_adc_sample_batch wire{};
-	std::memcpy(&wire, message.payload.data(),
-		    MSAP1_ADC_SAMPLE_BATCH_HEADER_SIZE);
-	if (wire.channel_count != MSAP1_ADC_CHANNEL_COUNT ||
-	    wire.frame_count == 0 ||
-	    wire.frame_count > MSAP1_ADC_MAX_BATCH_FRAMES ||
-	    wire.adc_sample_rate_hz == 0 || wire.display_rate_hz == 0 ||
-	    wire.adc_sample_rate_hz % wire.display_rate_hz != 0)
-		throw std::runtime_error("invalid ADC batch metadata");
-
-	const std::size_t expected_size = MSAP1_ADC_SAMPLE_BATCH_HEADER_SIZE +
-		wire.frame_count * sizeof(msap1_adc_sample_frame);
-	if (message.payload.size() != expected_size)
-		throw std::runtime_error("invalid ADC batch payload length");
-
-	AdcBatch batch;
-	batch.adc_sample_rate_hz = wire.adc_sample_rate_hz;
-	batch.display_rate_hz = wire.display_rate_hz;
-	batch.first_frame_index = wire.first_frame_index;
-	batch.capture_flags = wire.capture_flags;
-	batch.frames.resize(wire.frame_count);
-	const auto *frame_bytes = message.payload.data() +
-		MSAP1_ADC_SAMPLE_BATCH_HEADER_SIZE;
-	for (std::size_t i = 0; i < batch.frames.size(); ++i)
-		std::memcpy(batch.frames[i].data(),
-			    frame_bytes + i * sizeof(msap1_adc_sample_frame),
-			    sizeof(msap1_adc_sample_frame));
-	return batch;
 }
 
 msap1_adc_health_payload decode_adc_health(const Message &message)

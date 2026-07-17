@@ -13,7 +13,7 @@ namespace msap1 {
 namespace {
 
 constexpr double kAdcFullScaleCounts = 8388608.0;
-constexpr std::array<const char *, MSAP1_ADC_CHANNEL_COUNT> kChannelNames = {
+constexpr std::array<const char *, adc_channel_count> kChannelNames = {
 	"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"
 };
 
@@ -68,12 +68,12 @@ Visualizer::Visualizer(std::ostream &output, OutputFormat format,
 	: output_(output), format_(format), channels_(std::move(channels))
 {
 	if (channels_.empty()) {
-		for (std::size_t channel = 0; channel < MSAP1_ADC_CHANNEL_COUNT;
+		for (std::size_t channel = 0; channel < adc_channel_count;
 		     ++channel)
 			channels_.push_back(channel);
 	}
 	for (std::size_t index = 0; index < channels_.size(); ++index) {
-		if (channels_[index] >= MSAP1_ADC_CHANNEL_COUNT ||
+		if (channels_[index] >= adc_channel_count ||
 		    std::find(channels_.begin(), channels_.begin() + index,
 			      channels_[index]) != channels_.begin() + index)
 			throw std::invalid_argument("ADC channels must be unique values 0-7");
