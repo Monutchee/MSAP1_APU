@@ -1,7 +1,7 @@
 #ifndef MSAP1_ACQUISITION_IPC_HPP
 #define MSAP1_ACQUISITION_IPC_HPP
 
-#include "msap1/adc_sample.hpp"
+#include "msap1/meter_record.hpp"
 #include "msap1/rpu_control_protocol.h"
 
 #include <cstddef>
@@ -12,12 +12,8 @@ namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
-inline constexpr const char *acquisition_shm_name =
-	"/msap1-fpga-acquisition";
-inline constexpr std::uint32_t acquisition_ring_capacity = 262144;
-
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 1;
+inline constexpr std::uint16_t acquisition_ipc_version = 2;
 
 enum class AcquisitionCommand : std::uint16_t {
 	info = 1,
@@ -30,9 +26,10 @@ enum class AcquisitionStatus : std::uint32_t {
 	ok = 0,
 	bad_request = 1,
 	not_running = 2,
-	iio_error = 3,
+	dma_error = 3,
 	rpu_error = 4,
 	internal_error = 5,
+	configuration_error = 6,
 };
 
 struct AcquisitionRequest {
@@ -48,17 +45,18 @@ struct AcquisitionResponse {
 	std::uint16_t reserved = 0;
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	std::uint32_t running = 0;
-	std::uint32_t sample_rate_hz = adc_default_sample_rate_hz;
-	std::uint32_t channel_count = adc_channel_count;
-	std::uint32_t frame_size = sizeof(AdcSampleFrame);
-	std::uint32_t ring_capacity = acquisition_ring_capacity;
-	std::uint32_t capture_flags = 0;
+	std::uint32_t has_meter_record = 0;
+	std::uint32_t sample_rate_hz = 32000;
+	std::uint32_t meter_record_size = sizeof(MeterRecord);
+	std::uint32_t configuration_generation = 0;
 	std::uint64_t sequence = 0;
-	std::uint64_t published_sequence = 0;
-	std::uint64_t iio_bytes = 0;
-	std::uint64_t iio_blocks = 0;
-	std::uint64_t iio_read_errors = 0;
+	std::uint64_t meter_records = 0;
+	std::uint64_t dma_bytes = 0;
+	std::uint64_t dma_read_errors = 0;
+	std::uint64_t invalid_records = 0;
+	std::uint64_t sequence_gaps = 0;
 	msap1_adc_health_payload rpu_health{};
+	MeterRecord latest_record{};
 };
 
 class AcquisitionClient {

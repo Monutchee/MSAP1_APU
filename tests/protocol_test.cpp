@@ -1,16 +1,15 @@
+#include "msap1/meter_config.hpp"
+#include "msap1/meter_record.hpp"
 #include "msap1/protocol.hpp"
-#include "msap1/shared_ring.hpp"
-#include "msap1/visualizer.hpp"
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
-#include <string>
 #include <vector>
 
-#include <sys/mman.h>
 #include <unistd.h>
 
 namespace {
@@ -43,78 +42,107 @@ void request_round_trip()
 	require(decoded.payload.empty(), "capture start must have no payload");
 }
 
+void meter_ack_round_trip()
+{
+	msap1_meter_config_ack_payload acknowledgement{};
+	acknowledgement.generation = 0x12345678;
+	acknowledgement.conversion_active_generation = 0x12345678;
+	acknowledgement.processing_active_generation = 0x12345678;
+	acknowledgement.conversion_status = 1;
+	acknowledgement.processing_status = 5;
+	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ACK, 17,
+		&acknowledgement, sizeof(acknowledgement));
+	const auto message = msap1::decode_message(wire.data(), wire.size());
+	const auto decoded = msap1::decode_meter_config_ack(message);
+	require(decoded.generation == acknowledgement.generation,
+		"wrong meter acknowledgement generation");
+	require(decoded.processing_status == 5,
+		"wrong meter processing status");
+}
+
 void adc_health_round_trip()
 {
 	msap1_adc_health_payload health{};
 	health.health_flags = MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
 		MSAP1_ADC_HEALTH_INITIALIZED | MSAP1_ADC_HEALTH_CONFIG_MATCH;
+	health.meter_health_flags = MSAP1_METER_HEALTH_CONFIGURED |
+		MSAP1_METER_HEALTH_GENERATION_MATCH;
+	health.meter_generation = 0x11223344;
 	health.sample_rate_hz = 32000;
 	health.frame_count = 123456;
-	health.header_error_count = 12;
 	health.expected_decimation = 64;
-	health.status_3 = 0x10;
-	health.src_n_lsb = 64;
 
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
-						23, &health, sizeof(health));
+		23, &health, sizeof(health));
 	const auto message = msap1::decode_message(wire.data(), wire.size());
 	const auto decoded = msap1::decode_adc_health(message);
 	require(decoded.sample_rate_hz == 32000, "wrong health sample rate");
 	require(decoded.frame_count == 123456, "wrong health frame count");
-	require(decoded.header_error_count == 12,
-		"wrong health header error count");
-	require(decoded.expected_decimation == 64, "wrong expected decimation");
+	require(decoded.meter_generation == 0x11223344,
+		"wrong health meter generation");
 }
 
-void shared_ring_multi_reader()
+void meter_record_contract()
 {
-	const std::string name = "/msap1-ring-test-" + std::to_string(::getpid());
-	::shm_unlink(name.c_str());
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_periodic_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 41;
+	record.words[4] = 0xabcdef01;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 1u << 6;
+	const std::uint64_t mean = static_cast<std::uint64_t>(-125000);
+	const std::uint64_t rms = 230123456;
+	const std::size_t base = 16 + 6 * 5;
+	record.words[base] = static_cast<std::uint32_t>(mean);
+	record.words[base + 1] = static_cast<std::uint32_t>(mean >> 32);
+	record.words[base + 2] = 777;
+	record.words[base + 3] = static_cast<std::uint32_t>(rms);
+	record.words[base + 4] = static_cast<std::uint32_t>(rms >> 32);
+	require(record.header_valid(), "valid meter header rejected");
+	require(record.sequence() == 41, "wrong meter sequence");
+	const auto channel = record.channel(6);
+	require(channel.valid, "voltage channel is not valid");
+	require(channel.mean_micro_units == -125000, "wrong signed mean");
+	require(channel.rms_count == 777, "wrong RMS count");
+	require(channel.rms_micro_units == 230123456, "wrong RMS voltage");
+}
+
+void meter_configuration()
+{
+	const auto path = std::filesystem::temp_directory_path() /
+		("msap1-meter-config-" + std::to_string(::getpid()) + ".json");
 	{
-		msap1::SharedRingWriter writer(name, 4);
-		msap1::SharedRingReader first(name);
-		msap1::SharedRingReader second(name);
-		msap1::AdcSampleFrame frames[6]{};
-		for (std::size_t index = 0; index < 6; ++index)
-			frames[index][0] = static_cast<std::int32_t>(index);
-		writer.publish(frames, 2);
-
-		std::uint64_t first_cursor = 0;
-		std::uint64_t second_cursor = 0;
-		std::uint64_t first_dropped = 0;
-		std::uint64_t second_dropped = 0;
-		msap1::AdcSampleFrame frame{};
-		require(first.read(first_cursor, frame, first_dropped),
-			"first reader did not receive data");
-		require(frame[0] == 0, "first reader saw wrong frame");
-		require(second.read(second_cursor, frame, second_dropped),
-			"second reader did not receive data");
-		require(frame[0] == 0, "second reader was affected by first reader");
-
-		writer.publish(frames + 2, 4);
-		first_cursor = 0;
-		require(first.read(first_cursor, frame, first_dropped),
-			"overrun reader did not recover");
-		require(first_dropped == 2 && frame[0] == 2,
-			"overrun reader did not report skipped frames");
+		std::ofstream output(path);
+		output << R"({
+  "schema_version": 1,
+  "rms_window_ms": 200,
+  "remove_dc": false,
+  "adc_reference_volts": 1.0,
+  "adc_pga_gain": 1.0,
+  "voltage_channels": [
+    {"channel":4,"name":"VLC","rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":5,"name":"VLB","rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":6,"name":"VLA","rin_ohms":6000000.0,"rf_ohms":4640.0}
+  ]
+})";
 	}
-	::shm_unlink(name.c_str());
-}
-
-void voltage_channel_filter()
-{
-	msap1::AdcBatch batch;
-	batch.adc_sample_rate_hz = 32000;
-	batch.display_rate_hz = 1000;
-	batch.frames.push_back({0, 1, 2, 3, 400, 500, 600, 7});
-	std::ostringstream output;
-	msap1::Visualizer visualizer(output, msap1::OutputFormat::table,
-				      {4, 5, 6});
-	visualizer.render(batch);
-	const auto text = output.str();
-	require(text.find("ch4") != std::string::npos, "channel 4 missing");
-	require(text.find("ch6") != std::string::npos, "channel 6 missing");
-	require(text.find("ch0") == std::string::npos, "channel 0 was not filtered");
+	const auto configuration = msap1::load_meter_configuration(path, 32000);
+	std::filesystem::remove(path);
+	require(configuration.wire.rms_window_samples == 6400,
+		"wrong 200 ms RMS window");
+	require(configuration.wire.valid_mask == 0x70,
+		"wrong voltage valid mask");
+	require((configuration.wire.flags & MSAP1_METER_CONFIG_ENABLE) != 0u,
+		"meter configuration is not enabled");
+	require((configuration.wire.flags & MSAP1_METER_CONFIG_REMOVE_DC) == 0u,
+		"DC-offset removal was not disabled");
+	require(configuration.wire.scale_micro_units_q16[4] == 10102371,
+		"wrong nominal voltage coefficient");
+	require(configuration.wire.generation != 0,
+		"configuration generation must be non-zero");
 }
 
 void rejects_bad_frames()
@@ -123,12 +151,11 @@ void rejects_bad_frames()
 	require_throws(
 		[&] { msap1::decode_message(short_frame.data(), short_frame.size()); },
 		"short frame was accepted");
-
 	auto wire = msap1::encode_request(MSAP1_RPU_MSG_PING, 1);
 	auto *header = reinterpret_cast<msap1_rpu_msg_header *>(wire.data());
 	header->version = 1;
 	require_throws([&] { msap1::decode_message(wire.data(), wire.size()); },
-		       "old protocol version was accepted");
+		"old protocol version was accepted");
 }
 
 } // namespace
@@ -137,9 +164,10 @@ int main()
 {
 	try {
 		request_round_trip();
+		meter_ack_round_trip();
 		adc_health_round_trip();
-		shared_ring_multi_reader();
-		voltage_channel_filter();
+		meter_record_contract();
+		meter_configuration();
 		rejects_bad_frames();
 		std::cout << "protocol tests passed\n";
 		return 0;

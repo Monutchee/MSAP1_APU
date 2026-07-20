@@ -2,7 +2,7 @@
 
 ## Purpose and routing
 
-- This repository builds `msap1-fpga-acquisition`, the Linux-side AD7771 IIO
+- This repository builds `msap1-fpga-acquisition`, the Linux-side meter-record
   acquisition daemon, `msap1-apu-app`, its diagnostic client, and
   `msap1-web-backend`, the authenticated external JSON API and nginx owner.
 - Read `README.md` before changing behavior. For ADC bring-up expectations and
@@ -19,27 +19,25 @@
 
 ## Architecture contract
 
-- R5 core 0 owns AD7771 SPI control, reset/synchronization, and PL capture
-  registers. Linux exclusively owns AXI DMA S2MM, scatter-gather descriptors,
-  interrupts, and CMA-backed DDR buffers through IIO/DMAengine.
-- `msap1-fpga-acquisition` is the sole IIO and RPMsg lifecycle owner. It arms
-  IIO before requesting capture START, requests STOP before disabling IIO, and
-  publishes the full-rate stream through the shared-memory ring.
-- CLI and web consumers must use the daemon socket and shared-memory ring. Do
-  not open the IIO device, RPMsg endpoint, `/dev/spidev*`, `/dev/mem`, or UIO
-  from another process.
-- Internal acquisition control uses the binary `SOCK_SEQPACKET` protocol at
-  `/run/monutchee/fpga-acquisition.sock`; samples use POSIX shared memory. Only
-  the external nginx-facing API uses JSON.
-- The ADC capture rate defaults to 32,000 frames/s. `adc-view --rate` changes
-  only the visualization rate; it must not silently reconfigure the ADC.
-- ADC samples never travel over RPMsg. RPMsg carries only control and health.
-- Every shared-ring reader owns an independent sequence cursor. A slow reader
-  reports its own overrun and must never block the acquisition producer or
-  another reader.
-- Samples are raw signed 24-bit ADC counts represented as `int32_t`. Do not
-  label them volts or amperes without board calibration and analogue transfer
-  functions.
+- R5 core 0 owns AD7771 SPI control, reset/synchronization, PL capture
+  registers, and the AdcConversion/MeterProcessing AXI-Lite configuration.
+  Linux exclusively owns AXI DMA S2MM, scatter-gather descriptors, interrupts,
+  and CMA-backed DDR buffers through `/dev/msap1-meter`.
+- `msap1-fpga-acquisition` is the sole meter DMA and RPMsg lifecycle owner. It
+  opens/arms DMA, commits the JSON-derived configuration through R5 core 0,
+  requests capture START, and requests STOP before closing DMA.
+- CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
+  `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
+  endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
+- The ADC capture rate defaults to 32,000 frames/s. Meter coefficients and the
+  200 ms RMS window come from `/etc/monutchee/msap1/meter-conversion.json`.
+- ADC and meter payloads never travel over RPMsg. RPMsg carries only
+  configuration, control, health, and acknowledgements.
+- Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
+  coherent result, and concurrent CLI/web readers never backpressure PL.
+- Voltage readings are RMS values calculated in PL and encoded in microvolts.
+  The product JSON selects mean-corrected AC RMS or zero-referenced total RMS;
+  current channels remain zero and invalid until implemented.
 
 ## Cross-repository ABI
 
@@ -48,8 +46,8 @@
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
-- Preserve compatibility deliberately or increment the protocol version and
-  implement explicit handling on both peers.
+- The prototype wire version remains 2. Keep the coordinated APU/RPU copies
+  byte-identical when adding configuration fields or acknowledgements.
 
 ## Build and verification
 
