@@ -119,7 +119,8 @@ void meter_configuration()
 		output << R"({
   "schema_version": 1,
   "rms_window_ms": 200,
-  "adc_reference_volts": 2.5,
+  "remove_dc": false,
+  "adc_reference_volts": 1.0,
   "adc_pga_gain": 1.0,
   "voltage_channels": [
     {"channel":4,"name":"VLC","rin_ohms":6000000.0,"rf_ohms":4640.0},
@@ -134,7 +135,11 @@ void meter_configuration()
 		"wrong 200 ms RMS window");
 	require(configuration.wire.valid_mask == 0x70,
 		"wrong voltage valid mask");
-	require(configuration.wire.scale_micro_units_q16[4] == 25255927,
+	require((configuration.wire.flags & MSAP1_METER_CONFIG_ENABLE) != 0u,
+		"meter configuration is not enabled");
+	require((configuration.wire.flags & MSAP1_METER_CONFIG_REMOVE_DC) == 0u,
+		"DC-offset removal was not disabled");
+	require(configuration.wire.scale_micro_units_q16[4] == 10102371,
 		"wrong nominal voltage coefficient");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");

@@ -32,6 +32,18 @@ Expect `PASS`, 32,000 frame/s, a 6,400-frame RMS window, matching non-zero
 configuration generations, active capture, and zero DMA read, invalid-record,
 sequence-gap, FIFO-overflow, and header-error counts.
 
+To compare mean-corrected AC RMS with zero-referenced total RMS, set
+`remove_dc` to `true` or `false` respectively, then apply it without rebooting:
+
+```sh
+systemctl restart msap1-fpga-acquisition
+msap1-apu-app meter-health
+msap1-apu-app meter-view --results 10
+```
+
+Expect health to remain `PASS` in either mode and `DC offset removal` to report
+the selected setting. Restore `remove_dc` to `true` after the diagnostic test.
+
 ## 3. Meter result rate and content
 
 ```sh

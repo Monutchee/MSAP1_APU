@@ -35,8 +35,9 @@
   configuration, control, health, and acknowledgements.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
-- Voltage readings are mean-corrected RMS values calculated in PL and encoded
-  in microvolts. Current channels remain zero and invalid until implemented.
+- Voltage readings are RMS values calculated in PL and encoded in microvolts.
+  The product JSON selects mean-corrected AC RMS or zero-referenced total RMS;
+  current channels remain zero and invalid until implemented.
 
 ## Cross-repository ABI
 

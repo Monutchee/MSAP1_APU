@@ -153,7 +153,7 @@ HealthDto health(const msap1::AcquisitionResponse &response,
 		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
 		response.invalid_records == 0u && response.sequence_gaps == 0u;
 	const bool adc_ok = spi && initialized && config && active && fifo &&
-		headers && meter_configured && generation && dc;
+		headers && meter_configured && generation;
 	const bool nginx_ok = nginx.is_running();
 	return {
 		acquisition_ok && adc_ok && nginx_ok,

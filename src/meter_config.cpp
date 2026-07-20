@@ -60,8 +60,9 @@ PreparedMeterConfiguration load_meter_configuration(
 	if (window <= 0 || window > std::numeric_limits<std::uint32_t>::max())
 		throw std::runtime_error("RMS window sample count is out of range");
 	result.wire.rms_window_samples = static_cast<std::uint32_t>(window);
-	result.wire.flags = MSAP1_METER_CONFIG_ENABLE |
-		MSAP1_METER_CONFIG_REMOVE_DC;
+	result.wire.flags = MSAP1_METER_CONFIG_ENABLE;
+	if (result.source.remove_dc)
+		result.wire.flags |= MSAP1_METER_CONFIG_REMOVE_DC;
 
 	for (const auto &channel : result.source.voltage_channels) {
 		if (channel.channel >= 8u ||
