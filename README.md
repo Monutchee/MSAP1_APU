@@ -42,6 +42,10 @@ At 32 kSPS the 200 ms RMS window contains exactly 6,400 frames. The daemon
 opens DMA first, sends `METER_CONFIG_SET`, verifies the PL generation readback,
 then requests capture START. Shutdown requests STOP before closing DMA.
 
+`remove_dc` selects the PL RMS reference. It defaults to `true`, producing AC
+RMS about the window mean. Set it to `false` for total RMS referenced to zero,
+then restart `msap1-fpga-acquisition` to commit the updated configuration.
+
 Internal readers use the fixed binary `SOCK_SEQPACKET` endpoint:
 
 ```text
@@ -71,5 +75,6 @@ msap1-apu-app adc-start
 
 `meter-health` requires matching configuration generations, responsive SPI,
 active capture, zero DMA/header/FIFO errors, and advancing meter records.
-`meter-view` displays mean-corrected RMS results. CH4/VLC, CH5/VLB, and CH6/VLA
-are volts; current channels are intentionally zero and invalid in this stage.
+`meter-view` displays RMS results using the configured `remove_dc` mode.
+CH4/VLC, CH5/VLB, and CH6/VLA are volts; current channels are intentionally
+zero and invalid in this stage.

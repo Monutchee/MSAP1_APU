@@ -23,7 +23,8 @@ struct VoltageChannelConfig {
 struct MeterConversionFile {
 	std::uint32_t schema_version = 1;
 	std::uint32_t rms_window_ms = 200;
-	double adc_reference_volts = 2.5;
+	bool remove_dc = true;
+	double adc_reference_volts = 1.0;
 	double adc_pga_gain = 1.0;
 	std::vector<VoltageChannelConfig> voltage_channels;
 };

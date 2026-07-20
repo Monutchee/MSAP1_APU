@@ -162,8 +162,7 @@ int run_meter_health(const Options &options)
 	const bool meter_ok = meter_flag(health, MSAP1_METER_HEALTH_CORES_PRESENT) &&
 		meter_flag(health, MSAP1_METER_HEALTH_CONFIGURED) &&
 		meter_flag(health, MSAP1_METER_HEALTH_GENERATION_MATCH) &&
-		meter_flag(health, MSAP1_METER_HEALTH_ENABLED) &&
-		meter_flag(health, MSAP1_METER_HEALTH_REMOVE_DC);
+		meter_flag(health, MSAP1_METER_HEALTH_ENABLED);
 	const bool linux_ok = response.running != 0u &&
 		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
 		response.invalid_records == 0u && response.sequence_gaps == 0u;
