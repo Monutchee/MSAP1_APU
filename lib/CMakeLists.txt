@@ -1,13 +1,12 @@
 add_library(msap1_apu_core STATIC
     ${PROJECT_SOURCE_DIR}/src/acquisition_ipc.cpp
+	${PROJECT_SOURCE_DIR}/src/meter_config.cpp
     ${PROJECT_SOURCE_DIR}/src/protocol.cpp
     ${PROJECT_SOURCE_DIR}/src/rpmsg_endpoint.cpp
-    ${PROJECT_SOURCE_DIR}/src/shared_ring.cpp
-    ${PROJECT_SOURCE_DIR}/src/visualizer.cpp
 )
 add_library(msap1::apu-core ALIAS msap1_apu_core)
 
-target_link_libraries(msap1_apu_core PRIVATE mnc::rpmsg_chrdev)
+target_link_libraries(msap1_apu_core PRIVATE mnc::rpmsg_chrdev glaze::glaze)
 target_include_directories(msap1_apu_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>

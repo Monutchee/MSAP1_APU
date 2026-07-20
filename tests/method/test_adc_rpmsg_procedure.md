@@ -1,104 +1,64 @@
-# AD7771 Linux Acquisition Test Procedure
+# AD7771 PL Meter Pipeline Test Procedure
 
-The filename is retained for test-record compatibility. Sample data no longer
-travels over RPMsg: Linux receives it through IIO/DMAengine, while RPMsg carries
-only ADC capture control and health.
+The filename is retained for test-record compatibility. RPMsg carries only
+configuration/control/health; meter records travel through AXI DMA.
 
-## Prerequisites and safety
+## Prerequisites
 
-- Do not connect the sensor board to the electrical grid for digital-path tests.
-- Deploy one coordinated build containing the SG-enabled PL, protocol-v2 RPU,
-  IIO kernel driver/device tree, acquisition daemon, and APU client.
-- Record the PL, RPU, APU, meta-monutchee, and manifest revisions.
-- Confirm `msap1-fpga-acquisition.service` is active and the RPU heartbeat is
-  blinking.
+- Deploy one coordinated PL, RPU, APU, kernel/device-tree, and Yocto build.
+- Do not connect the sensor board to the grid for digital-path tests.
+- Record the exact revisions and exported XSA.
 
-## Command reference
+## 1. Driver and ownership
 
 ```sh
-systemctl status msap1-fpga-acquisition
-msap1-apu-app adc-health
-msap1-apu-app adc-view --rate RATE --channels "4,5,6" --duration SECONDS
-msap1-apu-app adc-stop
-msap1-apu-app adc-start
+dmesg | grep -E 'xilinx.*dma|msap1-meter'
+ls -l /dev/msap1-meter
+systemctl status msap1-fpga-acquisition --no-pager -l
 ```
 
-`--rate` is per-reader display decimation. It must divide 32,000 exactly and
-does not alter the ADC, DMA, IIO, shared-ring, or another reader's rate.
+Expect AXI DMA and `msap1_meter_dma` to probe, `/dev/msap1-meter` to belong to
+`msap1-data`, and no Linux driver to bind AD7771 SPI/capture/config registers.
+No fixed reserved-memory region is required; buffers come from DMA/CMA.
 
-| View rate | Cursor stride | Expected 10-second output | Acquisition rate |
-| ---: | ---: | ---: | ---: |
-| 20 frame/s | 1,600 | about 200 frames | 32,000 frame/s |
-| 1,000 frame/s | 32 | about 10,000 frames | 32,000 frame/s |
-| 32,000 frame/s | 1 | about 320,000 frames | 32,000 frame/s |
-
-## 1. Driver and overlay probe
+## 2. Configuration and baseline health
 
 ```sh
-dmesg | grep -E 'xilinx.*dma|msap1-ad7771|iio'
-cat /sys/bus/iio/devices/iio:device*/name
+cat /etc/monutchee/msap1/meter-conversion.json
+msap1-apu-app meter-health
 ```
 
-Expected results:
+Expect `PASS`, 32,000 frame/s, a 6,400-frame RMS window, matching non-zero
+configuration generations, active capture, and zero DMA read, invalid-record,
+sequence-gap, FIFO-overflow, and header-error counts.
 
-- Xilinx AXI DMA probes with its S2MM channel.
-- one IIO name is `msap1-ad7771` and `/dev/iio:deviceX` exists;
-- no Linux driver binds the AD7771 AXI SPI or PL capture-register node;
-- no fixed ADC reserved-memory region is present.
-
-## 2. Baseline health and throughput
-
-Run `msap1-apu-app adc-health` twice, at least five seconds apart. Expect:
-
-- overall result `PASS`;
-- Linux acquisition, SPI response, initialization, configuration, and capture
-  are healthy;
-- IIO frames, bytes, DMA blocks, PL frames, and PL packets increase;
-- IIO read errors, FIFO overflows, and header errors remain zero;
-- sustained IIO throughput is approximately 1,024,000 bytes/s: 32,000 frames/s
-  times eight 32-bit storage words;
-- each PL packet is 256 ordered frames, 8,192 bytes, terminated by `TLAST`.
-
-ADC alert counts may rise with open or out-of-common-mode analogue inputs and
-do not by themselves identify a DOUT framing error.
-
-## 3. Independent-reader test
-
-Run these in separate shells at the same time:
+## 3. Meter result rate and content
 
 ```sh
-msap1-apu-app adc-view --rate 20 --channels "4,5,6" --duration 30
-msap1-apu-app adc-view --rate 1000 --format csv --output /tmp/adc-second.csv --duration 30
+msap1-apu-app meter-view --results 50
 ```
 
-Both commands must finish without stealing data from each other, stopping
-capture, blocking the daemon, or disrupting the heartbeat/RPMsg health path.
-A reader that falls more than 262,144 frames behind may report its own
-shared-ring overrun; acquisition and other readers must continue.
+Expect 50 strictly advancing records in about ten seconds (5 Hz). Every DMA
+record is exactly 256 bytes and contains `MTR1`; CH4–CH6 are valid RMS volts.
+CH0–CH3 remain zero/invalid. Packetizer/hub drop counters remain zero.
 
-## 4. Repeated lifecycle test
+## 4. Concurrent readers
 
-Repeat at least ten times:
+Run `meter-view` while the authenticated web page or
+`GET /api/v1/meter/readings` polls concurrently. Both must observe advancing
+snapshots without stealing records, blocking acquisition, or disrupting the
+RPU heartbeat and health endpoint.
+
+## 5. Lifecycle and sustained run
+
+Repeat ten times:
 
 ```sh
 msap1-apu-app adc-stop
 msap1-apu-app adc-start
-msap1-apu-app adc-health
+msap1-apu-app meter-health
 ```
 
-STOP must disable/reset PL capture before Linux releases DMA. START must arm
-IIO/DMA before enabling PL capture. The RPU heartbeat and RPMsg health command
-must remain responsive throughout.
-
-## 5. Sustained run
-
-Run acquisition for at least ten minutes while periodically checking health
-and running two viewers. Expect no DMA/IIO errors, sequence gaps, FIFO/header
-errors, shared-ring corruption, or RPU starvation. Confirm with RPMsg tracing or
-protocol counters that no ADC sample payloads cross RPMsg.
-
-## Test record
-
-Record exact revisions and commands, elapsed time, frame/byte/block deltas,
-calculated throughput, viewer overruns, health before/after, heartbeat state,
-and any DMA, IIO, FIFO, header, sequence, or RPMsg errors.
+Then run for at least ten minutes. Expect no DMA errors, sequence gaps, corrupt
+records, PL header/FIFO errors, RPMsg timeouts, or heartbeat starvation. Confirm
+that no raw ADC samples or meter records travel over RPMsg.
