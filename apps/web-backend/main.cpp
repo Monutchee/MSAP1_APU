@@ -2,13 +2,9 @@
 #include "systemd_notifier.hpp"
 
 #include "msap1/acquisition_ipc.hpp"
-#include "msap1/adc_sample.hpp"
-#include "msap1/shared_ring.hpp"
 
 #include <array>
-#include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -16,15 +12,10 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <thread>
-#include <vector>
 
 #include <glaze/glaze.hpp>
 #include <webengine/NginxController.hpp>
@@ -47,75 +38,72 @@ struct SessionDto {
 
 struct AcquisitionHealthDto {
 	bool running;
-	std::uint64_t frames;
+	bool record_available;
+	std::uint64_t records;
 	std::uint64_t bytes;
-	std::uint64_t dma_blocks;
 	std::uint64_t read_errors;
+	std::uint64_t invalid_records;
+	std::uint64_t sequence_gaps;
+	std::uint32_t configuration_generation;
 };
 
 struct AdcHealthDto {
 	bool healthy;
 	bool spi_responsive;
 	bool initialized;
-	bool init_complete;
 	bool configuration_match;
 	bool capture_active;
 	bool fifo_ok;
 	bool headers_valid;
+	bool meter_configured;
+	bool meter_generation_match;
+	bool dc_offset_removal;
 	std::uint32_t sample_rate_hz;
-	std::uint32_t capture_flags;
 	std::uint32_t frames;
-	std::uint32_t packets;
 	std::uint32_t fifo_overflows;
 	std::uint32_t header_errors;
-	std::uint32_t alerts;
-	std::uint32_t spi_error;
-};
-
-struct WebHealthDto {
-	bool backend_running;
-	bool nginx_running;
 };
 
 struct HealthDto {
 	bool healthy;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
-	WebHealthDto web;
+	bool backend_running;
+	bool nginx_running;
 };
 
-struct ChannelDto {
+struct MeterChannelDto {
 	std::uint32_t index;
 	std::string name;
 	std::string unit;
+	bool valid;
+	std::int64_t mean_micro_units;
+	std::uint32_t rms_count;
+	double rms;
 };
 
-struct MetadataDto {
+struct MeterReadingsDto {
+	std::uint32_t sequence;
+	std::uint32_t configuration_generation;
 	std::uint32_t sample_rate_hz;
-	std::uint32_t channel_count;
-	std::uint32_t frame_size_bytes;
-	std::uint32_t ring_capacity_frames;
-	std::uint64_t published_sequence;
-	std::uint32_t capture_flags;
-	std::vector<ChannelDto> channels;
-};
-
-struct SampleDto {
-	std::uint64_t sequence;
-	std::array<std::int32_t, msap1::adc_channel_count> values;
-};
-
-struct SamplesDto {
-	std::uint32_t capture_rate_hz;
-	std::uint32_t display_rate_hz;
-	std::uint64_t next_sequence;
-	std::uint64_t dropped_frames;
-	std::vector<SampleDto> frames;
+	std::uint32_t rms_window_samples;
+	std::uint32_t status;
+	std::uint32_t capture_frames;
+	std::uint32_t header_errors;
+	std::uint32_t fifo_overflows;
+	std::uint32_t packetizer_drops;
+	std::uint32_t hub_drops;
+	std::array<MeterChannelDto, 8> channels;
 };
 
 bool health_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
 {
 	return (health.health_flags & flag) != 0u;
+}
+
+bool meter_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
+{
+	return (health.meter_health_flags & flag) != 0u;
 }
 
 template <typename T>
@@ -125,7 +113,7 @@ webengine::Response json_response(webengine::http::status status,
 	auto body = glz::write_json(value);
 	if (!body)
 		return webengine::json(webengine::http::status::internal_server_error,
-				       R"({"error":"JSON serialization failed"})");
+			R"({"error":"JSON serialization failed"})");
 	return webengine::json(status, std::move(*body));
 }
 
@@ -135,123 +123,11 @@ webengine::Response error_response(webengine::http::status status,
 	return json_response(status, glz::obj{"error", std::move(message)});
 }
 
-std::map<std::string, std::string> parse_query(const webengine::Request &request)
+void require_acquisition_ok(const msap1::AcquisitionResponse &response)
 {
-	const auto target_view = request.target();
-	const std::string target(target_view.data(), target_view.size());
-	const auto query_begin = target.find('?');
-	std::map<std::string, std::string> result;
-	if (query_begin == std::string::npos)
-		return result;
-
-	std::size_t begin = query_begin + 1;
-	while (begin < target.size()) {
-		const auto end = target.find('&', begin);
-		const auto item = target.substr(begin, end - begin);
-		const auto separator = item.find('=');
-		if (separator != std::string::npos && separator != 0)
-			result[item.substr(0, separator)] = item.substr(separator + 1);
-		if (end == std::string::npos)
-			break;
-		begin = end + 1;
-	}
-	return result;
-}
-
-std::uint64_t parse_unsigned(const std::map<std::string, std::string> &query,
-			     std::string_view name, std::uint64_t fallback,
-			     std::uint64_t maximum)
-{
-	const auto item = query.find(std::string(name));
-	if (item == query.end())
-		return fallback;
-	if (item->second.empty() ||
-	    !std::ranges::all_of(item->second, [](unsigned char character) {
-		    return std::isdigit(character) != 0;
-	    }))
-		throw std::invalid_argument(std::string(name) + " must be an integer");
-	std::size_t parsed = 0;
-	std::uint64_t value = 0;
-	try {
-		value = std::stoull(item->second, &parsed, 10);
-	} catch (const std::exception &) {
-		throw std::invalid_argument(std::string(name) + " must be an integer");
-	}
-	if (parsed != item->second.size() || value > maximum)
-		throw std::invalid_argument(std::string(name) + " is out of range");
-	return value;
-}
-
-class SampleReader {
-public:
-	SamplesDto read(const webengine::Request &request)
-	{
-		std::lock_guard lock(mutex_);
-		if (!ring_)
-			ring_ = std::make_unique<msap1::SharedRingReader>();
-		if (!ring_->running())
-			throw std::runtime_error("FPGA acquisition is not running");
-
-		const auto query = parse_query(request);
-		const auto capture_rate = ring_->sample_rate_hz();
-		const auto display_rate = static_cast<std::uint32_t>(
-			parse_unsigned(query, "rate_hz", 20, capture_rate));
-		const auto limit = static_cast<std::size_t>(
-			parse_unsigned(query, "limit", 20, 256));
-		if (display_rate == 0 || capture_rate % display_rate != 0)
-			throw std::invalid_argument(
-				"rate_hz must be a non-zero divisor of the capture rate");
-		if (limit == 0)
-			throw std::invalid_argument("limit must be between 1 and 256");
-
-		const auto stride = capture_rate / display_rate;
-		const auto published = ring_->published_sequence();
-		std::uint64_t cursor = 0;
-		if (query.contains("after")) {
-			cursor = parse_unsigned(query, "after", 0,
-						std::numeric_limits<std::uint64_t>::max());
-		} else {
-			const auto history = static_cast<std::uint64_t>(limit) * stride;
-			cursor = published > history ? published - history : 0;
-		}
-
-		SamplesDto response{capture_rate, display_rate, cursor, 0, {}};
-		response.frames.reserve(limit);
-		while (response.frames.size() < limit) {
-			msap1::AdcSampleFrame frame{};
-			if (!ring_->read(cursor, frame, response.dropped_frames))
-				break;
-			const auto sequence = cursor - 1;
-			response.frames.push_back({sequence, frame});
-			cursor = sequence + stride;
-		}
-		response.next_sequence = cursor;
-		return response;
-	}
-
-private:
-	std::mutex mutex_;
-	std::unique_ptr<msap1::SharedRingReader> ring_;
-};
-
-MetadataDto metadata(const msap1::AcquisitionResponse &response)
-{
-	static constexpr std::array<const char *, msap1::adc_channel_count> names{
-		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
-	MetadataDto result{
-		response.sample_rate_hz,
-		response.channel_count,
-		response.frame_size,
-		response.ring_capacity,
-		response.published_sequence,
-		response.capture_flags,
-		{},
-	};
-	result.channels.reserve(names.size());
-	for (std::size_t index = 0; index < names.size(); ++index)
-		result.channels.push_back(
-			{static_cast<std::uint32_t>(index), names[index], "raw_count"});
-	return result;
+	if (response.status != msap1::AcquisitionStatus::ok)
+		throw std::runtime_error("acquisition daemon returned status " +
+			std::to_string(static_cast<std::uint32_t>(response.status)));
 }
 
 HealthDto health(const msap1::AcquisitionResponse &response,
@@ -259,34 +135,68 @@ HealthDto health(const msap1::AcquisitionResponse &response,
 {
 	const auto &adc = response.rpu_health;
 	const bool spi = health_flag(adc, MSAP1_ADC_HEALTH_SPI_RESPONSIVE);
-	const bool initialized = health_flag(adc, MSAP1_ADC_HEALTH_INITIALIZED);
-	const bool init_complete = health_flag(adc, MSAP1_ADC_HEALTH_INIT_COMPLETE);
+	const bool initialized = health_flag(adc, MSAP1_ADC_HEALTH_INITIALIZED) &&
+		health_flag(adc, MSAP1_ADC_HEALTH_INIT_COMPLETE);
 	const bool config = health_flag(adc, MSAP1_ADC_HEALTH_CONFIG_MATCH);
 	const bool active = health_flag(adc, MSAP1_ADC_HEALTH_CAPTURE_ACTIVE);
 	const bool fifo = health_flag(adc, MSAP1_ADC_HEALTH_NO_OVERFLOW);
 	const bool headers = health_flag(adc, MSAP1_ADC_HEALTH_HEADERS_VALID);
-	const bool linux_ok = response.running != 0u &&
-		response.published_sequence != 0u && response.iio_read_errors == 0u;
-	const bool adc_ok = spi && initialized && init_complete && config && active &&
-		fifo && headers;
+	const bool meter_configured =
+		meter_flag(adc, MSAP1_METER_HEALTH_CORES_PRESENT) &&
+		meter_flag(adc, MSAP1_METER_HEALTH_CONFIGURED) &&
+		meter_flag(adc, MSAP1_METER_HEALTH_ENABLED);
+	const bool generation =
+		meter_flag(adc, MSAP1_METER_HEALTH_GENERATION_MATCH) &&
+		adc.meter_generation == response.configuration_generation;
+	const bool dc = meter_flag(adc, MSAP1_METER_HEALTH_REMOVE_DC);
+	const bool acquisition_ok = response.running != 0u &&
+		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
+		response.invalid_records == 0u && response.sequence_gaps == 0u;
+	const bool adc_ok = spi && initialized && config && active && fifo &&
+		headers && meter_configured && generation;
 	const bool nginx_ok = nginx.is_running();
 	return {
-		linux_ok && adc_ok && nginx_ok,
-		{response.running != 0u, response.published_sequence,
-		 response.iio_bytes, response.iio_blocks, response.iio_read_errors},
-		{adc_ok, spi, initialized, init_complete, config, active, fifo, headers,
-		 adc.sample_rate_hz, adc.capture_flags, adc.frame_count, adc.packet_count,
-		 adc.overflow_count, adc.header_error_count, adc.alert_count,
-		 adc.spi_error},
-		{true, nginx_ok},
+		acquisition_ok && adc_ok && nginx_ok,
+		{response.running != 0u, response.has_meter_record != 0u,
+		 response.meter_records, response.dma_bytes, response.dma_read_errors,
+		 response.invalid_records, response.sequence_gaps,
+		 response.configuration_generation},
+		{adc_ok, spi, initialized, config, active, fifo, headers,
+		 meter_configured, generation, dc, adc.sample_rate_hz,
+		 adc.frame_count, adc.overflow_count, adc.header_error_count},
+		true,
+		nginx_ok,
 	};
 }
 
-void require_acquisition_ok(const msap1::AcquisitionResponse &response)
+MeterReadingsDto readings(const msap1::AcquisitionResponse &response)
 {
-	if (response.status != msap1::AcquisitionStatus::ok)
-		throw std::runtime_error("acquisition daemon returned status " +
-			std::to_string(static_cast<std::uint32_t>(response.status)));
+	if (response.running == 0u || response.has_meter_record == 0u)
+		throw std::runtime_error("no meter result is available");
+	const auto &record = response.latest_record;
+	if (!record.header_valid())
+		throw std::runtime_error("meter record header is invalid");
+	static constexpr std::array<const char *, 8> names{
+		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
+	MeterReadingsDto result{
+		record.sequence(), record.configuration_generation(),
+		record.sample_rate_hz(), record.window_samples(), record.status(),
+		record.capture_frames(), record.header_errors(),
+		record.fifo_overflows(), record.packetizer_drops(), record.hub_drops(),
+		{},
+	};
+	for (std::size_t index = 0; index < result.channels.size(); ++index) {
+		const auto reading = record.channel(index);
+		result.channels[index] = {
+			static_cast<std::uint32_t>(index), names[index],
+			index >= 4 && index <= 6 ? "V" : "A", reading.valid,
+			reading.mean_micro_units, reading.rms_count,
+			reading.valid
+				? static_cast<double>(reading.rms_micro_units) / 1000000.0
+				: 0.0,
+		};
+	}
+	return result;
 }
 
 std::string getenv_or(const char *name, const char *fallback)
@@ -324,7 +234,6 @@ int main()
 {
 	try {
 		auto auth = std::make_shared<msap1::web::Msap1AuthProvider>();
-		auto sample_reader = std::make_shared<SampleReader>();
 
 		webengine::NginxController::Options nginx_options;
 		nginx_options.config = getenv_or("MSAP1_NGINX_CONFIG", nginx_config_path);
@@ -333,10 +242,8 @@ int main()
 		nginx_options.pidfile = getenv_or("MSAP1_NGINX_PIDFILE", nginx_pid_path);
 		nginx_options.temp_root =
 			getenv_or("MSAP1_NGINX_TEMP_ROOT", nginx_temp_path);
-		nginx_options.http_port =
-			web_port("MSAP1_WEB_HTTP_PORT", "80");
-		nginx_options.https_port =
-			web_port("MSAP1_WEB_HTTPS_PORT", "443");
+		nginx_options.http_port = web_port("MSAP1_WEB_HTTP_PORT", "80");
+		nginx_options.https_port = web_port("MSAP1_WEB_HTTPS_PORT", "443");
 		nginx_options.https_enabled = true;
 		webengine::NginxController nginx(std::move(nginx_options));
 
@@ -370,7 +277,8 @@ int main()
 				}
 			}, webengine::Role::Viewer);
 
-		engine.add_api(webengine::http::verb::get, "/api/v1/adc/metadata",
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/meter/readings",
 			[](const webengine::RequestContext &) {
 				try {
 					msap1::AcquisitionClient client;
@@ -378,22 +286,7 @@ int main()
 						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
-						metadata(response));
-				} catch (const std::exception &error) {
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Viewer);
-
-		engine.add_api(webengine::http::verb::get, "/api/v1/adc/samples",
-			[sample_reader](const webengine::RequestContext &context) {
-				try {
-					return json_response(webengine::http::status::ok,
-						sample_reader->read(context.request));
-				} catch (const std::invalid_argument &error) {
-					return error_response(webengine::http::status::bad_request,
-						error.what());
+						readings(response));
 				} catch (const std::exception &error) {
 					return error_response(
 						webengine::http::status::service_unavailable,
@@ -452,7 +345,7 @@ int main()
 			std::rethrow_exception(engine_error);
 		if (recovery_failures >= 3)
 			throw std::runtime_error("nginx recovery failed repeatedly: " +
-						 nginx.last_error());
+				nginx.last_error());
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << "msap1-web-backend: " << error.what() << '\n';

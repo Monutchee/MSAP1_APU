@@ -8,8 +8,12 @@ namespace msap1 {
 
 static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
-static_assert(sizeof(msap1_adc_health_payload) == 48,
+static_assert(sizeof(msap1_adc_health_payload) == 64,
 	      "unexpected ADC health payload layout");
+static_assert(sizeof(msap1_meter_config_payload) == 52,
+	      "unexpected meter configuration payload layout");
+static_assert(sizeof(msap1_meter_config_ack_payload) == 20,
+	      "unexpected meter configuration acknowledgement layout");
 static_assert(sizeof(msap1_rpu_msg_header) +
 	      sizeof(msap1_adc_health_payload) <= MSAP1_RPU_MAX_FRAME_SIZE,
 	      "ADC health response exceeds RPMsg protocol frame");
@@ -69,6 +73,20 @@ msap1_adc_health_payload decode_adc_health(const Message &message)
 	msap1_adc_health_payload health{};
 	std::memcpy(&health, message.payload.data(), sizeof(health));
 	return health;
+}
+
+msap1_meter_config_ack_payload decode_meter_config_ack(const Message &message)
+{
+	if (message.header.type != MSAP1_RPU_MSG_ACK ||
+	    message.header.status != MSAP1_RPU_STATUS_OK ||
+	    message.payload.size() != sizeof(msap1_meter_config_ack_payload))
+		throw std::runtime_error(
+			"message is not a meter configuration acknowledgement");
+
+	msap1_meter_config_ack_payload acknowledgement{};
+	std::memcpy(&acknowledgement, message.payload.data(),
+		    sizeof(acknowledgement));
+	return acknowledgement;
 }
 
 } // namespace msap1

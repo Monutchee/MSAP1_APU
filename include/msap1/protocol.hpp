@@ -20,6 +20,7 @@ std::vector<std::uint8_t> encode_request(std::uint8_t type,
 					std::size_t payload_size = 0);
 Message decode_message(const void *data, std::size_t size);
 msap1_adc_health_payload decode_adc_health(const Message &message);
+msap1_meter_config_ack_payload decode_meter_config_ack(const Message &message);
 
 } // namespace msap1
 
