@@ -3,7 +3,7 @@
 ## Purpose and routing
 
 - This repository builds `msap1-fpga-acquisition`, the Linux-side meter-record
-  acquisition daemon, `msap1-apu-app`, its diagnostic client, and
+  acquisition daemon, the `mnc` diagnostic CLI, and
   `msap1-web-backend`, the authenticated external JSON API and nginx owner.
 - Read `README.md` before changing behavior. For ADC bring-up expectations and
   known limitations, read `tests/method/test_adc_rpmsg_procedure.md` instead of
