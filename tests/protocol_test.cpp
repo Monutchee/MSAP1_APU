@@ -1,4 +1,5 @@
 #include "msap1/meter_config.hpp"
+#include "msap1/meter_health.hpp"
 #include "msap1/meter_record.hpp"
 #include "msap1/protocol.hpp"
 
@@ -158,6 +159,35 @@ void rejects_bad_frames()
 		"old protocol version was accepted");
 }
 
+void meter_health_evaluation()
+{
+	msap1::AcquisitionResponse response{};
+	response.running = 1;
+	response.has_meter_record = 1;
+	response.configuration_generation = 0x1234;
+	response.rpu_health.health_flags =
+		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
+		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH |
+		MSAP1_ADC_HEALTH_CAPTURE_ACTIVE | MSAP1_ADC_HEALTH_NO_OVERFLOW |
+		MSAP1_ADC_HEALTH_HEADERS_VALID;
+	response.rpu_health.meter_health_flags =
+		MSAP1_METER_HEALTH_CORES_PRESENT | MSAP1_METER_HEALTH_CONFIGURED |
+		MSAP1_METER_HEALTH_GENERATION_MATCH | MSAP1_METER_HEALTH_ENABLED |
+		MSAP1_METER_HEALTH_REMOVE_DC;
+	response.rpu_health.meter_generation = response.configuration_generation;
+	const auto healthy = msap1::evaluate_meter_health(response);
+	require(healthy.healthy && healthy.acquisition_healthy && healthy.adc_healthy,
+		"healthy meter response was rejected");
+	require(healthy.dc_offset_removal,
+		"DC-offset removal health flag was not exposed");
+
+	response.sequence_gaps = 1;
+	const auto degraded = msap1::evaluate_meter_health(response);
+	require(!degraded.healthy && !degraded.acquisition_healthy &&
+		degraded.adc_healthy,
+		"acquisition errors did not degrade meter health");
+}
+
 } // namespace
 
 int main()
@@ -169,6 +199,7 @@ int main()
 		meter_record_contract();
 		meter_configuration();
 		rejects_bad_frames();
+		meter_health_evaluation();
 		std::cout << "protocol tests passed\n";
 		return 0;
 	} catch (const std::exception &error) {
