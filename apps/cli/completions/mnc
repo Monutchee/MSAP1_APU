@@ -1,0 +1,19 @@
+# Bash completion for the Monutchee system CLI.
+_mnc()
+{
+    local cur
+    local -a candidates
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    mapfile -t candidates < <(
+        command mnc __complete "${COMP_WORDS[@]:1}" 2>/dev/null
+    )
+    if [[ "${candidates[0]-}" == "__MNC_FILE__" ]]; then
+        compopt -o filenames
+        mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+    else
+        mapfile -t COMPREPLY < <(compgen -W "${candidates[*]}" -- "$cur")
+    fi
+}
+
+complete -F _mnc mnc
