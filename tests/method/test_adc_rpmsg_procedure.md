@@ -25,7 +25,7 @@ No fixed reserved-memory region is required; buffers come from DMA/CMA.
 
 ```sh
 cat /etc/monutchee/msap1/meter-conversion.json
-msap1-apu-app meter-health
+mnc meter health
 ```
 
 Expect `PASS`, 32,000 frame/s, a 6,400-frame RMS window, matching non-zero
@@ -37,8 +37,8 @@ To compare mean-corrected AC RMS with zero-referenced total RMS, set
 
 ```sh
 systemctl restart msap1-fpga-acquisition
-msap1-apu-app meter-health
-msap1-apu-app meter-view --results 10
+mnc meter health
+mnc meter view --results 10
 ```
 
 Expect health to remain `PASS` in either mode and `DC offset removal` to report
@@ -47,7 +47,7 @@ the selected setting. Restore `remove_dc` to `true` after the diagnostic test.
 ## 3. Meter result rate and content
 
 ```sh
-msap1-apu-app meter-view --results 50
+mnc meter view --results 50
 ```
 
 Expect 50 strictly advancing records in about ten seconds (5 Hz). Every DMA
@@ -56,20 +56,26 @@ CH0–CH3 remain zero/invalid. Packetizer/hub drop counters remain zero.
 
 ## 4. Concurrent readers
 
-Run `meter-view` while the authenticated web page or
+Run `mnc meter view` while the authenticated web page or
 `GET /api/v1/meter/readings` polls concurrently. Both must observe advancing
 snapshots without stealing records, blocking acquisition, or disrupting the
-RPU heartbeat and health endpoint.
+RPU heartbeat. Confirm `GET /api/v1/meter/health` agrees with
+`mnc meter health` while the system remains healthy.
 
 ## 5. Lifecycle and sustained run
 
 Repeat ten times:
 
 ```sh
-msap1-apu-app adc-stop
-msap1-apu-app adc-start
-msap1-apu-app meter-health
+mnc adc stop
+mnc adc start
+mnc meter health
 ```
+
+Using an authenticated admin session, repeat the lifecycle with
+`DELETE /api/v1/adc/capture` and `PUT /api/v1/adc/capture`. Each response must
+report the resulting `active` state, repeated requests must be idempotent, and
+`GET /api/v1/adc/capture` must agree with the CLI.
 
 Then run for at least ten minutes. Expect no DMA errors, sequence gaps, corrupt
 records, PL header/FIFO errors, RPMsg timeouts, or heartbeat starvation. Confirm

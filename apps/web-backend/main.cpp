@@ -2,6 +2,7 @@
 #include "systemd_notifier.hpp"
 
 #include "msap1/acquisition_ipc.hpp"
+#include "msap1/meter_health.hpp"
 
 #include <array>
 #include <atomic>
@@ -72,6 +73,16 @@ struct HealthDto {
 	bool nginx_running;
 };
 
+struct MeterHealthDto {
+	bool healthy;
+	AcquisitionHealthDto acquisition;
+	AdcHealthDto adc;
+};
+
+struct AdcCaptureDto {
+	bool active;
+};
+
 struct MeterChannelDto {
 	std::uint32_t index;
 	std::string name;
@@ -95,16 +106,6 @@ struct MeterReadingsDto {
 	std::uint32_t hub_drops;
 	std::array<MeterChannelDto, 8> channels;
 };
-
-bool health_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
-{
-	return (health.health_flags & flag) != 0u;
-}
-
-bool meter_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
-{
-	return (health.meter_health_flags & flag) != 0u;
-}
 
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
@@ -130,40 +131,34 @@ void require_acquisition_ok(const msap1::AcquisitionResponse &response)
 			std::to_string(static_cast<std::uint32_t>(response.status)));
 }
 
-HealthDto health(const msap1::AcquisitionResponse &response,
-		 const webengine::NginxController &nginx)
+MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 {
 	const auto &adc = response.rpu_health;
-	const bool spi = health_flag(adc, MSAP1_ADC_HEALTH_SPI_RESPONSIVE);
-	const bool initialized = health_flag(adc, MSAP1_ADC_HEALTH_INITIALIZED) &&
-		health_flag(adc, MSAP1_ADC_HEALTH_INIT_COMPLETE);
-	const bool config = health_flag(adc, MSAP1_ADC_HEALTH_CONFIG_MATCH);
-	const bool active = health_flag(adc, MSAP1_ADC_HEALTH_CAPTURE_ACTIVE);
-	const bool fifo = health_flag(adc, MSAP1_ADC_HEALTH_NO_OVERFLOW);
-	const bool headers = health_flag(adc, MSAP1_ADC_HEALTH_HEADERS_VALID);
-	const bool meter_configured =
-		meter_flag(adc, MSAP1_METER_HEALTH_CORES_PRESENT) &&
-		meter_flag(adc, MSAP1_METER_HEALTH_CONFIGURED) &&
-		meter_flag(adc, MSAP1_METER_HEALTH_ENABLED);
-	const bool generation =
-		meter_flag(adc, MSAP1_METER_HEALTH_GENERATION_MATCH) &&
-		adc.meter_generation == response.configuration_generation;
-	const bool dc = meter_flag(adc, MSAP1_METER_HEALTH_REMOVE_DC);
-	const bool acquisition_ok = response.running != 0u &&
-		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
-		response.invalid_records == 0u && response.sequence_gaps == 0u;
-	const bool adc_ok = spi && initialized && config && active && fifo &&
-		headers && meter_configured && generation;
-	const bool nginx_ok = nginx.is_running();
+	const auto status = msap1::evaluate_meter_health(response);
 	return {
-		acquisition_ok && adc_ok && nginx_ok,
+		status.healthy,
 		{response.running != 0u, response.has_meter_record != 0u,
 		 response.meter_records, response.dma_bytes, response.dma_read_errors,
 		 response.invalid_records, response.sequence_gaps,
 		 response.configuration_generation},
-		{adc_ok, spi, initialized, config, active, fifo, headers,
-		 meter_configured, generation, dc, adc.sample_rate_hz,
-		 adc.frame_count, adc.overflow_count, adc.header_error_count},
+		{status.adc_healthy, status.spi_responsive, status.initialized,
+		 status.configuration_match, status.capture_active, status.fifo_ok,
+		 status.headers_valid, status.meter_configured,
+		 status.meter_generation_match, status.dc_offset_removal,
+		 adc.sample_rate_hz, adc.frame_count, adc.overflow_count,
+		 adc.header_error_count},
+	};
+}
+
+HealthDto system_health(const msap1::AcquisitionResponse &response,
+			const webengine::NginxController &nginx)
+{
+	const auto meter = meter_health(response);
+	const bool nginx_ok = nginx.is_running();
+	return {
+		meter.healthy && nginx_ok,
+		meter.acquisition,
+		meter.adc,
 		true,
 		nginx_ok,
 	};
@@ -269,7 +264,24 @@ int main()
 						msap1::AcquisitionCommand::health, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
-						health(response, nginx));
+						system_health(response, nginx));
+				} catch (const std::exception &error) {
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/meter/health",
+			[](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::health, 1000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						meter_health(response));
 				} catch (const std::exception &error) {
 					return error_response(
 						webengine::http::status::service_unavailable,
@@ -293,6 +305,31 @@ int main()
 						error.what());
 				}
 			}, webengine::Role::Viewer);
+
+		const auto capture = [](msap1::AcquisitionCommand command) {
+			return [command](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(command, 3000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						AdcCaptureDto{response.running != 0u});
+				} catch (const std::exception &error) {
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			};
+		};
+		engine.add_api(webengine::http::verb::get, "/api/v1/adc/capture",
+			capture(msap1::AcquisitionCommand::info),
+			webengine::Role::Viewer);
+		engine.add_api(webengine::http::verb::put, "/api/v1/adc/capture",
+			capture(msap1::AcquisitionCommand::start),
+			webengine::Role::Admin);
+		engine.add_api(webengine::http::verb::delete_, "/api/v1/adc/capture",
+			capture(msap1::AcquisitionCommand::stop),
+			webengine::Role::Admin);
 
 		std::atomic<bool> engine_finished{false};
 		std::exception_ptr engine_error;

@@ -1,6 +1,7 @@
 add_library(msap1_apu_core STATIC
     ${PROJECT_SOURCE_DIR}/src/acquisition_ipc.cpp
 	${PROJECT_SOURCE_DIR}/src/meter_config.cpp
+	${PROJECT_SOURCE_DIR}/src/meter_health.cpp
     ${PROJECT_SOURCE_DIR}/src/protocol.cpp
     ${PROJECT_SOURCE_DIR}/src/rpmsg_endpoint.cpp
 )

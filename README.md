@@ -57,24 +57,33 @@ The authenticated external API is:
 - `POST /api/login` and `POST /api/logout`
 - `GET /api/v1/session`
 - `GET /api/v1/health`
+- `GET /api/v1/meter/health`
 - `GET /api/v1/meter/readings`
+- `GET /api/v1/adc/capture`
+- `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 
 External responses use JSON. The development login is `admin` / `admin`.
-The backend owns nginx and serves HTTP 80 and HTTPS 443.
+The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
+require the viewer role; changing ADC capture requires the admin role.
 
 ## Commands
 
 ```sh
-msap1-apu-app meter-health
-msap1-apu-app meter-view
-msap1-apu-app meter-view --results 20
-msap1-apu-app meter-view --duration 10
-msap1-apu-app adc-stop
-msap1-apu-app adc-start
+mnc meter health
+mnc meter view
+mnc meter view --results 20
+mnc meter view --duration 10
+mnc adc stop
+mnc adc start
 ```
 
-`meter-health` requires matching configuration generations, responsive SPI,
+Run `mnc`, `mnc help meter`, or append `--help` to any command for contextual
+help. Global `--socket` and `--timeout-ms` options are accepted before or after
+the command path. The Yocto package installs Bash completion for command groups,
+actions, options, and socket paths.
+
+`mnc meter health` requires matching configuration generations, responsive SPI,
 active capture, zero DMA/header/FIFO errors, and advancing meter records.
-`meter-view` displays RMS results using the configured `remove_dc` mode.
+`mnc meter view` displays RMS results using the configured `remove_dc` mode.
 CH4/VLC, CH5/VLB, and CH6/VLA are volts; current channels are intentionally
 zero and invalid in this stage.
