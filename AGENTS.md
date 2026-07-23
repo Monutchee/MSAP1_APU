@@ -29,15 +29,18 @@
 - CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
   `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
   endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
-- The ADC capture rate defaults to 32,000 frames/s. Meter coefficients and the
-  200 ms RMS window come from `/etc/monutchee/msap1/meter-conversion.json`.
+- The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-2
+  profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
+  physical current/voltage frontends, and the 200 ms RMS window. The packaged
+  runtime default is `msap1-sensor-board-5a.json`.
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
-- Voltage readings are RMS values calculated in PL and encoded in microvolts.
-  The product JSON selects mean-corrected AC RMS or zero-referenced total RMS;
-  current channels remain zero and invalid until implemented.
+- Voltage and current readings are RMS values calculated in PL and encoded in
+  Q16 microvolts and microamps. The selected complete profile chooses
+  mean-corrected AC RMS or zero-referenced total RMS and supplies the
+  per-channel physical scaling and AD7771 PGA factors.
 
 ## Cross-repository ABI
 

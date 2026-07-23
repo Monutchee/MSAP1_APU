@@ -24,13 +24,16 @@ No fixed reserved-memory region is required; buffers come from DMA/CMA.
 ## 2. Configuration and baseline health
 
 ```sh
-cat /etc/monutchee/msap1/meter-conversion.json
+systemctl cat msap1-fpga-acquisition
+cat /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
 mnc meter health
 ```
 
 Expect `PASS`, 32,000 frame/s, a 6,400-frame RMS window, matching non-zero
 configuration generations, active capture, and zero DMA read, invalid-record,
-sequence-gap, FIFO-overflow, and header-error counts.
+sequence-gap, FIFO-overflow, and header-error counts. The service command must
+select the complete 5 A profile, and ADC configuration health must confirm the
+programmed PGA readback.
 
 To compare mean-corrected AC RMS with zero-referenced total RMS, set
 `remove_dc` to `true` or `false` respectively, then apply it without rebooting:
@@ -51,8 +54,9 @@ mnc meter view --results 50
 ```
 
 Expect 50 strictly advancing records in about ten seconds (5 Hz). Every DMA
-record is exactly 256 bytes and contains `MTR1`; CH4–CH6 are valid RMS volts.
-CH0–CH3 remain zero/invalid. Packetizer/hub drop counters remain zero.
+record is exactly 256 bytes and contains `MTR1`; CH0–CH3 are valid RMS amps
+with the 5 A profile and CH4–CH6 are valid RMS volts. Packetizer/hub drop
+counters remain zero.
 
 ## 4. Concurrent readers
 
