@@ -118,15 +118,32 @@ void meter_configuration()
 	{
 		std::ofstream output(path);
 		output << R"({
-  "schema_version": 1,
+  "schema_version": 2,
+  "profile_id": "acuvim3-sb-5a",
   "rms_window_ms": 200,
   "remove_dc": false,
   "adc_reference_volts": 1.0,
-  "adc_pga_gain": 1.0,
+  "current_channels": [
+    {"channel":0,"name":"ILA","enabled":true,"adc_pga_gain":2,
+     "sensor_model":"internal_ct","primary_rated_amps":5.0,
+     "secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":1,"name":"ILB","enabled":true,"adc_pga_gain":2,
+     "sensor_model":"internal_ct","primary_rated_amps":5.0,
+     "secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":2,"name":"ILC","enabled":true,"adc_pga_gain":2,
+     "sensor_model":"internal_ct","primary_rated_amps":5.0,
+     "secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":3,"name":"ILN","enabled":true,"adc_pga_gain":2,
+     "sensor_model":"internal_ct","primary_rated_amps":5.0,
+     "secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872}
+  ],
   "voltage_channels": [
-    {"channel":4,"name":"VLC","rin_ohms":6000000.0,"rf_ohms":4640.0},
-    {"channel":5,"name":"VLB","rin_ohms":6000000.0,"rf_ohms":4640.0},
-    {"channel":6,"name":"VLA","rin_ohms":6000000.0,"rf_ohms":4640.0}
+    {"channel":4,"name":"VLC","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":5,"name":"VLB","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":6,"name":"VLA","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0}
   ]
 })";
 	}
@@ -134,16 +151,127 @@ void meter_configuration()
 	std::filesystem::remove(path);
 	require(configuration.wire.rms_window_samples == 6400,
 		"wrong 200 ms RMS window");
-	require(configuration.wire.valid_mask == 0x70,
-		"wrong voltage valid mask");
+	require(configuration.wire.valid_mask == 0x7f,
+		"wrong meter valid mask");
 	require((configuration.wire.flags & MSAP1_METER_CONFIG_ENABLE) != 0u,
 		"meter configuration is not enabled");
 	require((configuration.wire.flags & MSAP1_METER_CONFIG_REMOVE_DC) == 0u,
 		"DC-offset removal was not disabled");
+	require(configuration.wire.scale_micro_units_q16[0] == 160362,
+		"wrong nominal 5 A current coefficient");
 	require(configuration.wire.scale_micro_units_q16[4] == 10102371,
 		"wrong nominal voltage coefficient");
+	require(configuration.wire.adc_pga_gain[0] == 2 &&
+		configuration.wire.adc_pga_gain[4] == 1 &&
+		configuration.wire.adc_pga_gain[7] == 1,
+		"wrong per-channel PGA configuration");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
+}
+
+void disabled_mv_configuration()
+{
+	const auto path = std::filesystem::temp_directory_path() /
+		("msap1-meter-mv-config-" + std::to_string(::getpid()) + ".json");
+	{
+		std::ofstream output(path);
+		output << R"({
+  "schema_version": 2,
+  "profile_id": "acuvim3-sb-mv",
+  "rms_window_ms": 200,
+  "remove_dc": true,
+  "adc_reference_volts": 1.0,
+  "current_channels": [
+    {"channel":0,"name":"ILA","enabled":false,"adc_pga_gain":1,
+     "sensor_model":"voltage_output_current_sensor",
+     "rated_output_millivolts":333.0,"frontend_gain":1.0},
+    {"channel":1,"name":"ILB","enabled":false,"adc_pga_gain":1,
+     "sensor_model":"voltage_output_current_sensor",
+     "rated_output_millivolts":333.0,"frontend_gain":1.0},
+    {"channel":2,"name":"ILC","enabled":false,"adc_pga_gain":1,
+     "sensor_model":"voltage_output_current_sensor",
+     "rated_output_millivolts":333.0,"frontend_gain":1.0},
+    {"channel":3,"name":"ILN","enabled":false,"adc_pga_gain":1,
+     "sensor_model":"voltage_output_current_sensor",
+     "rated_output_millivolts":333.0,"frontend_gain":1.0}
+  ],
+  "voltage_channels": [
+    {"channel":4,"name":"VLC","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":5,"name":"VLB","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":6,"name":"VLA","enabled":true,"adc_pga_gain":1,
+     "rin_ohms":6000000.0,"rf_ohms":4640.0}
+  ]
+})";
+	}
+	const auto configuration = msap1::load_meter_configuration(path, 32000);
+	std::filesystem::remove(path);
+	require(configuration.wire.valid_mask == 0x70,
+		"disabled mV current channels became valid");
+	for (std::size_t channel = 0; channel < 4; ++channel)
+		require(configuration.wire.scale_micro_units_q16[channel] == 0,
+			"disabled mV channel has a coefficient");
+}
+
+void one_amp_configuration()
+{
+	const auto path = std::filesystem::temp_directory_path() /
+		("msap1-meter-1a-config-" + std::to_string(::getpid()) + ".json");
+	{
+		std::ofstream output(path);
+		output << R"({
+  "schema_version":2,
+  "profile_id":"acuvim3-sb-1a",
+  "rms_window_ms":200,
+  "remove_dc":true,
+  "adc_reference_volts":1.0,
+  "current_channels":[
+    {"channel":0,"name":"ILA","enabled":true,"adc_pga_gain":8,"sensor_model":"internal_ct","primary_rated_amps":5.0,"secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":1,"name":"ILB","enabled":true,"adc_pga_gain":8,"sensor_model":"internal_ct","primary_rated_amps":5.0,"secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":2,"name":"ILC","enabled":true,"adc_pga_gain":8,"sensor_model":"internal_ct","primary_rated_amps":5.0,"secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872},
+    {"channel":3,"name":"ILN","enabled":true,"adc_pga_gain":8,"sensor_model":"internal_ct","primary_rated_amps":5.0,"secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872}
+  ],
+  "voltage_channels":[
+    {"channel":4,"name":"VLC","enabled":true,"adc_pga_gain":1,"rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":5,"name":"VLB","enabled":true,"adc_pga_gain":1,"rin_ohms":6000000.0,"rf_ohms":4640.0},
+    {"channel":6,"name":"VLA","enabled":true,"adc_pga_gain":1,"rin_ohms":6000000.0,"rf_ohms":4640.0}
+  ]
+})";
+	}
+	const auto configuration = msap1::load_meter_configuration(path, 32000);
+	std::filesystem::remove(path);
+	require(configuration.wire.scale_micro_units_q16[0] == 40090,
+		"wrong nominal 1 A current coefficient");
+	for (std::size_t channel = 0; channel < 4; ++channel)
+		require(configuration.wire.adc_pga_gain[channel] == 8,
+			"wrong 1 A profile PGA");
+}
+
+void rejects_incomplete_configuration()
+{
+	const auto path = std::filesystem::temp_directory_path() /
+		("msap1-meter-incomplete-" + std::to_string(::getpid()) + ".json");
+	{
+		std::ofstream output(path);
+		output << R"({
+  "schema_version":2,
+  "profile_id":"incomplete",
+  "rms_window_ms":200,
+  "remove_dc":true,
+  "adc_reference_volts":1.0,
+  "current_channels":[
+    {"channel":0,"name":"ILA","enabled":true,"adc_pga_gain":2,"sensor_model":"internal_ct","primary_rated_amps":5.0,"secondary_rated_amps":0.0025,"burden_ohms":48.71794871794872}
+  ],
+  "voltage_channels":[
+    {"channel":4,"name":"VLC","enabled":true,"adc_pga_gain":1,"rin_ohms":6000000.0,"rf_ohms":4640.0}
+  ]
+})";
+	}
+	require_throws(
+		[&] { (void)msap1::load_meter_configuration(path, 32000); },
+		"incomplete profile was accepted");
+	std::filesystem::remove(path);
 }
 
 void rejects_bad_frames()
@@ -198,6 +326,9 @@ int main()
 		adc_health_round_trip();
 		meter_record_contract();
 		meter_configuration();
+		disabled_mv_configuration();
+		one_amp_configuration();
+		rejects_incomplete_configuration();
 		rejects_bad_frames();
 		meter_health_evaluation();
 		std::cout << "protocol tests passed\n";
