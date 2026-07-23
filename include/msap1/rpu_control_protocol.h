@@ -1,7 +1,12 @@
 #ifndef MSAP1_RPU_CONTROL_PROTOCOL_H
 #define MSAP1_RPU_CONTROL_PROTOCOL_H
 
-/* Wire ABI shared with MSAP1_RPU/common/include/rpu_control_protocol.h. */
+/*
+ * Wire protocol shared between the APU application (msap1-apu-app) and the
+ * RPU firmware. This header is the single source of truth for the on-wire
+ * frame layout. Identifier names are local to each side; the numeric values
+ * and packed structure layout form the wire ABI and must remain compatible.
+ */
 
 #include <stdint.h>
 
@@ -105,6 +110,12 @@ struct msap1_rpu_status_payload {
 	uint32_t error_count;
 } __attribute__((packed));
 
+/*
+ * Software-defined PL metering configuration. Coefficients are unsigned
+ * Q16.16 micro-units per ADC count. The lower eight bits of valid_mask select
+ * configured channels; all remaining bits must be zero. adc_pga_gain carries
+ * the human-readable AD7771 gain factor (1, 2, 4, or 8) for every channel.
+ */
 struct msap1_meter_config_payload {
 	uint32_t generation;
 	uint32_t sample_rate_hz;
@@ -112,6 +123,7 @@ struct msap1_meter_config_payload {
 	uint32_t valid_mask;
 	uint32_t scale_micro_units_q16[8];
 	uint32_t flags;
+	uint8_t adc_pga_gain[8];
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {
@@ -122,6 +134,11 @@ struct msap1_meter_config_ack_payload {
 	uint32_t processing_status;
 } __attribute__((packed));
 
+/*
+ * Active AD7771 SPI readback plus the current PL capture counters. The RPU
+ * owns SPI and capture control; Linux owns AXI DMA and obtains ADC health only
+ * through this response. START and STOP carry no payload.
+ */
 struct msap1_adc_health_payload {
 	uint32_t health_flags;
 	uint32_t sample_rate_hz;
