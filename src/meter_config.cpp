@@ -12,6 +12,24 @@
 namespace msap1 {
 namespace {
 
+constexpr double adc_positive_codes = 8388608.0;
+constexpr double q16_scale = 65536.0;
+
+bool valid_pga_gain(std::uint32_t gain)
+{
+	return gain == 1u || gain == 2u || gain == 4u || gain == 8u;
+}
+
+std::uint32_t checked_coefficient(double coefficient,
+				  const char *measurement)
+{
+	if (!std::isfinite(coefficient) || coefficient <= 0.0 ||
+	    coefficient > std::numeric_limits<std::uint32_t>::max())
+		throw std::runtime_error(std::string(measurement) +
+			" conversion coefficient is out of range");
+	return static_cast<std::uint32_t>(std::llround(coefficient));
+}
+
 std::uint32_t configuration_fingerprint(
 	const msap1_meter_config_payload &configuration)
 {
@@ -41,18 +59,20 @@ PreparedMeterConfiguration load_meter_configuration(
 	if (const auto error = glz::read_json(result.source, json))
 		throw std::runtime_error("invalid meter configuration " +
 			path.string() + ": " + glz::format_error(error, json));
-	if (result.source.schema_version != 1u)
+	if (result.source.schema_version != 2u)
 		throw std::runtime_error("unsupported meter configuration schema");
 	if (sample_rate_hz < 1000u || sample_rate_hz > 128000u ||
+	    result.source.profile_id.empty() ||
 	    result.source.rms_window_ms == 0u ||
 	    result.source.rms_window_ms > 10000u ||
 	    !std::isfinite(result.source.adc_reference_volts) ||
 	    result.source.adc_reference_volts <= 0.0 ||
-	    !std::isfinite(result.source.adc_pga_gain) ||
-	    result.source.adc_pga_gain <= 0.0 ||
+	    result.source.current_channels.empty() ||
 	    result.source.voltage_channels.empty())
 		throw std::runtime_error("meter configuration values are out of range");
 
+	for (auto &gain : result.wire.adc_pga_gain)
+		gain = 1u;
 	result.wire.sample_rate_hz = sample_rate_hz;
 	const auto window = std::llround(
 		static_cast<double>(sample_rate_hz) *
@@ -64,27 +84,91 @@ PreparedMeterConfiguration load_meter_configuration(
 	if (result.source.remove_dc)
 		result.wire.flags |= MSAP1_METER_CONFIG_REMOVE_DC;
 
+	std::uint32_t configured_mask = 0u;
+	for (const auto &channel : result.source.current_channels) {
+		if (channel.channel >= 4u ||
+		    (configured_mask & (1u << channel.channel)) != 0u ||
+		    channel.name.empty() || !valid_pga_gain(channel.adc_pga_gain) ||
+		    !std::isfinite(channel.frontend_gain) ||
+		    channel.frontend_gain <= 0.0)
+			throw std::runtime_error(
+				"current channel configuration is invalid");
+		configured_mask |= 1u << channel.channel;
+		result.wire.adc_pga_gain[channel.channel] =
+			static_cast<std::uint8_t>(channel.adc_pga_gain);
+
+		double coefficient = 0.0;
+		if (channel.sensor_model == "internal_ct") {
+			if (!std::isfinite(channel.primary_rated_amps) ||
+			    !std::isfinite(channel.secondary_rated_amps) ||
+			    !std::isfinite(channel.burden_ohms) ||
+			    channel.primary_rated_amps <= 0.0 ||
+			    channel.secondary_rated_amps <= 0.0 ||
+			    channel.burden_ohms <= 0.0)
+				throw std::runtime_error(
+					"internal CT configuration is invalid");
+			const double ct_ratio = channel.primary_rated_amps /
+				channel.secondary_rated_amps;
+			coefficient = result.source.adc_reference_volts * ct_ratio *
+				1000000.0 * q16_scale /
+				(adc_positive_codes * channel.adc_pga_gain *
+				 channel.burden_ohms);
+		} else if (channel.sensor_model ==
+			   "voltage_output_current_sensor") {
+			if (!std::isfinite(channel.rated_output_millivolts) ||
+			    channel.rated_output_millivolts <= 0.0 ||
+			    (channel.enabled &&
+			     (!std::isfinite(channel.primary_rated_amps) ||
+			      channel.primary_rated_amps <= 0.0)))
+				throw std::runtime_error(
+					"voltage-output current sensor configuration is invalid");
+			if (channel.enabled) {
+				const double rated_output_volts =
+					channel.rated_output_millivolts / 1000.0;
+				coefficient = channel.primary_rated_amps * 1000000.0 *
+					result.source.adc_reference_volts * q16_scale /
+					(rated_output_volts * channel.frontend_gain *
+					 adc_positive_codes * channel.adc_pga_gain);
+			}
+		} else {
+			throw std::runtime_error("unsupported current sensor model");
+		}
+
+		if (!channel.enabled)
+			continue;
+		result.wire.scale_micro_units_q16[channel.channel] =
+			checked_coefficient(coefficient, "current");
+		result.wire.valid_mask |= 1u << channel.channel;
+	}
+
 	for (const auto &channel : result.source.voltage_channels) {
-		if (channel.channel >= 8u ||
-		    (result.wire.valid_mask & (1u << channel.channel)) != 0u ||
-		    channel.name.empty() || !std::isfinite(channel.rin_ohms) ||
+		if (channel.channel < 4u || channel.channel > 6u ||
+		    (configured_mask & (1u << channel.channel)) != 0u ||
+		    channel.name.empty() || !valid_pga_gain(channel.adc_pga_gain) ||
+		    !std::isfinite(channel.rin_ohms) ||
 		    !std::isfinite(channel.rf_ohms) || channel.rin_ohms <= 0.0 ||
 		    channel.rf_ohms <= 0.0)
 			throw std::runtime_error(
 				"voltage channel configuration is invalid");
+		configured_mask |= 1u << channel.channel;
+		result.wire.adc_pga_gain[channel.channel] =
+			static_cast<std::uint8_t>(channel.adc_pga_gain);
+		if (!channel.enabled)
+			continue;
 
 		const double frontend_gain = channel.rf_ohms / channel.rin_ohms;
 		const double coefficient =
-			result.source.adc_reference_volts * 1000000.0 * 65536.0 /
-			(8388608.0 * result.source.adc_pga_gain * frontend_gain);
-		if (!std::isfinite(coefficient) || coefficient <= 0.0 ||
-		    coefficient > std::numeric_limits<std::uint32_t>::max())
-			throw std::runtime_error(
-				"voltage conversion coefficient is out of range");
+			result.source.adc_reference_volts * 1000000.0 * q16_scale /
+			(adc_positive_codes * channel.adc_pga_gain * frontend_gain);
 		result.wire.scale_micro_units_q16[channel.channel] =
-			static_cast<std::uint32_t>(std::llround(coefficient));
+			checked_coefficient(coefficient, "voltage");
 		result.wire.valid_mask |= 1u << channel.channel;
 	}
+	if (configured_mask != 0x7fu)
+		throw std::runtime_error(
+			"complete meter configuration must define channels 0 through 6");
+	if (result.wire.valid_mask == 0u)
+		throw std::runtime_error("meter configuration enables no channels");
 
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;

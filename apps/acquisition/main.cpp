@@ -259,6 +259,15 @@ private:
 			return;
 		meter_.start();
 		try {
+			// PGA and coefficient changes are a coordinated ADC/PL
+			// transaction and may only occur with capture stopped. STOP is
+			// idempotent, so this also recovers cleanly after a daemon crash.
+			const auto stop_response =
+				transact(MSAP1_RPU_MSG_ADC_CAPTURE_STOP);
+			if (stop_response.header.type != MSAP1_RPU_MSG_ACK ||
+			    !stop_response.payload.empty())
+				throw std::runtime_error(
+					"unexpected RPU capture-stop response");
 			configure_meter();
 			const auto response =
 				transact(MSAP1_RPU_MSG_ADC_CAPTURE_START);

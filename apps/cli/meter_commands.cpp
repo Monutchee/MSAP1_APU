@@ -102,11 +102,14 @@ void print_record(const MeterRecord &record, std::ostream &output)
 {
 	static constexpr std::array<const char *, 8> names{
 		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
+	// CH7/VCM remains present in MTR1 and MeterRecord for future reference
+	// monitoring, but it is not a user-facing meter channel yet.
+	static constexpr std::size_t displayed_channel_count = 7;
 	output << "\033[2J\033[HMSAP1 meter results"
 	       << "  sequence=" << record.sequence() << "  generation=0x" << std::hex
 	       << record.configuration_generation() << std::dec
 	       << "  window=" << record.window_samples() << " samples\n\n";
-	for (std::size_t index = 0; index < names.size(); ++index) {
+	for (std::size_t index = 0; index < displayed_channel_count; ++index) {
 		const auto channel = record.channel(index);
 		output << "CH" << index << ' ' << std::setw(3) << names[index]
 		       << "  RMS=";
