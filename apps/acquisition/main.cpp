@@ -309,7 +309,7 @@ private:
 				"RPU meter configuration readback does not match");
 	}
 
-	void start()
+	void start(bool apply_configuration = true)
 	{
 		if (running_)
 			return;
@@ -324,7 +324,8 @@ private:
 			    !stop_response.payload.empty())
 				throw std::runtime_error(
 					"unexpected RPU capture-stop response");
-			configure_meter();
+			if (apply_configuration)
+				configure_meter();
 			const auto response =
 				transact(MSAP1_RPU_MSG_ADC_CAPTURE_START);
 			if (response.header.type != MSAP1_RPU_MSG_ACK ||
@@ -450,6 +451,49 @@ private:
 		}
 	}
 
+	void run_adc_diagnostic(std::uint32_t flow)
+	{
+		if (flow != 1u)
+			throw std::invalid_argument("unsupported ADC diagnostic flow");
+
+		const bool restart = running_;
+		if (restart)
+			stop();
+
+		try {
+			const msap1_adc_diagnostic_request request{flow};
+			last_adc_diagnostic_ = msap1::decode_adc_diagnostic(
+				transact(MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN,
+					 &request, sizeof(request), 8000ms));
+
+			if (restart) {
+				/*
+				 * A successful flow restores the same ADC operating point
+				 * itself. Resume DMA/capture without issuing a second SRC
+				 * load, otherwise the final diagnostic snapshot would no
+				 * longer describe the active state. If the flow failed,
+				 * perform the normal full coordinated configuration as a
+				 * recovery attempt.
+				 */
+				const bool diagnostic_succeeded =
+					last_adc_diagnostic_.diagnostic_error ==
+					MSAP1_ADC_DIAGNOSTIC_ERROR_NONE;
+				start(!diagnostic_succeeded);
+			}
+			cached_health_ = query_rpu_health();
+		} catch (...) {
+			if (restart && !running_) {
+				try {
+					start();
+				} catch (const std::exception &rollback_error) {
+					std::cerr << "ADC diagnostic recovery failed: "
+						  << rollback_error.what() << '\n';
+				}
+			}
+			throw;
+		}
+	}
+
 	void accept_record(const msap1::MeterRecord &record)
 	{
 		if (!record.header_valid() ||
@@ -511,6 +555,7 @@ private:
 		response.invalid_records = invalid_records_;
 		response.sequence_gaps = sequence_gaps_;
 		response.rpu_health = cached_health_;
+		response.adc_diagnostic = last_adc_diagnostic_;
 		if (latest_record_)
 			response.latest_record = *latest_record_;
 		response.frequency = frequency_ipc(configuration_.source.frequency);
@@ -553,6 +598,9 @@ private:
 				case msap1::AcquisitionCommand::sample_rate_set:
 					apply_sample_rate(request.sample_rate_hz);
 					break;
+				case msap1::AcquisitionCommand::adc_diagnostic_run:
+					run_adc_diagnostic(request.diagnostic_flow);
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
@@ -570,7 +618,10 @@ private:
 					 msap1::AcquisitionCommand::
 						 frequency_configuration_set ||
 					 request.command ==
-					 msap1::AcquisitionCommand::sample_rate_set)
+					 msap1::AcquisitionCommand::sample_rate_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::
+						 adc_diagnostic_run)
 					response.status =
 						msap1::AcquisitionStatus::configuration_error;
 				else
@@ -601,6 +652,7 @@ private:
 	std::uint64_t sequence_gaps_ = 0;
 	std::optional<msap1::MeterRecord> latest_record_;
 	msap1_adc_health_payload cached_health_{};
+	msap1_adc_diagnostic_payload last_adc_diagnostic_{};
 };
 
 } // namespace

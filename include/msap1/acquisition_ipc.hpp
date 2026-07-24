@@ -13,7 +13,7 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 6;
+inline constexpr std::uint16_t acquisition_ipc_version = 7;
 
 enum class AcquisitionCommand : std::uint16_t {
 	info = 1,
@@ -23,6 +23,7 @@ enum class AcquisitionCommand : std::uint16_t {
 	frequency_configuration_get = 5,
 	frequency_configuration_set = 6,
 	sample_rate_set = 7,
+	adc_diagnostic_run = 8,
 };
 
 struct FrequencyIpcConfiguration {
@@ -52,6 +53,7 @@ struct AcquisitionRequest {
 	AcquisitionCommand command = AcquisitionCommand::info;
 	std::uint64_t sequence = 0;
 	std::uint32_t sample_rate_hz = 0;
+	std::uint32_t diagnostic_flow = 0;
 	FrequencyIpcConfiguration frequency{};
 };
 
@@ -72,6 +74,7 @@ struct AcquisitionResponse {
 	std::uint64_t invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
 	msap1_adc_health_payload rpu_health{};
+	msap1_adc_diagnostic_payload adc_diagnostic{};
 	MeterRecord latest_record{};
 	FrequencyIpcConfiguration frequency{};
 };
@@ -84,7 +87,8 @@ public:
 				    int timeout_ms = 3000,
 				    const FrequencyIpcConfiguration *frequency =
 					    nullptr,
-				    std::uint32_t sample_rate_hz = 0) const;
+				    std::uint32_t sample_rate_hz = 0,
+				    std::uint32_t diagnostic_flow = 0) const;
 
 private:
 	std::string socket_path_;
