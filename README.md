@@ -105,9 +105,10 @@ mnc adc testflw --flow 1
 `mnc adc rate` compares the requested rate, SRC-register-derived rate, and
 physical DRDY rate. `--sps` temporarily selects one of 1, 2, 4, 8, 16, 32, 64,
 or 128 kSPS through a coordinated DMA/capture stop, AD7771 SRC/PGA update, PL
-window update, and restart. The complete profile remains unchanged and the
-selection is not persisted; restarting the acquisition daemon restores
-32 kSPS.
+window update, and restart. It polls across one-second PL measurement windows
+until two consecutive DRDY readings agree, avoiding stale pre-change results.
+The complete profile remains unchanged and the selection is not persisted;
+restarting the acquisition daemon restores 32 kSPS.
 
 `mnc adc testflw --flow 1` is a destructive, self-restoring rate diagnostic.
 The daemon stops DMA/capture, asks R5c0 to pulse the PL-driven sensor-board
@@ -135,7 +136,8 @@ the command path. The Yocto package installs Bash completion for command groups,
 actions, options, and socket paths.
 
 `mnc meter health` requires matching configuration generations, responsive SPI,
-active capture, zero DMA/header/FIFO errors, and advancing meter records.
+measured DRDY within 1% of the configured sample rate, active capture, zero
+DMA/header/FIFO errors, and advancing meter records.
 `mnc meter view` displays RMS results and the latest VLA grid frequency. An
 absent/out-of-range grid is reported as unavailable without failing acquisition;
 a frequency arithmetic fault does fail meter health. RMS uses the configured

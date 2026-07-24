@@ -65,6 +65,7 @@ enum msap1_adc_health_flag {
 	MSAP1_ADC_HEALTH_CAPTURE_ACTIVE = 1u << 4,
 	MSAP1_ADC_HEALTH_NO_OVERFLOW = 1u << 5,
 	MSAP1_ADC_HEALTH_HEADERS_VALID = 1u << 6,
+	MSAP1_ADC_HEALTH_RATE_MATCH = 1u << 7,
 };
 
 enum msap1_adc_spi_health_error {
