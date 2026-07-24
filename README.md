@@ -102,7 +102,13 @@ mnc adc start
 `mnc meter health` reports both the number of AXI packets accepted by the
 capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate
 measured in PL. The DCLK and DRDY fields are `unavailable` until two one-second
-observation windows complete, and whenever the corresponding signal stops.
+observation windows complete, and whenever the corresponding signal stops. It
+also prints the complete active AD7771 channel/general/DOUT/SRC configuration,
+offset/gain calibration, channel/saturation/general errors, enables, and status
+register snapshot read over SPI by R5c0. A decoded summary includes the power
+mode, digital filter, DOUT topology, DCLK divisor, reference mux, SRC
+decimation, and the ODR implied by the measured DCLK. This keeps Linux read-only
+while providing enough raw state to diagnose ADC rate and alert faults.
 
 Run `mnc`, `mnc help meter`, or append `--help` to any command for contextual
 help. Global `--socket` and `--timeout-ms` options are accepted before or after
