@@ -7,6 +7,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -44,6 +46,8 @@ struct Options {
 	std::string rpmsg_device;
 	std::string meter_device = "/dev/msap1-meter";
 	std::string configuration = msap1::default_meter_config_path;
+	std::string active_configuration =
+		"/etc/monutchee/msap1/adc_config/active.json";
 	std::string socket_path = msap1::acquisition_socket_path;
 };
 
@@ -55,6 +59,7 @@ void usage(const char *program)
 		<< "  --rpmsg-device PATH  Use an existing /dev/rpmsgN endpoint\n"
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
 		<< "  --config PATH        Meter conversion JSON\n"
+		<< "  --active-config PATH Persisted complete runtime profile\n"
 		<< "  --socket PATH        Control socket path\n";
 }
 
@@ -78,12 +83,64 @@ Options parse_options(int argc, char **argv)
 			options.meter_device = value;
 		else if (option == "--config")
 			options.configuration = value;
+		else if (option == "--active-config")
+			options.active_configuration = value;
 		else if (option == "--socket")
 			options.socket_path = value;
 		else
 			throw std::invalid_argument("unknown option '" + option + "'");
 	}
 	return options;
+}
+
+msap1::PreparedMeterConfiguration load_runtime_configuration(
+	const Options &options)
+{
+	if (!options.active_configuration.empty() &&
+	    std::filesystem::exists(options.active_configuration)) {
+		try {
+			return msap1::load_meter_configuration(
+				options.active_configuration);
+		} catch (const std::exception &error) {
+			std::cerr << "ignoring invalid active meter profile "
+				  << options.active_configuration << ": "
+				  << error.what() << '\n';
+		}
+	}
+	return msap1::load_meter_configuration(options.configuration);
+}
+
+std::string frequency_mode_name(std::uint32_t mode)
+{
+	switch (mode) {
+	case MSAP1_FREQUENCY_MODE_SINGLE_CYCLE: return "single_cycle";
+	case MSAP1_FREQUENCY_MODE_ROLLING_CYCLES: return "rolling_cycles";
+	case MSAP1_FREQUENCY_MODE_ROLLING_TIME: return "rolling_time";
+	default: throw std::runtime_error("invalid frequency IPC mode");
+	}
+}
+
+msap1::FrequencyIpcConfiguration frequency_ipc(
+	const msap1::FrequencyConfig &frequency)
+{
+	std::uint32_t mode = MSAP1_FREQUENCY_MODE_ROLLING_CYCLES;
+	if (frequency.mode == "single_cycle")
+		mode = MSAP1_FREQUENCY_MODE_SINGLE_CYCLE;
+	else if (frequency.mode == "rolling_time")
+		mode = MSAP1_FREQUENCY_MODE_ROLLING_TIME;
+	return {
+		frequency.enabled ? 1u : 0u,
+		frequency.reference_channel,
+		mode,
+		frequency.averaging_cycles,
+		frequency.averaging_window_ms,
+		static_cast<std::uint32_t>(
+			std::llround(frequency.minimum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.maximum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.hysteresis_volts * 1000000.0)),
+	};
 }
 
 class MeterDevice {
@@ -119,8 +176,7 @@ class AcquisitionDaemon {
 public:
 	explicit AcquisitionDaemon(const Options &options)
 		: options_(options),
-		  configuration_(msap1::load_meter_configuration(
-			  options.configuration)),
+		  configuration_(load_runtime_configuration(options)),
 		  meter_(options.meter_device),
 		  endpoint_(options.service, options.rpmsg_device)
 	{
@@ -297,6 +353,57 @@ private:
 		running_ = false;
 	}
 
+	void apply_frequency_configuration(
+		const msap1::FrequencyIpcConfiguration &request)
+	{
+		auto source = configuration_.source;
+		source.frequency.enabled = request.enabled != 0u;
+		source.frequency.reference_channel = request.reference_channel;
+		source.frequency.mode = frequency_mode_name(request.mode);
+		source.frequency.averaging_cycles = request.averaging_cycles;
+		source.frequency.averaging_window_ms =
+			request.averaging_window_ms;
+		source.frequency.minimum_hz =
+			static_cast<double>(request.minimum_millihz) / 1000.0;
+		source.frequency.maximum_hz =
+			static_cast<double>(request.maximum_millihz) / 1000.0;
+		source.frequency.hysteresis_volts =
+			static_cast<double>(request.hysteresis_microvolts) /
+			1000000.0;
+
+		auto staged = msap1::prepare_meter_configuration(
+			std::move(source), configuration_.wire.sample_rate_hz);
+		const auto previous = configuration_;
+		const bool restart = running_;
+		if (restart)
+			stop();
+		configuration_ = std::move(staged);
+		// The previous snapshot belongs to a different configuration
+		// generation. Publish no record until the restarted pipeline produces
+		// a coherent MTR1 result for the new generation.
+		latest_record_.reset();
+		try {
+			if (restart)
+				start();
+			msap1::save_meter_configuration(
+				configuration_.source,
+				options_.active_configuration);
+		} catch (...) {
+			if (running_)
+				stop();
+			configuration_ = previous;
+			if (restart) {
+				try {
+					start();
+				} catch (const std::exception &rollback_error) {
+					std::cerr << "frequency configuration rollback failed: "
+						  << rollback_error.what() << '\n';
+				}
+			}
+			throw;
+		}
+	}
+
 	void accept_record(const msap1::MeterRecord &record)
 	{
 		if (!record.header_valid() ||
@@ -360,6 +467,7 @@ private:
 		response.rpu_health = cached_health_;
 		if (latest_record_)
 			response.latest_record = *latest_record_;
+		response.frequency = frequency_ipc(configuration_.source.frequency);
 		return response;
 	}
 
@@ -389,6 +497,13 @@ private:
 				case msap1::AcquisitionCommand::stop:
 					stop();
 					break;
+				case msap1::AcquisitionCommand::
+					frequency_configuration_get:
+					break;
+				case msap1::AcquisitionCommand::
+					frequency_configuration_set:
+					apply_frequency_configuration(request.frequency);
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
@@ -401,7 +516,10 @@ private:
 					response.status =
 						msap1::AcquisitionStatus::rpu_error;
 				else if (request.command ==
-					 msap1::AcquisitionCommand::start)
+					 msap1::AcquisitionCommand::start ||
+					 request.command ==
+					 msap1::AcquisitionCommand::
+						 frequency_configuration_set)
 					response.status =
 						msap1::AcquisitionStatus::configuration_error;
 				else

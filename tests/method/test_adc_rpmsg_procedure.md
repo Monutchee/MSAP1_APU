@@ -58,6 +58,24 @@ record is exactly 256 bytes and contains `MTR1`; CH0–CH3 are valid RMS amps
 with the 5 A profile and CH4–CH6 are valid RMS volts. Packetizer/hub drop
 counters remain zero.
 
+With an isolated reference source on VLA, test 40, 50, 60, and 70 Hz. The
+displayed frequency must settle after the configured complete-cycle interval,
+remain within ±0.05 Hz of the source, and become `unavailable` after the
+three-period no-signal timeout when VLA is removed. Positive/negative DC offset
+and changing RMS `remove_dc` must not change the measured frequency.
+
+As an authenticated administrator, exercise:
+
+```text
+GET /api/v1/meter/configuration/frequency
+PUT /api/v1/meter/configuration/frequency
+```
+
+Verify single-cycle, rolling-cycle, and rolling-time modes. A valid update must
+stop, apply, restart, change the configuration generation, and create the
+complete `/etc/monutchee/msap1/adc_config/active.json`. An invalid update must
+return a client error, retain the prior profile, and restore capture.
+
 ## 4. Concurrent readers
 
 Run `mnc meter view` while the authenticated web page or
@@ -65,6 +83,12 @@ Run `mnc meter view` while the authenticated web page or
 snapshots without stealing records, blocking acquisition, or disrupting the
 RPU heartbeat. Confirm `GET /api/v1/meter/health` agrees with
 `mnc meter health` while the system remains healthy.
+
+The health output must also show an advancing ADC packet count and a nonzero
+ADC DCLK measurement after approximately two seconds. Compare the reported
+DCLK with the clock selected by the AD7771 output configuration. Stopping the
+ADC clock must make the field unavailable after the next observation window;
+restoring the clock must recover without restarting Linux.
 
 ## 5. Lifecycle and sustained run
 

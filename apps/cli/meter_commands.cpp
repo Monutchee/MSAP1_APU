@@ -69,6 +69,7 @@ int run_meter_health(const Options &options, std::ostream &output)
 	require_daemon_ok(response);
 	const auto status = evaluate_meter_health(response);
 	const auto &health = response.rpu_health;
+	const auto frequency = response.latest_record.frequency();
 
 	output << "MSAP1 meter health: " << (status.healthy ? "PASS" : "FAIL") << '\n'
 	       << "  Linux acquisition:    " << yes_no(response.running != 0u) << '\n'
@@ -89,12 +90,26 @@ int run_meter_health(const Options &options, std::ostream &output)
 	       << "  Capture active:       " << yes_no(status.capture_active) << '\n'
 	       << "  Sample rate:          " << health.sample_rate_hz << " frame/s\n"
 	       << "  PL frames:            " << health.frame_count << '\n'
-	       << "  FIFO overflows:       " << health.overflow_count << '\n'
+	       << "  ADC packets:          " << health.packet_count << '\n'
+	       << "  ADC DCLK:             ";
+	if (health.dclk_frequency_hz != 0u)
+		output << health.dclk_frequency_hz << " Hz\n";
+	else
+		output << "unavailable\n";
+	output << "  FIFO overflows:       " << health.overflow_count << '\n'
 	       << "  Header errors:        " << health.header_error_count << '\n'
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
 	       << '\n'
 	       << "  Processing status:   0x" << health.processing_status << std::dec
-	       << '\n';
+	       << '\n'
+	       << "  Frequency arithmetic: "
+	       << (status.frequency_arithmetic_ok ? "ok" : "fault") << '\n'
+	       << "  Grid frequency:       ";
+	if (response.has_meter_record != 0u && frequency.valid)
+		output << std::fixed << std::setprecision(3)
+		       << static_cast<double>(frequency.millihz) / 1000.0 << " Hz\n";
+	else
+		output << "unavailable\n";
 	return status.healthy ? 0 : 1;
 }
 
@@ -122,6 +137,21 @@ void print_record(const MeterRecord &record, std::ostream &output)
 		output << "  mean=" << channel.mean_micro_units
 		       << " micro-units  rms_count=" << channel.rms_count << '\n';
 	}
+	const auto frequency = record.frequency();
+	output << "\nFrequency=";
+	if (frequency.valid)
+		output << std::fixed << std::setprecision(3)
+		       << static_cast<double>(frequency.millihz) / 1000.0
+		       << " Hz (" << static_cast<unsigned>(frequency.cycles_used)
+		       << " cycles)";
+	else if (!frequency.enabled)
+		output << "disabled";
+	else if (frequency.out_of_range)
+		output << "unavailable (out of range)";
+	else if (frequency.timed_out)
+		output << "unavailable (no signal)";
+	else
+		output << "unavailable (measuring)";
 	output << "\nPL capture=" << record.capture_frames()
 	       << " header_errors=" << record.header_errors()
 	       << " fifo_overflows=" << record.fifo_overflows()

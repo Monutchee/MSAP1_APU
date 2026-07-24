@@ -71,6 +71,8 @@ void adc_health_round_trip()
 	health.meter_generation = 0x11223344;
 	health.sample_rate_hz = 32000;
 	health.frame_count = 123456;
+	health.packet_count = 482;
+	health.dclk_frequency_hz = 8192000;
 	health.expected_decimation = 64;
 
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
@@ -79,6 +81,9 @@ void adc_health_round_trip()
 	const auto decoded = msap1::decode_adc_health(message);
 	require(decoded.sample_rate_hz == 32000, "wrong health sample rate");
 	require(decoded.frame_count == 123456, "wrong health frame count");
+	require(decoded.packet_count == 482, "wrong health packet count");
+	require(decoded.dclk_frequency_hz == 8192000,
+		"wrong health DCLK frequency");
 	require(decoded.meter_generation == 0x11223344,
 		"wrong health meter generation");
 }
@@ -102,6 +107,11 @@ void meter_record_contract()
 	record.words[base + 2] = 777;
 	record.words[base + 3] = static_cast<std::uint32_t>(rms);
 	record.words[base + 4] = static_cast<std::uint32_t>(rms >> 32);
+	record.words[56] = 60001;
+	record.words[57] = (1u << 0) | (1u << 1) | (1u << 2) |
+		(1u << 8) | (6u << 12) | (10u << 16);
+	record.words[58] = 0x02155555;
+	record.words[59] = 19;
 	require(record.header_valid(), "valid meter header rejected");
 	require(record.sequence() == 41, "wrong meter sequence");
 	const auto channel = record.channel(6);
@@ -109,6 +119,12 @@ void meter_record_contract()
 	require(channel.mean_micro_units == -125000, "wrong signed mean");
 	require(channel.rms_count == 777, "wrong RMS count");
 	require(channel.rms_micro_units == 230123456, "wrong RMS voltage");
+	const auto frequency = record.frequency();
+	require(frequency.valid && frequency.millihz == 60001 &&
+		frequency.mode == 1 && frequency.reference_channel == 6 &&
+		frequency.cycles_used == 10 &&
+		frequency.measurement_sequence == 19,
+		"wrong frequency record decoding");
 }
 
 void meter_configuration()
@@ -165,8 +181,43 @@ void meter_configuration()
 		configuration.wire.adc_pga_gain[4] == 1 &&
 		configuration.wire.adc_pga_gain[7] == 1,
 		"wrong per-channel PGA configuration");
+	require(configuration.wire.frequency_mode ==
+			MSAP1_FREQUENCY_MODE_ROLLING_CYCLES &&
+		configuration.wire.frequency_reference_channel == 6 &&
+		configuration.wire.frequency_averaging_cycles == 10 &&
+		configuration.wire.frequency_window_samples == 32000 &&
+		configuration.wire.frequency_minimum_millihz == 40000 &&
+		configuration.wire.frequency_maximum_millihz == 70000 &&
+		configuration.wire.frequency_hysteresis_microvolts == 1000000,
+		"schema-v2 frequency defaults are incorrect");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
+
+	const auto active_path = std::filesystem::temp_directory_path() /
+		("msap1-meter-active-" + std::to_string(::getpid()) + ".json");
+	msap1::save_meter_configuration(configuration.source, active_path);
+	const auto reloaded = msap1::load_meter_configuration(active_path, 32000);
+	std::filesystem::remove(active_path);
+	require(reloaded.wire.generation == configuration.wire.generation,
+		"persisted complete profile changed its generation");
+
+	auto invalid_frequency = configuration.source;
+	invalid_frequency.frequency.reference_channel = 5;
+	require_throws(
+		[&] {
+			(void)msap1::prepare_meter_configuration(
+				invalid_frequency, 32000);
+		},
+		"non-VLA frequency reference was accepted");
+	invalid_frequency = configuration.source;
+	invalid_frequency.frequency.minimum_hz = 70.0;
+	invalid_frequency.frequency.maximum_hz = 40.0;
+	require_throws(
+		[&] {
+			(void)msap1::prepare_meter_configuration(
+				invalid_frequency, 32000);
+		},
+		"reversed frequency limits were accepted");
 }
 
 void disabled_mv_configuration()
@@ -306,6 +357,8 @@ void meter_health_evaluation()
 	const auto healthy = msap1::evaluate_meter_health(response);
 	require(healthy.healthy && healthy.acquisition_healthy && healthy.adc_healthy,
 		"healthy meter response was rejected");
+	require(healthy.frequency_arithmetic_ok,
+		"healthy frequency arithmetic was rejected");
 	require(healthy.dc_offset_removal,
 		"DC-offset removal health flag was not exposed");
 
@@ -314,6 +367,13 @@ void meter_health_evaluation()
 	require(!degraded.healthy && !degraded.acquisition_healthy &&
 		degraded.adc_healthy,
 		"acquisition errors did not degrade meter health");
+
+	response.sequence_gaps = 0;
+	response.latest_record.words[57] = 1u << 7;
+	const auto arithmetic_fault = msap1::evaluate_meter_health(response);
+	require(!arithmetic_fault.healthy &&
+		!arithmetic_fault.frequency_arithmetic_ok,
+		"frequency arithmetic error did not degrade meter health");
 }
 
 } // namespace
