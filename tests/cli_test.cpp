@@ -58,6 +58,13 @@ void option_parsing()
 		"ADC rate command was not selected");
 	require(rate.options.sample_rate_hz == 16000,
 		"ADC sample rate was not parsed");
+
+	const auto flow =
+		application.parse({"adc", "testflw", "--flow", "1"});
+	require(!flow.show_help && flow.command->name() == "testflw",
+		"ADC diagnostic flow command was not selected");
+	require(flow.options.diagnostic_flow == 1,
+		"ADC diagnostic flow was not parsed");
 }
 
 void help_and_errors()
@@ -87,6 +94,13 @@ void help_and_errors()
 		"unsupported ADC sample rate was accepted");
 	require(error.str().find("must be one of") != std::string::npos,
 		"sample-rate error omitted the supported values");
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"adc", "testflw", "--flow", "2"}, output, error) == 2,
+		"unsupported ADC diagnostic flow was accepted");
+	require(error.str().find("supports only flow 1") != std::string::npos,
+		"diagnostic-flow error omitted the supported flow");
 }
 
 void completion()
@@ -107,11 +121,14 @@ void completion()
 		"socket completion did not request path completion");
 	candidates = application.complete({"adc", ""});
 	require(contains(candidates, "rate") && contains(candidates, "start") &&
-		contains(candidates, "stop"),
+		contains(candidates, "stop") && contains(candidates, "testflw"),
 		"ADC completion omitted actions");
 	candidates = application.complete({"adc", "rate", "--"});
 	require(contains(candidates, "--sps"),
 		"ADC rate completion omitted --sps");
+	candidates = application.complete({"adc", "testflw", "--"});
+	require(contains(candidates, "--flow"),
+		"ADC diagnostic completion omitted --flow");
 }
 
 } // namespace

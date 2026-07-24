@@ -99,6 +99,7 @@ mnc adc stop
 mnc adc start
 mnc adc rate
 mnc adc rate --sps 16000
+mnc adc testflw --flow 1
 ```
 
 `mnc adc rate` compares the requested rate, SRC-register-derived rate, and
@@ -107,6 +108,15 @@ or 128 kSPS through a coordinated DMA/capture stop, AD7771 SRC/PGA update, PL
 window update, and restart. The complete profile remains unchanged and the
 selection is not persisted; restarting the acquisition daemon restores
 32 kSPS.
+
+`mnc adc testflw --flow 1` is a destructive, self-restoring rate diagnostic.
+The daemon stops DMA/capture, asks R5c0 to pulse the PL-driven sensor-board
+`ADC_RESET_N` output, records the reset-default registers, performs an
+observable 1 ms `SRC_UPDATE` high/low load, waits for fresh PL DCLK/DRDY
+measurement windows, and restores the prior running state. This is a warm ADC
+pin reset: it does not power-cycle the ADC and does not reset Linux or the
+FPGA. The command takes about five seconds and prints copyable before,
+reset-asserted, reset-default, and after snapshots.
 
 `mnc meter health` reports both the number of AXI packets accepted by the
 capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate

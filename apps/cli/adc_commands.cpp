@@ -55,26 +55,37 @@ std::uint32_t parse_sample_rate(const std::string &value)
 	return static_cast<std::uint32_t>(parsed);
 }
 
-double src_derived_rate(const msap1_adc_health_payload &health)
+double src_derived_rate(std::uint32_t dclk_frequency_hz,
+			std::uint8_t general_user_config_1,
+			std::uint8_t dout_format,
+			std::uint8_t src_n_msb, std::uint8_t src_n_lsb,
+			std::uint8_t src_if_msb, std::uint8_t src_if_lsb)
 {
-	if (health.dclk_frequency_hz == 0u)
+	if (dclk_frequency_hz == 0u)
 		return 0.0;
 	const auto src_n = static_cast<std::uint16_t>(
-		(static_cast<std::uint16_t>(health.src_n_msb & 0x0fu) << 8) |
-		health.src_n_lsb);
+		(static_cast<std::uint16_t>(src_n_msb & 0x0fu) << 8) |
+		src_n_lsb);
 	const auto src_if = static_cast<std::uint16_t>(
-		(static_cast<std::uint16_t>(health.src_if_msb) << 8) |
-		health.src_if_lsb);
+		(static_cast<std::uint16_t>(src_if_msb) << 8) | src_if_lsb);
 	const auto decimation = static_cast<double>(src_n) +
 		static_cast<double>(src_if) / 65536.0;
 	if (decimation <= 0.0)
 		return 0.0;
 	const auto dclk_divisor =
-		static_cast<double>(1u << ((health.dout_format >> 1) & 0x07u));
+		static_cast<double>(1u << ((dout_format >> 1) & 0x07u));
 	const auto modulator_divisor =
-		(health.general_user_config_1 & 0x40u) != 0u ? 4.0 : 8.0;
-	return static_cast<double>(health.dclk_frequency_hz) * dclk_divisor /
+		(general_user_config_1 & 0x40u) != 0u ? 4.0 : 8.0;
+	return static_cast<double>(dclk_frequency_hz) * dclk_divisor /
 		(modulator_divisor * decimation);
+}
+
+double src_derived_rate(const msap1_adc_health_payload &health)
+{
+	return src_derived_rate(
+		health.dclk_frequency_hz, health.general_user_config_1,
+		health.dout_format, health.src_n_msb, health.src_n_lsb,
+		health.src_if_msb, health.src_if_lsb);
 }
 
 int run_rate(const Options &options, std::ostream &output)
@@ -132,6 +143,221 @@ int run_rate(const Options &options, std::ostream &output)
 	return 0;
 }
 
+std::uint32_t parse_diagnostic_flow(const std::string &value)
+{
+	std::size_t end = 0;
+	std::uint64_t parsed = 0;
+	try {
+		parsed = std::stoull(value, &end, 0);
+	} catch (const std::exception &) {
+		throw std::invalid_argument("--flow requires diagnostic flow 1");
+	}
+	if (end != value.size() || parsed != 1u)
+		throw std::invalid_argument("--flow currently supports only flow 1");
+	return 1u;
+}
+
+const char *diagnostic_stage_name(std::uint32_t stage)
+{
+	switch (stage) {
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_NONE: return "none";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_PREFLIGHT: return "preflight";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_BEFORE: return "before snapshot";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_ASSERT: return "RESET_N asserted";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_RELEASE: return "RESET_N release";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_DEFAULTS:
+		return "reset-default snapshot";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_RECONFIGURE:
+		return "conservative SRC reload";
+	case MSAP1_ADC_DIAGNOSTIC_STAGE_AFTER: return "after snapshot";
+	default: return "unknown";
+	}
+}
+
+const char *diagnostic_error_name(std::uint32_t error)
+{
+	switch (error) {
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_NONE: return "none";
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_NOT_INITIALIZED:
+		return "ADC not initialized";
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_CAPTURE_ACTIVE:
+		return "capture was not stopped";
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_SPI: return "SPI communication";
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_ADC_NOT_READY:
+		return "INIT_COMPLETE timeout";
+	case MSAP1_ADC_DIAGNOSTIC_ERROR_REGISTER_MISMATCH:
+		return "register readback mismatch";
+	default: return "internal error";
+	}
+}
+
+void print_hex_byte(std::ostream &output, std::uint8_t value)
+{
+	output << "0x" << std::hex << std::setw(2) << std::setfill('0')
+	       << static_cast<unsigned int>(value) << std::dec
+	       << std::setfill(' ');
+}
+
+void print_diagnostic_snapshot(
+	std::ostream &output, const char *name,
+	const msap1_adc_diagnostic_snapshot &snapshot)
+{
+	output << "\n" << name << "\n"
+	       << "  PL capture flags:     0x" << std::hex
+	       << snapshot.capture_flags << std::dec << "\n"
+	       << "  PL frames/packets:    " << snapshot.frame_count << " / "
+	       << snapshot.packet_count << "\n"
+	       << "  ADC DCLK:             ";
+	if (snapshot.dclk_frequency_hz != 0u)
+		output << snapshot.dclk_frequency_hz << " Hz\n";
+	else
+		output << "unavailable/0\n";
+	output << "  ADC DRDY:             ";
+	if (snapshot.drdy_frequency_hz != 0u)
+		output << snapshot.drdy_frequency_hz << " frame/s\n";
+	else
+		output << "unavailable/0\n";
+
+	if ((snapshot.snapshot_flags &
+	     MSAP1_ADC_DIAGNOSTIC_SNAPSHOT_SPI_VALID) == 0u) {
+		output << "  SPI registers:        unavailable while RESET_N is low\n";
+		return;
+	}
+
+	const auto src_n = static_cast<std::uint16_t>(
+		(static_cast<std::uint16_t>(snapshot.src_n_msb & 0x0fu) << 8) |
+		snapshot.src_n_lsb);
+	const auto src_if = static_cast<std::uint16_t>(
+		(static_cast<std::uint16_t>(snapshot.src_if_msb) << 8) |
+		snapshot.src_if_lsb);
+	const auto derived = src_derived_rate(
+		snapshot.dclk_frequency_hz,
+		snapshot.general_user_config_1, snapshot.dout_format,
+		snapshot.src_n_msb, snapshot.src_n_lsb,
+		snapshot.src_if_msb, snapshot.src_if_lsb);
+
+	output << "  STATUS 1/2/3:        ";
+	print_hex_byte(output, snapshot.status_1);
+	output << " / ";
+	print_hex_byte(output, snapshot.status_2);
+	output << " / ";
+	print_hex_byte(output, snapshot.status_3);
+	output << "\n  CONFIG 1/2/3:        ";
+	print_hex_byte(output, snapshot.general_user_config_1);
+	output << " / ";
+	print_hex_byte(output, snapshot.general_user_config_2);
+	output << " / ";
+	print_hex_byte(output, snapshot.general_user_config_3);
+	output << "\n  DOUT_FORMAT:          ";
+	print_hex_byte(output, snapshot.dout_format);
+	output << "\n  CHANNEL_DISABLE:      ";
+	print_hex_byte(output, snapshot.channel_disable);
+	output << "\n  BUFFER_CONFIG 1/2:   ";
+	print_hex_byte(output, snapshot.buffer_config_1);
+	output << " / ";
+	print_hex_byte(output, snapshot.buffer_config_2);
+	output << "\n  SRC N / IF:           " << src_n << " / " << src_if
+	       << "\n  SRC_UPDATE:           ";
+	print_hex_byte(output, snapshot.src_update);
+	output << "\n  SRC-derived rate:     ";
+	if (derived > 0.0)
+		output << std::fixed << std::setprecision(3) << derived
+		       << " frame/s\n";
+	else
+		output << "unavailable\n";
+}
+
+const char *yes_no(bool value)
+{
+	return value ? "yes" : "no";
+}
+
+int run_test_flow(const Options &options, std::ostream &output)
+{
+	if (!options.diagnostic_flow)
+		throw std::invalid_argument("mnc adc testflw requires --flow 1");
+
+	AcquisitionClient client(options.socket_path);
+	const auto timeout = std::max(options.timeout_ms, 12000);
+	const auto response = client.request(
+		AcquisitionCommand::adc_diagnostic_run, timeout, nullptr, 0u,
+		*options.diagnostic_flow);
+	require_daemon_ok(response);
+	const auto &diagnostic = response.adc_diagnostic;
+	const auto flags = diagnostic.diagnostic_flags;
+
+	output << "AD7771 diagnostic test flow " << diagnostic.flow << "\n"
+	       << "  Reset method:         PL-driven ADC RESET_N pulse\n"
+	       << "  FPGA/Linux reset:     no\n"
+	       << "  ADC power cycle:      no\n"
+	       << "  RESET_N hold:         " << diagnostic.reset_hold_ms << " ms\n"
+	       << "  Requested sample rate:" << std::setw(9)
+	       << diagnostic.requested_sample_rate_hz << " frame/s\n"
+	       << "  Flow error:           "
+	       << diagnostic_error_name(diagnostic.diagnostic_error) << "\n"
+	       << "  Failure stage:        "
+	       << diagnostic_stage_name(diagnostic.failure_stage) << "\n"
+	       << "  Acquisition restored: "
+	       << yes_no(response.running != 0u) << "\n";
+
+	print_diagnostic_snapshot(output, "Before reset", diagnostic.before);
+	print_diagnostic_snapshot(
+		output, "While RESET_N asserted", diagnostic.reset_asserted);
+	print_diagnostic_snapshot(
+		output, "Reset defaults (before configuration)",
+		diagnostic.reset_defaults);
+	print_diagnostic_snapshot(
+		output, "After conservative SRC reload", diagnostic.after);
+
+	output << "\nFlow checks\n"
+	       << "  RESET_N commanded:    "
+	       << yes_no((flags & MSAP1_ADC_DIAGNOSTIC_RESET_ASSERTED) != 0u)
+	       << "\n  DRDY stopped in reset:"
+	       << std::setw(9)
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_RESET_DRDY_STOPPED) != 0u)
+	       << "\n  Reset defaults read:  "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_RESET_DEFAULTS_READ) != 0u)
+	       << "\n  SRC_UPDATE read high: "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_SRC_UPDATE_HIGH_READ) != 0u)
+	       << " (";
+	print_hex_byte(output, diagnostic.src_update_high_readback);
+	output << ")\n  SRC_UPDATE read low:  "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_SRC_UPDATE_LOW_READ) != 0u)
+	       << " (";
+	print_hex_byte(output, diagnostic.src_update_low_readback);
+	output << ")\n  SRC holding match:    "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_SRC_HOLDING_MATCH) != 0u)
+	       << "\n  Final config match:   "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_FINAL_CONFIG_MATCH) != 0u)
+	       << "\n  Final DRDY match:     "
+	       << yes_no((flags &
+			  MSAP1_ADC_DIAGNOSTIC_FINAL_DRDY_MATCH) != 0u)
+	       << "\n  Restored live DRDY:   ";
+	if (response.rpu_health.drdy_frequency_hz != 0u)
+		output << response.rpu_health.drdy_frequency_hz << " frame/s\n";
+	else
+		output << "unavailable\n";
+
+	if (diagnostic.diagnostic_error !=
+	    MSAP1_ADC_DIAGNOSTIC_ERROR_NONE)
+		output << "\nConclusion: Flow did not complete; use the failure stage "
+			  "and snapshots above.\n";
+	else if ((flags & MSAP1_ADC_DIAGNOSTIC_FINAL_DRDY_MATCH) == 0u)
+		output << "\nConclusion: RESET_N and the conservative SRC load "
+			  "completed, but physical DRDY still does not match the "
+			  "requested rate.\n";
+	else
+		output << "\nConclusion: Physical DRDY matches the requested rate "
+			  "after reset and SRC reload.\n";
+	return 0;
+}
+
 } // namespace
 
 void register_adc_commands(Application &application)
@@ -155,6 +381,18 @@ void register_adc_commands(Application &application)
 		},
 	});
 	adc.add_subcommand(std::move(rate));
+	Command test_flow(
+		"testflw",
+		"Run a destructive, self-restoring ADC diagnostic flow",
+		run_test_flow);
+	test_flow.add_option({
+		"flow", "NUMBER", "Diagnostic flow (currently: 1)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.diagnostic_flow = parse_diagnostic_flow(value);
+		},
+	});
+	adc.add_subcommand(std::move(test_flow));
 	application.add_command(std::move(adc));
 }
 

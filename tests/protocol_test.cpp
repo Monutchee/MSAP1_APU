@@ -139,6 +139,44 @@ void adc_health_round_trip()
 		"wrong health status registers");
 }
 
+void adc_diagnostic_round_trip()
+{
+	msap1_adc_diagnostic_payload diagnostic{};
+	diagnostic.flow = 1;
+	diagnostic.requested_sample_rate_hz = 32000;
+	diagnostic.diagnostic_flags =
+		MSAP1_ADC_DIAGNOSTIC_RESET_ASSERTED |
+		MSAP1_ADC_DIAGNOSTIC_SRC_UPDATE_HIGH_READ |
+		MSAP1_ADC_DIAGNOSTIC_SRC_HOLDING_MATCH;
+	diagnostic.reset_hold_ms = 2200;
+	diagnostic.src_update_high_readback = 0x01;
+	diagnostic.src_update_low_readback = 0x00;
+	diagnostic.before.snapshot_flags =
+		MSAP1_ADC_DIAGNOSTIC_SNAPSHOT_SPI_VALID;
+	diagnostic.before.dclk_frequency_hz = 8192000;
+	diagnostic.before.drdy_frequency_hz = 19200;
+	diagnostic.reset_asserted.drdy_frequency_hz = 0;
+	diagnostic.reset_defaults.status_3 = 0x30;
+	diagnostic.after.src_n_lsb = 64;
+	diagnostic.after.drdy_frequency_hz = 32000;
+
+	const auto wire = msap1::encode_request(
+		MSAP1_RPU_MSG_ADC_DIAGNOSTIC, 31,
+		&diagnostic, sizeof(diagnostic));
+	const auto message = msap1::decode_message(wire.data(), wire.size());
+	const auto decoded = msap1::decode_adc_diagnostic(message);
+	require(decoded.flow == 1 &&
+			decoded.requested_sample_rate_hz == 32000,
+		"wrong ADC diagnostic identity");
+	require(decoded.before.drdy_frequency_hz == 19200 &&
+			decoded.reset_asserted.drdy_frequency_hz == 0 &&
+			decoded.after.drdy_frequency_hz == 32000,
+		"wrong ADC diagnostic snapshots");
+	require(decoded.src_update_high_readback == 0x01 &&
+			decoded.after.src_n_lsb == 64,
+		"wrong ADC diagnostic SRC trace");
+}
+
 void meter_record_contract()
 {
 	msap1::MeterRecord record{};
@@ -467,6 +505,7 @@ int main()
 		request_round_trip();
 		meter_ack_round_trip();
 		adc_health_round_trip();
+		adc_diagnostic_round_trip();
 		meter_record_contract();
 		meter_configuration();
 		disabled_mv_configuration();

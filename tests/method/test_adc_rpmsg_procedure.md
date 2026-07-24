@@ -137,7 +137,52 @@ mnc meter health
 The selection is temporary. Restarting `msap1-fpga-acquisition` must restore
 the packaged 32 kSPS default.
 
-## 6. Lifecycle and sustained run
+## 6. Warm-reset and SRC-load diagnostic
+
+When SRC holding registers imply one rate but physical DRDY reports another,
+run:
+
+```sh
+mnc adc testflw --flow 1
+```
+
+The command preserves the daemon's prior running/stopped state and prints four
+snapshots:
+
+1. Active state before reset.
+2. DCLK/DRDY while PL holds the sensor-board `ADC_RESET_N` output low for
+   2.2 seconds.
+3. SPI reset defaults immediately after `INIT_COMPLETE`, before configuration.
+4. Active registers and rates after a conservative 1 ms
+   `SRC_UPDATE=1` pulse, readback high/low, filter synchronization, and a fresh
+   PL measurement window.
+
+This is not an independent cold reset or power cycle. Linux and the FPGA remain
+running; only the existing ADC reset pin driven through the capture core is
+pulsed. Copy the complete output when reporting the result.
+
+Expected diagnostic control checks are:
+
+```text
+RESET_N commanded       yes
+DRDY stopped in reset   yes
+Reset defaults read     yes
+SRC_UPDATE read high    yes (0x01)
+SRC_UPDATE read low     yes (0x00)
+SRC holding match       yes
+Final config match      yes
+```
+
+`Final DRDY match` may remain `no`; that is the measurement under
+investigation, not a transport failure. A non-`none` flow error or failure
+stage means the diagnostic itself did not complete. After the command, confirm
+the prior acquisition state and heartbeat were restored:
+
+```sh
+mnc meter health
+```
+
+## 7. Lifecycle and sustained run
 
 Repeat ten times:
 
