@@ -68,6 +68,7 @@ struct PreparedMeterConfiguration {
 	msap1_meter_config_payload wire{};
 };
 
+bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path = default_meter_config_path,
 	std::uint32_t sample_rate_hz = 32000);

@@ -97,7 +97,16 @@ mnc meter view --results 20
 mnc meter view --duration 10
 mnc adc stop
 mnc adc start
+mnc adc rate
+mnc adc rate --sps 16000
 ```
+
+`mnc adc rate` compares the requested rate, SRC-register-derived rate, and
+physical DRDY rate. `--sps` temporarily selects one of 1, 2, 4, 8, 16, 32, 64,
+or 128 kSPS through a coordinated DMA/capture stop, AD7771 SRC/PGA update, PL
+window update, and restart. The complete profile remains unchanged and the
+selection is not persisted; restarting the acquisition daemon restores
+32 kSPS.
 
 `mnc meter health` reports both the number of AXI packets accepted by the
 capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate

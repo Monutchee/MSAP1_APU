@@ -97,7 +97,47 @@ the requested configuration with the physical DRDY measurement. The snapshot
 also includes per-channel PGA/configuration, phase offsets, digital
 offset/gain calibration, and detailed error/status registers.
 
-## 5. Lifecycle and sustained run
+## 5. Runtime sample-rate diagnostic
+
+The rate command safely stops DMA/capture, reloads the AD7771 SRC, recalculates
+the PL RMS and frequency window sample counts, and restores the prior running
+state. Run:
+
+```sh
+mnc adc rate --sps 16000
+mnc adc rate --sps 32000
+mnc adc rate --sps 64000
+```
+
+Expect:
+
+| Requested | SRC integer N | Physical DRDY |
+| ---: | ---: | ---: |
+| 16,000 | 128 | approximately 16 kframe/s |
+| 32,000 | 64 | approximately 32 kframe/s |
+| 64,000 | 32 | approximately 64 kframe/s |
+
+Each command prints requested, SRC-derived, DCLK, and measured DRDY rates.
+A configuration transaction that succeeds but produces an unexpected physical
+DRDY rate prints `MISMATCH` without turning the CLI transaction itself into an
+error. Header/FIFO/DMA errors must remain zero, configuration generation must
+change with the rate, and meter results must remain five records per second
+because the 200 ms window duration is preserved.
+
+If DRDY follows the three requested values, the active SRC accepted every
+explicit load. If SRC register-derived rates change but DRDY remains fixed,
+the active DSP decimator or physical ADC control path requires investigation.
+Restore the normal operating point:
+
+```sh
+mnc adc rate --sps 32000
+mnc meter health
+```
+
+The selection is temporary. Restarting `msap1-fpga-acquisition` must restore
+the packaged 32 kSPS default.
+
+## 6. Lifecycle and sustained run
 
 Repeat ten times:
 

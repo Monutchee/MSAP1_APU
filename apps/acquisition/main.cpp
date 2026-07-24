@@ -404,6 +404,52 @@ private:
 		}
 	}
 
+	void apply_sample_rate(std::uint32_t sample_rate_hz)
+	{
+		if (!msap1::supported_adc_sample_rate(sample_rate_hz))
+			throw std::invalid_argument("unsupported ADC sample rate");
+
+		auto staged = msap1::prepare_meter_configuration(
+			configuration_.source, sample_rate_hz);
+		const auto previous = configuration_;
+		const bool restart = running_;
+		if (restart)
+			stop();
+		configuration_ = std::move(staged);
+		latest_record_.reset();
+
+		try {
+			if (restart) {
+				// start() arms DMA before committing the coordinated ADC/PL
+				// configuration and requesting capture.
+				start();
+			} else {
+				// A stopped pipeline still applies the operating point now
+				// so `mnc adc rate` can diagnose DRDY without first
+				// starting DMA and capture.
+				configure_meter();
+				cached_health_ = query_rpu_health();
+			}
+		} catch (...) {
+			if (running_)
+				stop();
+			configuration_ = previous;
+			latest_record_.reset();
+			try {
+				if (restart) {
+					start();
+				} else {
+					configure_meter();
+					cached_health_ = query_rpu_health();
+				}
+			} catch (const std::exception &rollback_error) {
+				std::cerr << "sample-rate rollback failed: "
+					  << rollback_error.what() << '\n';
+			}
+			throw;
+		}
+	}
+
 	void accept_record(const msap1::MeterRecord &record)
 	{
 		if (!record.header_valid() ||
@@ -504,6 +550,9 @@ private:
 					frequency_configuration_set:
 					apply_frequency_configuration(request.frequency);
 					break;
+				case msap1::AcquisitionCommand::sample_rate_set:
+					apply_sample_rate(request.sample_rate_hz);
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
@@ -519,7 +568,9 @@ private:
 					 msap1::AcquisitionCommand::start ||
 					 request.command ==
 					 msap1::AcquisitionCommand::
-						 frequency_configuration_set)
+						 frequency_configuration_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::sample_rate_set)
 					response.status =
 						msap1::AcquisitionStatus::configuration_error;
 				else

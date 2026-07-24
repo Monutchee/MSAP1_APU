@@ -51,6 +51,13 @@ void option_parsing()
 		"result limit was not parsed");
 	require(invocation.options.duration_seconds == 1.5,
 		"inline duration was not parsed");
+
+	const auto rate =
+		application.parse({"adc", "rate", "--sps", "16000"});
+	require(!rate.show_help && rate.command->name() == "rate",
+		"ADC rate command was not selected");
+	require(rate.options.sample_rate_hz == 16000,
+		"ADC sample rate was not parsed");
 }
 
 void help_and_errors()
@@ -73,6 +80,13 @@ void help_and_errors()
 	require(application.execute(
 		{"meter", "view", "--duration", "nan"}, output, error) == 2,
 		"non-finite duration was accepted");
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"adc", "rate", "--sps", "19200"}, output, error) == 2,
+		"unsupported ADC sample rate was accepted");
+	require(error.str().find("must be one of") != std::string::npos,
+		"sample-rate error omitted the supported values");
 }
 
 void completion()
@@ -91,6 +105,13 @@ void completion()
 	candidates = application.complete({"meter", "view", "--socket", ""});
 	require(candidates == std::vector<std::string>{"__MNC_FILE__"},
 		"socket completion did not request path completion");
+	candidates = application.complete({"adc", ""});
+	require(contains(candidates, "rate") && contains(candidates, "start") &&
+		contains(candidates, "stop"),
+		"ADC completion omitted actions");
+	candidates = application.complete({"adc", "rate", "--"});
+	require(contains(candidates, "--sps"),
+		"ADC rate completion omitted --sps");
 }
 
 } // namespace
