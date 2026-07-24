@@ -32,9 +32,18 @@
 - The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-2
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
   physical current/voltage frontends, and the 200 ms RMS window. The packaged
-  runtime default is `msap1-sensor-board-5a.json`.
+  runtime default is `msap1-sensor-board-5a.json`. Profiles also define CH6/VLA
+  zero-crossing frequency measurement; a valid Web-generated complete profile
+  is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
+- ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`
+  falling-edge rate through the CLI and external JSON API. A missing or
+  mismatched DRDY measurement makes ADC health fail even when SPI register
+  readback matches.
+- Temporary ADC rate diagnostics must flow through the acquisition daemon so
+  DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
+  Daemon restart restores the 32 kSPS profile default.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
 - Voltage and current readings are RMS values calculated in PL and encoded in

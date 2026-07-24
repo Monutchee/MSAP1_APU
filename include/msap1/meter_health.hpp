@@ -12,12 +12,14 @@ struct MeterHealth {
 	bool spi_responsive = false;
 	bool initialized = false;
 	bool configuration_match = false;
+	bool rate_match = false;
 	bool capture_active = false;
 	bool fifo_ok = false;
 	bool headers_valid = false;
 	bool meter_configured = false;
 	bool meter_generation_match = false;
 	bool dc_offset_removal = false;
+	bool frequency_arithmetic_ok = false;
 };
 
 MeterHealth evaluate_meter_health(const AcquisitionResponse &response);

@@ -8,6 +8,7 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace msap1 {
 namespace {
@@ -43,7 +44,35 @@ std::uint32_t configuration_fingerprint(
 	return hash == 0u ? 1u : hash;
 }
 
+std::uint32_t frequency_mode(const std::string &mode)
+{
+	if (mode == "single_cycle")
+		return MSAP1_FREQUENCY_MODE_SINGLE_CYCLE;
+	if (mode == "rolling_cycles")
+		return MSAP1_FREQUENCY_MODE_ROLLING_CYCLES;
+	if (mode == "rolling_time")
+		return MSAP1_FREQUENCY_MODE_ROLLING_TIME;
+	throw std::runtime_error("unsupported frequency measurement mode");
+}
+
 } // namespace
+
+bool supported_adc_sample_rate(std::uint32_t sample_rate_hz)
+{
+	switch (sample_rate_hz) {
+	case 1000u:
+	case 2000u:
+	case 4000u:
+	case 8000u:
+	case 16000u:
+	case 32000u:
+	case 64000u:
+	case 128000u:
+		return true;
+	default:
+		return false;
+	}
+}
 
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path, std::uint32_t sample_rate_hz)
@@ -55,13 +84,21 @@ PreparedMeterConfiguration load_meter_configuration(
 	const std::string json((std::istreambuf_iterator<char>(stream)),
 			       std::istreambuf_iterator<char>());
 
-	PreparedMeterConfiguration result;
-	if (const auto error = glz::read_json(result.source, json))
+	MeterConversionFile source;
+	if (const auto error = glz::read_json(source, json))
 		throw std::runtime_error("invalid meter configuration " +
 			path.string() + ": " + glz::format_error(error, json));
+	return prepare_meter_configuration(std::move(source), sample_rate_hz);
+}
+
+PreparedMeterConfiguration prepare_meter_configuration(
+	MeterConversionFile source, std::uint32_t sample_rate_hz)
+{
+	PreparedMeterConfiguration result;
+	result.source = std::move(source);
 	if (result.source.schema_version != 2u)
 		throw std::runtime_error("unsupported meter configuration schema");
-	if (sample_rate_hz < 1000u || sample_rate_hz > 128000u ||
+	if (!supported_adc_sample_rate(sample_rate_hz) ||
 	    result.source.profile_id.empty() ||
 	    result.source.rms_window_ms == 0u ||
 	    result.source.rms_window_ms > 10000u ||
@@ -170,8 +207,62 @@ PreparedMeterConfiguration load_meter_configuration(
 	if (result.wire.valid_mask == 0u)
 		throw std::runtime_error("meter configuration enables no channels");
 
+	const auto &frequency = result.source.frequency;
+	if (frequency.reference_channel != 6u ||
+	    frequency.averaging_cycles == 0u ||
+	    frequency.averaging_cycles > 64u ||
+	    frequency.averaging_window_ms < 100u ||
+	    frequency.averaging_window_ms > 1000u ||
+	    !std::isfinite(frequency.minimum_hz) ||
+	    !std::isfinite(frequency.maximum_hz) ||
+	    frequency.minimum_hz < 10.0 ||
+	    frequency.maximum_hz > 200.0 ||
+	    frequency.minimum_hz >= frequency.maximum_hz ||
+	    !std::isfinite(frequency.hysteresis_volts) ||
+	    frequency.hysteresis_volts <= 0.0 ||
+	    frequency.hysteresis_volts > 100.0)
+		throw std::runtime_error("frequency configuration is invalid");
+
+	result.wire.frequency_flags =
+		frequency.enabled
+			? static_cast<std::uint32_t>(
+				MSAP1_FREQUENCY_CONFIG_ENABLE)
+			: 0u;
+	result.wire.frequency_mode = frequency_mode(frequency.mode);
+	result.wire.frequency_reference_channel = frequency.reference_channel;
+	result.wire.frequency_averaging_cycles = frequency.averaging_cycles;
+	result.wire.frequency_window_samples = static_cast<std::uint32_t>(
+		std::llround(static_cast<double>(sample_rate_hz) *
+			     frequency.averaging_window_ms / 1000.0));
+	result.wire.frequency_minimum_millihz = static_cast<std::uint32_t>(
+		std::llround(frequency.minimum_hz * 1000.0));
+	result.wire.frequency_maximum_millihz = static_cast<std::uint32_t>(
+		std::llround(frequency.maximum_hz * 1000.0));
+	result.wire.frequency_hysteresis_microvolts =
+		static_cast<std::uint32_t>(
+			std::llround(frequency.hysteresis_volts * 1000000.0));
+
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;
+}
+
+void save_meter_configuration(const MeterConversionFile &configuration,
+			      const std::filesystem::path &path)
+{
+	const auto json = glz::write_json(configuration);
+	if (!json)
+		throw std::runtime_error("cannot serialize meter configuration");
+	const auto parent = path.parent_path();
+	if (!parent.empty())
+		std::filesystem::create_directories(parent);
+	const auto temporary = path.string() + ".tmp";
+	{
+		std::ofstream output(temporary, std::ios::trunc);
+		if (!output || !(output << *json << '\n'))
+			throw std::runtime_error("cannot write meter configuration " +
+				temporary);
+	}
+	std::filesystem::rename(temporary, path);
 }
 
 } // namespace msap1
