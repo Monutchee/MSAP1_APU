@@ -73,6 +73,7 @@ void adc_health_round_trip()
 	health.frame_count = 123456;
 	health.packet_count = 482;
 	health.dclk_frequency_hz = 8192000;
+	health.drdy_frequency_hz = 32000;
 	health.expected_decimation = 64;
 
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
@@ -84,6 +85,8 @@ void adc_health_round_trip()
 	require(decoded.packet_count == 482, "wrong health packet count");
 	require(decoded.dclk_frequency_hz == 8192000,
 		"wrong health DCLK frequency");
+	require(decoded.drdy_frequency_hz == 32000,
+		"wrong health DRDY frequency");
 	require(decoded.meter_generation == 0x11223344,
 		"wrong health meter generation");
 }

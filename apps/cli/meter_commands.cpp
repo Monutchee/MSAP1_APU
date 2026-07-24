@@ -96,6 +96,11 @@ int run_meter_health(const Options &options, std::ostream &output)
 		output << health.dclk_frequency_hz << " Hz\n";
 	else
 		output << "unavailable\n";
+	output << "  ADC DRDY:             ";
+	if (health.drdy_frequency_hz != 0u)
+		output << health.drdy_frequency_hz << " frame/s\n";
+	else
+		output << "unavailable\n";
 	output << "  FIFO overflows:       " << health.overflow_count << '\n'
 	       << "  Header errors:        " << health.header_error_count << '\n'
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status

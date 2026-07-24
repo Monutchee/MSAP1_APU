@@ -168,6 +168,7 @@ struct msap1_adc_health_payload {
 	uint32_t alert_count;
 	uint32_t packet_count;
 	uint32_t dclk_frequency_hz;
+	uint32_t drdy_frequency_hz;
 	uint32_t spi_error;
 	uint16_t expected_decimation;
 	uint8_t status_3;

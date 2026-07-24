@@ -85,10 +85,11 @@ RPU heartbeat. Confirm `GET /api/v1/meter/health` agrees with
 `mnc meter health` while the system remains healthy.
 
 The health output must also show an advancing ADC packet count and a nonzero
-ADC DCLK measurement after approximately two seconds. Compare the reported
-DCLK with the clock selected by the AD7771 output configuration. Stopping the
-ADC clock must make the field unavailable after the next observation window;
-restoring the clock must recover without restarting Linux.
+ADC DCLK and DRDY measurements after approximately two seconds. Compare the
+reported DCLK with the clock selected by the AD7771 output configuration and
+compare DRDY with the configured ADC frame rate. Stopping the
+ADC clock must make both fields unavailable after the next observation window;
+restoring it must recover without restarting Linux.
 
 ## 5. Lifecycle and sustained run
 

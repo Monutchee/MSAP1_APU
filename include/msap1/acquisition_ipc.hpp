@@ -13,7 +13,7 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 3;
+inline constexpr std::uint16_t acquisition_ipc_version = 4;
 
 enum class AcquisitionCommand : std::uint16_t {
 	info = 1,
