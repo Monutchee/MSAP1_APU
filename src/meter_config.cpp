@@ -199,7 +199,7 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	    !std::isfinite(frequency.minimum_hz) ||
 	    !std::isfinite(frequency.maximum_hz) ||
 	    frequency.minimum_hz < 10.0 ||
-	    frequency.maximum_hz > 100.0 ||
+	    frequency.maximum_hz > 200.0 ||
 	    frequency.minimum_hz >= frequency.maximum_hz ||
 	    !std::isfinite(frequency.hysteresis_volts) ||
 	    frequency.hysteresis_volts <= 0.0 ||

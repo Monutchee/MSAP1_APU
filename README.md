@@ -42,7 +42,8 @@ The Yocto package installs complete schema-version-2 ADC profiles at:
 
 Each profile also contains the CH6/VLA positive zero-crossing frequency
 configuration. Older schema-version-2 profiles without that object receive
-the rolling-10-cycle, 40–70 Hz, 1 V hysteresis defaults.
+the rolling-10-cycle, 40–70 Hz, 1 V hysteresis defaults. Runtime frequency
+limits must remain ordered within the supported 10–200 Hz range.
 
 The systemd service selects `acuvim3-sb-5a.json` by default. Pass exactly one
 complete profile with `msap1-fpga-acquisition --config <path>`; files are not

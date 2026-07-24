@@ -221,6 +221,20 @@ void meter_configuration()
 				invalid_frequency, 32000);
 		},
 		"reversed frequency limits were accepted");
+	auto extended_frequency = configuration.source;
+	extended_frequency.frequency.maximum_hz = 200.0;
+	const auto extended_configuration =
+		msap1::prepare_meter_configuration(extended_frequency, 32000);
+	require(
+		extended_configuration.wire.frequency_maximum_millihz == 200000,
+		"200 Hz frequency ceiling was not accepted");
+	extended_frequency.frequency.maximum_hz = 200.001;
+	require_throws(
+		[&] {
+			(void)msap1::prepare_meter_configuration(
+				extended_frequency, 32000);
+		},
+		"frequency limit above 200 Hz was accepted");
 }
 
 void disabled_mv_configuration()
