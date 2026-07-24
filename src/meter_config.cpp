@@ -57,6 +57,23 @@ std::uint32_t frequency_mode(const std::string &mode)
 
 } // namespace
 
+bool supported_adc_sample_rate(std::uint32_t sample_rate_hz)
+{
+	switch (sample_rate_hz) {
+	case 1000u:
+	case 2000u:
+	case 4000u:
+	case 8000u:
+	case 16000u:
+	case 32000u:
+	case 64000u:
+	case 128000u:
+		return true;
+	default:
+		return false;
+	}
+}
+
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path, std::uint32_t sample_rate_hz)
 {
@@ -81,7 +98,7 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	result.source = std::move(source);
 	if (result.source.schema_version != 2u)
 		throw std::runtime_error("unsupported meter configuration schema");
-	if (sample_rate_hz < 1000u || sample_rate_hz > 128000u ||
+	if (!supported_adc_sample_rate(sample_rate_hz) ||
 	    result.source.profile_id.empty() ||
 	    result.source.rms_window_ms == 0u ||
 	    result.source.rms_window_ms > 10000u ||

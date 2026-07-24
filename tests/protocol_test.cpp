@@ -243,6 +243,24 @@ void meter_configuration()
 		"schema-v2 frequency defaults are incorrect");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
+	const auto half_rate = msap1::prepare_meter_configuration(
+		configuration.source, 16000);
+	require(half_rate.wire.sample_rate_hz == 16000 &&
+		half_rate.wire.rms_window_samples == 3200 &&
+		half_rate.wire.frequency_window_samples == 16000,
+		"runtime sample rate did not update meter windows");
+	require(half_rate.wire.generation != configuration.wire.generation,
+		"runtime sample rate did not change configuration generation");
+	require(msap1::supported_adc_sample_rate(1000) &&
+		msap1::supported_adc_sample_rate(128000) &&
+		!msap1::supported_adc_sample_rate(19200),
+		"supported ADC sample-rate set is incorrect");
+	require_throws(
+		[&] {
+			(void)msap1::prepare_meter_configuration(
+				configuration.source, 19200);
+		},
+		"unsupported fractional ADC profile was accepted");
 
 	const auto active_path = std::filesystem::temp_directory_path() /
 		("msap1-meter-active-" + std::to_string(::getpid()) + ".json");

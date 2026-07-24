@@ -39,6 +39,9 @@
   configuration, control, health, and acknowledgements.
 - ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`
   falling-edge rate through the CLI and external JSON API.
+- Temporary ADC rate diagnostics must flow through the acquisition daemon so
+  DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
+  Daemon restart restores the 32 kSPS profile default.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
 - Voltage and current readings are RMS values calculated in PL and encoded in
