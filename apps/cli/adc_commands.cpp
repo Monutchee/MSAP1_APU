@@ -88,6 +88,14 @@ double src_derived_rate(const msap1_adc_health_payload &health)
 		health.src_if_msb, health.src_if_lsb);
 }
 
+bool rate_measurements_agree(std::uint32_t first, std::uint32_t second)
+{
+	if (first == 0u || second == 0u)
+		return false;
+	const auto difference = first > second ? first - second : second - first;
+	return difference <= std::max(2u, second / 1000u);
+}
+
 int run_rate(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -96,12 +104,23 @@ int run_rate(const Options &options, std::ostream &output)
 		response = client.request(AcquisitionCommand::sample_rate_set,
 			options.timeout_ms, nullptr, *options.sample_rate_hz);
 		require_daemon_ok(response);
-		// The PL diagnostic meter publishes one-second snapshots. Waiting
-		// beyond one complete window prevents this command from reporting
-		// the measurement that preceded the rate transition.
-		std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-		response = client.request(AcquisitionCommand::health,
-			options.timeout_ms);
+		/*
+		 * The PL publishes DRDY over independent one-second windows. Poll
+		 * across window boundaries until two consecutive measurements agree;
+		 * a single fixed delay can still return the pre-transition window.
+		 */
+		std::uint32_t previous_measurement = 0u;
+		for (unsigned int attempt = 0; attempt < 5; ++attempt) {
+			std::this_thread::sleep_for(
+				std::chrono::milliseconds(1100));
+			response = client.request(AcquisitionCommand::health,
+				options.timeout_ms);
+			require_daemon_ok(response);
+			const auto current = response.rpu_health.drdy_frequency_hz;
+			if (rate_measurements_agree(previous_measurement, current))
+				break;
+			previous_measurement = current;
+		}
 	} else {
 		response = client.request(AcquisitionCommand::health,
 			options.timeout_ms);
@@ -278,7 +297,7 @@ int run_test_flow(const Options &options, std::ostream &output)
 		throw std::invalid_argument("mnc adc testflw requires --flow 1");
 
 	AcquisitionClient client(options.socket_path);
-	const auto timeout = std::max(options.timeout_ms, 12000);
+	const auto timeout = std::max(options.timeout_ms, 20000);
 	const auto response = client.request(
 		AcquisitionCommand::adc_diagnostic_run, timeout, nullptr, 0u,
 		*options.diagnostic_flow);

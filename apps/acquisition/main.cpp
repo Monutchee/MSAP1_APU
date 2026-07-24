@@ -464,7 +464,7 @@ private:
 			const msap1_adc_diagnostic_request request{flow};
 			last_adc_diagnostic_ = msap1::decode_adc_diagnostic(
 				transact(MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN,
-					 &request, sizeof(request), 8000ms));
+					 &request, sizeof(request), 15000ms));
 
 			if (restart) {
 				/*

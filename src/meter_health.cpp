@@ -25,6 +25,7 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 		health_flag(adc, MSAP1_ADC_HEALTH_INIT_COMPLETE);
 	result.configuration_match =
 		health_flag(adc, MSAP1_ADC_HEALTH_CONFIG_MATCH);
+	result.rate_match = health_flag(adc, MSAP1_ADC_HEALTH_RATE_MATCH);
 	result.capture_active =
 		health_flag(adc, MSAP1_ADC_HEALTH_CAPTURE_ACTIVE);
 	result.fifo_ok = health_flag(adc, MSAP1_ADC_HEALTH_NO_OVERFLOW);
@@ -49,8 +50,9 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 		response.invalid_records == 0u && response.sequence_gaps == 0u &&
 		result.frequency_arithmetic_ok;
 	result.adc_healthy = result.spi_responsive && result.initialized &&
-		result.configuration_match && result.capture_active && result.fifo_ok &&
-		result.headers_valid && result.meter_configured &&
+		result.configuration_match && result.rate_match &&
+		result.capture_active && result.fifo_ok && result.headers_valid &&
+		result.meter_configured &&
 		result.meter_generation_match;
 	result.healthy = result.acquisition_healthy && result.adc_healthy;
 	return result;

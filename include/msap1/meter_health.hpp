@@ -12,6 +12,7 @@ struct MeterHealth {
 	bool spi_responsive = false;
 	bool initialized = false;
 	bool configuration_match = false;
+	bool rate_match = false;
 	bool capture_active = false;
 	bool fifo_ok = false;
 	bool headers_valid = false;

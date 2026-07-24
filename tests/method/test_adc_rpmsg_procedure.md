@@ -117,7 +117,8 @@ Expect:
 | 32,000 | 64 | approximately 32 kframe/s |
 | 64,000 | 32 | approximately 64 kframe/s |
 
-Each command prints requested, SRC-derived, DCLK, and measured DRDY rates.
+Each command waits for two consecutive one-second DRDY measurements to agree,
+then prints requested, SRC-derived, DCLK, and measured DRDY rates.
 A configuration transaction that succeeds but produces an unexpected physical
 DRDY rate prints `MISMATCH` without turning the CLI transaction itself into an
 error. Header/FIFO/DMA errors must remain zero, configuration generation must
@@ -173,10 +174,11 @@ SRC holding match       yes
 Final config match      yes
 ```
 
-`Final DRDY match` may remain `no`; that is the measurement under
-investigation, not a transport failure. A non-`none` flow error or failure
-stage means the diagnostic itself did not complete. After the command, confirm
-the prior acquisition state and heartbeat were restored:
+`Final DRDY match` should be `yes` after the hardware START synchronization
+fix. A `no` result means reset/register loading completed but the ADC output
+rate remains incorrect. A non-`none` flow error or failure stage means the
+diagnostic itself did not complete. After the command, confirm the prior
+acquisition state and heartbeat were restored:
 
 ```sh
 mnc meter health

@@ -263,6 +263,7 @@ int run_meter_health(const Options &options, std::ostream &output)
 	       << "  Meter configured:     " << yes_no(status.meter_configured) << '\n'
 	       << "  DC offset removal:    " << yes_no(status.dc_offset_removal) << '\n'
 	       << "  ADC SPI responsive:   " << yes_no(status.spi_responsive) << '\n'
+	       << "  ADC rate match:       " << yes_no(status.rate_match) << '\n'
 	       << "  Capture active:       " << yes_no(status.capture_active) << '\n'
 	       << "  Sample rate:          " << health.sample_rate_hz << " frame/s\n"
 	       << "  PL frames:            " << health.frame_count << '\n'

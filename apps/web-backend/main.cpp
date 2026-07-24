@@ -54,6 +54,7 @@ struct AdcHealthDto {
 	bool spi_responsive;
 	bool initialized;
 	bool configuration_match;
+	bool rate_match;
 	bool capture_active;
 	bool fifo_ok;
 	bool headers_valid;
@@ -176,8 +177,9 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 response.invalid_records, response.sequence_gaps,
 		 response.configuration_generation},
 		{status.adc_healthy, status.spi_responsive, status.initialized,
-		 status.configuration_match, status.capture_active, status.fifo_ok,
-		 status.headers_valid, status.meter_configured,
+		 status.configuration_match, status.rate_match,
+		 status.capture_active, status.fifo_ok, status.headers_valid,
+		 status.meter_configured,
 		 status.meter_generation_match, status.dc_offset_removal,
 		 adc.sample_rate_hz, adc.frame_count, adc.packet_count,
 		 adc.dclk_frequency_hz,

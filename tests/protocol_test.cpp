@@ -469,7 +469,7 @@ void meter_health_evaluation()
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
 		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH |
 		MSAP1_ADC_HEALTH_CAPTURE_ACTIVE | MSAP1_ADC_HEALTH_NO_OVERFLOW |
-		MSAP1_ADC_HEALTH_HEADERS_VALID;
+		MSAP1_ADC_HEALTH_HEADERS_VALID | MSAP1_ADC_HEALTH_RATE_MATCH;
 	response.rpu_health.meter_health_flags =
 		MSAP1_METER_HEALTH_CORES_PRESENT | MSAP1_METER_HEALTH_CONFIGURED |
 		MSAP1_METER_HEALTH_GENERATION_MATCH | MSAP1_METER_HEALTH_ENABLED |
@@ -482,6 +482,8 @@ void meter_health_evaluation()
 		"healthy frequency arithmetic was rejected");
 	require(healthy.dc_offset_removal,
 		"DC-offset removal health flag was not exposed");
+	require(healthy.rate_match,
+		"ADC rate-match health flag was not exposed");
 
 	response.sequence_gaps = 1;
 	const auto degraded = msap1::evaluate_meter_health(response);
@@ -490,6 +492,13 @@ void meter_health_evaluation()
 		"acquisition errors did not degrade meter health");
 
 	response.sequence_gaps = 0;
+	response.rpu_health.health_flags &= ~MSAP1_ADC_HEALTH_RATE_MATCH;
+	const auto rate_mismatch = msap1::evaluate_meter_health(response);
+	require(!rate_mismatch.healthy && !rate_mismatch.adc_healthy &&
+		rate_mismatch.acquisition_healthy,
+		"ADC rate mismatch did not degrade meter health");
+
+	response.rpu_health.health_flags |= MSAP1_ADC_HEALTH_RATE_MATCH;
 	response.latest_record.words[57] = 1u << 7;
 	const auto arithmetic_fault = msap1::evaluate_meter_health(response);
 	require(!arithmetic_fault.healthy &&

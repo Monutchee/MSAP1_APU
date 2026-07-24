@@ -38,7 +38,9 @@
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
 - ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`
-  falling-edge rate through the CLI and external JSON API.
+  falling-edge rate through the CLI and external JSON API. A missing or
+  mismatched DRDY measurement makes ADC health fail even when SPI register
+  readback matches.
 - Temporary ADC rate diagnostics must flow through the acquisition daemon so
   DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
   Daemon restart restores the 32 kSPS profile default.
