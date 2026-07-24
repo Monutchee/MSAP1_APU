@@ -23,6 +23,21 @@ struct MeterChannelReading {
 	std::int64_t rms_micro_units = 0;
 };
 
+struct MeterFrequencyReading {
+	bool enabled = false;
+	bool valid = false;
+	bool reference_valid = false;
+	bool out_of_range = false;
+	bool timed_out = false;
+	bool arithmetic_error = false;
+	std::uint32_t millihz = 0;
+	std::uint32_t period_q16_samples = 0;
+	std::uint32_t measurement_sequence = 0;
+	std::uint8_t mode = 0;
+	std::uint8_t reference_channel = 0;
+	std::uint8_t cycles_used = 0;
+};
+
 struct MeterRecord {
 	std::array<std::uint32_t, meter_record_word_count> words{};
 
@@ -76,6 +91,25 @@ struct MeterRecord {
 			signed64(base),
 			word(base + 2u),
 			signed64(base + 3u),
+		};
+	}
+
+	MeterFrequencyReading frequency() const
+	{
+		const auto frequency_status = word(57);
+		return {
+			(frequency_status & (1u << 0)) != 0u,
+			(frequency_status & (1u << 1)) != 0u,
+			(frequency_status & (1u << 2)) != 0u,
+			(frequency_status & (1u << 5)) != 0u,
+			(frequency_status & (1u << 6)) != 0u,
+			(frequency_status & (1u << 7)) != 0u,
+			word(56),
+			word(58),
+			word(59),
+			static_cast<std::uint8_t>((frequency_status >> 8) & 0x7u),
+			static_cast<std::uint8_t>((frequency_status >> 12) & 0xfu),
+			static_cast<std::uint8_t>((frequency_status >> 16) & 0xffu),
 		};
 	}
 };

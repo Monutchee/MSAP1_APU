@@ -32,6 +32,8 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_ADC_HEALTH_GET = 11,
 	MSAP1_RPU_MSG_ADC_HEALTH = 12,
 	MSAP1_RPU_MSG_METER_CONFIG_SET = 13,
+	MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN = 14,
+	MSAP1_RPU_MSG_ADC_DIAGNOSTIC = 15,
 };
 
 enum msap1_rpu_status_code {
@@ -63,6 +65,7 @@ enum msap1_adc_health_flag {
 	MSAP1_ADC_HEALTH_CAPTURE_ACTIVE = 1u << 4,
 	MSAP1_ADC_HEALTH_NO_OVERFLOW = 1u << 5,
 	MSAP1_ADC_HEALTH_HEADERS_VALID = 1u << 6,
+	MSAP1_ADC_HEALTH_RATE_MATCH = 1u << 7,
 };
 
 enum msap1_adc_spi_health_error {
@@ -73,9 +76,55 @@ enum msap1_adc_spi_health_error {
 	MSAP1_ADC_SPI_HEALTH_INTERNAL_ERROR = 4,
 };
 
+enum msap1_adc_diagnostic_flag {
+	MSAP1_ADC_DIAGNOSTIC_RESET_ASSERTED = 1u << 0,
+	MSAP1_ADC_DIAGNOSTIC_RESET_DRDY_STOPPED = 1u << 1,
+	MSAP1_ADC_DIAGNOSTIC_RESET_DEFAULTS_READ = 1u << 2,
+	MSAP1_ADC_DIAGNOSTIC_SRC_UPDATE_HIGH_READ = 1u << 3,
+	MSAP1_ADC_DIAGNOSTIC_SRC_UPDATE_LOW_READ = 1u << 4,
+	MSAP1_ADC_DIAGNOSTIC_SRC_HOLDING_MATCH = 1u << 5,
+	MSAP1_ADC_DIAGNOSTIC_FINAL_CONFIG_MATCH = 1u << 6,
+	MSAP1_ADC_DIAGNOSTIC_FINAL_DRDY_MATCH = 1u << 7,
+};
+
+enum msap1_adc_diagnostic_snapshot_flag {
+	MSAP1_ADC_DIAGNOSTIC_SNAPSHOT_SPI_VALID = 1u << 0,
+};
+
+enum msap1_adc_diagnostic_stage {
+	MSAP1_ADC_DIAGNOSTIC_STAGE_NONE = 0,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_PREFLIGHT = 1,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_BEFORE = 2,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_ASSERT = 3,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_RELEASE = 4,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_RESET_DEFAULTS = 5,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_RECONFIGURE = 6,
+	MSAP1_ADC_DIAGNOSTIC_STAGE_AFTER = 7,
+};
+
+enum msap1_adc_diagnostic_error {
+	MSAP1_ADC_DIAGNOSTIC_ERROR_NONE = 0,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_NOT_INITIALIZED = 1,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_CAPTURE_ACTIVE = 2,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_SPI = 3,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_ADC_NOT_READY = 4,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_REGISTER_MISMATCH = 5,
+	MSAP1_ADC_DIAGNOSTIC_ERROR_INTERNAL = 6,
+};
+
 enum msap1_meter_config_flag {
 	MSAP1_METER_CONFIG_ENABLE = 1u << 0,
 	MSAP1_METER_CONFIG_REMOVE_DC = 1u << 1,
+};
+
+enum msap1_frequency_config_flag {
+	MSAP1_FREQUENCY_CONFIG_ENABLE = 1u << 0,
+};
+
+enum msap1_frequency_mode {
+	MSAP1_FREQUENCY_MODE_SINGLE_CYCLE = 0,
+	MSAP1_FREQUENCY_MODE_ROLLING_CYCLES = 1,
+	MSAP1_FREQUENCY_MODE_ROLLING_TIME = 2,
 };
 
 enum msap1_meter_health_flag {
@@ -124,6 +173,15 @@ struct msap1_meter_config_payload {
 	uint32_t scale_micro_units_q16[8];
 	uint32_t flags;
 	uint8_t adc_pga_gain[8];
+	/* Frequency fields use millihertz, samples, and integer microvolts. */
+	uint32_t frequency_flags;
+	uint32_t frequency_mode;
+	uint32_t frequency_reference_channel;
+	uint32_t frequency_averaging_cycles;
+	uint32_t frequency_window_samples;
+	uint32_t frequency_minimum_millihz;
+	uint32_t frequency_maximum_millihz;
+	uint32_t frequency_hysteresis_microvolts;
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {
@@ -148,6 +206,8 @@ struct msap1_adc_health_payload {
 	uint32_t header_error_count;
 	uint32_t alert_count;
 	uint32_t packet_count;
+	uint32_t dclk_frequency_hz;
+	uint32_t drdy_frequency_hz;
 	uint32_t spi_error;
 	uint16_t expected_decimation;
 	uint8_t status_3;
@@ -164,6 +224,83 @@ struct msap1_adc_health_payload {
 	uint32_t meter_generation;
 	uint32_t conversion_status;
 	uint32_t processing_status;
+	uint8_t channel_config[8];       /* 0x00 through 0x07 */
+	uint8_t channel_error[8];        /* 0x4C through 0x53 */
+	uint8_t saturation_error[4];     /* 0x54 through 0x57 */
+	uint8_t channel_error_enable;    /* 0x58 */
+	uint8_t general_error_1;         /* 0x59 */
+	uint8_t general_error_1_enable;  /* 0x5A */
+	uint8_t general_error_2;         /* 0x5B */
+	uint8_t general_error_2_enable;  /* 0x5C */
+	uint8_t status_1;                /* 0x5D */
+	uint8_t status_2;                /* 0x5E */
+	uint8_t channel_disable;         /* 0x08 */
+	uint8_t channel_sync_offset[8];  /* 0x09 through 0x10 */
+	uint8_t adc_mux_config;          /* 0x15 */
+	uint8_t global_mux_config;       /* 0x16 */
+	uint8_t gpio_config;             /* 0x17 */
+	uint8_t gpio_data;               /* 0x18 */
+	uint8_t buffer_config_1;         /* 0x19 */
+	uint8_t buffer_config_2;         /* 0x1A */
+	uint8_t channel_offset[8][3];    /* 0x1C through 0x48, stride 6 */
+	uint8_t channel_gain[8][3];      /* 0x1F through 0x4B, stride 6 */
+} __attribute__((packed));
+
+struct msap1_adc_diagnostic_request {
+	uint32_t flow;
+} __attribute__((packed));
+
+/*
+ * A compact capture/register snapshot used by the destructive ADC diagnostic.
+ * Register bytes are valid only when SNAPSHOT_SPI_VALID is set. The reset
+ * snapshot deliberately has no SPI data because RESET_N is asserted.
+ */
+struct msap1_adc_diagnostic_snapshot {
+	uint32_t snapshot_flags;
+	uint32_t capture_flags;
+	uint32_t frame_count;
+	uint32_t packet_count;
+	uint32_t dclk_frequency_hz;
+	uint32_t drdy_frequency_hz;
+	uint8_t status_1;
+	uint8_t status_2;
+	uint8_t status_3;
+	uint8_t general_user_config_1;
+	uint8_t general_user_config_2;
+	uint8_t general_user_config_3;
+	uint8_t dout_format;
+	uint8_t channel_disable;
+	uint8_t buffer_config_1;
+	uint8_t buffer_config_2;
+	uint8_t src_n_msb;
+	uint8_t src_n_lsb;
+	uint8_t src_if_msb;
+	uint8_t src_if_lsb;
+	uint8_t src_update;
+	uint8_t reserved;
+} __attribute__((packed));
+
+/*
+ * Flow 1 is a warm hardware-pin diagnostic, not a board power cycle:
+ *   before -> assert ADC RESET_N -> reset defaults -> conservative SRC load
+ *   -> after.
+ * The PL/FPGA and Linux remain running while only the sensor-board ADC reset
+ * output is pulsed.
+ */
+struct msap1_adc_diagnostic_payload {
+	uint32_t flow;
+	uint32_t requested_sample_rate_hz;
+	uint32_t diagnostic_flags;
+	uint32_t diagnostic_error;
+	uint32_t failure_stage;
+	uint32_t reset_hold_ms;
+	uint8_t src_update_high_readback;
+	uint8_t src_update_low_readback;
+	uint8_t reserved[2];
+	struct msap1_adc_diagnostic_snapshot before;
+	struct msap1_adc_diagnostic_snapshot reset_asserted;
+	struct msap1_adc_diagnostic_snapshot reset_defaults;
+	struct msap1_adc_diagnostic_snapshot after;
 } __attribute__((packed));
 
 #ifdef __cplusplus

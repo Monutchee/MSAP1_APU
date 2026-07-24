@@ -26,7 +26,10 @@ AcquisitionClient::AcquisitionClient(std::string socket_path)
 }
 
 AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
-						int timeout_ms) const
+						int timeout_ms,
+						const FrequencyIpcConfiguration *frequency,
+						std::uint32_t sample_rate_hz,
+						std::uint32_t diagnostic_flow) const
 {
 	const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	if (fd < 0)
@@ -50,6 +53,10 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 
 	AcquisitionRequest request{};
 	request.command = command;
+	request.sample_rate_hz = sample_rate_hz;
+	request.diagnostic_flow = diagnostic_flow;
+	if (frequency != nullptr)
+		request.frequency = *frequency;
 	request.sequence = static_cast<std::uint64_t>(
 		std::chrono::steady_clock::now().time_since_epoch().count());
 	if (::send(fd, &request, sizeof(request), MSG_NOSIGNAL) !=

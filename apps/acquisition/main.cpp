@@ -7,6 +7,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -44,6 +46,8 @@ struct Options {
 	std::string rpmsg_device;
 	std::string meter_device = "/dev/msap1-meter";
 	std::string configuration = msap1::default_meter_config_path;
+	std::string active_configuration =
+		"/etc/monutchee/msap1/adc_config/active.json";
 	std::string socket_path = msap1::acquisition_socket_path;
 };
 
@@ -55,6 +59,7 @@ void usage(const char *program)
 		<< "  --rpmsg-device PATH  Use an existing /dev/rpmsgN endpoint\n"
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
 		<< "  --config PATH        Meter conversion JSON\n"
+		<< "  --active-config PATH Persisted complete runtime profile\n"
 		<< "  --socket PATH        Control socket path\n";
 }
 
@@ -78,12 +83,64 @@ Options parse_options(int argc, char **argv)
 			options.meter_device = value;
 		else if (option == "--config")
 			options.configuration = value;
+		else if (option == "--active-config")
+			options.active_configuration = value;
 		else if (option == "--socket")
 			options.socket_path = value;
 		else
 			throw std::invalid_argument("unknown option '" + option + "'");
 	}
 	return options;
+}
+
+msap1::PreparedMeterConfiguration load_runtime_configuration(
+	const Options &options)
+{
+	if (!options.active_configuration.empty() &&
+	    std::filesystem::exists(options.active_configuration)) {
+		try {
+			return msap1::load_meter_configuration(
+				options.active_configuration);
+		} catch (const std::exception &error) {
+			std::cerr << "ignoring invalid active meter profile "
+				  << options.active_configuration << ": "
+				  << error.what() << '\n';
+		}
+	}
+	return msap1::load_meter_configuration(options.configuration);
+}
+
+std::string frequency_mode_name(std::uint32_t mode)
+{
+	switch (mode) {
+	case MSAP1_FREQUENCY_MODE_SINGLE_CYCLE: return "single_cycle";
+	case MSAP1_FREQUENCY_MODE_ROLLING_CYCLES: return "rolling_cycles";
+	case MSAP1_FREQUENCY_MODE_ROLLING_TIME: return "rolling_time";
+	default: throw std::runtime_error("invalid frequency IPC mode");
+	}
+}
+
+msap1::FrequencyIpcConfiguration frequency_ipc(
+	const msap1::FrequencyConfig &frequency)
+{
+	std::uint32_t mode = MSAP1_FREQUENCY_MODE_ROLLING_CYCLES;
+	if (frequency.mode == "single_cycle")
+		mode = MSAP1_FREQUENCY_MODE_SINGLE_CYCLE;
+	else if (frequency.mode == "rolling_time")
+		mode = MSAP1_FREQUENCY_MODE_ROLLING_TIME;
+	return {
+		frequency.enabled ? 1u : 0u,
+		frequency.reference_channel,
+		mode,
+		frequency.averaging_cycles,
+		frequency.averaging_window_ms,
+		static_cast<std::uint32_t>(
+			std::llround(frequency.minimum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.maximum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.hysteresis_volts * 1000000.0)),
+	};
 }
 
 class MeterDevice {
@@ -119,8 +176,7 @@ class AcquisitionDaemon {
 public:
 	explicit AcquisitionDaemon(const Options &options)
 		: options_(options),
-		  configuration_(msap1::load_meter_configuration(
-			  options.configuration)),
+		  configuration_(load_runtime_configuration(options)),
 		  meter_(options.meter_device),
 		  endpoint_(options.service, options.rpmsg_device)
 	{
@@ -253,7 +309,7 @@ private:
 				"RPU meter configuration readback does not match");
 	}
 
-	void start()
+	void start(bool apply_configuration = true)
 	{
 		if (running_)
 			return;
@@ -268,7 +324,8 @@ private:
 			    !stop_response.payload.empty())
 				throw std::runtime_error(
 					"unexpected RPU capture-stop response");
-			configure_meter();
+			if (apply_configuration)
+				configure_meter();
 			const auto response =
 				transact(MSAP1_RPU_MSG_ADC_CAPTURE_START);
 			if (response.header.type != MSAP1_RPU_MSG_ACK ||
@@ -295,6 +352,146 @@ private:
 		}
 		meter_.stop();
 		running_ = false;
+	}
+
+	void apply_frequency_configuration(
+		const msap1::FrequencyIpcConfiguration &request)
+	{
+		auto source = configuration_.source;
+		source.frequency.enabled = request.enabled != 0u;
+		source.frequency.reference_channel = request.reference_channel;
+		source.frequency.mode = frequency_mode_name(request.mode);
+		source.frequency.averaging_cycles = request.averaging_cycles;
+		source.frequency.averaging_window_ms =
+			request.averaging_window_ms;
+		source.frequency.minimum_hz =
+			static_cast<double>(request.minimum_millihz) / 1000.0;
+		source.frequency.maximum_hz =
+			static_cast<double>(request.maximum_millihz) / 1000.0;
+		source.frequency.hysteresis_volts =
+			static_cast<double>(request.hysteresis_microvolts) /
+			1000000.0;
+
+		auto staged = msap1::prepare_meter_configuration(
+			std::move(source), configuration_.wire.sample_rate_hz);
+		const auto previous = configuration_;
+		const bool restart = running_;
+		if (restart)
+			stop();
+		configuration_ = std::move(staged);
+		// The previous snapshot belongs to a different configuration
+		// generation. Publish no record until the restarted pipeline produces
+		// a coherent MTR1 result for the new generation.
+		latest_record_.reset();
+		try {
+			if (restart)
+				start();
+			msap1::save_meter_configuration(
+				configuration_.source,
+				options_.active_configuration);
+		} catch (...) {
+			if (running_)
+				stop();
+			configuration_ = previous;
+			if (restart) {
+				try {
+					start();
+				} catch (const std::exception &rollback_error) {
+					std::cerr << "frequency configuration rollback failed: "
+						  << rollback_error.what() << '\n';
+				}
+			}
+			throw;
+		}
+	}
+
+	void apply_sample_rate(std::uint32_t sample_rate_hz)
+	{
+		if (!msap1::supported_adc_sample_rate(sample_rate_hz))
+			throw std::invalid_argument("unsupported ADC sample rate");
+
+		auto staged = msap1::prepare_meter_configuration(
+			configuration_.source, sample_rate_hz);
+		const auto previous = configuration_;
+		const bool restart = running_;
+		if (restart)
+			stop();
+		configuration_ = std::move(staged);
+		latest_record_.reset();
+
+		try {
+			if (restart) {
+				// start() arms DMA before committing the coordinated ADC/PL
+				// configuration and requesting capture.
+				start();
+			} else {
+				// A stopped pipeline still applies the operating point now
+				// so `mnc adc rate` can diagnose DRDY without first
+				// starting DMA and capture.
+				configure_meter();
+				cached_health_ = query_rpu_health();
+			}
+		} catch (...) {
+			if (running_)
+				stop();
+			configuration_ = previous;
+			latest_record_.reset();
+			try {
+				if (restart) {
+					start();
+				} else {
+					configure_meter();
+					cached_health_ = query_rpu_health();
+				}
+			} catch (const std::exception &rollback_error) {
+				std::cerr << "sample-rate rollback failed: "
+					  << rollback_error.what() << '\n';
+			}
+			throw;
+		}
+	}
+
+	void run_adc_diagnostic(std::uint32_t flow)
+	{
+		if (flow != 1u)
+			throw std::invalid_argument("unsupported ADC diagnostic flow");
+
+		const bool restart = running_;
+		if (restart)
+			stop();
+
+		try {
+			const msap1_adc_diagnostic_request request{flow};
+			last_adc_diagnostic_ = msap1::decode_adc_diagnostic(
+				transact(MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN,
+					 &request, sizeof(request), 15000ms));
+
+			if (restart) {
+				/*
+				 * A successful flow restores the same ADC operating point
+				 * itself. Resume DMA/capture without issuing a second SRC
+				 * load, otherwise the final diagnostic snapshot would no
+				 * longer describe the active state. If the flow failed,
+				 * perform the normal full coordinated configuration as a
+				 * recovery attempt.
+				 */
+				const bool diagnostic_succeeded =
+					last_adc_diagnostic_.diagnostic_error ==
+					MSAP1_ADC_DIAGNOSTIC_ERROR_NONE;
+				start(!diagnostic_succeeded);
+			}
+			cached_health_ = query_rpu_health();
+		} catch (...) {
+			if (restart && !running_) {
+				try {
+					start();
+				} catch (const std::exception &rollback_error) {
+					std::cerr << "ADC diagnostic recovery failed: "
+						  << rollback_error.what() << '\n';
+				}
+			}
+			throw;
+		}
 	}
 
 	void accept_record(const msap1::MeterRecord &record)
@@ -358,8 +555,10 @@ private:
 		response.invalid_records = invalid_records_;
 		response.sequence_gaps = sequence_gaps_;
 		response.rpu_health = cached_health_;
+		response.adc_diagnostic = last_adc_diagnostic_;
 		if (latest_record_)
 			response.latest_record = *latest_record_;
+		response.frequency = frequency_ipc(configuration_.source.frequency);
 		return response;
 	}
 
@@ -389,6 +588,19 @@ private:
 				case msap1::AcquisitionCommand::stop:
 					stop();
 					break;
+				case msap1::AcquisitionCommand::
+					frequency_configuration_get:
+					break;
+				case msap1::AcquisitionCommand::
+					frequency_configuration_set:
+					apply_frequency_configuration(request.frequency);
+					break;
+				case msap1::AcquisitionCommand::sample_rate_set:
+					apply_sample_rate(request.sample_rate_hz);
+					break;
+				case msap1::AcquisitionCommand::adc_diagnostic_run:
+					run_adc_diagnostic(request.diagnostic_flow);
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
@@ -401,7 +613,15 @@ private:
 					response.status =
 						msap1::AcquisitionStatus::rpu_error;
 				else if (request.command ==
-					 msap1::AcquisitionCommand::start)
+					 msap1::AcquisitionCommand::start ||
+					 request.command ==
+					 msap1::AcquisitionCommand::
+						 frequency_configuration_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::sample_rate_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::
+						 adc_diagnostic_run)
 					response.status =
 						msap1::AcquisitionStatus::configuration_error;
 				else
@@ -432,6 +652,7 @@ private:
 	std::uint64_t sequence_gaps_ = 0;
 	std::optional<msap1::MeterRecord> latest_record_;
 	msap1_adc_health_payload cached_health_{};
+	msap1_adc_diagnostic_payload last_adc_diagnostic_{};
 };
 
 } // namespace

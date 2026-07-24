@@ -13,6 +13,8 @@ struct Options {
 	std::string socket_path;
 	std::optional<std::uint64_t> result_limit;
 	std::optional<double> duration_seconds;
+	std::optional<std::uint32_t> sample_rate_hz;
+	std::optional<std::uint32_t> diagnostic_flow;
 	int timeout_ms = 3000;
 };
 
