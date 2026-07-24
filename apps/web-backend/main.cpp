@@ -284,7 +284,7 @@ msap1::FrequencyIpcConfiguration frequency_ipc(
 	    frequency.averaging_window_ms < 100u ||
 	    frequency.averaging_window_ms > 1000u ||
 	    frequency.minimum_hz < 10.0 ||
-	    frequency.maximum_hz > 100.0 ||
+	    frequency.maximum_hz > 200.0 ||
 	    frequency.minimum_hz >= frequency.maximum_hz ||
 	    frequency.hysteresis_volts <= 0.0 ||
 	    frequency.hysteresis_volts > 100.0)
