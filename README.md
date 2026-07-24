@@ -99,9 +99,9 @@ mnc adc start
 ```
 
 `mnc meter health` reports both the number of AXI packets accepted by the
-capture stream and the external AD7771 DCLK frequency measured in PL. The DCLK
-field is `unavailable` until two one-second observation windows complete, and
-whenever the external clock stops.
+capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate
+measured in PL. The DCLK and DRDY fields are `unavailable` until two one-second
+observation windows complete, and whenever the corresponding signal stops.
 
 Run `mnc`, `mnc help meter`, or append `--help` to any command for contextual
 help. Global `--socket` and `--timeout-ms` options are accepted before or after

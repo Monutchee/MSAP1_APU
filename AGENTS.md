@@ -37,6 +37,8 @@
   is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
+- ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`
+  falling-edge rate through the CLI and external JSON API.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
 - Voltage and current readings are RMS values calculated in PL and encoded in

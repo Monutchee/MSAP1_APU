@@ -64,6 +64,7 @@ struct AdcHealthDto {
 	std::uint32_t frames;
 	std::uint32_t packets;
 	std::uint32_t dclk_frequency_hz;
+	std::uint32_t drdy_frequency_hz;
 	std::uint32_t fifo_overflows;
 	std::uint32_t header_errors;
 };
@@ -180,6 +181,7 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 status.meter_generation_match, status.dc_offset_removal,
 		 adc.sample_rate_hz, adc.frame_count, adc.packet_count,
 		 adc.dclk_frequency_hz,
+		 adc.drdy_frequency_hz,
 		 adc.overflow_count,
 		 adc.header_error_count},
 		status.frequency_arithmetic_ok,
