@@ -75,6 +75,28 @@ void adc_health_round_trip()
 	health.dclk_frequency_hz = 8192000;
 	health.drdy_frequency_hz = 32000;
 	health.expected_decimation = 64;
+	health.channel_config[6] = 0x80;
+	health.channel_disable = 0x01;
+	health.channel_sync_offset[6] = 0x23;
+	health.adc_mux_config = 0x40;
+	health.buffer_config_1 = 0x38;
+	health.buffer_config_2 = 0xc0;
+	health.channel_offset[6][0] = 0x11;
+	health.channel_offset[6][1] = 0x22;
+	health.channel_offset[6][2] = 0x33;
+	health.channel_gain[6][0] = 0x44;
+	health.channel_gain[6][1] = 0x55;
+	health.channel_gain[6][2] = 0x66;
+	health.channel_error[6] = 0x12;
+	health.saturation_error[3] = 0x21;
+	health.channel_error_enable = 0xfe;
+	health.general_error_1 = 0x04;
+	health.general_error_1_enable = 0x3e;
+	health.general_error_2 = 0x20;
+	health.general_error_2_enable = 0x3c;
+	health.status_1 = 0x10;
+	health.status_2 = 0x08;
+	health.status_3 = 0x30;
 
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
 		23, &health, sizeof(health));
@@ -89,6 +111,32 @@ void adc_health_round_trip()
 		"wrong health DRDY frequency");
 	require(decoded.meter_generation == 0x11223344,
 		"wrong health meter generation");
+	require(decoded.channel_config[6] == 0x80,
+		"wrong health channel configuration");
+	require(decoded.channel_disable == 0x01 &&
+			decoded.channel_sync_offset[6] == 0x23,
+		"wrong health channel controls");
+	require(decoded.adc_mux_config == 0x40 &&
+			decoded.buffer_config_1 == 0x38 &&
+			decoded.buffer_config_2 == 0xc0,
+		"wrong health common configuration");
+	require(decoded.channel_offset[6][0] == 0x11 &&
+			decoded.channel_offset[6][1] == 0x22 &&
+			decoded.channel_offset[6][2] == 0x33 &&
+			decoded.channel_gain[6][0] == 0x44 &&
+			decoded.channel_gain[6][1] == 0x55 &&
+			decoded.channel_gain[6][2] == 0x66,
+		"wrong health calibration registers");
+	require(decoded.channel_error[6] == 0x12,
+		"wrong health channel error");
+	require(decoded.saturation_error[3] == 0x21,
+		"wrong health saturation error");
+	require(decoded.general_error_1 == 0x04 &&
+			decoded.general_error_2 == 0x20,
+		"wrong health general errors");
+	require(decoded.status_1 == 0x10 && decoded.status_2 == 0x08 &&
+			decoded.status_3 == 0x30,
+		"wrong health status registers");
 }
 
 void meter_record_contract()

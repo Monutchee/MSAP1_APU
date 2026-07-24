@@ -185,6 +185,26 @@ struct msap1_adc_health_payload {
 	uint32_t meter_generation;
 	uint32_t conversion_status;
 	uint32_t processing_status;
+	uint8_t channel_config[8];       /* 0x00 through 0x07 */
+	uint8_t channel_error[8];        /* 0x4C through 0x53 */
+	uint8_t saturation_error[4];     /* 0x54 through 0x57 */
+	uint8_t channel_error_enable;    /* 0x58 */
+	uint8_t general_error_1;         /* 0x59 */
+	uint8_t general_error_1_enable;  /* 0x5A */
+	uint8_t general_error_2;         /* 0x5B */
+	uint8_t general_error_2_enable;  /* 0x5C */
+	uint8_t status_1;                /* 0x5D */
+	uint8_t status_2;                /* 0x5E */
+	uint8_t channel_disable;         /* 0x08 */
+	uint8_t channel_sync_offset[8];  /* 0x09 through 0x10 */
+	uint8_t adc_mux_config;          /* 0x15 */
+	uint8_t global_mux_config;       /* 0x16 */
+	uint8_t gpio_config;             /* 0x17 */
+	uint8_t gpio_data;               /* 0x18 */
+	uint8_t buffer_config_1;         /* 0x19 */
+	uint8_t buffer_config_2;         /* 0x1A */
+	uint8_t channel_offset[8][3];    /* 0x1C through 0x48, stride 6 */
+	uint8_t channel_gain[8][3];      /* 0x1F through 0x4B, stride 6 */
 } __attribute__((packed));
 
 #ifdef __cplusplus

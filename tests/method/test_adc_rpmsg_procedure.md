@@ -87,9 +87,15 @@ RPU heartbeat. Confirm `GET /api/v1/meter/health` agrees with
 The health output must also show an advancing ADC packet count and a nonzero
 ADC DCLK and DRDY measurements after approximately two seconds. Compare the
 reported DCLK with the clock selected by the AD7771 output configuration and
-compare DRDY with the configured ADC frame rate. Stopping the
-ADC clock must make both fields unavailable after the next observation window;
-restoring it must recover without restarting Linux.
+compare DRDY with the configured ADC frame rate. Stopping the ADC clock must
+make both fields unavailable after the next observation window; restoring it
+must recover without restarting Linux.
+
+Stopping capture does not remove the raw AD7771 register snapshot. Use its decoded
+power mode, filter, DOUT topology, reference mux, and SRC-derived ODR to compare
+the requested configuration with the physical DRDY measurement. The snapshot
+also includes per-channel PGA/configuration, phase offsets, digital
+offset/gain calibration, and detailed error/status registers.
 
 ## 5. Lifecycle and sustained run
 

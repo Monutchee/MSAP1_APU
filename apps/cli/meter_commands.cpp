@@ -54,6 +54,182 @@ double parse_duration(const std::string &value)
 
 const char *yes_no(bool value) { return value ? "yes" : "no"; }
 
+void print_adc_register(std::ostream &output, std::uint8_t address,
+			const char *name, std::uint8_t value)
+{
+	const auto flags = output.flags();
+	const auto fill = output.fill();
+	output << "    0x" << std::hex << std::uppercase << std::setw(2)
+	       << std::setfill('0') << static_cast<unsigned>(address) << "  "
+	       << std::left << std::setw(25) << std::setfill(' ') << name
+	       << " = 0x" << std::right << std::setw(2) << std::setfill('0')
+	       << static_cast<unsigned>(value) << '\n';
+	output.flags(flags);
+	output.fill(fill);
+}
+
+void print_adc_registers(std::ostream &output,
+			 const msap1_adc_health_payload &health)
+{
+	static constexpr std::array<const char *, 8> channel_config_names{
+		"CH0_CONFIG", "CH1_CONFIG", "CH2_CONFIG", "CH3_CONFIG",
+		"CH4_CONFIG", "CH5_CONFIG", "CH6_CONFIG", "CH7_CONFIG"};
+	static constexpr std::array<const char *, 8> channel_error_names{
+		"CH0_ERR_REG", "CH1_ERR_REG", "CH2_ERR_REG", "CH3_ERR_REG",
+		"CH4_ERR_REG", "CH5_ERR_REG", "CH6_ERR_REG", "CH7_ERR_REG"};
+	static constexpr std::array<const char *, 8> channel_sync_names{
+		"CH0_SYNC_OFFSET", "CH1_SYNC_OFFSET", "CH2_SYNC_OFFSET",
+		"CH3_SYNC_OFFSET", "CH4_SYNC_OFFSET", "CH5_SYNC_OFFSET",
+		"CH6_SYNC_OFFSET", "CH7_SYNC_OFFSET"};
+	static constexpr std::array<const char *, 4> saturation_error_names{
+		"CH0_1_SAT_ERR", "CH2_3_SAT_ERR",
+		"CH4_5_SAT_ERR", "CH6_7_SAT_ERR"};
+
+	output << "\n  AD7771 register snapshot:\n";
+	for (std::size_t channel = 0; channel < channel_config_names.size();
+	     ++channel)
+		print_adc_register(output, static_cast<std::uint8_t>(channel),
+				   channel_config_names[channel],
+				   health.channel_config[channel]);
+	print_adc_register(output, 0x08, "CH_DISABLE", health.channel_disable);
+	for (std::size_t channel = 0; channel < channel_sync_names.size();
+	     ++channel)
+		print_adc_register(output,
+				   static_cast<std::uint8_t>(0x09 + channel),
+				   channel_sync_names[channel],
+				   health.channel_sync_offset[channel]);
+	print_adc_register(output, 0x11, "GENERAL_USER_CONFIG_1",
+			   health.general_user_config_1);
+	print_adc_register(output, 0x12, "GENERAL_USER_CONFIG_2",
+			   health.general_user_config_2);
+	print_adc_register(output, 0x13, "GENERAL_USER_CONFIG_3",
+			   health.general_user_config_3);
+	print_adc_register(output, 0x14, "DOUT_FORMAT", health.dout_format);
+	print_adc_register(output, 0x15, "ADC_MUX_CONFIG",
+			   health.adc_mux_config);
+	print_adc_register(output, 0x16, "GLOBAL_MUX_CONFIG",
+			   health.global_mux_config);
+	print_adc_register(output, 0x17, "GPIO_CONFIG", health.gpio_config);
+	print_adc_register(output, 0x18, "GPIO_DATA", health.gpio_data);
+	print_adc_register(output, 0x19, "BUFFER_CONFIG_1",
+			   health.buffer_config_1);
+	print_adc_register(output, 0x1a, "BUFFER_CONFIG_2",
+			   health.buffer_config_2);
+	for (std::size_t channel = 0; channel < channel_config_names.size();
+	     ++channel) {
+		const auto base = static_cast<std::uint8_t>(0x1c + channel * 6);
+		const auto offset_name = std::string("CH") +
+			std::to_string(channel) + "_OFFSET";
+		const auto gain_name = std::string("CH") +
+			std::to_string(channel) + "_GAIN";
+		for (std::size_t byte = 0; byte < 3; ++byte) {
+			const auto offset_byte_name = offset_name +
+				(byte == 0 ? "_UPPER" :
+				 byte == 1 ? "_MIDDLE" : "_LOWER");
+			const auto gain_byte_name = gain_name +
+				(byte == 0 ? "_UPPER" :
+				 byte == 1 ? "_MIDDLE" : "_LOWER");
+			print_adc_register(output,
+				static_cast<std::uint8_t>(base + byte),
+				offset_byte_name.c_str(),
+				health.channel_offset[channel][byte]);
+			print_adc_register(output,
+				static_cast<std::uint8_t>(base + 3 + byte),
+				gain_byte_name.c_str(),
+				health.channel_gain[channel][byte]);
+		}
+	}
+	for (std::size_t channel = 0; channel < channel_error_names.size();
+	     ++channel)
+		print_adc_register(output,
+				   static_cast<std::uint8_t>(0x4c + channel),
+				   channel_error_names[channel],
+				   health.channel_error[channel]);
+	for (std::size_t pair = 0; pair < saturation_error_names.size(); ++pair)
+		print_adc_register(output, static_cast<std::uint8_t>(0x54 + pair),
+				   saturation_error_names[pair],
+				   health.saturation_error[pair]);
+	print_adc_register(output, 0x58, "CHX_ERR_REG_EN",
+			   health.channel_error_enable);
+	print_adc_register(output, 0x59, "GEN_ERR_REG_1",
+			   health.general_error_1);
+	print_adc_register(output, 0x5a, "GEN_ERR_REG_1_EN",
+			   health.general_error_1_enable);
+	print_adc_register(output, 0x5b, "GEN_ERR_REG_2",
+			   health.general_error_2);
+	print_adc_register(output, 0x5c, "GEN_ERR_REG_2_EN",
+			   health.general_error_2_enable);
+	print_adc_register(output, 0x5d, "STATUS_REG_1", health.status_1);
+	print_adc_register(output, 0x5e, "STATUS_REG_2", health.status_2);
+	print_adc_register(output, 0x5f, "STATUS_REG_3", health.status_3);
+	print_adc_register(output, 0x60, "SRC_N_MSB", health.src_n_msb);
+	print_adc_register(output, 0x61, "SRC_N_LSB", health.src_n_lsb);
+	print_adc_register(output, 0x62, "SRC_IF_MSB", health.src_if_msb);
+	print_adc_register(output, 0x63, "SRC_IF_LSB", health.src_if_lsb);
+	print_adc_register(output, 0x64, "SRC_UPDATE", health.src_update);
+
+	const auto high_resolution =
+		(health.general_user_config_1 & 0x40u) != 0u;
+	const auto sinc5 = (health.general_user_config_2 & 0x40u) != 0u;
+	const auto dout_code = (health.dout_format >> 6) & 0x03u;
+	const auto dout_lines = dout_code == 0u ? 4u :
+		dout_code == 1u ? 2u : 1u;
+	const auto dclk_divisor =
+		1u << ((health.dout_format >> 1) & 0x07u);
+	const auto src_n = static_cast<std::uint16_t>(
+		(static_cast<std::uint16_t>(health.src_n_msb & 0x0fu) << 8) |
+		health.src_n_lsb);
+	const auto src_if = static_cast<std::uint16_t>(
+		(static_cast<std::uint16_t>(health.src_if_msb) << 8) |
+		health.src_if_lsb);
+	const auto effective_decimation =
+		static_cast<double>(src_n) +
+		static_cast<double>(src_if) / 65536.0;
+	const auto reference_mux = (health.adc_mux_config >> 6) & 0x03u;
+	static constexpr std::array<const char *, 4> reference_names{
+		"external REFx+/REFx-", "internal reference",
+		"AVDD1x/AVSSx", "reversed external REFx-/REFx+"};
+
+	output << "\n  AD7771 decoded controls:\n"
+	       << "    Power mode                = "
+	       << (high_resolution ? "high resolution" : "low power")
+	       << "\n    Digital filter            = "
+	       << (sinc5 ? "sinc5" : "sinc3")
+	       << "\n    Enabled channels          = 0x" << std::hex
+	       << std::uppercase << std::setw(2) << std::setfill('0')
+	       << static_cast<unsigned>(~health.channel_disable & 0xffu)
+	       << std::dec << std::nouppercase << std::setfill(' ')
+	       << "\n    DOUT lanes                = " << dout_lines
+	       << "\n    DOUT header               = "
+	       << ((health.dout_format & 0x20u) != 0u ? "CRC" : "status")
+	       << "\n    DCLK divisor              = " << dclk_divisor
+	       << "\n    Reference mux             = "
+	       << reference_names[reference_mux]
+	       << "\n    SRC decimation            = " << src_n << " + " << src_if
+	       << "/65536"
+	       << "\n    Expected decimation       = " << health.expected_decimation
+	       << "\n    SRC load source           = "
+	       << ((health.src_update & 0x80u) != 0u ? "GPIO0" : "software")
+	       << "\n    SRC update pending        = "
+	       << yes_no((health.src_update & 0x01u) != 0u)
+	       << "\n    CHIP_ERROR active         = "
+	       << yes_no(((health.status_1 | health.status_2 |
+			   health.status_3) & 0x20u) != 0u)
+	       << '\n';
+	if (health.dclk_frequency_hz != 0u && effective_decimation > 0.0) {
+		const auto master_clock_hz =
+			static_cast<double>(health.dclk_frequency_hz) *
+			static_cast<double>(dclk_divisor);
+		const auto modulator_divisor =
+			high_resolution ? 4.0 : 8.0;
+		output << "    SRC-derived ODR           = " << std::fixed
+		       << std::setprecision(3)
+		       << master_clock_hz /
+			  (modulator_divisor * effective_decimation)
+		       << " frame/s\n";
+	}
+}
+
 void require_daemon_ok(const AcquisitionResponse &response)
 {
 	if (response.status != AcquisitionStatus::ok)
@@ -115,6 +291,10 @@ int run_meter_health(const Options &options, std::ostream &output)
 		       << static_cast<double>(frequency.millihz) / 1000.0 << " Hz\n";
 	else
 		output << "unavailable\n";
+	if (status.spi_responsive)
+		print_adc_registers(output, health);
+	else
+		output << "\n  AD7771 register snapshot: unavailable\n";
 	return status.healthy ? 0 : 1;
 }
 
