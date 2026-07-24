@@ -18,6 +18,7 @@ struct MeterHealth {
 	bool meter_configured = false;
 	bool meter_generation_match = false;
 	bool dc_offset_removal = false;
+	bool frequency_arithmetic_ok = false;
 };
 
 MeterHealth evaluate_meter_health(const AcquisitionResponse &response);

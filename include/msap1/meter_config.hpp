@@ -39,6 +39,17 @@ struct CurrentChannelConfig {
 	double frontend_gain = 1.0;
 };
 
+struct FrequencyConfig {
+	bool enabled = true;
+	std::uint32_t reference_channel = 6;
+	std::string mode = "rolling_cycles";
+	std::uint32_t averaging_cycles = 10;
+	std::uint32_t averaging_window_ms = 1000;
+	double minimum_hz = 40.0;
+	double maximum_hz = 70.0;
+	double hysteresis_volts = 1.0;
+};
+
 struct MeterConversionFile {
 	std::uint32_t schema_version = 2;
 	std::string profile_id;
@@ -47,6 +58,9 @@ struct MeterConversionFile {
 	double adc_reference_volts = 1.0;
 	std::vector<CurrentChannelConfig> current_channels;
 	std::vector<VoltageChannelConfig> voltage_channels;
+	// Kept optional-by-default for compatible schema-v2 profiles created
+	// before frequency measurement was introduced.
+	FrequencyConfig frequency;
 };
 
 struct PreparedMeterConfiguration {
@@ -57,6 +71,10 @@ struct PreparedMeterConfiguration {
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path = default_meter_config_path,
 	std::uint32_t sample_rate_hz = 32000);
+PreparedMeterConfiguration prepare_meter_configuration(
+	MeterConversionFile source, std::uint32_t sample_rate_hz = 32000);
+void save_meter_configuration(const MeterConversionFile &configuration,
+			      const std::filesystem::path &path);
 
 } // namespace msap1
 

@@ -32,7 +32,9 @@
 - The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-2
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
   physical current/voltage frontends, and the 200 ms RMS window. The packaged
-  runtime default is `acuvim3-sb-5a.json`.
+  runtime default is `acuvim3-sb-5a.json`. Profiles also define CH6/VLA
+  zero-crossing frequency measurement; a valid Web-generated complete profile
+  is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest

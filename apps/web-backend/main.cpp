@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -61,6 +62,8 @@ struct AdcHealthDto {
 	bool dc_offset_removal;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t frames;
+	std::uint32_t packets;
+	std::uint32_t dclk_frequency_hz;
 	std::uint32_t fifo_overflows;
 	std::uint32_t header_errors;
 };
@@ -69,6 +72,7 @@ struct HealthDto {
 	bool healthy;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
+	bool frequency_arithmetic_ok;
 	bool backend_running;
 	bool nginx_running;
 };
@@ -77,6 +81,7 @@ struct MeterHealthDto {
 	bool healthy;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
+	bool frequency_arithmetic_ok;
 };
 
 struct AdcCaptureDto {
@@ -93,6 +98,33 @@ struct MeterChannelDto {
 	double rms;
 };
 
+struct FrequencyReadingDto {
+	bool enabled;
+	bool valid;
+	bool reference_valid;
+	bool out_of_range;
+	bool timed_out;
+	bool arithmetic_error;
+	double hz;
+	std::uint32_t millihz;
+	std::uint32_t period_q16_samples;
+	std::uint32_t measurement_sequence;
+	std::uint32_t mode;
+	std::uint32_t reference_channel;
+	std::uint32_t cycles_used;
+};
+
+struct FrequencyConfigurationDto {
+	bool enabled = true;
+	std::uint32_t reference_channel = 6;
+	std::string mode = "rolling_cycles";
+	std::uint32_t averaging_cycles = 10;
+	std::uint32_t averaging_window_ms = 1000;
+	double minimum_hz = 40.0;
+	double maximum_hz = 70.0;
+	double hysteresis_volts = 1.0;
+};
+
 struct MeterReadingsDto {
 	std::uint32_t sequence;
 	std::uint32_t configuration_generation;
@@ -104,6 +136,7 @@ struct MeterReadingsDto {
 	std::uint32_t fifo_overflows;
 	std::uint32_t packetizer_drops;
 	std::uint32_t hub_drops;
+	FrequencyReadingDto frequency;
 	std::array<MeterChannelDto, 8> channels;
 };
 
@@ -145,8 +178,11 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 status.configuration_match, status.capture_active, status.fifo_ok,
 		 status.headers_valid, status.meter_configured,
 		 status.meter_generation_match, status.dc_offset_removal,
-		 adc.sample_rate_hz, adc.frame_count, adc.overflow_count,
+		 adc.sample_rate_hz, adc.frame_count, adc.packet_count,
+		 adc.dclk_frequency_hz,
+		 adc.overflow_count,
 		 adc.header_error_count},
+		status.frequency_arithmetic_ok,
 	};
 }
 
@@ -159,6 +195,7 @@ HealthDto system_health(const msap1::AcquisitionResponse &response,
 		meter.healthy && nginx_ok,
 		meter.acquisition,
 		meter.adc,
+		meter.frequency_arithmetic_ok,
 		true,
 		nginx_ok,
 	};
@@ -173,11 +210,20 @@ MeterReadingsDto readings(const msap1::AcquisitionResponse &response)
 		throw std::runtime_error("meter record header is invalid");
 	static constexpr std::array<const char *, 8> names{
 		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
+	const auto frequency = record.frequency();
 	MeterReadingsDto result{
 		record.sequence(), record.configuration_generation(),
 		record.sample_rate_hz(), record.window_samples(), record.status(),
 		record.capture_frames(), record.header_errors(),
 		record.fifo_overflows(), record.packetizer_drops(), record.hub_drops(),
+		{frequency.enabled, frequency.valid, frequency.reference_valid,
+		 frequency.out_of_range, frequency.timed_out,
+		 frequency.arithmetic_error,
+		 frequency.valid ? static_cast<double>(frequency.millihz) / 1000.0
+				 : 0.0,
+		 frequency.millihz, frequency.period_q16_samples,
+		 frequency.measurement_sequence, frequency.mode,
+		 frequency.reference_channel, frequency.cycles_used},
 		{},
 	};
 	for (std::size_t index = 0; index < result.channels.size(); ++index) {
@@ -192,6 +238,68 @@ MeterReadingsDto readings(const msap1::AcquisitionResponse &response)
 		};
 	}
 	return result;
+}
+
+FrequencyConfigurationDto frequency_configuration(
+	const msap1::FrequencyIpcConfiguration &frequency)
+{
+	const char *mode = "rolling_cycles";
+	if (frequency.mode == MSAP1_FREQUENCY_MODE_SINGLE_CYCLE)
+		mode = "single_cycle";
+	else if (frequency.mode == MSAP1_FREQUENCY_MODE_ROLLING_TIME)
+		mode = "rolling_time";
+	return {
+		frequency.enabled != 0u,
+		frequency.reference_channel,
+		mode,
+		frequency.averaging_cycles,
+		frequency.averaging_window_ms,
+		static_cast<double>(frequency.minimum_millihz) / 1000.0,
+		static_cast<double>(frequency.maximum_millihz) / 1000.0,
+		static_cast<double>(frequency.hysteresis_microvolts) / 1000000.0,
+	};
+}
+
+msap1::FrequencyIpcConfiguration frequency_ipc(
+	const FrequencyConfigurationDto &frequency)
+{
+	std::uint32_t mode;
+	if (frequency.mode == "single_cycle")
+		mode = MSAP1_FREQUENCY_MODE_SINGLE_CYCLE;
+	else if (frequency.mode == "rolling_cycles")
+		mode = MSAP1_FREQUENCY_MODE_ROLLING_CYCLES;
+	else if (frequency.mode == "rolling_time")
+		mode = MSAP1_FREQUENCY_MODE_ROLLING_TIME;
+	else
+		throw std::invalid_argument("unsupported frequency mode");
+
+	if (!std::isfinite(frequency.minimum_hz) ||
+	    !std::isfinite(frequency.maximum_hz) ||
+	    !std::isfinite(frequency.hysteresis_volts) ||
+	    frequency.reference_channel != 6u ||
+	    frequency.averaging_cycles < 1u ||
+	    frequency.averaging_cycles > 64u ||
+	    frequency.averaging_window_ms < 100u ||
+	    frequency.averaging_window_ms > 1000u ||
+	    frequency.minimum_hz < 10.0 ||
+	    frequency.maximum_hz > 100.0 ||
+	    frequency.minimum_hz >= frequency.maximum_hz ||
+	    frequency.hysteresis_volts <= 0.0 ||
+	    frequency.hysteresis_volts > 100.0)
+		throw std::invalid_argument("frequency configuration is out of range");
+	return {
+		frequency.enabled ? 1u : 0u,
+		frequency.reference_channel,
+		mode,
+		frequency.averaging_cycles,
+		frequency.averaging_window_ms,
+		static_cast<std::uint32_t>(
+			std::llround(frequency.minimum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.maximum_hz * 1000.0)),
+		static_cast<std::uint32_t>(
+			std::llround(frequency.hysteresis_volts * 1000000.0)),
+	};
 }
 
 std::string getenv_or(const char *name, const char *fallback)
@@ -305,6 +413,60 @@ int main()
 						error.what());
 				}
 			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/meter/configuration/frequency",
+			[](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::
+							frequency_configuration_get,
+						1000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						frequency_configuration(response.frequency));
+				} catch (const std::exception &error) {
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::put,
+			"/api/v1/meter/configuration/frequency",
+			[](const webengine::RequestContext &context) {
+				try {
+					FrequencyConfigurationDto configuration;
+					if (const auto error = glz::read_json(
+						    configuration, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid frequency configuration JSON");
+					const auto wire = frequency_ipc(configuration);
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::
+							frequency_configuration_set,
+						5000, &wire);
+					if (response.status ==
+					    msap1::AcquisitionStatus::configuration_error)
+						return error_response(
+							webengine::http::status::bad_request,
+							"frequency configuration was rejected");
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						frequency_configuration(response.frequency));
+				} catch (const std::invalid_argument &error) {
+					return error_response(
+						webengine::http::status::bad_request,
+						error.what());
+				} catch (const std::exception &error) {
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
 
 		const auto capture = [](msap1::AcquisitionCommand command) {
 			return [command](const webengine::RequestContext &) {

@@ -78,6 +78,16 @@ enum msap1_meter_config_flag {
 	MSAP1_METER_CONFIG_REMOVE_DC = 1u << 1,
 };
 
+enum msap1_frequency_config_flag {
+	MSAP1_FREQUENCY_CONFIG_ENABLE = 1u << 0,
+};
+
+enum msap1_frequency_mode {
+	MSAP1_FREQUENCY_MODE_SINGLE_CYCLE = 0,
+	MSAP1_FREQUENCY_MODE_ROLLING_CYCLES = 1,
+	MSAP1_FREQUENCY_MODE_ROLLING_TIME = 2,
+};
+
 enum msap1_meter_health_flag {
 	MSAP1_METER_HEALTH_CORES_PRESENT = 1u << 0,
 	MSAP1_METER_HEALTH_CONFIGURED = 1u << 1,
@@ -124,6 +134,15 @@ struct msap1_meter_config_payload {
 	uint32_t scale_micro_units_q16[8];
 	uint32_t flags;
 	uint8_t adc_pga_gain[8];
+	/* Frequency fields use millihertz, samples, and integer microvolts. */
+	uint32_t frequency_flags;
+	uint32_t frequency_mode;
+	uint32_t frequency_reference_channel;
+	uint32_t frequency_averaging_cycles;
+	uint32_t frequency_window_samples;
+	uint32_t frequency_minimum_millihz;
+	uint32_t frequency_maximum_millihz;
+	uint32_t frequency_hysteresis_microvolts;
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {
@@ -148,6 +167,7 @@ struct msap1_adc_health_payload {
 	uint32_t header_error_count;
 	uint32_t alert_count;
 	uint32_t packet_count;
+	uint32_t dclk_frequency_hz;
 	uint32_t spi_error;
 	uint16_t expected_decimation;
 	uint8_t status_3;
