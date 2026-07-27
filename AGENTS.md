@@ -33,6 +33,9 @@
 - Product services emit structured journald entries and `mnc log` provides the
   consolidated reader. Journald remains the only log store; do not add a
   parallel product log file or database.
+- Web journal inspection is administrator-only and must remain a bounded,
+  cursor-paginated backend query. Do not expose unrestricted journal access or
+  allow the browser to open journald directly.
 - CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
   `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
   endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.

@@ -3,10 +3,13 @@
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
+#include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,10 +19,15 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <source_location>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <glaze/glaze.hpp>
 #include <webengine/NginxController.hpp>
@@ -177,6 +185,29 @@ struct MeterReadingsDto {
 	std::array<MeterChannelDto, 8> channels;
 };
 
+struct DeveloperLogEntryDto {
+	std::int64_t timestamp_usec;
+	std::string cursor;
+	std::string priority;
+	std::string message;
+	std::string component;
+	std::string module;
+	std::string event;
+	std::string request_id;
+	std::string configuration_generation;
+	std::string unit;
+	std::string executable;
+	std::string source_file;
+	std::string source_line;
+	std::string source_function;
+	std::string raw;
+};
+
+struct DeveloperLogsDto {
+	std::vector<DeveloperLogEntryDto> entries;
+	std::string next_cursor;
+};
+
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
 				  const T &value)
@@ -192,6 +223,200 @@ webengine::Response error_response(webengine::http::status status,
 				   std::string message)
 {
 	return json_response(status, glz::obj{"error", std::move(message)});
+}
+
+unsigned hex_digit(char value)
+{
+	if (value >= '0' && value <= '9')
+		return static_cast<unsigned>(value - '0');
+	if (value >= 'a' && value <= 'f')
+		return static_cast<unsigned>(value - 'a' + 10);
+	if (value >= 'A' && value <= 'F')
+		return static_cast<unsigned>(value - 'A' + 10);
+	throw std::invalid_argument("invalid URL encoding");
+}
+
+std::string url_decode(std::string_view value)
+{
+	std::string result;
+	result.reserve(value.size());
+	for (std::size_t index = 0; index < value.size(); ++index) {
+		if (value[index] == '+') {
+			result.push_back(' ');
+			continue;
+		}
+		if (value[index] != '%') {
+			result.push_back(value[index]);
+			continue;
+		}
+		if (index + 2 >= value.size())
+			throw std::invalid_argument("invalid URL encoding");
+		const auto byte = (hex_digit(value[index + 1]) << 4u) |
+				  hex_digit(value[index + 2]);
+		result.push_back(static_cast<char>(byte));
+		index += 2;
+	}
+	return result;
+}
+
+std::unordered_map<std::string, std::string>
+query_parameters(std::string_view target)
+{
+	std::unordered_map<std::string, std::string> result;
+	const auto question = target.find('?');
+	if (question == std::string_view::npos)
+		return result;
+	auto query = target.substr(question + 1);
+	while (!query.empty()) {
+		const auto separator = query.find('&');
+		const auto item = query.substr(0, separator);
+		const auto equals = item.find('=');
+		const auto name = url_decode(item.substr(0, equals));
+		const auto value = equals == std::string_view::npos
+			? std::string{}
+			: url_decode(item.substr(equals + 1));
+		if (!name.empty())
+			result.insert_or_assign(name, value);
+		if (separator == std::string_view::npos)
+			break;
+		query.remove_prefix(separator + 1);
+	}
+	return result;
+}
+
+std::size_t log_limit(const std::unordered_map<std::string, std::string> &params)
+{
+	const auto item = params.find("limit");
+	if (item == params.end())
+		return 100;
+	std::size_t value = 0;
+	const auto parsed = std::from_chars(
+		item->second.data(), item->second.data() + item->second.size(), value);
+	if (parsed.ec != std::errc{} ||
+	    parsed.ptr != item->second.data() + item->second.size() ||
+	    value == 0 || value > 500)
+		throw std::invalid_argument("log limit must be between 1 and 500");
+	return value;
+}
+
+std::pair<std::string, std::string>
+classify_log_entry(const mnc::logging::Entry &entry)
+{
+	if (!entry.component.empty())
+		return {entry.component, entry.module};
+	if (entry.unit == "dfx-mgr-fw-load.service")
+		return {"firmware", "pl"};
+	if (entry.unit == "msap1-dfx-firmware-rpu-load.service")
+		return {"firmware", "rpu"};
+	if (entry.unit == "msap1-fpga-acquisition.service")
+		return {"fpga-acquisition", entry.module};
+	if (entry.unit == "msap1-web-backend.service")
+		return {"web-backend", entry.module};
+	return {{}, {}};
+}
+
+DeveloperLogsDto developer_logs(std::string_view target)
+{
+	const auto params = query_parameters(target);
+	mnc::logging::Query query;
+	query.limit = log_limit(params);
+	query.components = {"fpga-acquisition", "web-backend", "firmware"};
+	query.units = {
+		"msap1-fpga-acquisition.service",
+		"msap1-web-backend.service",
+		"dfx-mgr-fw-load.service",
+		"msap1-dfx-firmware-rpu-load.service",
+	};
+
+	if (const auto item = params.find("component");
+	    item != params.end() && !item->second.empty()) {
+		if (item->second == "firmware") {
+			query.components = {"firmware"};
+			query.units = {
+				"dfx-mgr-fw-load.service",
+				"msap1-dfx-firmware-rpu-load.service",
+			};
+		} else if (item->second == "fpga-acquisition") {
+			query.components = {"fpga-acquisition"};
+			query.units = {"msap1-fpga-acquisition.service"};
+		} else if (item->second == "web-backend") {
+			query.components = {"web-backend"};
+			query.units = {"msap1-web-backend.service"};
+		} else {
+			throw std::invalid_argument("unsupported log component");
+		}
+	}
+	if (const auto item = params.find("module");
+	    item != params.end() && !item->second.empty()) {
+		/*
+		 * Firmware lifecycle entries emitted by PID 1 have a UNIT but no
+		 * MNC_MODULE. Translate the two synthetic firmware modules to unit
+		 * filters before asking the generic journal reader to match them.
+		 */
+		if (item->second == "pl" || item->second == "rpu") {
+			const auto component = params.find("component");
+			if (component != params.end() && !component->second.empty() &&
+			    component->second != "firmware")
+				throw std::invalid_argument(
+					"PL/RPU modules require the firmware component");
+			query.components = {"firmware"};
+			query.units = {item->second == "pl"
+				? "dfx-mgr-fw-load.service"
+				: "msap1-dfx-firmware-rpu-load.service"};
+		} else {
+			query.module = item->second;
+		}
+	}
+	if (const auto item = params.find("priority");
+	    item != params.end() && !item->second.empty()) {
+		mnc::logging::Priority priority;
+		if (!mnc::logging::parse_priority(item->second, priority))
+			throw std::invalid_argument("unsupported log priority");
+		query.maximum_priority = priority;
+	}
+	if (const auto item = params.find("after");
+	    item != params.end() && !item->second.empty())
+		query.after = mnc::logging::Cursor{item->second};
+
+	mnc::logging::JournalReader reader;
+	if (!reader.available())
+		throw std::runtime_error("system journal is unavailable");
+	const auto entries = reader.read(query);
+	DeveloperLogsDto result;
+	result.entries.reserve(entries.size());
+	if (query.after)
+		result.next_cursor = query.after->value;
+	for (const auto &entry : entries) {
+		auto classified = entry;
+		const auto [component, module] = classify_log_entry(entry);
+		if (classified.component.empty())
+			classified.component = component;
+		if (classified.module.empty())
+			classified.module = module;
+		const auto usec =
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				classified.timestamp.time_since_epoch())
+				.count();
+		result.entries.push_back({
+			usec,
+			classified.cursor.value,
+			mnc::logging::priority_name(classified.priority),
+			classified.message,
+			classified.component,
+			classified.module,
+			classified.event,
+			classified.request_id,
+			classified.configuration_generation,
+			classified.unit,
+			classified.executable,
+			classified.source_file,
+			classified.source_line,
+			classified.source_function,
+			mnc::logging::entry_to_json(classified),
+		});
+		result.next_cursor = classified.cursor.value;
+	}
+	return result;
 }
 
 void require_acquisition_ok(const msap1::AcquisitionResponse &response)
@@ -421,6 +646,37 @@ int main()
 						error.what());
 				}
 			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/developer/logs",
+			[](const webengine::RequestContext &context) {
+				try {
+					const auto target = context.request.target();
+					return json_response(
+						webengine::http::status::ok,
+						developer_logs(std::string_view{
+							target.data(), target.size()}));
+				} catch (const std::invalid_argument &error) {
+					return error_response(
+						webengine::http::status::bad_request,
+						error.what());
+				} catch (const std::runtime_error &error) {
+					if (std::string_view{error.what()} ==
+					    "journal cursor is no longer valid")
+						return error_response(
+							webengine::http::status::conflict,
+							error.what());
+					log_api_failure("/api/v1/developer/logs", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/developer/logs", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
 
 		engine.add_api(webengine::http::verb::get,
 			"/api/v1/meter/health",

@@ -84,6 +84,8 @@ The authenticated external API is:
 - `GET /api/v1/meter/readings`
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
+- `GET /api/v1/developer/logs` (administrator only; bounded journal page with
+  `component`, `module`, `priority`, `after`, and `limit` query parameters)
 - `GET /api/v1/adc/capture`
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 
