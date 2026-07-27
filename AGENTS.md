@@ -50,6 +50,9 @@
   Q16 microvolts and microamps. The selected complete profile chooses
   mean-corrected AC RMS or zero-referenced total RMS and supplies the
   per-channel physical scaling and AD7771 PGA factors.
+- Use neutral MSAP1 sensor-board identifiers in profile IDs, paths, CLI/API
+  output, tests, and documentation. Do not introduce third-party vendor or
+  product branding into this repository.
 
 ## Cross-repository ABI
 
