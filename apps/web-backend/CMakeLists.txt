@@ -6,6 +6,7 @@ add_executable(msap1-web-backend
 
 target_link_libraries(msap1-web-backend PRIVATE
     msap1::apu-core
+    mnc::logging
     webengine::webengine
     glaze::glaze
 )

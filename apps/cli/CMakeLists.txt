@@ -2,8 +2,9 @@ add_library(mnc_cli STATIC
     cli.cpp
     meter_commands.cpp
     adc_commands.cpp
+    log_commands.cpp
 )
-target_link_libraries(mnc_cli PUBLIC msap1::apu-core)
+target_link_libraries(mnc_cli PUBLIC msap1::apu-core mnc::logging)
 target_include_directories(mnc_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(mnc_cli PUBLIC cxx_std_23)
 target_compile_options(mnc_cli PRIVATE -Wall -Wextra -Wpedantic)

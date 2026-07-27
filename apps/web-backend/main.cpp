@@ -3,6 +3,7 @@
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
+#include "mnc/logging/logging.hpp"
 
 #include <array>
 #include <atomic>
@@ -12,9 +13,10 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <iostream>
+#include <initializer_list>
 #include <limits>
 #include <memory>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,6 +34,39 @@ constexpr const char *nginx_config_path = "/etc/monutchee/msap1/nginx.conf";
 constexpr const char *nginx_listen_path = "/run/monutchee/nginx/listen.conf";
 constexpr const char *nginx_pid_path = "/run/monutchee/nginx/nginx.pid";
 constexpr const char *nginx_temp_path = "/run/monutchee/nginx";
+
+const mnc::logging::Logger lifecycle_log("web-backend", "lifecycle");
+const mnc::logging::Logger nginx_log("web-backend", "nginx");
+const mnc::logging::Logger api_log("web-backend", "http");
+
+void log_message(
+	const mnc::logging::Logger &logger, mnc::logging::Priority priority,
+	std::string message, std::string_view event,
+	std::initializer_list<mnc::logging::Field> fields = {},
+	const std::source_location &source = std::source_location::current())
+{
+	(void)logger.write(priority, message, event,
+			   std::span<const mnc::logging::Field>(
+				   fields.begin(), fields.size()),
+			   source);
+}
+
+std::string request_id()
+{
+	static std::atomic<std::uint64_t> sequence{0};
+	return std::to_string(++sequence);
+}
+
+void log_api_failure(std::string_view route, const std::exception &error,
+		     const std::source_location &source =
+			     std::source_location::current())
+{
+	log_message(api_log, mnc::logging::Priority::warning,
+		"API request failed for " + std::string(route) + ": " +
+			error.what(),
+		"api_request_failed",
+		{{"MNC_HTTP_ROUTE", std::string(route)}}, source);
+}
 
 struct SessionDto {
 	std::string username;
@@ -340,6 +375,8 @@ bool wait_for_socket(const std::filesystem::path &path,
 int main()
 {
 	try {
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"MSAP1 web backend is starting", "service_starting");
 		auto auth = std::make_shared<msap1::web::Msap1AuthProvider>();
 
 		webengine::NginxController::Options nginx_options;
@@ -378,6 +415,7 @@ int main()
 					return json_response(webengine::http::status::ok,
 						system_health(response, nginx));
 				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/health", error);
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -395,6 +433,7 @@ int main()
 					return json_response(webengine::http::status::ok,
 						meter_health(response));
 				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/meter/health", error);
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -412,6 +451,7 @@ int main()
 					return json_response(webengine::http::status::ok,
 						readings(response));
 				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/meter/readings", error);
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -431,6 +471,9 @@ int main()
 					return json_response(webengine::http::status::ok,
 						frequency_configuration(response.frequency));
 				} catch (const std::exception &error) {
+					log_api_failure(
+						"/api/v1/meter/configuration/frequency",
+						error);
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -440,13 +483,25 @@ int main()
 		engine.add_api(webengine::http::verb::put,
 			"/api/v1/meter/configuration/frequency",
 			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				log_message(api_log, mnc::logging::Priority::info,
+					"frequency configuration update requested",
+					"frequency_update_requested",
+					{{"MNC_REQUEST_ID", correlation}});
 				try {
 					FrequencyConfigurationDto configuration;
 					if (const auto error = glz::read_json(
-						    configuration, context.request.body()))
+						    configuration, context.request.body())) {
+						log_message(api_log,
+							mnc::logging::Priority::warning,
+							"frequency configuration JSON is invalid",
+							"frequency_update_rejected",
+							{{"MNC_REQUEST_ID",
+							  correlation}});
 						return error_response(
 							webengine::http::status::bad_request,
 							"invalid frequency configuration JSON");
+					}
 					const auto wire = frequency_ipc(configuration);
 					msap1::AcquisitionClient client;
 					const auto response = client.request(
@@ -454,18 +509,45 @@ int main()
 							frequency_configuration_set,
 						5000, &wire);
 					if (response.status ==
-					    msap1::AcquisitionStatus::configuration_error)
+					    msap1::AcquisitionStatus::configuration_error) {
+						log_message(api_log,
+							mnc::logging::Priority::warning,
+							"frequency configuration was rejected",
+							"frequency_update_rejected",
+							{{"MNC_REQUEST_ID",
+							  correlation}});
 						return error_response(
 							webengine::http::status::bad_request,
 							"frequency configuration was rejected");
+					}
 					require_acquisition_ok(response);
+					log_message(api_log,
+						mnc::logging::Priority::notice,
+						"frequency configuration update applied",
+						"frequency_update_applied",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_CONFIGURATION_GENERATION",
+						  std::to_string(response
+							.configuration_generation)}});
 					return json_response(webengine::http::status::ok,
 						frequency_configuration(response.frequency));
 				} catch (const std::invalid_argument &error) {
+					log_message(api_log,
+						mnc::logging::Priority::warning,
+						"frequency configuration rejected: " +
+							std::string(error.what()),
+						"frequency_update_rejected",
+						{{"MNC_REQUEST_ID", correlation}});
 					return error_response(
 						webengine::http::status::bad_request,
 						error.what());
 				} catch (const std::exception &error) {
+					log_message(api_log,
+						mnc::logging::Priority::error,
+						"frequency configuration failed: " +
+							std::string(error.what()),
+						"frequency_update_failed",
+						{{"MNC_REQUEST_ID", correlation}});
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -474,13 +556,45 @@ int main()
 
 		const auto capture = [](msap1::AcquisitionCommand command) {
 			return [command](const webengine::RequestContext &) {
+				const bool query =
+					command == msap1::AcquisitionCommand::info;
+				const auto correlation = request_id();
+				const bool starting =
+					command == msap1::AcquisitionCommand::start;
+				if (!query)
+					log_message(api_log,
+						mnc::logging::Priority::info,
+						starting
+							? "ADC capture start requested"
+							: "ADC capture stop requested",
+						starting
+							? "capture_start_requested"
+							: "capture_stop_requested",
+						{{"MNC_REQUEST_ID", correlation}});
 				try {
 					msap1::AcquisitionClient client;
 					const auto response = client.request(command, 3000);
 					require_acquisition_ok(response);
+					if (!query)
+						log_message(api_log,
+							mnc::logging::Priority::notice,
+							starting
+								? "ADC capture started"
+								: "ADC capture stopped",
+							starting
+								? "capture_start_applied"
+								: "capture_stop_applied",
+							{{"MNC_REQUEST_ID",
+							  correlation}});
 					return json_response(webengine::http::status::ok,
 						AdcCaptureDto{response.running != 0u});
 				} catch (const std::exception &error) {
+					log_message(api_log,
+						mnc::logging::Priority::error,
+						std::string("ADC capture command failed: ") +
+							error.what(),
+						"capture_command_failed",
+						{{"MNC_REQUEST_ID", correlation}});
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
@@ -514,34 +628,60 @@ int main()
 			engine_thread.join();
 			throw std::runtime_error("WebEngine did not create its Unix socket");
 		}
+		log_message(lifecycle_log, mnc::logging::Priority::info,
+			"WebEngine Unix socket is ready: " + socket_path,
+			"backend_socket_ready",
+			{{"MNC_SOCKET_PATH", socket_path}});
 		if (!nginx.on()) {
 			engine.stop();
 			engine_thread.join();
 			throw std::runtime_error("nginx failed to start: " + nginx.last_error());
 		}
+		log_message(nginx_log, mnc::logging::Priority::notice,
+			"nginx started under web-backend supervision",
+			"nginx_started");
 
 		msap1::web::SystemdNotifier notifier;
 		(void)notifier.ready("MSAP1 web backend and nginx are ready");
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"MSAP1 web backend and nginx are ready", "service_ready");
 		unsigned recovery_failures = 0;
 		while (!engine_finished) {
 			std::this_thread::sleep_for(5s);
 			if (engine_finished)
 				break;
 			if (!nginx.is_running()) {
+				log_message(nginx_log, mnc::logging::Priority::warning,
+					"nginx stopped unexpectedly; recovery is starting",
+					"nginx_unexpected_exit",
+					{{"MNC_RECOVERY_ATTEMPT",
+					  std::to_string(recovery_failures + 1)}});
 				if (!nginx.on()) {
 					if (++recovery_failures >= 3) {
+						log_message(nginx_log,
+							mnc::logging::Priority::critical,
+							"nginx recovery failed repeatedly: " +
+								nginx.last_error(),
+							"nginx_recovery_exhausted");
 						engine.stop();
 						break;
 					}
 					continue;
 				}
 				recovery_failures = 0;
+				log_message(nginx_log, mnc::logging::Priority::notice,
+					"nginx recovered successfully",
+					"nginx_recovered");
 			}
 			(void)notifier.watchdog("MSAP1 web backend and nginx are healthy");
 		}
 
 		(void)notifier.stopping("MSAP1 web backend is stopping");
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"MSAP1 web backend is stopping", "service_stopping");
 		(void)nginx.off();
+		log_message(nginx_log, mnc::logging::Priority::info,
+			"nginx stopped", "nginx_stopped");
 		engine.stop();
 		engine_thread.join();
 		if (engine_error)
@@ -551,7 +691,9 @@ int main()
 				nginx.last_error());
 		return 0;
 	} catch (const std::exception &error) {
-		std::cerr << "msap1-web-backend: " << error.what() << '\n';
+		log_message(lifecycle_log, mnc::logging::Priority::critical,
+			"msap1-web-backend: " + std::string(error.what()),
+			"service_failed");
 		return 1;
 	}
 }

@@ -10,6 +10,10 @@
   recording transient results here.
 - Public headers are under `include/msap1/`; shared implementation is under
   `src/`, and each executable has its own directory under `apps/`.
+- Reusable Linux logging interfaces live under `include/mnc/logging` and use
+  the `mnc::logging` namespace. Keep product-neutral journal writer/query
+  mechanics there and MSAP1 component, event, and access policy in this
+  repository's applications.
 - `libs/openamp-helper` is the shared Linux RPMsg transport submodule. Keep
   service discovery, `rpmsg_chrdev` binding, and generic endpoint I/O there;
   keep MSAP1 wire-protocol handling in this repository.
@@ -26,6 +30,9 @@
 - `msap1-fpga-acquisition` is the sole meter DMA and RPMsg lifecycle owner. It
   opens/arms DMA, commits the JSON-derived configuration through R5 core 0,
   requests capture START, and requests STOP before closing DMA.
+- Product services emit structured journald entries and `mnc log` provides the
+  consolidated reader. Journald remains the only log store; do not add a
+  parallel product log file or database.
 - CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
   `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
   endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
