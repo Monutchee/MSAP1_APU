@@ -25,7 +25,7 @@ No fixed reserved-memory region is required; buffers come from DMA/CMA.
 
 ```sh
 systemctl cat msap1-fpga-acquisition
-cat /etc/monutchee/msap1/default/adc_config/acuvim3-sb-5a.json
+cat /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
 mnc meter health
 ```
 

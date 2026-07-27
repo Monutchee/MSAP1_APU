@@ -224,7 +224,7 @@ void meter_configuration()
 		std::ofstream output(path);
 		output << R"({
   "schema_version": 2,
-  "profile_id": "acuvim3-sb-5a",
+  "profile_id": "msap1-sensor-board-5a",
   "rms_window_ms": 200,
   "remove_dc": false,
   "adc_reference_volts": 1.0,
@@ -349,7 +349,7 @@ void disabled_mv_configuration()
 		std::ofstream output(path);
 		output << R"({
   "schema_version": 2,
-  "profile_id": "acuvim3-sb-mv",
+  "profile_id": "msap1-sensor-board-mv",
   "rms_window_ms": 200,
   "remove_dc": true,
   "adc_reference_volts": 1.0,
@@ -394,7 +394,7 @@ void one_amp_configuration()
 		std::ofstream output(path);
 		output << R"({
   "schema_version":2,
-  "profile_id":"acuvim3-sb-1a",
+  "profile_id":"msap1-sensor-board-1a",
   "rms_window_ms":200,
   "remove_dc":true,
   "adc_reference_volts":1.0,

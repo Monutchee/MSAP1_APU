@@ -11,7 +11,7 @@
 namespace msap1 {
 
 inline constexpr const char *default_meter_config_path =
-	"/etc/monutchee/msap1/default/adc_config/acuvim3-sb-5a.json";
+	"/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json";
 
 struct VoltageChannelConfig {
 	std::uint32_t channel = 0;

@@ -32,7 +32,7 @@
 - The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-2
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
   physical current/voltage frontends, and the 200 ms RMS window. The packaged
-  runtime default is `acuvim3-sb-5a.json`. Profiles also define CH6/VLA
+  runtime default is `msap1-sensor-board-5a.json`. Profiles also define CH6/VLA
   zero-crossing frequency measurement; a valid Web-generated complete profile
   is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
 - ADC and meter payloads never travel over RPMsg. RPMsg carries only
@@ -50,6 +50,9 @@
   Q16 microvolts and microamps. The selected complete profile chooses
   mean-corrected AC RMS or zero-referenced total RMS and supplies the
   per-channel physical scaling and AD7771 PGA factors.
+- Use neutral MSAP1 sensor-board identifiers in profile IDs, paths, CLI/API
+  output, tests, and documentation. Do not introduce third-party vendor or
+  product branding into this repository.
 
 ## Cross-repository ABI
 

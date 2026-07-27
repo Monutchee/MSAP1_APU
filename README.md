@@ -35,9 +35,9 @@ The project uses C++23, Glaze 7.9.0, OpenAMP-helper-APU, and WebEngine.
 The Yocto package installs complete schema-version-2 ADC profiles at:
 
 ```text
-/etc/monutchee/msap1/default/adc_config/acuvim3-sb-1a.json
-/etc/monutchee/msap1/default/adc_config/acuvim3-sb-5a.json
-/etc/monutchee/msap1/default/adc_config/acuvim3-sb-mv.json
+/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-1a.json
+/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
+/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-mv.json
 ```
 
 Each profile also contains the CH6/VLA positive zero-crossing frequency
@@ -45,7 +45,7 @@ configuration. Older schema-version-2 profiles without that object receive
 the rolling-10-cycle, 40–70 Hz, 1 V hysteresis defaults. Runtime frequency
 limits must remain ordered within the supported 10–200 Hz range.
 
-The systemd service selects `acuvim3-sb-5a.json` by default. Pass exactly one
+The systemd service selects `msap1-sensor-board-5a.json` by default. Pass exactly one
 complete profile with `msap1-fpga-acquisition --config <path>`; files are not
 merged. A valid `/etc/monutchee/msap1/adc_config/active.json` takes precedence
 at boot. An authenticated frequency update stages and validates the complete
