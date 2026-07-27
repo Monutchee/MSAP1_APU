@@ -3,6 +3,7 @@
 #include "msap1/meter_record.hpp"
 #include "msap1/protocol.hpp"
 #include "msap1/rpmsg_endpoint.hpp"
+#include "mnc/logging/logging.hpp"
 
 #include <array>
 #include <cerrno>
@@ -12,7 +13,9 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <initializer_list>
 #include <optional>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -30,6 +33,24 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 
 volatile std::sig_atomic_t stop_requested = 0;
+
+const mnc::logging::Logger lifecycle_log("fpga-acquisition", "lifecycle");
+const mnc::logging::Logger dma_log("fpga-acquisition", "dma");
+const mnc::logging::Logger rpmsg_log("fpga-acquisition", "rpmsg");
+const mnc::logging::Logger config_log("fpga-acquisition", "adc-config");
+const mnc::logging::Logger health_log("fpga-acquisition", "health");
+
+void log_message(
+	const mnc::logging::Logger &logger, mnc::logging::Priority priority,
+	std::string message, std::string_view event,
+	std::initializer_list<mnc::logging::Field> fields = {},
+	const std::source_location &source = std::source_location::current())
+{
+	(void)logger.write(priority, message, event,
+			   std::span<const mnc::logging::Field>(
+				   fields.begin(), fields.size()),
+			   source);
+}
 
 void handle_signal(int)
 {
@@ -102,9 +123,13 @@ msap1::PreparedMeterConfiguration load_runtime_configuration(
 			return msap1::load_meter_configuration(
 				options.active_configuration);
 		} catch (const std::exception &error) {
-			std::cerr << "ignoring invalid active meter profile "
-				  << options.active_configuration << ": "
-				  << error.what() << '\n';
+			log_message(config_log, mnc::logging::Priority::warning,
+				"ignoring invalid active meter profile " +
+					options.active_configuration + ": " +
+					error.what(),
+				"active_profile_invalid",
+				{{"MNC_CONFIG_PATH",
+				  options.active_configuration}});
 		}
 	}
 	return msap1::load_meter_configuration(options.configuration);
@@ -155,12 +180,19 @@ public:
 		fd_ = ::open(path_.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 		if (fd_ < 0)
 			throw_errno("open " + path_);
+		log_message(dma_log, mnc::logging::Priority::info,
+			"meter DMA device opened: " + path_, "dma_opened",
+			{{"MNC_DEVICE", path_}});
 	}
 
 	void stop() noexcept
 	{
-		if (fd_ >= 0)
+		if (fd_ >= 0) {
 			::close(fd_);
+			log_message(dma_log, mnc::logging::Priority::info,
+				"meter DMA device closed: " + path_, "dma_closed",
+				{{"MNC_DEVICE", path_}});
+		}
 		fd_ = -1;
 	}
 
@@ -195,9 +227,14 @@ public:
 	void run()
 	{
 		start();
-		std::cerr << "meter acquisition started: " << meter_.path()
-			  << ", configuration generation "
-			  << configuration_.wire.generation << '\n';
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"meter acquisition started: " + meter_.path() +
+				", configuration generation " +
+				std::to_string(configuration_.wire.generation),
+			"service_started",
+			{{"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(configuration_.wire.generation)},
+			 {"MNC_DEVICE", meter_.path()}});
 		auto next_health = Clock::now() + 1s;
 
 		while (!stop_requested) {
@@ -216,6 +253,9 @@ public:
 			if ((descriptors[0].revents &
 			     (POLLERR | POLLHUP | POLLNVAL)) != 0) {
 				++dma_read_errors_;
+				log_message(dma_log, mnc::logging::Priority::error,
+					"meter DMA device disconnected",
+					"dma_disconnected");
 				throw std::runtime_error("meter DMA device disconnected");
 			}
 			if ((descriptors[1].revents & POLLIN) != 0)
@@ -225,12 +265,18 @@ public:
 				try {
 					cached_health_ = query_rpu_health();
 				} catch (const std::exception &error) {
-					std::cerr << "RPU health query failed: "
-						  << error.what() << '\n';
+					log_message(rpmsg_log,
+						mnc::logging::Priority::warning,
+						"RPU health query failed: " +
+							std::string(error.what()),
+						"health_query_failed");
 				}
 				next_health = Clock::now() + 1s;
 			}
 		}
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"meter acquisition service is stopping",
+			"service_stopping");
 	}
 
 private:
@@ -277,23 +323,79 @@ private:
 			if (message.header.sequence != sequence)
 				continue;
 			if (message.header.type == MSAP1_RPU_MSG_ERROR ||
-			    message.header.status != MSAP1_RPU_STATUS_OK)
+			    message.header.status != MSAP1_RPU_STATUS_OK) {
+				log_message(rpmsg_log,
+					mnc::logging::Priority::error,
+					"RPU rejected request with status " +
+						std::to_string(
+							message.header.status),
+					"request_rejected",
+					{{"MNC_REQUEST_ID",
+					  std::to_string(sequence)},
+					 {"MNC_RPU_STATUS",
+					  std::to_string(
+						  message.header.status)}});
 				throw std::runtime_error(
 					"RPU rejected request (status " +
 					std::to_string(message.header.status) + ")");
+			}
 			return message;
 		}
+		log_message(rpmsg_log, mnc::logging::Priority::error,
+			"timed out waiting for RPU response", "request_timeout",
+			{{"MNC_REQUEST_ID", std::to_string(sequence)}});
 		throw std::runtime_error("timed out waiting for RPU response");
 	}
 
 	msap1_adc_health_payload query_rpu_health()
 	{
-		return msap1::decode_adc_health(
+		auto health = msap1::decode_adc_health(
 			transact(MSAP1_RPU_MSG_ADC_HEALTH_GET));
+		observe_rpu_health(health);
+		return health;
+	}
+
+	void observe_rpu_health(const msap1_adc_health_payload &health)
+	{
+		if (last_health_flags_ &&
+		    *last_health_flags_ == health.health_flags &&
+		    last_spi_error_ == health.spi_error)
+			return;
+		constexpr std::uint32_t expected =
+			MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
+			MSAP1_ADC_HEALTH_INITIALIZED |
+			MSAP1_ADC_HEALTH_INIT_COMPLETE |
+			MSAP1_ADC_HEALTH_CONFIG_MATCH |
+			MSAP1_ADC_HEALTH_CAPTURE_ACTIVE |
+			MSAP1_ADC_HEALTH_NO_OVERFLOW |
+			MSAP1_ADC_HEALTH_HEADERS_VALID |
+			MSAP1_ADC_HEALTH_RATE_MATCH;
+		const bool healthy = (health.health_flags & expected) == expected &&
+			health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
+		log_message(health_log,
+			healthy ? mnc::logging::Priority::notice
+				: mnc::logging::Priority::warning,
+			healthy ? "RPU ADC health became healthy"
+				: "RPU ADC health became degraded",
+			healthy ? "rpu_health_healthy" : "rpu_health_degraded",
+			{{"MNC_ADC_HEALTH_FLAGS",
+			  std::to_string(health.health_flags)},
+			 {"MNC_SPI_ERROR", std::to_string(health.spi_error)},
+			 {"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(health.meter_generation)}});
+		last_health_flags_ = health.health_flags;
+		last_spi_error_ = health.spi_error;
 	}
 
 	void configure_meter()
 	{
+		log_message(config_log, mnc::logging::Priority::info,
+			"applying coordinated ADC and PL meter configuration",
+			"configuration_apply_started",
+			{{"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(configuration_.wire.generation)},
+			 {"MNC_SAMPLE_RATE_HZ",
+			  std::to_string(configuration_.wire.sample_rate_hz)}});
 		const auto response = transact(MSAP1_RPU_MSG_METER_CONFIG_SET,
 			&configuration_.wire, sizeof(configuration_.wire));
 		const auto acknowledgement =
@@ -307,6 +409,13 @@ private:
 		    (acknowledgement.processing_status & 1u) == 0u)
 			throw std::runtime_error(
 				"RPU meter configuration readback does not match");
+		log_message(config_log, mnc::logging::Priority::notice,
+			"coordinated ADC and PL meter configuration applied",
+			"configuration_applied",
+			{{"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(configuration_.wire.generation)},
+			 {"MNC_SAMPLE_RATE_HZ",
+			  std::to_string(configuration_.wire.sample_rate_hz)}});
 	}
 
 	void start(bool apply_configuration = true)
@@ -338,6 +447,10 @@ private:
 			throw;
 		}
 		running_ = true;
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"ADC capture and meter DMA started", "capture_started",
+			{{"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(configuration_.wire.generation)}});
 	}
 
 	void stop() noexcept
@@ -348,10 +461,15 @@ private:
 			(void)transact(MSAP1_RPU_MSG_ADC_CAPTURE_STOP, nullptr, 0,
 				       500ms);
 		} catch (const std::exception &error) {
-			std::cerr << "RPU capture stop failed: " << error.what() << '\n';
+			log_message(rpmsg_log, mnc::logging::Priority::warning,
+				"RPU capture stop failed: " +
+					std::string(error.what()),
+				"capture_stop_failed");
 		}
 		meter_.stop();
 		running_ = false;
+		log_message(lifecycle_log, mnc::logging::Priority::notice,
+			"ADC capture and meter DMA stopped", "capture_stopped");
 	}
 
 	void apply_frequency_configuration(
@@ -389,6 +507,12 @@ private:
 			msap1::save_meter_configuration(
 				configuration_.source,
 				options_.active_configuration);
+			log_message(config_log, mnc::logging::Priority::notice,
+				"frequency configuration applied and persisted",
+				"frequency_configuration_applied",
+				{{"MNC_CONFIGURATION_GENERATION",
+				  std::to_string(
+					  configuration_.wire.generation)}});
 		} catch (...) {
 			if (running_)
 				stop();
@@ -397,8 +521,12 @@ private:
 				try {
 					start();
 				} catch (const std::exception &rollback_error) {
-					std::cerr << "frequency configuration rollback failed: "
-						  << rollback_error.what() << '\n';
+					log_message(config_log,
+						mnc::logging::Priority::critical,
+						"frequency configuration rollback failed: " +
+							std::string(
+								rollback_error.what()),
+						"frequency_rollback_failed");
 				}
 			}
 			throw;
@@ -444,11 +572,23 @@ private:
 					cached_health_ = query_rpu_health();
 				}
 			} catch (const std::exception &rollback_error) {
-				std::cerr << "sample-rate rollback failed: "
-					  << rollback_error.what() << '\n';
+				log_message(config_log,
+					mnc::logging::Priority::critical,
+					"sample-rate rollback failed: " +
+						std::string(
+							rollback_error.what()),
+					"sample_rate_rollback_failed");
 			}
 			throw;
 		}
+		log_message(config_log, mnc::logging::Priority::notice,
+			"temporary ADC sample rate applied: " +
+				std::to_string(sample_rate_hz) + " frame/s",
+			"sample_rate_applied",
+			{{"MNC_SAMPLE_RATE_HZ",
+			  std::to_string(sample_rate_hz)},
+			 {"MNC_CONFIGURATION_GENERATION",
+			  std::to_string(configuration_.wire.generation)}});
 	}
 
 	void run_adc_diagnostic(std::uint32_t flow)
@@ -481,13 +621,24 @@ private:
 				start(!diagnostic_succeeded);
 			}
 			cached_health_ = query_rpu_health();
+			log_message(config_log, mnc::logging::Priority::notice,
+				"ADC diagnostic flow completed",
+				"adc_diagnostic_completed",
+				{{"MNC_DIAGNOSTIC_FLOW", std::to_string(flow)},
+				 {"MNC_DIAGNOSTIC_ERROR",
+				  std::to_string(last_adc_diagnostic_
+							 .diagnostic_error)}});
 		} catch (...) {
 			if (restart && !running_) {
 				try {
 					start();
 				} catch (const std::exception &rollback_error) {
-					std::cerr << "ADC diagnostic recovery failed: "
-						  << rollback_error.what() << '\n';
+					log_message(config_log,
+						mnc::logging::Priority::critical,
+						"ADC diagnostic recovery failed: " +
+							std::string(
+								rollback_error.what()),
+						"adc_diagnostic_recovery_failed");
 				}
 			}
 			throw;
@@ -525,6 +676,10 @@ private:
 			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
 				return;
 			++dma_read_errors_;
+			log_message(dma_log, mnc::logging::Priority::error,
+				"meter DMA read failed: " +
+					std::string(std::strerror(errno)),
+				"dma_read_failed");
 			return;
 		}
 		if (size == 0)
@@ -532,6 +687,10 @@ private:
 		dma_bytes_ += static_cast<std::uint64_t>(size);
 		if (size % static_cast<ssize_t>(sizeof(msap1::MeterRecord)) != 0) {
 			++invalid_records_;
+			log_message(dma_log, mnc::logging::Priority::warning,
+				"meter DMA returned a partial record",
+				"dma_partial_record",
+				{{"MNC_DMA_BYTES", std::to_string(size)}});
 			return;
 		}
 		const auto count = static_cast<std::size_t>(size) /
@@ -607,8 +766,16 @@ private:
 					break;
 				}
 			} catch (const std::exception &error) {
-				std::cerr << "acquisition command failed: "
-					  << error.what() << '\n';
+				log_message(lifecycle_log,
+					mnc::logging::Priority::error,
+					"acquisition command failed: " +
+						std::string(error.what()),
+					"command_failed",
+					{{"MNC_REQUEST_ID",
+					  std::to_string(request.sequence)},
+					 {"MNC_COMMAND",
+					  std::to_string(static_cast<std::uint32_t>(
+						  request.command))}});
 				if (request.command == msap1::AcquisitionCommand::health)
 					response.status =
 						msap1::AcquisitionStatus::rpu_error;
@@ -653,6 +820,8 @@ private:
 	std::optional<msap1::MeterRecord> latest_record_;
 	msap1_adc_health_payload cached_health_{};
 	msap1_adc_diagnostic_payload last_adc_diagnostic_{};
+	std::optional<std::uint32_t> last_health_flags_;
+	std::uint32_t last_spi_error_ = 0;
 };
 
 } // namespace
@@ -666,7 +835,9 @@ int main(int argc, char **argv)
 		daemon.run();
 		return 0;
 	} catch (const std::exception &error) {
-		std::cerr << "msap1-fpga-acquisition: " << error.what() << '\n';
+		log_message(lifecycle_log, mnc::logging::Priority::critical,
+			"msap1-fpga-acquisition: " + std::string(error.what()),
+			"service_failed");
 		return 1;
 	}
 }

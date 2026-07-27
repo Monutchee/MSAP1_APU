@@ -29,6 +29,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The project uses C++23, Glaze 7.9.0, OpenAMP-helper-APU, and WebEngine.
+The reusable `mnc::logging` library writes and reads structured systemd
+journal entries; MSAP1-specific component/event policy remains in this
+repository.
 
 ## Runtime
 
@@ -81,6 +84,8 @@ The authenticated external API is:
 - `GET /api/v1/meter/readings`
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
+- `GET /api/v1/developer/logs` (administrator only; bounded journal page with
+  `component`, `module`, `priority`, `after`, and `limit` query parameters)
 - `GET /api/v1/adc/capture`
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 
@@ -100,7 +105,22 @@ mnc adc start
 mnc adc rate
 mnc adc rate --sps 16000
 mnc adc testflw --flow 1
+mnc log
+mnc log --component fpga-acquisition
+mnc log --module dma --priority warning
+mnc log --since "10 minutes ago" --follow
+mnc log --json
 ```
+
+`mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
+events in timestamp order. Structured entries identify their process component,
+internal module, stable event name, source location, and optional request or
+configuration generation. `--priority warning` includes warnings and all more
+severe levels. `--json` emits one object per journal entry for automation.
+Journal cursors back the public C++ reader API so a future bounded MCP log
+reader can continue reliably across equal timestamps and journal rotation.
+Reading the complete system journal requires root or membership in the
+`systemd-journal` group; product services need no special permission to write.
 
 `mnc adc rate` compares the requested rate, SRC-register-derived rate, and
 physical DRDY rate. `--sps` temporarily selects one of 1, 2, 4, 8, 16, 32, 64,

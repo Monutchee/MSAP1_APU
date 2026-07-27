@@ -65,6 +65,23 @@ void option_parsing()
 		"ADC diagnostic flow command was not selected");
 	require(flow.options.diagnostic_flow == 1,
 		"ADC diagnostic flow was not parsed");
+
+	const auto log = application.parse({
+		"log", "--component", "fpga-acquisition", "--module=dma",
+		"--priority", "warning", "--since", "10 minutes ago",
+		"--limit", "25", "--follow", "--json",
+	});
+	require(!log.show_help && log.command->name() == "log",
+		"log command was not selected");
+	require(log.options.log_component == "fpga-acquisition" &&
+			log.options.log_module == "dma",
+		"log classification filters were not parsed");
+	require(log.options.log_priority == "warning" &&
+			log.options.log_since == "10 minutes ago",
+		"log priority/time filters were not parsed");
+	require(log.options.result_limit == 25 && log.options.log_follow &&
+			log.options.log_json,
+		"log limit/flag options were not parsed");
 }
 
 void help_and_errors()
@@ -101,13 +118,24 @@ void help_and_errors()
 		"unsupported ADC diagnostic flow was accepted");
 	require(error.str().find("supports only flow 1") != std::string::npos,
 		"diagnostic-flow error omitted the supported flow");
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"log", "--priority", "verbose"}, output, error) == 2,
+		"unknown log priority was accepted");
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"log", "--follow=true"}, output, error) == 2,
+		"flag option accepted an inline value");
 }
 
 void completion()
 {
 	const auto application = msap1::cli::make_application();
 	auto candidates = application.complete({""});
-	require(contains(candidates, "adc") && contains(candidates, "meter"),
+	require(contains(candidates, "adc") && contains(candidates, "meter") &&
+			contains(candidates, "log"),
 		"root completion omitted command groups");
 	candidates = application.complete({"meter", ""});
 	require(contains(candidates, "health") && contains(candidates, "view"),
@@ -129,6 +157,11 @@ void completion()
 	candidates = application.complete({"adc", "testflw", "--"});
 	require(contains(candidates, "--flow"),
 		"ADC diagnostic completion omitted --flow");
+	candidates = application.complete({"log", "--"});
+	require(contains(candidates, "--component") &&
+			contains(candidates, "--follow") &&
+			contains(candidates, "--json"),
+		"log completion omitted options");
 }
 
 } // namespace

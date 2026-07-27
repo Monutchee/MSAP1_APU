@@ -407,5 +407,6 @@ void register_meter_commands(Application &application)
 }
 
 void request_stop() noexcept { stop_requested = 1; }
+bool stop_was_requested() noexcept { return stop_requested != 0; }
 
 } // namespace msap1::cli

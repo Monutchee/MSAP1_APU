@@ -44,7 +44,8 @@ bool find_path(const Command &current, const Command *target,
 
 void write_option(std::ostream &output, const OptionSpec &option)
 {
-	const std::string label = "--" + option.name + " " + option.value_name;
+	const std::string label = "--" + option.name +
+		(option.takes_value ? " " + option.value_name : "");
 	output << "  " << std::left << std::setw(24) << label << option.summary
 	       << '\n';
 }
@@ -164,7 +165,11 @@ Invocation Application::parse(const std::vector<std::string> &arguments) const
 			if (option == nullptr)
 				throw UsageError("unknown option '--" + name + "'", *current);
 			std::string value;
-			if (equals != std::string::npos) {
+			if (!option->takes_value) {
+				if (equals != std::string::npos)
+					throw UsageError("--" + name +
+						" does not take a value", *current);
+			} else if (equals != std::string::npos) {
 				value = argument.substr(equals + 1);
 			} else {
 				if (++index >= arguments.size())
@@ -284,7 +289,7 @@ Application::complete(const std::vector<std::string> &arguments) const
 			const auto *option = find_option(*current, name);
 			if (option == nullptr)
 				return {};
-			if (equals == std::string::npos)
+			if (equals == std::string::npos && option->takes_value)
 				pending_value = option;
 			continue;
 		}
@@ -327,6 +332,7 @@ Application make_application()
 	Application application;
 	register_meter_commands(application);
 	register_adc_commands(application);
+	register_log_command(application);
 	return application;
 }
 

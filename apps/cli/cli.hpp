@@ -15,6 +15,12 @@ struct Options {
 	std::optional<double> duration_seconds;
 	std::optional<std::uint32_t> sample_rate_hz;
 	std::optional<std::uint32_t> diagnostic_flow;
+	std::optional<std::string> log_component;
+	std::optional<std::string> log_module;
+	std::optional<std::string> log_priority;
+	std::optional<std::string> log_since;
+	bool log_follow = false;
+	bool log_json = false;
 	int timeout_ms = 3000;
 };
 
@@ -26,6 +32,7 @@ struct OptionSpec {
 	std::string summary;
 	CompletionKind completion = CompletionKind::none;
 	std::function<void(Options &, const std::string &)> apply;
+	bool takes_value = true;
 };
 
 class Command {
@@ -86,6 +93,8 @@ private:
 Application make_application();
 void register_meter_commands(Application &application);
 void register_adc_commands(Application &application);
+void register_log_command(Application &application);
 void request_stop() noexcept;
+bool stop_was_requested() noexcept;
 
 } // namespace msap1::cli
