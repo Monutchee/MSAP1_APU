@@ -28,20 +28,30 @@ std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 {
 	std::vector<HealthReason> reasons;
-	if (!health_flag(health, MSAP1_ADC_HEALTH_SPI_RESPONSIVE) ||
-	    health.spi_error != MSAP1_ADC_SPI_HEALTH_OK)
+	const bool spi_snapshot_valid =
+		health_flag(health, MSAP1_ADC_HEALTH_SPI_RESPONSIVE) &&
+		health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
+	if (!spi_snapshot_valid)
 		append_reason(reasons, "spi_unresponsive",
 			      "ADC SPI register-health check failed (error " +
 				      std::to_string(health.spi_error) + ")");
 	if (!health_flag(health, MSAP1_ADC_HEALTH_INITIALIZED))
 		append_reason(reasons, "not_initialized",
 			      "ADC driver is not initialized");
-	if (!health_flag(health, MSAP1_ADC_HEALTH_INIT_COMPLETE))
-		append_reason(reasons, "init_incomplete",
-			      "ADC INIT_COMPLETE is not asserted");
-	if (!health_flag(health, MSAP1_ADC_HEALTH_CONFIG_MATCH))
-		append_reason(reasons, "configuration_mismatch",
-			      "ADC register readback does not match the active configuration");
+	/*
+	 * INIT_COMPLETE and configuration-match are derived from the same SPI
+	 * audit snapshot. When that snapshot is invalid, reporting them as
+	 * independent failures obscures the actual transport fault.
+	 */
+	if (spi_snapshot_valid) {
+		if (!health_flag(health, MSAP1_ADC_HEALTH_INIT_COMPLETE))
+			append_reason(reasons, "init_incomplete",
+				      "ADC INIT_COMPLETE is not asserted");
+		if (!health_flag(health, MSAP1_ADC_HEALTH_CONFIG_MATCH))
+			append_reason(
+				reasons, "configuration_mismatch",
+				"ADC register readback does not match the active configuration");
+	}
 	if (!health_flag(health, MSAP1_ADC_HEALTH_CAPTURE_ACTIVE))
 		append_reason(reasons, "capture_inactive",
 			      "ADC capture is not active");
@@ -112,10 +122,12 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 	// Only an arithmetic error means the PL metering path itself is unhealthy.
 	result.frequency_arithmetic_ok =
 		response.has_meter_record != 0u && !frequency.arithmetic_error;
+	result.record_stale = response.running != 0u &&
+		response.meter_record_age_ms > meter_record_stale_after_ms;
 	result.acquisition_healthy = response.running != 0u &&
 		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
 		response.invalid_records == 0u && response.sequence_gaps == 0u &&
-		result.frequency_arithmetic_ok;
+		!result.record_stale && result.frequency_arithmetic_ok;
 	result.adc_healthy = result.spi_responsive && result.initialized &&
 		result.configuration_match && result.rate_match &&
 		result.capture_active && result.fifo_ok && result.headers_valid &&

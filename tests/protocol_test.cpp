@@ -97,6 +97,10 @@ void adc_health_round_trip()
 	health.status_1 = 0x10;
 	health.status_2 = 0x08;
 	health.status_3 = 0x30;
+	health.spi_protocol_error_count = 7;
+	health.spi_retry_recovery_count = 3;
+	health.spi_last_failed_register = 0x4d;
+	health.spi_last_received_header = 0x00;
 
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ADC_HEALTH,
 		23, &health, sizeof(health));
@@ -137,6 +141,11 @@ void adc_health_round_trip()
 	require(decoded.status_1 == 0x10 && decoded.status_2 == 0x08 &&
 			decoded.status_3 == 0x30,
 		"wrong health status registers");
+	require(decoded.spi_protocol_error_count == 7 &&
+			decoded.spi_retry_recovery_count == 3 &&
+			decoded.spi_last_failed_register == 0x4d &&
+			decoded.spi_last_received_header == 0x00,
+		"wrong SPI health diagnostics");
 }
 
 void adc_diagnostic_round_trip()
@@ -464,6 +473,7 @@ void meter_health_evaluation()
 	msap1::AcquisitionResponse response{};
 	response.running = 1;
 	response.has_meter_record = 1;
+	response.meter_record_age_ms = 0;
 	response.configuration_generation = 0x1234;
 	response.rpu_health.health_flags =
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
@@ -487,6 +497,14 @@ void meter_health_evaluation()
 	require(healthy.adc_degraded_reasons.empty(),
 		"healthy ADC response reported degradation reasons");
 
+	response.meter_record_age_ms =
+		msap1::meter_record_stale_after_ms + 1u;
+	const auto stale = msap1::evaluate_meter_health(response);
+	require(!stale.healthy && !stale.acquisition_healthy &&
+			stale.record_stale && stale.adc_healthy,
+		"stale meter data did not degrade acquisition health");
+	response.meter_record_age_ms = 0;
+
 	response.sequence_gaps = 1;
 	const auto degraded = msap1::evaluate_meter_health(response);
 	require(!degraded.healthy && !degraded.acquisition_healthy &&
@@ -508,6 +526,22 @@ void meter_health_evaluation()
 		"ADC rate-mismatch reason omitted measured/configured context");
 
 	response.rpu_health.health_flags |= MSAP1_ADC_HEALTH_RATE_MATCH;
+	response.rpu_health.health_flags &=
+		~(MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
+		  MSAP1_ADC_HEALTH_INIT_COMPLETE |
+		  MSAP1_ADC_HEALTH_CONFIG_MATCH);
+	response.rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_PROTOCOL_FAILED;
+	const auto spi_failure = msap1::evaluate_meter_health(response);
+	require(spi_failure.adc_degraded_reasons.size() == 1 &&
+			spi_failure.adc_degraded_reasons.front().code ==
+				"spi_unresponsive",
+		"invalid SPI snapshot produced secondary register-health reasons");
+	response.rpu_health.health_flags |=
+		MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
+		MSAP1_ADC_HEALTH_INIT_COMPLETE |
+		MSAP1_ADC_HEALTH_CONFIG_MATCH;
+	response.rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_OK;
+
 	response.latest_record.words[57] = 1u << 7;
 	const auto arithmetic_fault = msap1::evaluate_meter_health(response);
 	require(!arithmetic_fault.healthy &&

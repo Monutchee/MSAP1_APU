@@ -29,6 +29,23 @@ cat /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
 mnc meter health
 ```
 
+The default command reads a concise summary from the acquisition daemon cache.
+Inspect the complete counters and AD7771 register snapshot with:
+
+```sh
+mnc meter health --full
+```
+
+Verify an explicit register audit separately:
+
+```sh
+mnc meter health --refresh --full
+```
+
+The output should show a meter-record age below 1000 ms, no pending health
+confirmation, and stable SPI protocol/retry counters. A single recovered retry
+may increment the diagnostic counters without degrading the cached health.
+
 Expect `PASS`, 32,000 frame/s, a 6,400-frame RMS window, matching non-zero
 configuration generations, active capture, and zero DMA read, invalid-record,
 sequence-gap, FIFO-overflow, and header-error counts. The service command must

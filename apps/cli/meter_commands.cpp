@@ -9,6 +9,7 @@
 #include <csignal>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -241,15 +242,91 @@ int run_meter_health(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
 	const auto response =
-		client.request(AcquisitionCommand::health, options.timeout_ms);
+		client.request(options.health_refresh
+				       ? AcquisitionCommand::health_refresh
+				       : AcquisitionCommand::health,
+			       options.timeout_ms);
 	require_daemon_ok(response);
 	const auto status = evaluate_meter_health(response);
 	const auto &health = response.rpu_health;
-	const auto frequency = response.latest_record.frequency();
+
+	if (!options.health_full) {
+		output << "MSAP1 meter health: "
+		       << (status.healthy ? "PASS" : "FAIL") << '\n'
+		       << "  Acquisition:         "
+		       << (status.acquisition_healthy ? "healthy" : "degraded")
+		       << " (" << (response.running != 0u ? "running" : "stopped")
+		       << ", record ";
+		if (response.meter_record_age_ms !=
+		    std::numeric_limits<std::uint32_t>::max())
+			output << response.meter_record_age_ms << " ms old)\n";
+		else
+			output << "unavailable)\n";
+		output << "  ADC:                 "
+		       << (status.adc_healthy ? "healthy" : "degraded") << '\n'
+		       << "  Sample rate:         " << health.sample_rate_hz
+		       << " configured / ";
+		if (health.drdy_frequency_hz != 0u)
+			output << health.drdy_frequency_hz;
+		else
+			output << "unavailable";
+		output << " measured frame/s\n"
+		       << "  Data-path errors:    DMA " << response.dma_read_errors
+		       << ", invalid " << response.invalid_records << ", gaps "
+		       << response.sequence_gaps << ", FIFO "
+		       << health.overflow_count << ", headers "
+		       << health.header_error_count << '\n'
+		       << "  Health audit:        ";
+		if (response.health_probe_pending != 0u) {
+			if (response.health_probe_failures == 0u)
+				output << "startup stabilization\n";
+			else
+				output << "confirmation pending ("
+				       << response.health_probe_failures
+				       << " failure)\n";
+		} else if (response.rpu_health_age_ms !=
+			   std::numeric_limits<std::uint32_t>::max()) {
+			output << "cached " << response.rpu_health_age_ms
+			       << " ms ago\n";
+		} else {
+			output << "unavailable\n";
+		}
+		if (!status.adc_degraded_reasons.empty()) {
+			output << "  ADC degraded because:\n";
+			for (const auto &reason : status.adc_degraded_reasons)
+				output << "    - [" << reason.code << "] "
+				       << reason.message << '\n';
+		}
+		output << "  Run 'mnc meter health --full' for complete diagnostics.\n";
+		return status.healthy ? 0 : 1;
+	}
 
 	output << "MSAP1 meter health: " << (status.healthy ? "PASS" : "FAIL") << '\n'
 	       << "  Linux acquisition:    " << yes_no(response.running != 0u) << '\n'
 	       << "  Meter record present: " << yes_no(response.has_meter_record != 0u)
+	       << '\n'
+	       << "  Meter record stale:   " << yes_no(status.record_stale) << '\n'
+	       << "  Meter record age:     ";
+	if (response.meter_record_age_ms !=
+	    std::numeric_limits<std::uint32_t>::max())
+		output << response.meter_record_age_ms << " ms\n";
+	else
+		output << "unavailable\n";
+	output << "  RPU health cache age: ";
+	if (response.rpu_health_age_ms !=
+	    std::numeric_limits<std::uint32_t>::max())
+		output << response.rpu_health_age_ms << " ms\n";
+	else
+		output << "unavailable\n";
+	output << "  Health confirmation:  "
+	       << (response.health_probe_pending == 0u
+			   ? "not pending"
+			   : response.health_probe_failures == 0u
+				   ? "startup stabilization"
+				   : "pending (" +
+					     std::to_string(
+						     response.health_probe_failures) +
+					     " failure)")
 	       << '\n'
 	       << "  Meter records:        " << response.meter_records << '\n'
 	       << "  DMA bytes:            " << response.dma_bytes << '\n'
@@ -280,18 +357,21 @@ int run_meter_health(const Options &options, std::ostream &output)
 		output << "unavailable\n";
 	output << "  FIFO overflows:       " << health.overflow_count << '\n'
 	       << "  Header errors:        " << health.header_error_count << '\n'
+	       << "  SPI protocol errors:  "
+	       << health.spi_protocol_error_count << '\n'
+	       << "  SPI retry recoveries: "
+	       << health.spi_retry_recovery_count << '\n'
+	       << "  Last SPI failure:     register 0x" << std::hex
+	       << static_cast<unsigned int>(health.spi_last_failed_register)
+	       << ", header 0x"
+	       << static_cast<unsigned int>(health.spi_last_received_header)
+	       << std::dec << '\n'
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
 	       << '\n'
 	       << "  Processing status:   0x" << health.processing_status << std::dec
 	       << '\n'
 	       << "  Frequency arithmetic: "
-	       << (status.frequency_arithmetic_ok ? "ok" : "fault") << '\n'
-	       << "  Grid frequency:       ";
-	if (response.has_meter_record != 0u && frequency.valid)
-		output << std::fixed << std::setprecision(3)
-		       << static_cast<double>(frequency.millihz) / 1000.0 << " Hz\n";
-	else
-		output << "unavailable\n";
+	       << (status.frequency_arithmetic_ok ? "ok" : "fault") << '\n';
 	if (!status.adc_degraded_reasons.empty()) {
 		output << "  ADC degraded because:\n";
 		for (const auto &reason : status.adc_degraded_reasons)
@@ -390,8 +470,25 @@ int run_meter_view(const Options &options, std::ostream &output)
 void register_meter_commands(Application &application)
 {
 	Command meter("meter", "Inspect MSAP1 meter health and readings");
-	meter.add_subcommand(Command("health", "Show acquisition and meter health",
-				     run_meter_health));
+	Command health("health", "Show cached acquisition and meter health",
+		       run_meter_health);
+	health.add_option({
+		"refresh", "", "Run an immediate RPU ADC register-health audit",
+		CompletionKind::none,
+		[](Options &options, const std::string &) {
+			options.health_refresh = true;
+		},
+		false,
+	});
+	health.add_option({
+		"full", "", "Show complete pipeline and AD7771 register diagnostics",
+		CompletionKind::none,
+		[](Options &options, const std::string &) {
+			options.health_full = true;
+		},
+		false,
+	});
+	meter.add_subcommand(std::move(health));
 	Command view("view", "Continuously display the latest meter readings",
 		     run_meter_view);
 	view.add_option({

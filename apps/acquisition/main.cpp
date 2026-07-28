@@ -6,6 +6,7 @@
 #include "msap1/rpmsg_endpoint.hpp"
 #include "mnc/logging/logging.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <iostream>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <source_location>
 #include <stdexcept>
@@ -32,6 +34,16 @@ namespace {
 
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
+
+constexpr auto health_audit_interval = 30s;
+constexpr auto health_confirmation_interval = 1s;
+/*
+ * The PL DCLK/DRDY monitor publishes one-second snapshots. Delay the first
+ * post-start audit long enough for a complete capture-active window to replace
+ * the zero-rate snapshot produced while capture was stopped.
+ */
+constexpr auto health_startup_settle_interval = 2s;
+constexpr std::uint32_t health_failures_before_degraded = 2;
 
 volatile std::sig_atomic_t stop_requested = 0;
 
@@ -260,8 +272,6 @@ public:
 			{{"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(configuration_.wire.generation)},
 			 {"MNC_DEVICE", meter_.path()}});
-		auto next_health = Clock::now() + 1s;
-
 		while (!stop_requested) {
 			pollfd descriptors[2] = {
 				{meter_.fd(), POLLIN, 0},
@@ -286,17 +296,22 @@ public:
 			if ((descriptors[1].revents & POLLIN) != 0)
 				handle_client();
 
-			if (running_ && Clock::now() >= next_health) {
+			if (running_ && Clock::now() >= next_health_audit_) {
 				try {
-					cached_health_ = query_rpu_health();
+					refresh_rpu_health();
 				} catch (const std::exception &error) {
 					log_message(rpmsg_log,
 						mnc::logging::Priority::warning,
 						"RPU health query failed: " +
 							std::string(error.what()),
-						"health_query_failed");
+						"health_query_failed",
+						{{"MNC_CONSECUTIVE_FAILURES",
+						  std::to_string(
+							  health_probe_failures_)}});
+					next_health_audit_ =
+						Clock::now() +
+						health_confirmation_interval;
 				}
-				next_health = Clock::now() + 1s;
 			}
 		}
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
@@ -372,12 +387,136 @@ private:
 		throw std::runtime_error("timed out waiting for RPU response");
 	}
 
-	msap1_adc_health_payload query_rpu_health()
+	msap1_adc_health_payload query_rpu_health_raw()
 	{
-		auto health = msap1::decode_adc_health(
+		return msap1::decode_adc_health(
 			transact(MSAP1_RPU_MSG_ADC_HEALTH_GET));
-		observe_rpu_health(health);
-		return health;
+	}
+
+	void observe_spi_recovery(const msap1_adc_health_payload &health)
+	{
+		if (health.spi_retry_recovery_count ==
+		    last_spi_retry_recovery_count_)
+			return;
+		log_message(
+			health_log, mnc::logging::Priority::notice,
+			"ADC SPI register read recovered after retry",
+			"spi_retry_recovered",
+			{{"MNC_SPI_RETRY_RECOVERIES",
+			  std::to_string(health.spi_retry_recovery_count)},
+			 {"MNC_SPI_PROTOCOL_ERRORS",
+			  std::to_string(health.spi_protocol_error_count)},
+			 {"MNC_SPI_REGISTER",
+			  std::to_string(health.spi_last_failed_register)},
+			 {"MNC_SPI_RECEIVED_HEADER",
+			  std::to_string(health.spi_last_received_header)}});
+		last_spi_retry_recovery_count_ =
+			health.spi_retry_recovery_count;
+	}
+
+	void update_cached_operational_health(
+		const msap1_adc_health_payload &health)
+	{
+		/*
+		 * Capture and MeterCore status do not depend on the failed SPI
+		 * snapshot. Keep these fast fields current while retaining the last
+		 * verified register-derived flags and register bytes.
+		 */
+		constexpr std::uint32_t register_health_flags =
+			MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
+			MSAP1_ADC_HEALTH_INIT_COMPLETE |
+			MSAP1_ADC_HEALTH_CONFIG_MATCH;
+		cached_health_.health_flags =
+			(cached_health_.health_flags & register_health_flags) |
+			(health.health_flags & ~register_health_flags);
+		cached_health_.meter_health_flags = health.meter_health_flags;
+		cached_health_.meter_generation = health.meter_generation;
+		cached_health_.conversion_status = health.conversion_status;
+		cached_health_.processing_status = health.processing_status;
+		cached_health_.sample_rate_hz = health.sample_rate_hz;
+		cached_health_.capture_flags = health.capture_flags;
+		cached_health_.frame_count = health.frame_count;
+		cached_health_.overflow_count = health.overflow_count;
+		cached_health_.header_error_count = health.header_error_count;
+		cached_health_.alert_count = health.alert_count;
+		cached_health_.packet_count = health.packet_count;
+		cached_health_.dclk_frequency_hz = health.dclk_frequency_hz;
+		cached_health_.drdy_frequency_hz = health.drdy_frequency_hz;
+		cached_health_.spi_protocol_error_count =
+			health.spi_protocol_error_count;
+		cached_health_.spi_retry_recovery_count =
+			health.spi_retry_recovery_count;
+		cached_health_.spi_last_failed_register =
+			health.spi_last_failed_register;
+		cached_health_.spi_last_received_header =
+			health.spi_last_received_header;
+	}
+
+	void refresh_rpu_health()
+	{
+		health_stabilizing_ = false;
+		msap1_adc_health_payload health{};
+		try {
+			health = query_rpu_health_raw();
+		} catch (...) {
+			++health_probe_failures_;
+			next_health_audit_ =
+				Clock::now() + health_confirmation_interval;
+			throw;
+		}
+		const bool spi_snapshot_valid =
+			(health.health_flags &
+			 MSAP1_ADC_HEALTH_SPI_RESPONSIVE) != 0u &&
+			health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
+
+		if (spi_snapshot_valid) {
+			health_probe_failures_ = 0;
+			cached_health_ = health;
+			has_cached_health_ = true;
+			last_rpu_health_time_ = Clock::now();
+			next_health_audit_ =
+				Clock::now() + health_audit_interval;
+			observe_spi_recovery(health);
+			observe_rpu_health(health);
+			return;
+		}
+
+		++health_probe_failures_;
+		next_health_audit_ =
+			Clock::now() + health_confirmation_interval;
+		if (health_probe_failures_ < health_failures_before_degraded) {
+			log_message(
+				health_log, mnc::logging::Priority::notice,
+				"transient ADC SPI health audit failure; confirmation scheduled",
+				"rpu_health_confirmation_pending",
+				{{"MNC_CONSECUTIVE_FAILURES",
+				  std::to_string(health_probe_failures_)},
+				 {"MNC_SPI_ERROR", std::to_string(health.spi_error)},
+				 {"MNC_SPI_PROTOCOL_ERRORS",
+				  std::to_string(
+					  health.spi_protocol_error_count)},
+				 {"MNC_SPI_REGISTER",
+				  std::to_string(
+					  health.spi_last_failed_register)},
+				 {"MNC_SPI_RECEIVED_HEADER",
+				  std::to_string(
+					  health.spi_last_received_header)}});
+		}
+
+		/*
+		 * A single bad SPI audit must not replace a known-good cache.
+		 * Publish the failure after confirmation, or immediately when no
+		 * previous snapshot exists during startup.
+		 */
+		if (has_cached_health_)
+			update_cached_operational_health(health);
+		if (!has_cached_health_ ||
+		    health_probe_failures_ >= health_failures_before_degraded) {
+			cached_health_ = health;
+			has_cached_health_ = true;
+			last_rpu_health_time_ = Clock::now();
+			observe_rpu_health(health);
+		}
 	}
 
 	void observe_rpu_health(const msap1_adc_health_payload &health)
@@ -400,6 +539,14 @@ private:
 			{{"MNC_ADC_HEALTH_FLAGS",
 			  std::to_string(health.health_flags)},
 			 {"MNC_SPI_ERROR", std::to_string(health.spi_error)},
+			 {"MNC_SPI_PROTOCOL_ERRORS",
+			  std::to_string(health.spi_protocol_error_count)},
+			 {"MNC_SPI_RETRY_RECOVERIES",
+			  std::to_string(health.spi_retry_recovery_count)},
+			 {"MNC_SPI_REGISTER",
+			  std::to_string(health.spi_last_failed_register)},
+			 {"MNC_SPI_RECEIVED_HEADER",
+			  std::to_string(health.spi_last_received_header)},
 			 {"MNC_HEALTH_REASONS", reason_codes},
 			 {"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(health.meter_generation)}});
@@ -461,12 +608,15 @@ private:
 			    !response.payload.empty())
 				throw std::runtime_error(
 					"unexpected RPU capture-start response");
-			cached_health_ = query_rpu_health();
 		} catch (...) {
 			meter_.stop();
 			throw;
 		}
 		running_ = true;
+		health_probe_failures_ = 0;
+		health_stabilizing_ = true;
+		next_health_audit_ =
+			Clock::now() + health_startup_settle_interval;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"ADC capture and meter DMA started", "capture_started",
 			{{"MNC_CONFIGURATION_GENERATION",
@@ -488,6 +638,7 @@ private:
 		}
 		meter_.stop();
 		running_ = false;
+		health_stabilizing_ = false;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"ADC capture and meter DMA stopped", "capture_stopped");
 	}
@@ -521,6 +672,7 @@ private:
 		// generation. Publish no record until the restarted pipeline produces
 		// a coherent MTR1 result for the new generation.
 		latest_record_.reset();
+		last_record_time_.reset();
 		try {
 			if (restart)
 				start();
@@ -566,6 +718,7 @@ private:
 			stop();
 		configuration_ = std::move(staged);
 		latest_record_.reset();
+		last_record_time_.reset();
 
 		try {
 			if (restart) {
@@ -577,19 +730,20 @@ private:
 				// so `mnc adc rate` can diagnose DRDY without first
 				// starting DMA and capture.
 				configure_meter();
-				cached_health_ = query_rpu_health();
+				refresh_rpu_health();
 			}
 		} catch (...) {
 			if (running_)
 				stop();
 			configuration_ = previous;
 			latest_record_.reset();
+			last_record_time_.reset();
 			try {
 				if (restart) {
 					start();
 				} else {
 					configure_meter();
-					cached_health_ = query_rpu_health();
+					refresh_rpu_health();
 				}
 			} catch (const std::exception &rollback_error) {
 				log_message(config_log,
@@ -640,7 +794,8 @@ private:
 					MSAP1_ADC_DIAGNOSTIC_ERROR_NONE;
 				start(!diagnostic_succeeded);
 			}
-			cached_health_ = query_rpu_health();
+			if (!restart)
+				refresh_rpu_health();
 			log_message(config_log, mnc::logging::Priority::notice,
 				"ADC diagnostic flow completed",
 				"adc_diagnostic_completed",
@@ -685,6 +840,7 @@ private:
 					received - expected);
 		}
 		latest_record_ = record;
+		last_record_time_ = Clock::now();
 		++meter_records_;
 	}
 
@@ -722,6 +878,20 @@ private:
 	msap1::AcquisitionResponse make_response(
 		const msap1::AcquisitionRequest &request) const
 	{
+		const auto age_milliseconds =
+			[](const std::optional<Clock::time_point> &timestamp) {
+				if (!timestamp)
+					return std::numeric_limits<std::uint32_t>::max();
+				const auto age =
+					std::chrono::duration_cast<std::chrono::milliseconds>(
+						Clock::now() - *timestamp)
+						.count();
+				return static_cast<std::uint32_t>(
+					std::clamp<std::int64_t>(
+						age, 0,
+						std::numeric_limits<
+							std::uint32_t>::max()));
+			};
 		msap1::AcquisitionResponse response{};
 		response.sequence = request.sequence;
 		response.running = running_ ? 1u : 0u;
@@ -733,6 +903,14 @@ private:
 		response.dma_read_errors = dma_read_errors_;
 		response.invalid_records = invalid_records_;
 		response.sequence_gaps = sequence_gaps_;
+		response.meter_record_age_ms =
+			age_milliseconds(last_record_time_);
+		response.rpu_health_age_ms =
+			age_milliseconds(last_rpu_health_time_);
+		response.health_probe_failures = health_probe_failures_;
+		response.health_probe_pending =
+			health_stabilizing_ || health_probe_failures_ != 0u ? 1u
+									     : 0u;
 		response.rpu_health = cached_health_;
 		response.adc_diagnostic = last_adc_diagnostic_;
 		if (latest_record_)
@@ -759,7 +937,12 @@ private:
 				case msap1::AcquisitionCommand::info:
 					break;
 				case msap1::AcquisitionCommand::health:
-					cached_health_ = query_rpu_health();
+					// The public health path returns the daemon cache.
+					// Web polling must never trigger a 100-register SPI
+					// audit.
+					break;
+				case msap1::AcquisitionCommand::health_refresh:
+					refresh_rpu_health();
 					break;
 				case msap1::AcquisitionCommand::start:
 					start();
@@ -796,7 +979,8 @@ private:
 					 {"MNC_COMMAND",
 					  std::to_string(static_cast<std::uint32_t>(
 						  request.command))}});
-				if (request.command == msap1::AcquisitionCommand::health)
+				if (request.command ==
+				    msap1::AcquisitionCommand::health_refresh)
 					response.status =
 						msap1::AcquisitionStatus::rpu_error;
 				else if (request.command ==
@@ -838,8 +1022,15 @@ private:
 	std::uint64_t invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
 	std::optional<msap1::MeterRecord> latest_record_;
+	std::optional<Clock::time_point> last_record_time_;
 	msap1_adc_health_payload cached_health_{};
 	msap1_adc_diagnostic_payload last_adc_diagnostic_{};
+	bool has_cached_health_ = false;
+	std::optional<Clock::time_point> last_rpu_health_time_;
+	Clock::time_point next_health_audit_ = Clock::now();
+	bool health_stabilizing_ = false;
+	std::uint32_t health_probe_failures_ = 0;
+	std::uint32_t last_spi_retry_recovery_count_ = 0;
 	std::optional<std::uint32_t> last_health_flags_;
 	std::uint32_t last_spi_error_ = 0;
 };

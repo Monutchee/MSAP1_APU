@@ -16,6 +16,7 @@ struct HealthReason {
 struct MeterHealth {
 	bool healthy = false;
 	bool acquisition_healthy = false;
+	bool record_stale = false;
 	bool adc_healthy = false;
 	bool spi_responsive = false;
 	bool initialized = false;

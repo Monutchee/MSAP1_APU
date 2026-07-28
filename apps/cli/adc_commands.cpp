@@ -113,7 +113,7 @@ int run_rate(const Options &options, std::ostream &output)
 		for (unsigned int attempt = 0; attempt < 5; ++attempt) {
 			std::this_thread::sleep_for(
 				std::chrono::milliseconds(1100));
-			response = client.request(AcquisitionCommand::health,
+			response = client.request(AcquisitionCommand::health_refresh,
 				options.timeout_ms);
 			require_daemon_ok(response);
 			const auto current = response.rpu_health.drdy_frequency_hz;
@@ -122,7 +122,7 @@ int run_rate(const Options &options, std::ostream &output)
 			previous_measurement = current;
 		}
 	} else {
-		response = client.request(AcquisitionCommand::health,
+		response = client.request(AcquisitionCommand::health_refresh,
 			options.timeout_ms);
 	}
 	require_daemon_ok(response);

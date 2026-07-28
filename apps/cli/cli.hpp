@@ -21,6 +21,8 @@ struct Options {
 	std::optional<std::string> log_since;
 	bool log_follow = false;
 	bool log_json = false;
+	bool health_refresh = false;
+	bool health_full = false;
 	int timeout_ms = 3000;
 };
 

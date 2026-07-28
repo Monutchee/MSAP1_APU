@@ -97,6 +97,8 @@ require the viewer role; changing ADC capture requires the admin role.
 
 ```sh
 mnc meter health
+mnc meter health --full
+mnc meter health --refresh
 mnc meter view
 mnc meter view --results 20
 mnc meter view --duration 10
@@ -139,7 +141,21 @@ pin reset: it does not power-cycle the ADC and does not reset Linux or the
 FPGA. The command takes about five seconds and prints copyable before,
 reset-asserted, reset-default, and after snapshots.
 
-`mnc meter health` reports both the number of AXI packets accepted by the
+`mnc meter health` reports the daemon's cached RPU audit together with the
+one-second meter-record freshness check in a concise summary. Use
+`mnc meter health --full` for complete pipeline counters, SPI diagnostics,
+decoded AD7771 controls, and the raw register snapshot. The full 100-register
+SPI audit runs
+after a two-second capture-start stabilization interval, after configuration
+changes, and every 30 seconds. The startup delay lets the PL DRDY meter publish
+a complete one-second capture-active window before its rate is evaluated. Use
+`mnc meter health --refresh` when an immediate destructive-on-the-bus audit is
+needed. One failed SPI audit is retained as a pending confirmation and retried
+after one second; only two consecutive failures replace a known-good health
+snapshot. Recovered per-register retries and the last malformed register/header
+are included in the output.
+
+The command also reports both the number of AXI packets accepted by the
 capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate
 measured in PL. The DCLK and DRDY fields are `unavailable` until two one-second
 observation windows complete, and whenever the corresponding signal stops. It
@@ -157,7 +173,8 @@ actions, options, and socket paths.
 
 `mnc meter health` requires matching configuration generations, responsive SPI,
 measured DRDY within 1% of the configured sample rate, active capture, zero
-DMA/header/FIFO errors, and advancing meter records.
+DMA/header/FIFO errors, and a meter record no older than one second. Web health
+polling reads this same cache and never starts an SPI audit.
 `mnc meter view` displays RMS results and the latest VLA grid frequency. An
 absent/out-of-range grid is reported as unavailable without failing acquisition;
 a frequency arithmetic fault does fail meter health. RMS uses the configured

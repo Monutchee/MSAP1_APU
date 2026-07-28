@@ -244,6 +244,11 @@ struct msap1_adc_health_payload {
 	uint8_t buffer_config_2;         /* 0x1A */
 	uint8_t channel_offset[8][3];    /* 0x1C through 0x48, stride 6 */
 	uint8_t channel_gain[8][3];      /* 0x1F through 0x4B, stride 6 */
+	uint32_t spi_protocol_error_count; /* cumulative malformed headers */
+	uint32_t spi_retry_recovery_count; /* reads recovered by retry */
+	uint8_t spi_last_failed_register;
+	uint8_t spi_last_received_header;
+	uint8_t spi_diagnostics_reserved[2];
 } __attribute__((packed));
 
 struct msap1_adc_diagnostic_request {
