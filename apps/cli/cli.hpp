@@ -96,6 +96,7 @@ Application make_application();
 void register_meter_commands(Application &application);
 void register_adc_commands(Application &application);
 void register_log_command(Application &application);
+void register_system_commands(Application &application);
 void request_stop() noexcept;
 bool stop_was_requested() noexcept;
 

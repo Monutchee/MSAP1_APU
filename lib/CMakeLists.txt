@@ -39,6 +39,7 @@ add_library(msap1_apu_core STATIC
 	${PROJECT_SOURCE_DIR}/src/meter_health.cpp
     ${PROJECT_SOURCE_DIR}/src/protocol.cpp
     ${PROJECT_SOURCE_DIR}/src/rpmsg_endpoint.cpp
+    ${PROJECT_SOURCE_DIR}/src/soc_temperature.cpp
 )
 add_library(msap1::apu-core ALIAS msap1_apu_core)
 
@@ -65,4 +66,11 @@ if(BUILD_TESTING)
     target_link_libraries(protocol_test PRIVATE msap1::apu-core)
     target_compile_options(protocol_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME protocol_test COMMAND protocol_test)
+
+    add_executable(soc_temperature_test
+        ${PROJECT_SOURCE_DIR}/tests/soc_temperature_test.cpp)
+    target_link_libraries(soc_temperature_test PRIVATE msap1::apu-core)
+    target_compile_options(soc_temperature_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME soc_temperature_test COMMAND soc_temperature_test)
 endif()

@@ -86,6 +86,8 @@ The authenticated external API is:
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/developer/logs` (administrator only; bounded journal page with
   `component`, `module`, `priority`, `after`, and `limit` query parameters)
+- `GET /api/v1/developer/temperatures` (administrator only; label-discovered
+  LPD, FPD, and PL temperatures)
 - `GET /api/v1/adc/capture`
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 
@@ -112,7 +114,13 @@ mnc log --component fpga-acquisition
 mnc log --module dma --priority warning
 mnc log --since "10 minutes ago" --follow
 mnc log --json
+mnc system temperature
 ```
+
+`mnc system temperature` discovers the ZynqMP LPD, FPD, and PL sensors from
+their `Temp_LPD`, `Temp_FPD`, and `Temp_PL` hwmon labels. It deliberately does
+not depend on a fixed `/sys/class/hwmon/hwmonN` index because Linux may assign
+that index differently across boots and kernel versions.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

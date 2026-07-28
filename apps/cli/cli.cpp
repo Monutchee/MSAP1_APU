@@ -333,6 +333,7 @@ Application make_application()
 	register_meter_commands(application);
 	register_adc_commands(application);
 	register_log_command(application);
+	register_system_commands(application);
 	return application;
 }
 

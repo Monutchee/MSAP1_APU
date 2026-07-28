@@ -41,6 +41,8 @@
 - Web journal inspection is administrator-only and must remain a bounded,
   cursor-paginated backend query. Do not expose unrestricted journal access or
   allow the browser to open journald directly.
+- SoC temperature monitoring discovers the LPD, FPD, and PL sensors by their
+  hwmon labels. Never bind product behavior to a particular `hwmonN` index.
 - CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
   `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
   endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
