@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
 namespace msap1 {
@@ -83,6 +84,11 @@ struct AcquisitionResponse {
 	msap1_adc_diagnostic_payload adc_diagnostic{};
 	MeterRecord latest_record{};
 	FrequencyIpcConfiguration frequency{};
+};
+
+class AcquisitionUnavailable : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
 };
 
 class AcquisitionClient {

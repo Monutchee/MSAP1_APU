@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "result_output.hpp"
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
@@ -15,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace msap1::cli {
 namespace {
@@ -238,19 +240,20 @@ void require_daemon_ok(const AcquisitionResponse &response)
 			std::to_string(static_cast<std::uint32_t>(response.status)) + ")");
 }
 
-int run_meter_health(const Options &options, std::ostream &output)
+struct MeterHealthResult {
+	AcquisitionResponse response;
+	MeterHealth status;
+	bool full = false;
+};
+
+int write_meter_health_text(const MeterHealthResult &result,
+			    std::ostream &output)
 {
-	AcquisitionClient client(options.socket_path);
-	const auto response =
-		client.request(options.health_refresh
-				       ? AcquisitionCommand::health_refresh
-				       : AcquisitionCommand::health,
-			       options.timeout_ms);
-	require_daemon_ok(response);
-	const auto status = evaluate_meter_health(response);
+	const auto &response = result.response;
+	const auto &status = result.status;
 	const auto &health = response.rpu_health;
 
-	if (!options.health_full) {
+	if (!result.full) {
 		output << "MSAP1 meter health: "
 		       << (status.healthy ? "PASS" : "FAIL") << '\n'
 		       << "  Acquisition:         "
@@ -385,6 +388,236 @@ int run_meter_health(const Options &options, std::ostream &output)
 	return status.healthy ? 0 : 1;
 }
 
+struct HealthReasonDto {
+	std::string code;
+	std::string message;
+};
+
+struct RegisterDto {
+	std::uint32_t address = 0;
+	std::string name;
+	std::uint32_t value = 0;
+};
+
+struct AcquisitionHealthDto {
+	bool healthy = false;
+	bool running = false;
+	bool record_present = false;
+	bool record_stale = false;
+	std::optional<std::uint32_t> record_age_ms;
+	std::uint64_t records = 0;
+	std::uint64_t dma_bytes = 0;
+	std::uint64_t dma_read_errors = 0;
+	std::uint64_t invalid_records = 0;
+	std::uint64_t sequence_gaps = 0;
+};
+
+struct AdcHealthDto {
+	bool healthy = false;
+	bool spi_responsive = false;
+	bool initialized = false;
+	bool configuration_match = false;
+	bool rate_match = false;
+	bool capture_active = false;
+	bool fifo_ok = false;
+	bool headers_valid = false;
+	std::uint32_t configured_rate_hz = 0;
+	std::uint32_t measured_drdy_hz = 0;
+	std::uint32_t measured_dclk_hz = 0;
+	std::uint64_t frames = 0;
+	std::uint64_t packets = 0;
+	std::uint32_t fifo_overflows = 0;
+	std::uint32_t header_errors = 0;
+	std::uint32_t spi_error = 0;
+	std::vector<HealthReasonDto> degraded_reasons;
+	std::vector<RegisterDto> registers;
+};
+
+struct MeterHealthDto {
+	bool healthy = false;
+	bool full = false;
+	std::uint32_t configuration_generation = 0;
+	bool meter_configured = false;
+	bool meter_generation_match = false;
+	bool dc_offset_removal = false;
+	bool frequency_arithmetic_ok = false;
+	std::optional<std::uint32_t> rpu_health_age_ms;
+	bool health_probe_pending = false;
+	std::uint32_t health_probe_failures = 0;
+	AcquisitionHealthDto acquisition;
+	AdcHealthDto adc;
+};
+
+std::vector<RegisterDto>
+adc_register_dtos(const msap1_adc_health_payload &health)
+{
+	std::vector<RegisterDto> registers;
+	auto add = [&registers](std::uint32_t address, std::string name,
+			       std::uint8_t value) {
+		registers.push_back({address, std::move(name), value});
+	};
+	for (std::size_t channel = 0; channel < 8; ++channel)
+		add(channel, "CH" + std::to_string(channel) + "_CONFIG",
+		    health.channel_config[channel]);
+	add(0x08, "CH_DISABLE", health.channel_disable);
+	for (std::size_t channel = 0; channel < 8; ++channel)
+		add(0x09 + channel,
+		    "CH" + std::to_string(channel) + "_SYNC_OFFSET",
+		    health.channel_sync_offset[channel]);
+	add(0x11, "GENERAL_USER_CONFIG_1", health.general_user_config_1);
+	add(0x12, "GENERAL_USER_CONFIG_2", health.general_user_config_2);
+	add(0x13, "GENERAL_USER_CONFIG_3", health.general_user_config_3);
+	add(0x14, "DOUT_FORMAT", health.dout_format);
+	add(0x15, "ADC_MUX_CONFIG", health.adc_mux_config);
+	add(0x16, "GLOBAL_MUX_CONFIG", health.global_mux_config);
+	add(0x17, "GPIO_CONFIG", health.gpio_config);
+	add(0x18, "GPIO_DATA", health.gpio_data);
+	add(0x19, "BUFFER_CONFIG_1", health.buffer_config_1);
+	add(0x1a, "BUFFER_CONFIG_2", health.buffer_config_2);
+	for (std::size_t channel = 0; channel < 8; ++channel) {
+		const auto base = 0x1cu + channel * 6u;
+		for (std::size_t byte = 0; byte < 3; ++byte) {
+			add(base + byte,
+			    "CH" + std::to_string(channel) + "_OFFSET_" +
+				    std::to_string(byte),
+			    health.channel_offset[channel][byte]);
+			add(base + 3u + byte,
+			    "CH" + std::to_string(channel) + "_GAIN_" +
+				    std::to_string(byte),
+			    health.channel_gain[channel][byte]);
+		}
+	}
+	for (std::size_t channel = 0; channel < 8; ++channel)
+		add(0x4cu + channel,
+		    "CH" + std::to_string(channel) + "_ERR_REG",
+		    health.channel_error[channel]);
+	for (std::size_t pair = 0; pair < 4; ++pair)
+		add(0x54u + pair, "SATURATION_ERR_" + std::to_string(pair),
+		    health.saturation_error[pair]);
+	add(0x58, "CHX_ERR_REG_EN", health.channel_error_enable);
+	add(0x59, "GEN_ERR_REG_1", health.general_error_1);
+	add(0x5a, "GEN_ERR_REG_1_EN", health.general_error_1_enable);
+	add(0x5b, "GEN_ERR_REG_2", health.general_error_2);
+	add(0x5c, "GEN_ERR_REG_2_EN", health.general_error_2_enable);
+	add(0x5d, "STATUS_REG_1", health.status_1);
+	add(0x5e, "STATUS_REG_2", health.status_2);
+	add(0x5f, "STATUS_REG_3", health.status_3);
+	add(0x60, "SRC_N_MSB", health.src_n_msb);
+	add(0x61, "SRC_N_LSB", health.src_n_lsb);
+	add(0x62, "SRC_IF_MSB", health.src_if_msb);
+	add(0x63, "SRC_IF_LSB", health.src_if_lsb);
+	add(0x64, "SRC_UPDATE", health.src_update);
+	return registers;
+}
+
+MeterHealthDto meter_health_dto(const MeterHealthResult &result)
+{
+	const auto &response = result.response;
+	const auto &status = result.status;
+	const auto &health = response.rpu_health;
+	MeterHealthDto dto{
+		.healthy = status.healthy,
+		.full = result.full,
+		.configuration_generation = response.configuration_generation,
+		.meter_configured = status.meter_configured,
+		.meter_generation_match = status.meter_generation_match,
+		.dc_offset_removal = status.dc_offset_removal,
+		.frequency_arithmetic_ok = status.frequency_arithmetic_ok,
+		.rpu_health_age_ms =
+			response.rpu_health_age_ms ==
+					std::numeric_limits<std::uint32_t>::max()
+				? std::nullopt
+				: std::optional<std::uint32_t>(
+					  response.rpu_health_age_ms),
+		.health_probe_pending = response.health_probe_pending != 0u,
+		.health_probe_failures = response.health_probe_failures,
+		.acquisition = {
+			.healthy = status.acquisition_healthy,
+			.running = response.running != 0u,
+			.record_present = response.has_meter_record != 0u,
+			.record_stale = status.record_stale,
+			.record_age_ms =
+				response.meter_record_age_ms ==
+						std::numeric_limits<std::uint32_t>::max()
+					? std::nullopt
+					: std::optional<std::uint32_t>(
+						  response.meter_record_age_ms),
+			.records = response.meter_records,
+			.dma_bytes = response.dma_bytes,
+			.dma_read_errors = response.dma_read_errors,
+			.invalid_records = response.invalid_records,
+			.sequence_gaps = response.sequence_gaps,
+		},
+		.adc = {
+			.healthy = status.adc_healthy,
+			.spi_responsive = status.spi_responsive,
+			.initialized = status.initialized,
+			.configuration_match = status.configuration_match,
+			.rate_match = status.rate_match,
+			.capture_active = status.capture_active,
+			.fifo_ok = status.fifo_ok,
+			.headers_valid = status.headers_valid,
+			.configured_rate_hz = health.sample_rate_hz,
+			.measured_drdy_hz = health.drdy_frequency_hz,
+			.measured_dclk_hz = health.dclk_frequency_hz,
+			.frames = health.frame_count,
+			.packets = health.packet_count,
+			.fifo_overflows = health.overflow_count,
+			.header_errors = health.header_error_count,
+			.spi_error = health.spi_error,
+			.degraded_reasons = {},
+			.registers = {},
+		},
+	};
+	for (const auto &reason : status.adc_degraded_reasons)
+		dto.adc.degraded_reasons.push_back({reason.code, reason.message});
+	if (result.full && status.spi_responsive)
+		dto.adc.registers = adc_register_dtos(health);
+	return dto;
+}
+
+class MeterHealthTextGenerator final :
+	public ResultGenerator<MeterHealthResult> {
+public:
+	int write(const MeterHealthResult &result,
+		  std::ostream &output) const override
+	{
+		return write_meter_health_text(result, output);
+	}
+};
+
+class MeterHealthJsonGenerator final :
+	public ResultGenerator<MeterHealthResult> {
+public:
+	int write(const MeterHealthResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, meter_health_dto(result));
+		// A diagnostic response remains a successful machine query even when
+		// the observed system is unhealthy.
+		return 0;
+	}
+};
+
+int run_meter_health(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response =
+		client.request(options.health_refresh
+				       ? AcquisitionCommand::health_refresh
+				       : AcquisitionCommand::health,
+			       options.timeout_ms);
+	require_daemon_ok(response);
+	const MeterHealthResult result{
+		.response = response,
+		.status = evaluate_meter_health(response),
+		.full = options.health_full,
+	};
+	return render_result(options, result, output,
+			     MeterHealthTextGenerator{},
+			     MeterHealthJsonGenerator{});
+}
+
 void print_record(const MeterRecord &record, std::ostream &output)
 {
 	static constexpr std::array<const char *, 8> names{
@@ -465,13 +698,166 @@ int run_meter_view(const Options &options, std::ostream &output)
 	return 0;
 }
 
+struct MeterChannelDto {
+	std::uint32_t channel = 0;
+	std::string name;
+	std::string quantity;
+	bool valid = false;
+	std::int64_t mean_micro_units = 0;
+	std::uint32_t rms_count = 0;
+	std::int64_t rms_micro_units = 0;
+};
+
+struct MeterFrequencyDto {
+	bool enabled = false;
+	bool valid = false;
+	bool out_of_range = false;
+	bool timed_out = false;
+	bool arithmetic_error = false;
+	std::uint32_t millihz = 0;
+	std::uint32_t period_q16_samples = 0;
+	std::uint32_t measurement_sequence = 0;
+	std::uint32_t cycles_used = 0;
+};
+
+struct MeterSnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint32_t window_samples = 0;
+	std::uint32_t capture_frames = 0;
+	std::uint32_t header_errors = 0;
+	std::uint32_t fifo_overflows = 0;
+	std::uint32_t packetizer_drops = 0;
+	std::uint32_t hub_drops = 0;
+	std::vector<MeterChannelDto> channels;
+	MeterFrequencyDto frequency;
+};
+
+MeterSnapshot meter_snapshot(const MeterRecord &record)
+{
+	static constexpr std::array<const char *, 8> names{
+		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
+	MeterSnapshot result{
+		.sequence = record.sequence(),
+		.configuration_generation = record.configuration_generation(),
+		.sample_rate_hz = record.sample_rate_hz(),
+		.window_samples = record.window_samples(),
+		.capture_frames = record.capture_frames(),
+		.header_errors = record.header_errors(),
+		.fifo_overflows = record.fifo_overflows(),
+		.packetizer_drops = record.packetizer_drops(),
+		.hub_drops = record.hub_drops(),
+		.channels = {},
+		.frequency = {},
+	};
+	for (std::size_t index = 0; index < 7; ++index) {
+		const auto channel = record.channel(index);
+		result.channels.push_back({
+			.channel = static_cast<std::uint32_t>(index),
+			.name = names[index],
+			.quantity = index < 4 ? "current" : "voltage",
+			.valid = channel.valid,
+			.mean_micro_units = channel.mean_micro_units,
+			.rms_count = channel.rms_count,
+			.rms_micro_units = channel.rms_micro_units,
+		});
+	}
+	const auto frequency = record.frequency();
+	result.frequency = {
+		.enabled = frequency.enabled,
+		.valid = frequency.valid,
+		.out_of_range = frequency.out_of_range,
+		.timed_out = frequency.timed_out,
+		.arithmetic_error = frequency.arithmetic_error,
+		.millihz = frequency.millihz,
+		.period_q16_samples = frequency.period_q16_samples,
+		.measurement_sequence = frequency.measurement_sequence,
+		.cycles_used = frequency.cycles_used,
+	};
+	return result;
+}
+
+class SnapshotTextGenerator final : public ResultGenerator<MeterSnapshot> {
+public:
+	int write(const MeterSnapshot &snapshot,
+		  std::ostream &output) const override
+	{
+		output << "MSAP1 meter snapshot  sequence=" << snapshot.sequence
+		       << "  generation=0x" << std::hex
+		       << snapshot.configuration_generation << std::dec << '\n';
+		for (const auto &channel : snapshot.channels) {
+			output << "  CH" << channel.channel << ' ' << std::setw(3)
+			       << channel.name << "  ";
+			if (!channel.valid)
+				output << "unavailable\n";
+			else
+				output << std::fixed << std::setprecision(3)
+				       << static_cast<double>(
+						  channel.rms_micro_units) /
+						  1000000.0
+				       << (channel.quantity == "voltage" ? " V" : " A")
+				       << " RMS\n";
+		}
+		output << "  Frequency: ";
+		if (snapshot.frequency.valid)
+			output << std::fixed << std::setprecision(3)
+			       << static_cast<double>(snapshot.frequency.millihz) /
+					  1000.0
+			       << " Hz\n";
+		else
+			output << "unavailable\n";
+		return 0;
+	}
+};
+
+class SnapshotJsonGenerator final : public ResultGenerator<MeterSnapshot> {
+public:
+	int write(const MeterSnapshot &snapshot,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, snapshot);
+		return 0;
+	}
+};
+
+int run_meter_snapshot(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response =
+		client.request(AcquisitionCommand::info, options.timeout_ms);
+	require_daemon_ok(response);
+	if (response.has_meter_record == 0u)
+		throw std::runtime_error("no meter record is available");
+	if (!response.latest_record.header_valid())
+		throw std::runtime_error("daemon returned an invalid meter record");
+	const auto result = meter_snapshot(response.latest_record);
+	return render_result(options, result, output, SnapshotTextGenerator{},
+			     SnapshotJsonGenerator{});
+}
+
 } // namespace
 
 void register_meter_commands(Application &application)
 {
 	Command meter("meter", "Inspect MSAP1 meter health and readings");
-	Command health("health", "Show cached acquisition and meter health",
-		       run_meter_health);
+	Command health(
+		"health", "Show cached acquisition and meter health",
+		run_meter_health,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {
+				{"--refresh", AccessLevel::maintenance,
+				 "Run an immediate RPU register-health audit"},
+			},
+		});
+	health.set_access_resolver([](const Options &options) {
+		return options.health_refresh ? AccessLevel::maintenance
+					      : AccessLevel::diagnostic;
+	});
 	health.add_option({
 		"refresh", "", "Run an immediate RPU ADC register-health audit",
 		CompletionKind::none,
@@ -489,8 +875,26 @@ void register_meter_commands(Application &application)
 		false,
 	});
 	meter.add_subcommand(std::move(health));
-	Command view("view", "Continuously display the latest meter readings",
-		     run_meter_view);
+	meter.add_subcommand(Command(
+		"snapshot", "Read one coherent meter result",
+		run_meter_snapshot,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	Command view(
+		"view", "Continuously display the latest meter readings",
+		run_meter_view,
+		{
+			.access = AccessLevel::local_only,
+			.side_effect = SideEffect::continuous,
+			.supports_text = true,
+			.supports_json = false,
+			.variants = {},
+		});
 	view.add_option({
 		"results", "COUNT", "Stop after displaying COUNT results",
 		CompletionKind::none,

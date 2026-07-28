@@ -101,6 +101,7 @@ require the viewer role; changing ADC capture requires the admin role.
 mnc meter health
 mnc meter health --full
 mnc meter health --refresh
+mnc meter snapshot
 mnc meter view
 mnc meter view --results 20
 mnc meter view --duration 10
@@ -115,6 +116,8 @@ mnc log --module dma --priority warning
 mnc log --since "10 minutes ago" --follow
 mnc log --json
 mnc system temperature
+mnc machine describe
+mnc --output json meter health
 ```
 
 `mnc system temperature` discovers the ZynqMP LPD, FPD, and PL sensors from
@@ -131,6 +134,9 @@ Journal cursors back the public C++ reader API so a future bounded MCP log
 reader can continue reliably across equal timestamps and journal rotation.
 Reading the complete system journal requires root or membership in the
 `systemd-journal` group; product services need no special permission to write.
+For bounded automation, global `--output json` returns one response envelope
+and `--cursor` continues a log query. The older `mnc log --json` JSONL output
+remains a local compatibility interface.
 
 `mnc adc rate` compares the requested rate, SRC-register-derived rate, and
 physical DRDY rate. `--sps` temporarily selects one of 1, 2, 4, 8, 16, 32, 64,
@@ -175,9 +181,13 @@ decimation, and the ODR implied by the measured DCLK. This keeps Linux read-only
 while providing enough raw state to diagnose ADC rate and alert faults.
 
 Run `mnc`, `mnc help meter`, or append `--help` to any command for contextual
-help. Global `--socket` and `--timeout-ms` options are accepted before or after
-the command path. The Yocto package installs Bash completion for command groups,
-actions, options, and socket paths.
+help. Global `--socket`, `--timeout-ms`, and `--output text|json` options are
+accepted before or after the command path. `mnc machine describe` prints the
+authoritative command/access table used by the restricted diagnostic gateway.
+See [docs/MACHINE_INTERFACE.md](docs/MACHINE_INTERFACE.md) for JSON envelopes,
+cursor pagination, access classes, and the temporary opt-in SSH test account.
+The Yocto package installs Bash completion for command groups, actions,
+options, and socket paths.
 
 `mnc meter health` requires matching configuration generations, responsive SPI,
 measured DRDY within 1% of the configured sample rate, active capture, zero

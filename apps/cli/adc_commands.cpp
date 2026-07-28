@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "result_output.hpp"
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_config.hpp"
@@ -25,15 +26,43 @@ void require_daemon_ok(const AcquisitionResponse &response)
 			std::to_string(static_cast<std::uint32_t>(response.status)) + ")");
 }
 
+struct CaptureControlResult {
+	bool running = false;
+};
+
+class CaptureControlTextGenerator final :
+	public ResultGenerator<CaptureControlResult> {
+public:
+	int write(const CaptureControlResult &result,
+		  std::ostream &output) const override
+	{
+		output << "FPGA acquisition "
+		       << (result.running ? "running" : "stopped") << '\n';
+		return 0;
+	}
+};
+
+class CaptureControlJsonGenerator final :
+	public ResultGenerator<CaptureControlResult> {
+public:
+	int write(const CaptureControlResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
 int run_control(const Options &options, std::ostream &output,
 		AcquisitionCommand command)
 {
 	AcquisitionClient client(options.socket_path);
 	const auto response = client.request(command, options.timeout_ms);
 	require_daemon_ok(response);
-	output << "FPGA acquisition "
-	       << (response.running != 0u ? "running" : "stopped") << '\n';
-	return 0;
+	const CaptureControlResult result{response.running != 0u};
+	return render_result(options, result, output,
+			     CaptureControlTextGenerator{},
+			     CaptureControlJsonGenerator{});
 }
 
 std::uint32_t parse_sample_rate(const std::string &value)
@@ -96,6 +125,58 @@ bool rate_measurements_agree(std::uint32_t first, std::uint32_t second)
 	return difference <= std::max(2u, second / 1000u);
 }
 
+struct AdcRateResult {
+	std::uint32_t requested_hz = 0;
+	std::uint32_t dclk_hz = 0;
+	double src_derived_hz = 0.0;
+	std::uint32_t measured_drdy_hz = 0;
+	bool measurement_available = false;
+	bool matches = false;
+};
+
+class AdcRateTextGenerator final : public ResultGenerator<AdcRateResult> {
+public:
+	int write(const AdcRateResult &result,
+		  std::ostream &output) const override
+	{
+		output << "ADC sample rate\n"
+		       << "  Requested:            " << result.requested_hz
+		       << " frame/s\n"
+		       << "  ADC DCLK:             ";
+		if (result.dclk_hz != 0u)
+			output << result.dclk_hz << " Hz\n";
+		else
+			output << "unavailable\n";
+		output << "  SRC-derived rate:     ";
+		if (result.src_derived_hz > 0.0)
+			output << std::fixed << std::setprecision(3)
+			       << result.src_derived_hz << " frame/s\n";
+		else
+			output << "unavailable\n";
+		output << "  Measured ADC DRDY:    ";
+		if (result.measurement_available)
+			output << result.measured_drdy_hz << " frame/s\n";
+		else
+			output << "unavailable\n";
+		output << "  Result:               "
+		       << (!result.measurement_available
+				   ? "measurement unavailable"
+				   : result.matches ? "match" : "MISMATCH")
+		       << '\n';
+		return 0;
+	}
+};
+
+class AdcRateJsonGenerator final : public ResultGenerator<AdcRateResult> {
+public:
+	int write(const AdcRateResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
 int run_rate(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -122,7 +203,9 @@ int run_rate(const Options &options, std::ostream &output)
 			previous_measurement = current;
 		}
 	} else {
-		response = client.request(AcquisitionCommand::health_refresh,
+		// Read the daemon cache for the diagnostic getter. A fresh SPI audit
+		// is maintenance work and must not be triggered by restricted users.
+		response = client.request(AcquisitionCommand::health,
 			options.timeout_ms);
 	}
 	require_daemon_ok(response);
@@ -137,29 +220,16 @@ int run_rate(const Options &options, std::ostream &output)
 			 static_cast<double>(requested)) <=
 			std::max(2.0, static_cast<double>(requested) * 0.01);
 
-	output << "ADC sample rate\n"
-	       << "  Requested:            " << requested << " frame/s\n"
-	       << "  ADC DCLK:             ";
-	if (health.dclk_frequency_hz != 0u)
-		output << health.dclk_frequency_hz << " Hz\n";
-	else
-		output << "unavailable\n";
-	output << "  SRC-derived rate:     ";
-	if (derived > 0.0)
-		output << std::fixed << std::setprecision(3) << derived
-		       << " frame/s\n";
-	else
-		output << "unavailable\n";
-	output << "  Measured ADC DRDY:    ";
-	if (measurement_available)
-		output << measured << " frame/s\n";
-	else
-		output << "unavailable\n";
-	output << "  Result:               "
-	       << (!measurement_available ? "measurement unavailable" :
-		   matches ? "match" : "MISMATCH")
-	       << '\n';
-	return 0;
+	const AdcRateResult result{
+		.requested_hz = requested,
+		.dclk_hz = health.dclk_frequency_hz,
+		.src_derived_hz = derived,
+		.measured_drdy_hz = measured,
+		.measurement_available = measurement_available,
+		.matches = matches,
+	};
+	return render_result(options, result, output, AdcRateTextGenerator{},
+			     AdcRateJsonGenerator{});
 }
 
 std::uint32_t parse_diagnostic_flow(const std::string &value)
@@ -382,16 +452,47 @@ int run_test_flow(const Options &options, std::ostream &output)
 void register_adc_commands(Application &application)
 {
 	Command adc("adc", "Control ADC capture and FPGA acquisition");
-	adc.add_subcommand(Command("start", "Start ADC capture and meter acquisition",
+	adc.add_subcommand(Command(
+		"start", "Start ADC capture and meter acquisition",
 		[](const Options &options, std::ostream &output) {
 			return run_control(options, output, AcquisitionCommand::start);
+		},
+		{
+			.access = AccessLevel::operator_control,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
 		}));
-	adc.add_subcommand(Command("stop", "Stop ADC capture and meter acquisition",
+	adc.add_subcommand(Command(
+		"stop", "Stop ADC capture and meter acquisition",
 		[](const Options &options, std::ostream &output) {
 			return run_control(options, output, AcquisitionCommand::stop);
+		},
+		{
+			.access = AccessLevel::operator_control,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
 		}));
-	Command rate("rate", "Inspect or temporarily set the ADC sample rate",
-		     run_rate);
+	Command rate(
+		"rate", "Inspect or temporarily set the ADC sample rate",
+		run_rate,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {
+				{"--sps RATE", AccessLevel::operator_control,
+				 "Temporarily reconfigure the acquisition rate"},
+			},
+		});
+	rate.set_access_resolver([](const Options &options) {
+		return options.sample_rate_hz ? AccessLevel::operator_control
+					      : AccessLevel::diagnostic;
+	});
 	rate.add_option({
 		"sps", "RATE", "Temporary sample rate in frames per second",
 		CompletionKind::none,
@@ -403,7 +504,14 @@ void register_adc_commands(Application &application)
 	Command test_flow(
 		"testflw",
 		"Run a destructive, self-restoring ADC diagnostic flow",
-		run_test_flow);
+		run_test_flow,
+		{
+			.access = AccessLevel::maintenance,
+			.side_effect = SideEffect::destructive_diagnostic,
+			.supports_text = true,
+			.supports_json = false,
+			.variants = {},
+		});
 	test_flow.add_option({
 		"flow", "NUMBER", "Diagnostic flow (currently: 1)",
 		CompletionKind::none,
