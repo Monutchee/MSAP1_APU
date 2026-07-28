@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "result_output.hpp"
 
 #include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace msap1::cli {
 namespace {
@@ -84,6 +86,111 @@ classification(const mnc::logging::Entry &entry)
 	return {{}, {}};
 }
 
+std::string base64url_encode(std::string_view input)
+{
+	static constexpr std::string_view alphabet =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+	std::string output;
+	output.reserve((input.size() * 4 + 2) / 3);
+	std::uint32_t accumulator = 0;
+	unsigned bits = 0;
+	for (const auto byte : input) {
+		accumulator = (accumulator << 8) |
+			static_cast<unsigned char>(byte);
+		bits += 8;
+		while (bits >= 6) {
+			bits -= 6;
+			output.push_back(alphabet[(accumulator >> bits) & 0x3fu]);
+		}
+	}
+	if (bits != 0)
+		output.push_back(alphabet[(accumulator << (6 - bits)) & 0x3fu]);
+	return output;
+}
+
+std::string base64url_decode(std::string_view input)
+{
+	auto value = [](char character) -> int {
+		if (character >= 'A' && character <= 'Z')
+			return character - 'A';
+		if (character >= 'a' && character <= 'z')
+			return character - 'a' + 26;
+		if (character >= '0' && character <= '9')
+			return character - '0' + 52;
+		if (character == '-')
+			return 62;
+		if (character == '_')
+			return 63;
+		return -1;
+	};
+	std::string output;
+	std::uint32_t accumulator = 0;
+	unsigned bits = 0;
+	for (const auto character : input) {
+		const auto decoded = value(character);
+		if (decoded < 0)
+			throw std::invalid_argument("--cursor is not valid base64url");
+		accumulator = (accumulator << 6) |
+			static_cast<std::uint32_t>(decoded);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			output.push_back(static_cast<char>(
+				(accumulator >> bits) & 0xffu));
+		}
+	}
+	return output;
+}
+
+struct LogEntryDto {
+	std::int64_t timestamp_unix_ms = 0;
+	std::string priority;
+	std::string component;
+	std::string module;
+	std::string event;
+	std::string message;
+	std::string request_id;
+	std::string configuration_generation;
+	std::string unit;
+	std::string executable;
+	std::string source_file;
+	std::string source_line;
+	std::string source_function;
+};
+
+struct LogPageDto {
+	std::vector<LogEntryDto> entries;
+	std::string next_cursor;
+	bool has_more = false;
+};
+
+LogEntryDto log_entry_dto(const mnc::logging::Entry &entry)
+{
+	const auto [fallback_component, fallback_module] =
+		classification(entry);
+	return {
+		.timestamp_unix_ms =
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				entry.timestamp.time_since_epoch())
+				.count(),
+		.priority = std::string(
+			mnc::logging::priority_name(entry.priority)),
+		.component = entry.component.empty() ? fallback_component
+						    : entry.component,
+		.module = entry.module.empty() ? fallback_module : entry.module,
+		.event = entry.event,
+		.message = entry.message,
+		.request_id = entry.request_id,
+		.configuration_generation =
+			entry.configuration_generation,
+		.unit = entry.unit,
+		.executable = entry.executable,
+		.source_file = entry.source_file,
+		.source_line = entry.source_line,
+		.source_function = entry.source_function,
+	};
+}
+
 void print_entry(std::ostream &output, const mnc::logging::Entry &entry,
 		 bool json)
 {
@@ -149,8 +256,28 @@ int show_logs(const Options &options, std::ostream &output)
 	}
 	if (options.log_since)
 		query.since = parse_since(*options.log_since);
+	if (options.log_cursor)
+		query.after =
+			mnc::logging::Cursor{base64url_decode(*options.log_cursor)};
 
 	mnc::logging::JournalReader reader;
+	if (options.output_format == OutputFormat::json) {
+		const auto requested_limit = query.limit;
+		query.limit = requested_limit + 1;
+		auto entries = reader.read(query);
+		const bool has_more = entries.size() > requested_limit;
+		if (has_more)
+			entries.resize(requested_limit);
+		LogPageDto page;
+		page.has_more = has_more;
+		for (const auto &entry : entries)
+			page.entries.push_back(log_entry_dto(entry));
+		if (has_more && !entries.empty())
+			page.next_cursor =
+				base64url_encode(entries.back().cursor.value);
+		write_json_success(output, page);
+		return 0;
+	}
 	auto print = [&](const mnc::logging::Entry &entry) {
 		print_entry(output, entry, options.log_json);
 		output.flush();
@@ -170,14 +297,32 @@ int show_logs(const Options &options, std::ostream &output)
 
 void register_log_command(Application &application)
 {
-	Command command("log",
-			"View consolidated structured MSAP1 system logs",
-			show_logs);
+	Command command(
+		"log", "View consolidated structured MSAP1 system logs",
+		show_logs,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {
+				{"--follow", AccessLevel::local_only,
+				 "Continuously follow journal entries"},
+			},
+		});
 	command.add_option({
 		"component", "NAME", "Filter by process component",
 		CompletionKind::none,
 		[](Options &options, const std::string &value) {
 			options.log_component = value;
+		},
+	});
+	command.add_option({
+		"cursor", "TOKEN", "Continue a bounded machine-readable query",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			(void)base64url_decode(value);
+			options.log_cursor = value;
 		},
 	});
 	command.add_option({
@@ -233,6 +378,10 @@ void register_log_command(Application &application)
 			options.log_json = true;
 		},
 		false,
+	});
+	command.set_access_resolver([](const Options &options) {
+		return options.log_follow ? AccessLevel::local_only
+					  : AccessLevel::diagnostic;
 	});
 	application.add_command(std::move(command));
 }

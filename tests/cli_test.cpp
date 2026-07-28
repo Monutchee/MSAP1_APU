@@ -44,7 +44,8 @@ void option_parsing()
 	const auto application = msap1::cli::make_application();
 	const auto invocation = application.parse({
 		"--timeout-ms", "42", "meter", "view", "--results", "3",
-		"--socket", "/tmp/acquisition.sock", "--duration=1.5", "--help",
+		"--socket", "/tmp/acquisition.sock", "--duration=1.5",
+		"--output", "text", "--help",
 	});
 	require(invocation.show_help && invocation.command->name() == "view",
 		"leaf help did not select meter view");
@@ -56,6 +57,9 @@ void option_parsing()
 		"result limit was not parsed");
 	require(invocation.options.duration_seconds == 1.5,
 		"inline duration was not parsed");
+	require(invocation.options.output_format ==
+			msap1::cli::OutputFormat::text,
+		"output format was not parsed");
 
 	const auto rate =
 		application.parse({"adc", "rate", "--sps", "16000"});
@@ -139,6 +143,102 @@ void help_and_errors()
 	require(application.execute(
 		{"log", "--follow=true"}, output, error) == 2,
 		"flag option accepted an inline value");
+
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"--output", "json", "meter", "unknown"}, output, error) == 2,
+		"machine usage error did not return status 2");
+	require(output.str().find(R"("success":false)") != std::string::npos &&
+			output.str().find(R"("code":"USAGE_ERROR")") !=
+				std::string::npos &&
+			error.str().empty(),
+		"machine usage error was not a pure JSON envelope");
+}
+
+void machine_interface()
+{
+	const auto application = msap1::cli::make_application();
+	const auto descriptors = application.descriptors();
+	const auto find = [&descriptors](const std::string &path) {
+		return std::find_if(descriptors.begin(), descriptors.end(),
+			[&path](const auto &descriptor) {
+				return descriptor.command == path;
+			});
+	};
+	const auto health = find("mnc meter health");
+	require(health != descriptors.end() &&
+			health->metadata.access ==
+				msap1::cli::AccessLevel::diagnostic &&
+			health->metadata.supports_json,
+		"meter health metadata is not diagnostic JSON");
+	const auto start = find("mnc adc start");
+	require(start != descriptors.end() &&
+			start->metadata.access ==
+				msap1::cli::AccessLevel::operator_control,
+		"ADC start metadata is not operator control");
+	const auto view = find("mnc meter view");
+	require(view != descriptors.end() &&
+			view->metadata.access ==
+				msap1::cli::AccessLevel::local_only,
+		"meter view metadata is not local-only");
+
+	const msap1::cli::ExecutionPolicy restricted{
+		.maximum_access = msap1::cli::AccessLevel::diagnostic,
+		.require_json = true,
+		.allow_socket_override = false,
+		.allow_timeout_override = false,
+	};
+	std::ostringstream output;
+	std::ostringstream error;
+	require(application.execute(
+			{"--output", "json", "machine", "describe"},
+			output, error, restricted) == 0,
+		"restricted machine describe failed");
+	require(output.str().find(R"("interface_version":1)") !=
+			std::string::npos,
+		"machine describe omitted the interface version");
+
+	output.str({});
+	error.str({});
+	require(application.execute(
+			{"--output", "json", "adc", "start"}, output, error,
+			restricted) == 3,
+		"restricted ADC start was not denied");
+	require(output.str().find(R"("code":"ACCESS_DENIED")") !=
+			std::string::npos,
+		"restricted denial omitted its JSON error code");
+
+	output.str({});
+	error.str({});
+	require(application.execute(
+			{"--output", "json", "--socket", "/tmp/other",
+			 "machine", "describe"},
+			output, error, restricted) == 3,
+		"restricted socket override was accepted");
+	require(output.str().find(R"("code":"ACCESS_DENIED")") !=
+			std::string::npos,
+		"restricted socket override omitted its authorization error");
+
+	output.str({});
+	error.str({});
+	require(application.execute(
+			{"machine", "describe"}, output, error, restricted) == 2,
+		"restricted execution accepted non-JSON output");
+	require(output.str().find(R"("code":"OUTPUT_REQUIRED")") !=
+			std::string::npos,
+		"restricted non-JSON request omitted its output error");
+
+	output.str({});
+	error.str({});
+	require(application.execute(
+			{"--output", "json", "--socket",
+			 "/tmp/mnc-cli-test-missing.sock", "meter", "health"},
+			output, error) == 4,
+		"missing acquisition service did not return unavailable status");
+	require(output.str().find(R"("code":"SERVICE_UNAVAILABLE")") !=
+			std::string::npos,
+		"unavailable acquisition service omitted its JSON error code");
 }
 
 void completion()
@@ -146,10 +246,12 @@ void completion()
 	const auto application = msap1::cli::make_application();
 	auto candidates = application.complete({""});
 	require(contains(candidates, "adc") && contains(candidates, "meter") &&
-			contains(candidates, "log") && contains(candidates, "system"),
+			contains(candidates, "log") && contains(candidates, "system") &&
+			contains(candidates, "machine"),
 		"root completion omitted command groups");
 	candidates = application.complete({"meter", ""});
-	require(contains(candidates, "health") && contains(candidates, "view"),
+	require(contains(candidates, "health") && contains(candidates, "view") &&
+			contains(candidates, "snapshot"),
 		"meter completion omitted actions");
 	candidates = application.complete({"meter", "health", "--"});
 	require(contains(candidates, "--refresh") &&
@@ -175,7 +277,8 @@ void completion()
 	candidates = application.complete({"log", "--"});
 	require(contains(candidates, "--component") &&
 			contains(candidates, "--follow") &&
-			contains(candidates, "--json"),
+			contains(candidates, "--json") &&
+			contains(candidates, "--cursor"),
 		"log completion omitted options");
 	candidates = application.complete({"system", ""});
 	require(contains(candidates, "temperature"),
@@ -190,6 +293,7 @@ int main()
 		command_hierarchy();
 		option_parsing();
 		help_and_errors();
+		machine_interface();
 		completion();
 		std::cout << "CLI tests passed\n";
 		return 0;

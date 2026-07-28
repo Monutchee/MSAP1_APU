@@ -18,6 +18,11 @@ namespace {
 	throw std::runtime_error(operation + ": " + std::strerror(errno));
 }
 
+[[noreturn]] void throw_unavailable_errno(const std::string &operation)
+{
+	throw AcquisitionUnavailable(operation + ": " + std::strerror(errno));
+}
+
 } // namespace
 
 AcquisitionClient::AcquisitionClient(std::string socket_path)
@@ -48,7 +53,7 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 		const int saved_errno = errno;
 		close_fd();
 		errno = saved_errno;
-		throw_errno("connect " + socket_path_);
+		throw_unavailable_errno("connect " + socket_path_);
 	}
 
 	AcquisitionRequest request{};
@@ -64,7 +69,7 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 		const int saved_errno = errno;
 		close_fd();
 		errno = saved_errno;
-		throw_errno("send acquisition request");
+		throw_unavailable_errno("send acquisition request");
 	}
 
 	pollfd descriptor{fd, POLLIN, 0};
@@ -73,9 +78,10 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 		const int saved_errno = errno;
 		close_fd();
 		if (poll_result == 0)
-			throw std::runtime_error("timed out waiting for acquisition daemon");
+			throw AcquisitionUnavailable(
+				"timed out waiting for acquisition daemon");
 		errno = saved_errno;
-		throw_errno("poll acquisition socket");
+		throw_unavailable_errno("poll acquisition socket");
 	}
 
 	AcquisitionResponse response{};

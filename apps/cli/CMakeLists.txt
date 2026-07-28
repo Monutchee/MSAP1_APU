@@ -3,9 +3,14 @@ add_library(mnc_cli STATIC
     meter_commands.cpp
     adc_commands.cpp
     log_commands.cpp
+    machine_commands.cpp
     system_commands.cpp
 )
-target_link_libraries(mnc_cli PUBLIC msap1::apu-core mnc::logging)
+target_link_libraries(mnc_cli PUBLIC
+    msap1::apu-core
+    mnc::logging
+    glaze::glaze
+)
 target_include_directories(mnc_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(mnc_cli PUBLIC cxx_std_23)
 target_compile_options(mnc_cli PRIVATE -Wall -Wextra -Wpedantic)
@@ -15,7 +20,13 @@ target_link_libraries(mnc PRIVATE mnc_cli)
 target_compile_features(mnc PRIVATE cxx_std_23)
 target_compile_options(mnc PRIVATE -Wall -Wextra -Wpedantic)
 
-install(TARGETS mnc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+add_executable(mnc-ssh-gateway gateway_main.cpp)
+target_link_libraries(mnc-ssh-gateway PRIVATE mnc_cli)
+target_compile_features(mnc-ssh-gateway PRIVATE cxx_std_23)
+target_compile_options(mnc-ssh-gateway PRIVATE -Wall -Wextra -Wpedantic)
+
+install(TARGETS mnc mnc-ssh-gateway
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES completions/mnc
     DESTINATION ${CMAKE_INSTALL_DATADIR}/bash-completion/completions)
 

@@ -38,6 +38,13 @@
 - Product services emit structured journald entries and `mnc log` provides the
   consolidated reader. Journald remains the only log store; do not add a
   parallel product log file or database.
+- `mnc` command handlers collect typed results once and select either a human
+  text or machine JSON generator. Command access metadata is authoritative for
+  both `mnc machine describe` and restricted remote execution; never maintain
+  a second remote-command allowlist.
+- Restricted diagnostics may execute only metadata-classified `diagnostic`
+  commands with bounded JSON output. Runtime control, maintenance audits,
+  continuous output, socket overrides, and timeout overrides remain local.
 - Web journal inspection is administrator-only and must remain a bounded,
   cursor-paginated backend query. Do not expose unrestricted journal access or
   allow the browser to open journald directly.

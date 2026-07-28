@@ -2,9 +2,12 @@
 
 #include "msap1/acquisition_ipc.hpp"
 
+#include <glaze/glaze.hpp>
+
 #include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -12,6 +15,17 @@ namespace msap1::cli {
 namespace {
 
 constexpr const char *file_completion_marker = "__MNC_FILE__";
+
+struct JsonError {
+	std::string code;
+	std::string message;
+};
+
+struct JsonErrorEnvelope {
+	std::string schema = "mnc.response.v1";
+	bool success = false;
+	JsonError error;
+};
 
 std::uint64_t parse_positive_integer(const std::string &value,
 				     const std::string &option)
@@ -50,6 +64,28 @@ void write_option(std::ostream &output, const OptionSpec &option)
 	       << '\n';
 }
 
+int access_rank(AccessLevel level) noexcept
+{
+	switch (level) {
+	case AccessLevel::diagnostic: return 0;
+	case AccessLevel::operator_control: return 1;
+	case AccessLevel::maintenance: return 2;
+	case AccessLevel::local_only: return 3;
+	}
+	return 3;
+}
+
+void collect_descriptors(const Command &command, const std::string &parent,
+			 std::vector<CommandDescriptor> &result)
+{
+	const auto path = parent.empty() ? command.name()
+					: parent + " " + command.name();
+	if (command.handler())
+		result.push_back({path, command.summary(), command.metadata()});
+	for (const auto &child : command.subcommands())
+		collect_descriptors(child, path, result);
+}
+
 } // namespace
 
 class Application::UsageError : public std::invalid_argument {
@@ -65,9 +101,10 @@ private:
 	const Command *command_;
 };
 
-Command::Command(std::string name, std::string summary, Handler handler)
+Command::Command(std::string name, std::string summary, Handler handler,
+		 CommandMetadata metadata)
 	: name_(std::move(name)), summary_(std::move(summary)),
-	  handler_(std::move(handler))
+	  handler_(std::move(handler)), metadata_(std::move(metadata))
 {
 }
 
@@ -81,6 +118,17 @@ Command &Command::add_option(OptionSpec option)
 {
 	options_.push_back(std::move(option));
 	return *this;
+}
+
+Command &Command::set_access_resolver(AccessResolver resolver)
+{
+	access_resolver_ = std::move(resolver);
+	return *this;
+}
+
+AccessLevel Command::required_access(const Options &options) const
+{
+	return access_resolver_ ? access_resolver_(options) : metadata_.access;
 }
 
 const Command *Command::find_subcommand(const std::string &name) const
@@ -98,6 +146,7 @@ Application::Application()
 		CompletionKind::path,
 		[](Options &options, const std::string &value) {
 			options.socket_path = value;
+			options.socket_overridden = true;
 		},
 	});
 	global_options_.push_back({
@@ -109,6 +158,20 @@ Application::Application()
 			    static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
 				throw std::invalid_argument("--timeout-ms is too large");
 			options.timeout_ms = static_cast<int>(timeout);
+			options.timeout_overridden = true;
+		},
+	});
+	global_options_.push_back({
+		"output", "FORMAT", "Output format: text or json",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			if (value == "text")
+				options.output_format = OutputFormat::text;
+			else if (value == "json")
+				options.output_format = OutputFormat::json;
+			else
+				throw std::invalid_argument(
+					"--output must be text or json");
 		},
 	});
 }
@@ -198,19 +261,90 @@ Invocation Application::parse(const std::vector<std::string> &arguments) const
 }
 
 int Application::execute(const std::vector<std::string> &arguments,
-			 std::ostream &output, std::ostream &error) const
+			 std::ostream &output, std::ostream &error,
+			 const ExecutionPolicy &policy) const
 {
+	const bool json_requested = arguments_request_json(arguments) ||
+		policy.require_json;
 	try {
-		const auto invocation = parse(arguments);
+		auto invocation = parse(arguments);
+		if (policy.require_json &&
+		    invocation.options.output_format != OutputFormat::json) {
+			write_json_error(output, "OUTPUT_REQUIRED",
+					 "restricted access requires --output json");
+			return 2;
+		}
+		if (!policy.allow_socket_override &&
+		    invocation.options.socket_overridden) {
+			write_json_error(
+				output, "ACCESS_DENIED",
+				"--socket is unavailable through restricted access");
+			return 3;
+		}
+		if (!policy.allow_timeout_override &&
+		    invocation.options.timeout_overridden) {
+			write_json_error(
+				output, "ACCESS_DENIED",
+				"--timeout-ms is unavailable through restricted access");
+			return 3;
+		}
 		if (invocation.show_help) {
+			if (policy.require_json) {
+				write_json_error(
+					output, "ACCESS_DENIED",
+					"interactive help is unavailable through restricted access");
+				return 3;
+			}
 			write_help(*invocation.command, output);
 			return 0;
 		}
+		const auto required =
+			invocation.command->required_access(invocation.options);
+		if (!access_allowed(required, policy.maximum_access)) {
+			const auto message = "command requires " +
+				std::string(access_level_name(required)) +
+				" access";
+			if (json_requested)
+				write_json_error(output, "ACCESS_DENIED", message);
+			else
+				error << "mnc: " << message << '\n';
+			return 3;
+		}
+		if (invocation.options.output_format == OutputFormat::json &&
+		    !invocation.command->metadata().supports_json) {
+			const auto message =
+				"command does not support machine-readable JSON output";
+			write_json_error(output, "OUTPUT_UNSUPPORTED", message);
+			return 2;
+		}
 		return invocation.command->handler()(invocation.options, output);
 	} catch (const UsageError &usage_error) {
+		if (json_requested) {
+			write_json_error(output, "USAGE_ERROR", usage_error.what());
+			return 2;
+		}
 		error << "mnc: " << usage_error.what() << "\n\n";
 		write_help(usage_error.command(), error);
 		return 2;
+	} catch (const std::invalid_argument &invalid) {
+		if (json_requested)
+			write_json_error(output, "USAGE_ERROR", invalid.what());
+		else
+			error << "mnc: " << invalid.what() << '\n';
+		return 2;
+	} catch (const msap1::AcquisitionUnavailable &unavailable) {
+		if (json_requested)
+			write_json_error(output, "SERVICE_UNAVAILABLE",
+					 unavailable.what());
+		else
+			error << "mnc: " << unavailable.what() << '\n';
+		return 4;
+	} catch (const std::exception &runtime) {
+		if (json_requested)
+			write_json_error(output, "RUNTIME_ERROR", runtime.what());
+		else
+			error << "mnc: " << runtime.what() << '\n';
+		return 1;
 	}
 }
 
@@ -262,6 +396,28 @@ void Application::write_help(const Command &command, std::ostream &output) const
 	       << "Show contextual help\n";
 	if (&command == &root_)
 		output << "\nUse \"mnc help <command>\" for more information.\n";
+}
+
+std::vector<CommandDescriptor> Application::descriptors() const
+{
+	std::vector<CommandDescriptor> result;
+	for (const auto &child : root_.subcommands())
+		collect_descriptors(child, root_.name(), result);
+	const CommandMetadata local_tool{
+		.access = AccessLevel::local_only,
+		.side_effect = SideEffect::none,
+		.supports_text = true,
+		.supports_json = false,
+		.variants = {},
+	};
+	result.push_back({"mnc help", "Show contextual human help", local_tool});
+	result.push_back(
+		{"mnc __complete", "Generate local shell completions", local_tool});
+	std::sort(result.begin(), result.end(),
+		  [](const auto &left, const auto &right) {
+			  return left.command < right.command;
+		  });
+	return result;
 }
 
 std::vector<std::string>
@@ -334,7 +490,61 @@ Application make_application()
 	register_adc_commands(application);
 	register_log_command(application);
 	register_system_commands(application);
+	register_machine_commands(application);
 	return application;
+}
+
+std::string_view access_level_name(AccessLevel level) noexcept
+{
+	switch (level) {
+	case AccessLevel::diagnostic: return "diagnostic";
+	case AccessLevel::operator_control: return "operator_control";
+	case AccessLevel::maintenance: return "maintenance";
+	case AccessLevel::local_only: return "local_only";
+	}
+	return "local_only";
+}
+
+std::string_view side_effect_name(SideEffect effect) noexcept
+{
+	switch (effect) {
+	case SideEffect::none: return "none";
+	case SideEffect::control: return "control";
+	case SideEffect::destructive_diagnostic:
+		return "destructive_diagnostic";
+	case SideEffect::continuous: return "continuous";
+	}
+	return "none";
+}
+
+bool access_allowed(AccessLevel required, AccessLevel maximum) noexcept
+{
+	return access_rank(required) <= access_rank(maximum);
+}
+
+bool arguments_request_json(
+	const std::vector<std::string> &arguments) noexcept
+{
+	for (std::size_t index = 0; index < arguments.size(); ++index) {
+		if (arguments[index] == "--output" && index + 1 < arguments.size() &&
+		    arguments[index + 1] == "json")
+			return true;
+		if (arguments[index] == "--output=json")
+			return true;
+	}
+	return false;
+}
+
+void write_json_error(std::ostream &output, std::string_view code,
+		      std::string_view message)
+{
+	const auto json = glz::write_json(JsonErrorEnvelope{
+		.error = {std::string(code), std::string(message)}});
+	if (json)
+		output << *json << '\n';
+	else
+		output << R"({"schema":"mnc.response.v1","success":false,"error":{"code":"JSON_ERROR","message":"failed to serialize error"}})"
+		       << '\n';
 }
 
 } // namespace msap1::cli
