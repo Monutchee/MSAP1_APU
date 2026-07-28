@@ -27,6 +27,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -92,10 +93,16 @@ struct AcquisitionHealthDto {
 	std::uint32_t configuration_generation;
 };
 
+struct HealthReasonDto {
+	std::string code;
+	std::string message;
+};
+
 struct AdcHealthDto {
 	bool healthy;
 	bool spi_responsive;
 	bool initialized;
+	bool init_complete;
 	bool configuration_match;
 	bool rate_match;
 	bool capture_active;
@@ -111,6 +118,7 @@ struct AdcHealthDto {
 	std::uint32_t drdy_frequency_hz;
 	std::uint32_t fifo_overflows;
 	std::uint32_t header_errors;
+	std::vector<HealthReasonDto> degraded_reasons;
 };
 
 struct HealthDto {
@@ -430,6 +438,10 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 {
 	const auto &adc = response.rpu_health;
 	const auto status = msap1::evaluate_meter_health(response);
+	std::vector<HealthReasonDto> degraded_reasons;
+	degraded_reasons.reserve(status.adc_degraded_reasons.size());
+	for (const auto &reason : status.adc_degraded_reasons)
+		degraded_reasons.push_back({reason.code, reason.message});
 	return {
 		status.healthy,
 		{response.running != 0u, response.has_meter_record != 0u,
@@ -437,6 +449,7 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 response.invalid_records, response.sequence_gaps,
 		 response.configuration_generation},
 		{status.adc_healthy, status.spi_responsive, status.initialized,
+		 (adc.health_flags & MSAP1_ADC_HEALTH_INIT_COMPLETE) != 0u,
 		 status.configuration_match, status.rate_match,
 		 status.capture_active, status.fifo_ok, status.headers_valid,
 		 status.meter_configured,
@@ -445,7 +458,8 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 adc.dclk_frequency_hz,
 		 adc.drdy_frequency_hz,
 		 adc.overflow_count,
-		 adc.header_error_count},
+		 adc.header_error_count,
+		 std::move(degraded_reasons)},
 		status.frequency_arithmetic_ok,
 	};
 }

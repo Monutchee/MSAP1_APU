@@ -1,5 +1,6 @@
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_config.hpp"
+#include "msap1/meter_health.hpp"
 #include "msap1/meter_record.hpp"
 #include "msap1/protocol.hpp"
 #include "msap1/rpmsg_endpoint.hpp"
@@ -50,6 +51,30 @@ void log_message(
 			   std::span<const mnc::logging::Field>(
 				   fields.begin(), fields.size()),
 			   source);
+}
+
+std::string health_reason_codes(
+	const std::vector<msap1::HealthReason> &reasons)
+{
+	std::string result;
+	for (const auto &reason : reasons) {
+		if (!result.empty())
+			result += ',';
+		result += reason.code;
+	}
+	return result;
+}
+
+std::string health_reason_messages(
+	const std::vector<msap1::HealthReason> &reasons)
+{
+	std::string result;
+	for (const auto &reason : reasons) {
+		if (!result.empty())
+			result += "; ";
+		result += reason.message;
+	}
+	return result;
 }
 
 void handle_signal(int)
@@ -361,26 +386,21 @@ private:
 		    *last_health_flags_ == health.health_flags &&
 		    last_spi_error_ == health.spi_error)
 			return;
-		constexpr std::uint32_t expected =
-			MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
-			MSAP1_ADC_HEALTH_INITIALIZED |
-			MSAP1_ADC_HEALTH_INIT_COMPLETE |
-			MSAP1_ADC_HEALTH_CONFIG_MATCH |
-			MSAP1_ADC_HEALTH_CAPTURE_ACTIVE |
-			MSAP1_ADC_HEALTH_NO_OVERFLOW |
-			MSAP1_ADC_HEALTH_HEADERS_VALID |
-			MSAP1_ADC_HEALTH_RATE_MATCH;
-		const bool healthy = (health.health_flags & expected) == expected &&
-			health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
+		const auto reasons = msap1::evaluate_rpu_adc_health_reasons(health);
+		const bool healthy = reasons.empty();
+		const auto reason_codes = health_reason_codes(reasons);
+		const auto reason_messages = health_reason_messages(reasons);
 		log_message(health_log,
 			healthy ? mnc::logging::Priority::notice
 				: mnc::logging::Priority::warning,
 			healthy ? "RPU ADC health became healthy"
-				: "RPU ADC health became degraded",
+				: "RPU ADC health became degraded: " +
+					reason_messages,
 			healthy ? "rpu_health_healthy" : "rpu_health_degraded",
 			{{"MNC_ADC_HEALTH_FLAGS",
 			  std::to_string(health.health_flags)},
 			 {"MNC_SPI_ERROR", std::to_string(health.spi_error)},
+			 {"MNC_HEALTH_REASONS", reason_codes},
 			 {"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(health.meter_generation)}});
 		last_health_flags_ = health.health_flags;

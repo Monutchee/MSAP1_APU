@@ -1,5 +1,8 @@
 #include "msap1/meter_health.hpp"
 
+#include <string>
+#include <utility>
+
 namespace msap1 {
 namespace {
 
@@ -13,12 +16,60 @@ bool meter_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
 	return (health.meter_health_flags & flag) != 0u;
 }
 
+void append_reason(std::vector<HealthReason> &reasons, std::string code,
+		   std::string message)
+{
+	reasons.push_back({std::move(code), std::move(message)});
+}
+
 } // namespace
+
+std::vector<HealthReason>
+evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
+{
+	std::vector<HealthReason> reasons;
+	if (!health_flag(health, MSAP1_ADC_HEALTH_SPI_RESPONSIVE) ||
+	    health.spi_error != MSAP1_ADC_SPI_HEALTH_OK)
+		append_reason(reasons, "spi_unresponsive",
+			      "ADC SPI register-health check failed (error " +
+				      std::to_string(health.spi_error) + ")");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_INITIALIZED))
+		append_reason(reasons, "not_initialized",
+			      "ADC driver is not initialized");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_INIT_COMPLETE))
+		append_reason(reasons, "init_incomplete",
+			      "ADC INIT_COMPLETE is not asserted");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_CONFIG_MATCH))
+		append_reason(reasons, "configuration_mismatch",
+			      "ADC register readback does not match the active configuration");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_CAPTURE_ACTIVE))
+		append_reason(reasons, "capture_inactive",
+			      "ADC capture is not active");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_NO_OVERFLOW))
+		append_reason(reasons, "fifo_overflow",
+			      "PL capture FIFO has " +
+				      std::to_string(health.overflow_count) +
+				      " overflow(s)");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_HEADERS_VALID))
+		append_reason(reasons, "invalid_headers",
+			      "no valid ADC frames are available or " +
+				      std::to_string(health.header_error_count) +
+				      " frame header error(s) were detected");
+	if (!health_flag(health, MSAP1_ADC_HEALTH_RATE_MATCH))
+		append_reason(reasons, "sample_rate_mismatch",
+			      "measured ADC DRDY rate " +
+				      std::to_string(health.drdy_frequency_hz) +
+				      " frame/s does not match configured rate " +
+				      std::to_string(health.sample_rate_hz) +
+				      " frame/s");
+	return reasons;
+}
 
 MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 {
 	const auto &adc = response.rpu_health;
 	MeterHealth result;
+	result.adc_degraded_reasons = evaluate_rpu_adc_health_reasons(adc);
 	result.spi_responsive =
 		health_flag(adc, MSAP1_ADC_HEALTH_SPI_RESPONSIVE);
 	result.initialized = health_flag(adc, MSAP1_ADC_HEALTH_INITIALIZED) &&
@@ -38,6 +89,22 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 	result.meter_generation_match =
 		meter_flag(adc, MSAP1_METER_HEALTH_GENERATION_MATCH) &&
 		adc.meter_generation == response.configuration_generation;
+	if (!meter_flag(adc, MSAP1_METER_HEALTH_CORES_PRESENT))
+		append_reason(result.adc_degraded_reasons,
+			      "meter_cores_unavailable",
+			      "PL meter-processing cores are unavailable");
+	if (!meter_flag(adc, MSAP1_METER_HEALTH_CONFIGURED))
+		append_reason(result.adc_degraded_reasons,
+			      "meter_not_configured",
+			      "PL meter configuration has not been applied");
+	if (!meter_flag(adc, MSAP1_METER_HEALTH_ENABLED))
+		append_reason(result.adc_degraded_reasons,
+			      "meter_disabled",
+			      "PL meter processing is disabled");
+	if (!result.meter_generation_match)
+		append_reason(result.adc_degraded_reasons,
+			      "configuration_generation_mismatch",
+			      "APU and PL configuration generations do not match");
 	result.dc_offset_removal =
 		meter_flag(adc, MSAP1_METER_HEALTH_REMOVE_DC);
 	const auto frequency = response.latest_record.frequency();

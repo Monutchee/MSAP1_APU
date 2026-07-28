@@ -3,7 +3,15 @@
 
 #include "msap1/acquisition_ipc.hpp"
 
+#include <string>
+#include <vector>
+
 namespace msap1 {
+
+struct HealthReason {
+	std::string code;
+	std::string message;
+};
 
 struct MeterHealth {
 	bool healthy = false;
@@ -20,8 +28,11 @@ struct MeterHealth {
 	bool meter_generation_match = false;
 	bool dc_offset_removal = false;
 	bool frequency_arithmetic_ok = false;
+	std::vector<HealthReason> adc_degraded_reasons;
 };
 
+std::vector<HealthReason>
+evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health);
 MeterHealth evaluate_meter_health(const AcquisitionResponse &response);
 
 } // namespace msap1
