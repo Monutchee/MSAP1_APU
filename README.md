@@ -97,6 +97,7 @@ require the viewer role; changing ADC capture requires the admin role.
 
 ```sh
 mnc meter health
+mnc meter health --full
 mnc meter health --refresh
 mnc meter view
 mnc meter view --results 20
@@ -141,8 +142,13 @@ FPGA. The command takes about five seconds and prints copyable before,
 reset-asserted, reset-default, and after snapshots.
 
 `mnc meter health` reports the daemon's cached RPU audit together with the
-one-second meter-record freshness check. The full 100-register SPI audit runs
-at startup, after configuration changes, and every 30 seconds. Use
+one-second meter-record freshness check in a concise summary. Use
+`mnc meter health --full` for complete pipeline counters, SPI diagnostics,
+decoded AD7771 controls, and the raw register snapshot. The full 100-register
+SPI audit runs
+after a two-second capture-start stabilization interval, after configuration
+changes, and every 30 seconds. The startup delay lets the PL DRDY meter publish
+a complete one-second capture-active window before its rate is evaluated. Use
 `mnc meter health --refresh` when an immediate destructive-on-the-bus audit is
 needed. One failed SPI audit is retained as a pending confirmation and retried
 after one second; only two consecutive failures replace a known-good health

@@ -37,6 +37,12 @@ using Clock = std::chrono::steady_clock;
 
 constexpr auto health_audit_interval = 30s;
 constexpr auto health_confirmation_interval = 1s;
+/*
+ * The PL DCLK/DRDY monitor publishes one-second snapshots. Delay the first
+ * post-start audit long enough for a complete capture-active window to replace
+ * the zero-rate snapshot produced while capture was stopped.
+ */
+constexpr auto health_startup_settle_interval = 2s;
 constexpr std::uint32_t health_failures_before_degraded = 2;
 
 volatile std::sig_atomic_t stop_requested = 0;
@@ -266,8 +272,6 @@ public:
 			{{"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(configuration_.wire.generation)},
 			 {"MNC_DEVICE", meter_.path()}});
-		next_health_audit_ = Clock::now() + health_audit_interval;
-
 		while (!stop_requested) {
 			pollfd descriptors[2] = {
 				{meter_.fd(), POLLIN, 0},
@@ -450,6 +454,7 @@ private:
 
 	void refresh_rpu_health()
 	{
+		health_stabilizing_ = false;
 		msap1_adc_health_payload health{};
 		try {
 			health = query_rpu_health_raw();
@@ -603,12 +608,15 @@ private:
 			    !response.payload.empty())
 				throw std::runtime_error(
 					"unexpected RPU capture-start response");
-			refresh_rpu_health();
 		} catch (...) {
 			meter_.stop();
 			throw;
 		}
 		running_ = true;
+		health_probe_failures_ = 0;
+		health_stabilizing_ = true;
+		next_health_audit_ =
+			Clock::now() + health_startup_settle_interval;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"ADC capture and meter DMA started", "capture_started",
 			{{"MNC_CONFIGURATION_GENERATION",
@@ -630,6 +638,7 @@ private:
 		}
 		meter_.stop();
 		running_ = false;
+		health_stabilizing_ = false;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"ADC capture and meter DMA stopped", "capture_stopped");
 	}
@@ -785,7 +794,8 @@ private:
 					MSAP1_ADC_DIAGNOSTIC_ERROR_NONE;
 				start(!diagnostic_succeeded);
 			}
-			refresh_rpu_health();
+			if (!restart)
+				refresh_rpu_health();
 			log_message(config_log, mnc::logging::Priority::notice,
 				"ADC diagnostic flow completed",
 				"adc_diagnostic_completed",
@@ -899,7 +909,8 @@ private:
 			age_milliseconds(last_rpu_health_time_);
 		response.health_probe_failures = health_probe_failures_;
 		response.health_probe_pending =
-			health_probe_failures_ != 0u ? 1u : 0u;
+			health_stabilizing_ || health_probe_failures_ != 0u ? 1u
+									     : 0u;
 		response.rpu_health = cached_health_;
 		response.adc_diagnostic = last_adc_diagnostic_;
 		if (latest_record_)
@@ -1017,6 +1028,7 @@ private:
 	bool has_cached_health_ = false;
 	std::optional<Clock::time_point> last_rpu_health_time_;
 	Clock::time_point next_health_audit_ = Clock::now();
+	bool health_stabilizing_ = false;
 	std::uint32_t health_probe_failures_ = 0;
 	std::uint32_t last_spi_retry_recovery_count_ = 0;
 	std::optional<std::uint32_t> last_health_flags_;

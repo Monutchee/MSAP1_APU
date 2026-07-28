@@ -249,7 +249,57 @@ int run_meter_health(const Options &options, std::ostream &output)
 	require_daemon_ok(response);
 	const auto status = evaluate_meter_health(response);
 	const auto &health = response.rpu_health;
-	const auto frequency = response.latest_record.frequency();
+
+	if (!options.health_full) {
+		output << "MSAP1 meter health: "
+		       << (status.healthy ? "PASS" : "FAIL") << '\n'
+		       << "  Acquisition:         "
+		       << (status.acquisition_healthy ? "healthy" : "degraded")
+		       << " (" << (response.running != 0u ? "running" : "stopped")
+		       << ", record ";
+		if (response.meter_record_age_ms !=
+		    std::numeric_limits<std::uint32_t>::max())
+			output << response.meter_record_age_ms << " ms old)\n";
+		else
+			output << "unavailable)\n";
+		output << "  ADC:                 "
+		       << (status.adc_healthy ? "healthy" : "degraded") << '\n'
+		       << "  Sample rate:         " << health.sample_rate_hz
+		       << " configured / ";
+		if (health.drdy_frequency_hz != 0u)
+			output << health.drdy_frequency_hz;
+		else
+			output << "unavailable";
+		output << " measured frame/s\n"
+		       << "  Data-path errors:    DMA " << response.dma_read_errors
+		       << ", invalid " << response.invalid_records << ", gaps "
+		       << response.sequence_gaps << ", FIFO "
+		       << health.overflow_count << ", headers "
+		       << health.header_error_count << '\n'
+		       << "  Health audit:        ";
+		if (response.health_probe_pending != 0u) {
+			if (response.health_probe_failures == 0u)
+				output << "startup stabilization\n";
+			else
+				output << "confirmation pending ("
+				       << response.health_probe_failures
+				       << " failure)\n";
+		} else if (response.rpu_health_age_ms !=
+			   std::numeric_limits<std::uint32_t>::max()) {
+			output << "cached " << response.rpu_health_age_ms
+			       << " ms ago\n";
+		} else {
+			output << "unavailable\n";
+		}
+		if (!status.adc_degraded_reasons.empty()) {
+			output << "  ADC degraded because:\n";
+			for (const auto &reason : status.adc_degraded_reasons)
+				output << "    - [" << reason.code << "] "
+				       << reason.message << '\n';
+		}
+		output << "  Run 'mnc meter health --full' for complete diagnostics.\n";
+		return status.healthy ? 0 : 1;
+	}
 
 	output << "MSAP1 meter health: " << (status.healthy ? "PASS" : "FAIL") << '\n'
 	       << "  Linux acquisition:    " << yes_no(response.running != 0u) << '\n'
@@ -269,11 +319,14 @@ int run_meter_health(const Options &options, std::ostream &output)
 	else
 		output << "unavailable\n";
 	output << "  Health confirmation:  "
-	       << (response.health_probe_pending != 0u
-			   ? "pending (" +
-				     std::to_string(response.health_probe_failures) +
-				     " failure)"
-			   : "not pending")
+	       << (response.health_probe_pending == 0u
+			   ? "not pending"
+			   : response.health_probe_failures == 0u
+				   ? "startup stabilization"
+				   : "pending (" +
+					     std::to_string(
+						     response.health_probe_failures) +
+					     " failure)")
 	       << '\n'
 	       << "  Meter records:        " << response.meter_records << '\n'
 	       << "  DMA bytes:            " << response.dma_bytes << '\n'
@@ -318,13 +371,7 @@ int run_meter_health(const Options &options, std::ostream &output)
 	       << "  Processing status:   0x" << health.processing_status << std::dec
 	       << '\n'
 	       << "  Frequency arithmetic: "
-	       << (status.frequency_arithmetic_ok ? "ok" : "fault") << '\n'
-	       << "  Grid frequency:       ";
-	if (response.has_meter_record != 0u && frequency.valid)
-		output << std::fixed << std::setprecision(3)
-		       << static_cast<double>(frequency.millihz) / 1000.0 << " Hz\n";
-	else
-		output << "unavailable\n";
+	       << (status.frequency_arithmetic_ok ? "ok" : "fault") << '\n';
 	if (!status.adc_degraded_reasons.empty()) {
 		output << "  ADC degraded because:\n";
 		for (const auto &reason : status.adc_degraded_reasons)
@@ -430,6 +477,14 @@ void register_meter_commands(Application &application)
 		CompletionKind::none,
 		[](Options &options, const std::string &) {
 			options.health_refresh = true;
+		},
+		false,
+	});
+	health.add_option({
+		"full", "", "Show complete pipeline and AD7771 register diagnostics",
+		CompletionKind::none,
+		[](Options &options, const std::string &) {
+			options.health_full = true;
 		},
 		false,
 	});

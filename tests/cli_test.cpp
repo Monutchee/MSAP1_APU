@@ -60,10 +60,10 @@ void option_parsing()
 		"ADC sample rate was not parsed");
 
 	const auto health =
-		application.parse({"meter", "health", "--refresh"});
+		application.parse({"meter", "health", "--refresh", "--full"});
 	require(!health.show_help && health.command->name() == "health" &&
-			health.options.health_refresh,
-		"meter health refresh option was not parsed");
+			health.options.health_refresh && health.options.health_full,
+		"meter health diagnostic options were not parsed");
 
 	const auto flow =
 		application.parse({"adc", "testflw", "--flow", "1"});
@@ -147,8 +147,9 @@ void completion()
 	require(contains(candidates, "health") && contains(candidates, "view"),
 		"meter completion omitted actions");
 	candidates = application.complete({"meter", "health", "--"});
-	require(contains(candidates, "--refresh"),
-		"meter health completion omitted --refresh");
+	require(contains(candidates, "--refresh") &&
+			contains(candidates, "--full"),
+		"meter health completion omitted diagnostic options");
 	candidates = application.complete({"meter", "view", "--"});
 	require(contains(candidates, "--duration") &&
 		contains(candidates, "--results") && contains(candidates, "--socket"),
