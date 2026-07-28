@@ -32,6 +32,11 @@ void command_hierarchy()
 	const auto adc = application.parse({"help", "adc"});
 	require(adc.show_help && adc.command->name() == "adc",
 		"explicit help did not select the ADC group");
+	const auto temperature =
+		application.parse({"help", "system", "temperature"});
+	require(temperature.show_help &&
+			temperature.command->name() == "temperature",
+		"explicit help did not select the temperature command");
 }
 
 void option_parsing()
@@ -141,7 +146,7 @@ void completion()
 	const auto application = msap1::cli::make_application();
 	auto candidates = application.complete({""});
 	require(contains(candidates, "adc") && contains(candidates, "meter") &&
-			contains(candidates, "log"),
+			contains(candidates, "log") && contains(candidates, "system"),
 		"root completion omitted command groups");
 	candidates = application.complete({"meter", ""});
 	require(contains(candidates, "health") && contains(candidates, "view"),
@@ -172,6 +177,9 @@ void completion()
 			contains(candidates, "--follow") &&
 			contains(candidates, "--json"),
 		"log completion omitted options");
+	candidates = application.complete({"system", ""});
+	require(contains(candidates, "temperature"),
+		"system completion omitted temperature");
 }
 
 } // namespace

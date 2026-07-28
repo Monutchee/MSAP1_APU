@@ -3,6 +3,7 @@
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
+#include "msap1/soc_temperature.hpp"
 #include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"
 
@@ -225,6 +226,19 @@ struct DeveloperLogsDto {
 	std::string next_cursor;
 };
 
+struct SocTemperatureDto {
+	std::string zone;
+	std::string label;
+	bool available;
+	std::int64_t millidegrees_c;
+	double temperature_c;
+};
+
+struct SocTemperaturesDto {
+	std::int64_t sampled_at_unix_ms;
+	std::vector<SocTemperatureDto> sensors;
+};
+
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
 				  const T &value)
@@ -432,6 +446,28 @@ DeveloperLogsDto developer_logs(std::string_view target)
 			mnc::logging::entry_to_json(classified),
 		});
 		result.next_cursor = classified.cursor.value;
+	}
+	return result;
+}
+
+SocTemperaturesDto soc_temperatures()
+{
+	const auto readings = msap1::read_soc_temperatures();
+	SocTemperaturesDto result{
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now().time_since_epoch())
+			.count(),
+		{},
+	};
+	result.sensors.reserve(readings.size());
+	for (const auto &reading : readings) {
+		result.sensors.push_back({
+			reading.zone,
+			reading.label,
+			reading.available(),
+			reading.millidegrees_c.value_or(0),
+			reading.celsius(),
+		});
 	}
 	return result;
 }
@@ -676,6 +712,21 @@ int main()
 						error.what());
 				}
 			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/developer/temperatures",
+			[](const webengine::RequestContext &) {
+				try {
+					return json_response(webengine::http::status::ok,
+						soc_temperatures());
+				} catch (const std::exception &error) {
+					log_api_failure(
+						"/api/v1/developer/temperatures", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
 
 		engine.add_api(webengine::http::verb::get,
 			"/api/v1/developer/logs",
