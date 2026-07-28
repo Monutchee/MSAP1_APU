@@ -30,6 +30,11 @@
 - `msap1-fpga-acquisition` is the sole meter DMA and RPMsg lifecycle owner. It
   opens/arms DMA, commits the JSON-derived configuration through R5 core 0,
   requests capture START, and requests STOP before closing DMA.
+- The daemon also owns full RPU ADC register-health audits. Run them at
+  startup, after coordinated configuration changes, and on the low-rate
+  periodic schedule. CLI/Web health polling reads the cache; fast pipeline
+  failure detection uses meter-record freshness rather than repeated SPI
+  sweeps.
 - Product services emit structured journald entries and `mnc log` provides the
   consolidated reader. Journald remains the only log store; do not add a
   parallel product log file or database.

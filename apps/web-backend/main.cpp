@@ -85,6 +85,11 @@ struct SessionDto {
 struct AcquisitionHealthDto {
 	bool running;
 	bool record_available;
+	bool record_stale;
+	std::uint32_t record_age_ms;
+	std::uint32_t rpu_health_age_ms;
+	std::uint32_t health_probe_failures;
+	bool health_probe_pending;
 	std::uint64_t records;
 	std::uint64_t bytes;
 	std::uint64_t read_errors;
@@ -118,6 +123,10 @@ struct AdcHealthDto {
 	std::uint32_t drdy_frequency_hz;
 	std::uint32_t fifo_overflows;
 	std::uint32_t header_errors;
+	std::uint32_t spi_protocol_errors;
+	std::uint32_t spi_retry_recoveries;
+	std::uint32_t spi_last_failed_register;
+	std::uint32_t spi_last_received_header;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 
@@ -445,6 +454,9 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 	return {
 		status.healthy,
 		{response.running != 0u, response.has_meter_record != 0u,
+		 status.record_stale, response.meter_record_age_ms,
+		 response.rpu_health_age_ms, response.health_probe_failures,
+		 response.health_probe_pending != 0u,
 		 response.meter_records, response.dma_bytes, response.dma_read_errors,
 		 response.invalid_records, response.sequence_gaps,
 		 response.configuration_generation},
@@ -459,6 +471,10 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 adc.drdy_frequency_hz,
 		 adc.overflow_count,
 		 adc.header_error_count,
+		 adc.spi_protocol_error_count,
+		 adc.spi_retry_recovery_count,
+		 adc.spi_last_failed_register,
+		 adc.spi_last_received_header,
 		 std::move(degraded_reasons)},
 		status.frequency_arithmetic_ok,
 	};
@@ -649,7 +665,7 @@ int main()
 				try {
 					msap1::AcquisitionClient client;
 					const auto response = client.request(
-						msap1::AcquisitionCommand::health, 1000);
+						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						system_health(response, nginx));
@@ -698,7 +714,7 @@ int main()
 				try {
 					msap1::AcquisitionClient client;
 					const auto response = client.request(
-						msap1::AcquisitionCommand::health, 1000);
+						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						meter_health(response));

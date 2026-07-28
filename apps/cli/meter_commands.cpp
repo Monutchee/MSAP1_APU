@@ -9,6 +9,7 @@
 #include <csignal>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -241,7 +242,10 @@ int run_meter_health(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
 	const auto response =
-		client.request(AcquisitionCommand::health, options.timeout_ms);
+		client.request(options.health_refresh
+				       ? AcquisitionCommand::health_refresh
+				       : AcquisitionCommand::health,
+			       options.timeout_ms);
 	require_daemon_ok(response);
 	const auto status = evaluate_meter_health(response);
 	const auto &health = response.rpu_health;
@@ -250,6 +254,26 @@ int run_meter_health(const Options &options, std::ostream &output)
 	output << "MSAP1 meter health: " << (status.healthy ? "PASS" : "FAIL") << '\n'
 	       << "  Linux acquisition:    " << yes_no(response.running != 0u) << '\n'
 	       << "  Meter record present: " << yes_no(response.has_meter_record != 0u)
+	       << '\n'
+	       << "  Meter record stale:   " << yes_no(status.record_stale) << '\n'
+	       << "  Meter record age:     ";
+	if (response.meter_record_age_ms !=
+	    std::numeric_limits<std::uint32_t>::max())
+		output << response.meter_record_age_ms << " ms\n";
+	else
+		output << "unavailable\n";
+	output << "  RPU health cache age: ";
+	if (response.rpu_health_age_ms !=
+	    std::numeric_limits<std::uint32_t>::max())
+		output << response.rpu_health_age_ms << " ms\n";
+	else
+		output << "unavailable\n";
+	output << "  Health confirmation:  "
+	       << (response.health_probe_pending != 0u
+			   ? "pending (" +
+				     std::to_string(response.health_probe_failures) +
+				     " failure)"
+			   : "not pending")
 	       << '\n'
 	       << "  Meter records:        " << response.meter_records << '\n'
 	       << "  DMA bytes:            " << response.dma_bytes << '\n'
@@ -280,6 +304,15 @@ int run_meter_health(const Options &options, std::ostream &output)
 		output << "unavailable\n";
 	output << "  FIFO overflows:       " << health.overflow_count << '\n'
 	       << "  Header errors:        " << health.header_error_count << '\n'
+	       << "  SPI protocol errors:  "
+	       << health.spi_protocol_error_count << '\n'
+	       << "  SPI retry recoveries: "
+	       << health.spi_retry_recovery_count << '\n'
+	       << "  Last SPI failure:     register 0x" << std::hex
+	       << static_cast<unsigned int>(health.spi_last_failed_register)
+	       << ", header 0x"
+	       << static_cast<unsigned int>(health.spi_last_received_header)
+	       << std::dec << '\n'
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
 	       << '\n'
 	       << "  Processing status:   0x" << health.processing_status << std::dec
@@ -390,8 +423,17 @@ int run_meter_view(const Options &options, std::ostream &output)
 void register_meter_commands(Application &application)
 {
 	Command meter("meter", "Inspect MSAP1 meter health and readings");
-	meter.add_subcommand(Command("health", "Show acquisition and meter health",
-				     run_meter_health));
+	Command health("health", "Show cached acquisition and meter health",
+		       run_meter_health);
+	health.add_option({
+		"refresh", "", "Run an immediate RPU ADC register-health audit",
+		CompletionKind::none,
+		[](Options &options, const std::string &) {
+			options.health_refresh = true;
+		},
+		false,
+	});
+	meter.add_subcommand(std::move(health));
 	Command view("view", "Continuously display the latest meter readings",
 		     run_meter_view);
 	view.add_option({
