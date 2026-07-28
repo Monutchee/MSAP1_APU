@@ -484,6 +484,8 @@ void meter_health_evaluation()
 		"DC-offset removal health flag was not exposed");
 	require(healthy.rate_match,
 		"ADC rate-match health flag was not exposed");
+	require(healthy.adc_degraded_reasons.empty(),
+		"healthy ADC response reported degradation reasons");
 
 	response.sequence_gaps = 1;
 	const auto degraded = msap1::evaluate_meter_health(response);
@@ -497,6 +499,13 @@ void meter_health_evaluation()
 	require(!rate_mismatch.healthy && !rate_mismatch.adc_healthy &&
 		rate_mismatch.acquisition_healthy,
 		"ADC rate mismatch did not degrade meter health");
+	require(rate_mismatch.adc_degraded_reasons.size() == 1 &&
+			rate_mismatch.adc_degraded_reasons.front().code ==
+				"sample_rate_mismatch",
+		"ADC rate mismatch did not expose its degradation reason");
+	require(rate_mismatch.adc_degraded_reasons.front().message.find(
+			"does not match configured rate") != std::string::npos,
+		"ADC rate-mismatch reason omitted measured/configured context");
 
 	response.rpu_health.health_flags |= MSAP1_ADC_HEALTH_RATE_MATCH;
 	response.latest_record.words[57] = 1u << 7;

@@ -292,6 +292,12 @@ int run_meter_health(const Options &options, std::ostream &output)
 		       << static_cast<double>(frequency.millihz) / 1000.0 << " Hz\n";
 	else
 		output << "unavailable\n";
+	if (!status.adc_degraded_reasons.empty()) {
+		output << "  ADC degraded because:\n";
+		for (const auto &reason : status.adc_degraded_reasons)
+			output << "    - [" << reason.code << "] "
+			       << reason.message << '\n';
+	}
 	if (status.spi_responsive)
 		print_adc_registers(output, health);
 	else
