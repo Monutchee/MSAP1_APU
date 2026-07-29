@@ -3,6 +3,8 @@ option(MNC_LOGGING_REQUIRE_SYSTEMD
     OFF
 )
 
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 if(MNC_LOGGING_REQUIRE_SYSTEMD)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
@@ -40,6 +42,7 @@ add_library(msap1_apu_core STATIC
     ${PROJECT_SOURCE_DIR}/src/protocol.cpp
     ${PROJECT_SOURCE_DIR}/src/rpmsg_endpoint.cpp
     ${PROJECT_SOURCE_DIR}/src/soc_temperature.cpp
+    ${PROJECT_SOURCE_DIR}/src/system_identity.cpp
 )
 add_library(msap1::apu-core ALIAS msap1_apu_core)
 
@@ -47,6 +50,7 @@ target_link_libraries(msap1_apu_core PRIVATE
     mnc::rpmsg_chrdev
     mnc::logging
     glaze::glaze
+    OpenSSL::Crypto
 )
 target_include_directories(msap1_apu_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -73,4 +77,11 @@ if(BUILD_TESTING)
     target_compile_options(soc_temperature_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME soc_temperature_test COMMAND soc_temperature_test)
+
+    add_executable(system_identity_test
+        ${PROJECT_SOURCE_DIR}/tests/system_identity_test.cpp)
+    target_link_libraries(system_identity_test PRIVATE msap1::apu-core)
+    target_compile_options(system_identity_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME system_identity_test COMMAND system_identity_test)
 endif()

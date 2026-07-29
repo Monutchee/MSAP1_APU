@@ -80,6 +80,8 @@ The authenticated external API is:
 - `POST /api/login` and `POST /api/logout`
 - `GET /api/v1/session`
 - `GET /api/v1/health`
+- `GET /api/v1/about` (viewer-safe MNCOS version, image build identifier, and
+  software build date)
 - `GET /api/v1/meter/health`
 - `GET /api/v1/meter/readings`
 - `GET /api/v1/meter/configuration/frequency`
@@ -88,12 +90,17 @@ The authenticated external API is:
   `component`, `module`, `priority`, `after`, and `limit` query parameters)
 - `GET /api/v1/developer/temperatures` (administrator only; label-discovered
   LPD, FPD, and PL temperatures)
+- `GET /api/v1/developer/about` (administrator only; MD5 diagnostic
+  fingerprints for the deployed PL bitstream, R5 firmware, and APU
+  executables)
 - `GET /api/v1/adc/capture`
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
 require the viewer role; changing ADC capture requires the admin role.
+The Developer About fingerprints identify whether deployed files match; MD5 is
+not used as a security or integrity guarantee.
 
 ## Commands
 
