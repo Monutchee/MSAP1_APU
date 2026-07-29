@@ -4,6 +4,7 @@
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/soc_temperature.hpp"
+#include "msap1/system_identity.hpp"
 #include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"
 
@@ -239,6 +240,33 @@ struct SocTemperaturesDto {
 	std::vector<SocTemperatureDto> sensors;
 };
 
+struct SystemAboutDto {
+	bool available;
+	std::string product;
+	std::string operating_system;
+	std::string yocto_system_version;
+	std::string build_hex;
+	std::string software_build_date;
+	std::string image_recipe;
+	std::string machine;
+};
+
+struct ComponentFingerprintDto {
+	std::string id;
+	std::string label;
+	std::string component_type;
+	std::string path;
+	bool available;
+	std::uintmax_t size_bytes;
+	std::string md5;
+};
+
+struct DeveloperAboutDto {
+	std::string digest_algorithm;
+	std::string digest_purpose;
+	std::vector<ComponentFingerprintDto> components;
+};
+
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
 				  const T &value)
@@ -467,6 +495,47 @@ SocTemperaturesDto soc_temperatures()
 			reading.available(),
 			reading.millidegrees_c.value_or(0),
 			reading.celsius(),
+		});
+	}
+	return result;
+}
+
+SystemAboutDto system_about()
+{
+	const auto identity = msap1::read_image_identity();
+	auto short_hash = identity.build_hash_short;
+	if (short_hash.empty() && identity.build_hash.size() >= 6)
+		short_hash = identity.build_hash.substr(0, 6);
+	return {
+		identity.available,
+		"MSAP1",
+		"MNCOS",
+		identity.distro_version,
+		std::move(short_hash),
+		identity.build_time,
+		identity.image_recipe,
+		identity.machine,
+	};
+}
+
+DeveloperAboutDto developer_about()
+{
+	DeveloperAboutDto result{
+		"MD5",
+		"Diagnostic file identity only; MD5 is not an integrity or security check",
+		{},
+	};
+	const auto fingerprints = msap1::system_component_fingerprints();
+	result.components.reserve(fingerprints.size());
+	for (const auto &fingerprint : fingerprints) {
+		result.components.push_back({
+			fingerprint.id,
+			fingerprint.label,
+			fingerprint.component_type,
+			fingerprint.path,
+			fingerprint.available,
+			fingerprint.size_bytes,
+			fingerprint.md5,
 		});
 	}
 	return result;
@@ -713,6 +782,12 @@ int main()
 				}
 			}, webengine::Role::Viewer);
 
+		engine.add_api(webengine::http::verb::get, "/api/v1/about",
+			[](const webengine::RequestContext &) {
+				return json_response(webengine::http::status::ok,
+					system_about());
+			}, webengine::Role::Viewer);
+
 		engine.add_api(webengine::http::verb::get,
 			"/api/v1/developer/temperatures",
 			[](const webengine::RequestContext &) {
@@ -726,6 +801,13 @@ int main()
 						webengine::http::status::service_unavailable,
 						error.what());
 				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/developer/about",
+			[](const webengine::RequestContext &) {
+				return json_response(webengine::http::status::ok,
+					developer_about());
 			}, webengine::Role::Admin);
 
 		engine.add_api(webengine::http::verb::get,
