@@ -183,6 +183,7 @@ public:
 	WaveformSessionSummary trigger(std::uint32_t pretrigger_ms,
 				       std::uint32_t posttrigger_ms,
 				       WaveformTriggerSource source);
+	void erase(std::uint64_t session_id);
 	WaveformStatus status();
 	std::vector<WaveformSessionSummary> sessions();
 

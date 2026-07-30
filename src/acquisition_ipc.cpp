@@ -37,7 +37,8 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 						std::uint32_t diagnostic_flow,
 						std::uint32_t waveform_pretrigger_ms,
 						std::uint32_t waveform_posttrigger_ms,
-						WaveformTriggerSource waveform_trigger_source) const
+						WaveformTriggerSource waveform_trigger_source,
+						std::uint64_t waveform_session_id) const
 {
 	const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	if (fd < 0)
@@ -66,6 +67,7 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 	request.waveform_pretrigger_ms = waveform_pretrigger_ms;
 	request.waveform_posttrigger_ms = waveform_posttrigger_ms;
 	request.waveform_trigger_source = waveform_trigger_source;
+	request.waveform_session_id = waveform_session_id;
 	if (frequency != nullptr)
 		request.frequency = *frequency;
 	request.sequence = static_cast<std::uint64_t>(

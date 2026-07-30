@@ -659,6 +659,35 @@ WaveformSessionSummary WaveformCapture::trigger(
 	return active->summary;
 }
 
+void WaveformCapture::erase(std::uint64_t session_id)
+{
+	collect_materialization_results();
+	const auto session = std::find_if(
+		sessions_.begin(), sessions_.end(),
+		[session_id](const Session &candidate) {
+			return candidate.summary.id == session_id;
+		});
+	if (session == sessions_.end())
+		throw std::invalid_argument("waveform session does not exist");
+	if (session->summary.state == WaveformSessionState::capturing ||
+	    session->materialization_queued)
+		throw std::runtime_error("waveform session is still active");
+
+	const std::string filename = session->summary.filename.data();
+	if (!filename.empty()) {
+		const std::filesystem::path relative(filename);
+		if (relative != relative.filename())
+			throw std::runtime_error("waveform filename is invalid");
+		std::error_code error;
+		(void)std::filesystem::remove(output_directory_ / relative, error);
+		if (error)
+			throw std::runtime_error(
+				"delete waveform file " + filename + ": " +
+				error.message());
+	}
+	sessions_.erase(session);
+}
+
 bool WaveformCapture::intersects_gap(std::uint64_t first,
 				     std::uint64_t last) const
 {

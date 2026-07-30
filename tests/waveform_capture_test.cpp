@@ -235,6 +235,11 @@ int main()
 				restored.front()
 						.trigger_realtime_nanoseconds != 0,
 			"persisted waveform history was not restored");
+		restarted.erase(triggered.id);
+		require(restarted.sessions().empty(),
+			"deleted waveform session was retained");
+		require(!std::filesystem::exists(capture_file),
+			"deleted waveform file was retained");
 		restarted.stop();
 		std::filesystem::remove(empty_device);
 		std::filesystem::remove_all(output);

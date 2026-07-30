@@ -15,7 +15,7 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 11;
+inline constexpr std::uint16_t acquisition_ipc_version = 12;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 
 enum class AcquisitionCommand : std::uint16_t {
@@ -31,6 +31,7 @@ enum class AcquisitionCommand : std::uint16_t {
 	waveform_status = 10,
 	waveform_trigger = 11,
 	waveform_list = 12,
+	waveform_delete = 13,
 };
 
 struct FrequencyIpcConfiguration {
@@ -65,6 +66,7 @@ struct AcquisitionRequest {
 	std::uint32_t waveform_posttrigger_ms = 10000;
 	WaveformTriggerSource waveform_trigger_source =
 		WaveformTriggerSource::manual_cli;
+	std::uint64_t waveform_session_id = 0;
 	FrequencyIpcConfiguration frequency{};
 };
 
@@ -117,7 +119,8 @@ public:
 				    std::uint32_t waveform_pretrigger_ms = 10000,
 				    std::uint32_t waveform_posttrigger_ms = 10000,
 				    WaveformTriggerSource waveform_trigger_source =
-					    WaveformTriggerSource::manual_cli) const;
+					    WaveformTriggerSource::manual_cli,
+				    std::uint64_t waveform_session_id = 0) const;
 
 private:
 	std::string socket_path_;

@@ -272,6 +272,10 @@ struct WaveformTriggerDto {
 	std::uint32_t posttrigger_ms = 10000;
 };
 
+struct WaveformDeleteDto {
+	std::uint64_t session_id = 0;
+};
+
 struct WaveformSessionDto {
 	std::uint64_t id;
 	std::string state;
@@ -1030,6 +1034,45 @@ int main()
 						"/api/v1/waveforms/trigger", error);
 					return error_response(
 						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::delete_,
+			"/api/v1/waveforms",
+			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				try {
+					WaveformDeleteDto deletion;
+					if (const auto error = glz::read_json(
+						    deletion, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid waveform deletion JSON");
+					if (deletion.session_id == 0u)
+						return error_response(
+							webengine::http::status::bad_request,
+							"waveform session ID is required");
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::waveform_delete,
+						3000, nullptr, 0, 0, 0, 0,
+						msap1::WaveformTriggerSource::manual_web,
+						deletion.session_id);
+					require_acquisition_ok(response);
+					log_message(api_log,
+						mnc::logging::Priority::notice,
+						"waveform capture deleted",
+						"waveform_deleted",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_WAVEFORM_SESSION",
+						  std::to_string(deletion.session_id)}});
+					return json_response(webengine::http::status::ok,
+						waveform_status(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/waveforms", error);
+					return error_response(
+						webengine::http::status::conflict,
 						error.what());
 				}
 			}, webengine::Role::Admin);

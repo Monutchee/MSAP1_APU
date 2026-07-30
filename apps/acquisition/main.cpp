@@ -1061,6 +1061,16 @@ private:
 							 .waveform_posttrigger_ms)}});
 					break;
 				}
+				case msap1::AcquisitionCommand::waveform_delete:
+					waveform_.erase(request.waveform_session_id);
+					log_message(waveform_log,
+						mnc::logging::Priority::notice,
+						"waveform capture deleted",
+						"waveform_deleted",
+						{{"MNC_WAVEFORM_SESSION",
+						  std::to_string(
+							  request.waveform_session_id)}});
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
