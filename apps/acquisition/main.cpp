@@ -913,7 +913,7 @@ private:
 	}
 
 	msap1::AcquisitionResponse make_response(
-		const msap1::AcquisitionRequest &request) const
+		const msap1::AcquisitionRequest &request)
 	{
 		const auto age_milliseconds =
 			[](const std::optional<Clock::time_point> &timestamp) {

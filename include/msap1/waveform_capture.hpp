@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -61,12 +62,14 @@ struct WaveformStatus {
 	std::uint32_t running = 0;
 	std::uint32_t active_session = 0;
 	std::uint32_t sample_rate_hz = 0;
-	std::uint32_t reserved = 0;
+	std::uint32_t transport_ring_blocks = 0;
 	std::uint64_t blocks = 0;
 	std::uint64_t frames = 0;
 	std::uint64_t bytes = 0;
 	std::uint64_t invalid_blocks = 0;
 	std::uint64_t sequence_gaps = 0;
+	std::uint64_t transport_overrun_blocks = 0;
+	std::uint64_t materialization_failures = 0;
 	std::uint64_t history_oldest_sequence = 0;
 	std::uint64_t history_latest_sequence = 0;
 	std::uint64_t history_capacity_frames = waveform_history_frames;
@@ -120,6 +123,14 @@ struct WaveformCorrelationIoctl {
 	std::uint64_t pl_tick;
 	std::uint64_t frame_sequence;
 };
+
+struct WaveformTransportStatusIoctl {
+	std::uint64_t produced_blocks;
+	std::uint64_t consumed_blocks;
+	std::uint64_t overrun_blocks;
+	std::uint32_t ring_blocks;
+	std::uint32_t reserved;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WaveformBlockHeader) == waveform_block_header_bytes);
@@ -143,16 +154,24 @@ public:
 	WaveformSessionSummary trigger(std::uint32_t pretrigger_ms,
 				       std::uint32_t posttrigger_ms,
 				       WaveformTriggerSource source);
-	WaveformStatus status() const noexcept;
-	std::vector<WaveformSessionSummary> sessions() const;
+	WaveformStatus status();
+	std::vector<WaveformSessionSummary> sessions();
 
 private:
 	struct Event;
 	struct Session;
+	struct AsyncWriter;
+	struct GapRange {
+		std::uint64_t first = 0;
+		std::uint64_t last = 0;
+	};
 
 	void accept_block(const WaveformBlock &block);
 	void finish_sessions();
-	void materialize(Session &session);
+	void enqueue_materialization(Session &session);
+	void collect_materialization_results();
+	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
+	void update_transport_status() noexcept;
 	std::optional<WaveformCorrelation> correlate() const noexcept;
 
 	std::string device_path_;
@@ -167,9 +186,15 @@ private:
 	std::uint64_t bytes_ = 0;
 	std::uint64_t invalid_blocks_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
+	std::uint64_t transport_overrun_blocks_ = 0;
+	std::uint64_t transport_last_overrun_blocks_ = 0;
+	std::uint64_t materialization_failures_ = 0;
+	std::uint32_t transport_ring_blocks_ = 0;
 	std::uint32_t sample_rate_hz_ = 0;
 	std::uint64_t next_session_id_ = 1;
 	std::vector<Session> sessions_;
+	std::vector<GapRange> gaps_;
+	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};
 };
 

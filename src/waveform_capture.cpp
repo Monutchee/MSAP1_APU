@@ -3,13 +3,15 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
-#include <iomanip>
 #include <iterator>
-#include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -20,6 +22,8 @@ namespace {
 
 constexpr unsigned long waveform_correlate_ioctl =
 	_IOR('W', 0x01, WaveformCorrelationIoctl);
+constexpr unsigned long waveform_transport_status_ioctl =
+	_IOR('W', 0x02, WaveformTransportStatusIoctl);
 
 [[noreturn]] void throw_errno(const std::string &operation)
 {
@@ -52,19 +56,188 @@ struct WaveformCapture::Event {
 struct WaveformCapture::Session {
 	WaveformSessionSummary summary{};
 	std::vector<Event> events;
+	bool materialization_queued = false;
+};
+
+/*
+ * Disk I/O is deliberately isolated from the acquisition thread. Writing a
+ * multi-second capture can take longer than the kernel DMA transport slack;
+ * blocking the epoll loop here would cause otherwise healthy WFM1 blocks to
+ * be overwritten before userspace drains them.
+ */
+struct WaveformCapture::AsyncWriter {
+	using Frame = std::array<std::int32_t, waveform_channels>;
+
+	struct Job {
+		WaveformSessionSummary summary{};
+		std::vector<Event> events;
+		WaveformCorrelation correlation{};
+		std::filesystem::path output_directory;
+		std::vector<Frame> frames;
+	};
+
+	struct Result {
+		std::uint64_t session_id = 0;
+		bool success = false;
+		std::string filename;
+	};
+
+	AsyncWriter() : worker([this] { run(); }) {}
+
+	~AsyncWriter()
+	{
+		{
+			std::lock_guard lock(mutex);
+			stopping = true;
+		}
+		ready.notify_one();
+		if (worker.joinable())
+			worker.join();
+	}
+
+	void enqueue(Job job)
+	{
+		{
+			std::lock_guard lock(mutex);
+			jobs.push_back(std::move(job));
+		}
+		ready.notify_one();
+	}
+
+	std::vector<Result> collect()
+	{
+		std::vector<Result> collected;
+		std::lock_guard lock(mutex);
+		collected.reserve(results.size());
+		while (!results.empty()) {
+			collected.push_back(std::move(results.front()));
+			results.pop_front();
+		}
+		return collected;
+	}
+
+private:
+	static Result write(const Job &job)
+	{
+		Result result{};
+		result.session_id = job.summary.id;
+
+		std::ostringstream name;
+		name << "waveform-" << job.summary.id << "-"
+		     << job.summary.trigger_tai_nanoseconds << ".mncwf";
+		result.filename = name.str();
+		const auto path = job.output_directory / result.filename;
+		const auto temporary = path.string() + ".tmp";
+
+		try {
+			std::ofstream output(
+				temporary, std::ios::binary | std::ios::trunc);
+			if (!output)
+				throw std::runtime_error(
+					"create waveform file " + temporary);
+
+			const std::array<char, 8> magic{
+				'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'};
+			output.write(magic.data(), magic.size());
+			const std::uint32_t version = 1;
+			const std::uint32_t header_bytes = 128;
+			write_binary(output, version);
+			write_binary(output, header_bytes);
+			write_binary(output, job.summary.id);
+			write_binary(output, job.summary.first_sequence);
+			write_binary(output, job.summary.last_sequence);
+			write_binary(output, job.summary.trigger_sequence);
+			write_binary(output,
+				     job.summary.trigger_tai_nanoseconds);
+			write_binary(output, job.summary.sample_rate_hz);
+			const auto event_count =
+				static_cast<std::uint32_t>(job.events.size());
+			write_binary(output, event_count);
+			write_binary(output, job.correlation.tai_nanoseconds);
+			write_binary(output, job.correlation.pl_tick);
+			write_binary(output, job.correlation.frame_sequence);
+			write_binary(
+				output, job.correlation.uncertainty_nanoseconds);
+			std::array<std::byte, 32> reserved{};
+			output.write(
+				reinterpret_cast<const char *>(reserved.data()),
+				reserved.size());
+
+			for (const auto &event : job.events) {
+				write_binary(output, event.sequence);
+				write_binary(output, event.tai_nanoseconds);
+				const auto source =
+					static_cast<std::uint32_t>(event.source);
+				write_binary(output, source);
+				const std::uint32_t event_reserved = 0;
+				write_binary(output, event_reserved);
+			}
+			for (const auto &frame : job.frames) {
+				output.write(
+					reinterpret_cast<const char *>(
+						frame.data()),
+					sizeof(frame));
+			}
+			output.close();
+			if (!output)
+				throw std::runtime_error(
+					"write waveform file " + temporary);
+			std::filesystem::rename(temporary, path);
+			result.success = true;
+		} catch (...) {
+			std::error_code ignored;
+			std::filesystem::remove(temporary, ignored);
+			result.success = false;
+		}
+		return result;
+	}
+
+	void run()
+	{
+		for (;;) {
+			Job job;
+			{
+				std::unique_lock lock(mutex);
+				ready.wait(lock,
+					   [this] {
+						   return stopping ||
+							   !jobs.empty();
+					   });
+				if (stopping && jobs.empty())
+					return;
+				job = std::move(jobs.front());
+				jobs.pop_front();
+			}
+
+			auto result = write(job);
+			{
+				std::lock_guard lock(mutex);
+				results.push_back(std::move(result));
+			}
+		}
+	}
+
+	std::mutex mutex;
+	std::condition_variable ready;
+	std::deque<Job> jobs;
+	std::deque<Result> results;
+	std::thread worker;
+	bool stopping = false;
 };
 
 WaveformCapture::WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
-	  history_(waveform_history_frames)
+	  history_(waveform_history_frames),
+	  writer_(std::make_unique<AsyncWriter>())
 {
 }
 
 WaveformCapture::~WaveformCapture()
 {
 	stop();
+	writer_.reset();
 }
 
 void WaveformCapture::start()
@@ -75,8 +248,10 @@ void WaveformCapture::start()
 	if (fd_ < 0)
 		throw_errno("open " + device_path_);
 	std::filesystem::create_directories(output_directory_);
+	transport_last_overrun_blocks_ = 0;
 	if (const auto current = correlate())
 		correlation_ = *current;
+	update_transport_status();
 }
 
 void WaveformCapture::stop() noexcept
@@ -84,8 +259,14 @@ void WaveformCapture::stop() noexcept
 	if (fd_ >= 0)
 		::close(fd_);
 	fd_ = -1;
+	try {
+		collect_materialization_results();
+	} catch (...) {
+		// Shutdown must not fail because a background result cannot be read.
+	}
 	for (auto &session : sessions_) {
-		if (session.summary.state == WaveformSessionState::capturing)
+		if (session.summary.state == WaveformSessionState::capturing &&
+		    !session.materialization_queued)
 			session.summary.state = WaveformSessionState::incomplete;
 	}
 }
@@ -108,13 +289,32 @@ std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
 	};
 }
 
+void WaveformCapture::update_transport_status() noexcept
+{
+	if (fd_ < 0)
+		return;
+	WaveformTransportStatusIoctl status{};
+	if (::ioctl(fd_, waveform_transport_status_ioctl, &status) != 0)
+		return;
+	transport_ring_blocks_ = status.ring_blocks;
+	if (status.overrun_blocks >= transport_last_overrun_blocks_) {
+		transport_overrun_blocks_ +=
+			status.overrun_blocks - transport_last_overrun_blocks_;
+	}
+	transport_last_overrun_blocks_ = status.overrun_blocks;
+}
+
 void WaveformCapture::read_available()
 {
+	collect_materialization_results();
+	update_transport_status();
+
 	std::array<WaveformBlock, 2> blocks{};
 	for (;;) {
 		const auto size = ::read(fd_, blocks.data(), sizeof(blocks));
 		if (size < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+			if (errno == EAGAIN || errno == EWOULDBLOCK ||
+			    errno == EINTR)
 				break;
 			throw_errno("read " + device_path_);
 		}
@@ -130,7 +330,9 @@ void WaveformCapture::read_available()
 		for (std::size_t index = 0; index < count; ++index)
 			accept_block(blocks[index]);
 	}
+	update_transport_status();
 	finish_sessions();
+	collect_materialization_results();
 }
 
 void WaveformCapture::accept_block(const WaveformBlock &block)
@@ -146,11 +348,21 @@ void WaveformCapture::accept_block(const WaveformBlock &block)
 	}
 
 	const auto first = header.first_sequence();
-	if (have_history_ && first != latest_sequence_ + 1u) {
-		if (first > latest_sequence_ + 1u)
-			sequence_gaps_ += first - (latest_sequence_ + 1u);
-		else
-			++sequence_gaps_;
+	if (have_history_) {
+		const auto expected = latest_sequence_ + 1u;
+		if (first < expected) {
+			/*
+			 * Never rewind the history on a stale/out-of-order DMA
+			 * period. Doing so makes a later session appear contiguous
+			 * while silently replacing newer frames.
+			 */
+			++invalid_blocks_;
+			return;
+		}
+		if (first > expected) {
+			sequence_gaps_ += first - expected;
+			gaps_.push_back({expected, first - 1u});
+		}
 	}
 	for (std::size_t index = 0; index < waveform_frames_per_block; ++index) {
 		const auto sequence = first + index;
@@ -164,6 +376,11 @@ void WaveformCapture::accept_block(const WaveformBlock &block)
 		   history_.size()) {
 		oldest_sequence_ = latest_sequence_ - history_.size() + 1u;
 	}
+	gaps_.erase(std::remove_if(gaps_.begin(), gaps_.end(),
+			    [this](const GapRange &gap) {
+				    return gap.last < oldest_sequence_;
+			    }),
+		    gaps_.end());
 	sample_rate_hz_ = header.measured_sample_rate_hz;
 	++blocks_;
 	frames_ += waveform_frames_per_block;
@@ -173,6 +390,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
 	WaveformTriggerSource source)
 {
+	collect_materialization_results();
 	if (!have_history_ || sample_rate_hz_ == 0)
 		throw std::runtime_error("waveform history is not ready");
 	if (pretrigger_ms > 120000u || posttrigger_ms > 120000u)
@@ -191,8 +409,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 	const auto requested_last = anchor + frames_for(posttrigger_ms);
 	/*
 	 * Refresh the PL-tick/CLOCK_TAI mapping at every trigger. A startup-only
-	 * correlation would accumulate oscillator drift during long uptimes and
-	 * make an otherwise precise trigger timestamp less useful.
+	 * correlation would accumulate oscillator drift during long uptimes.
 	 */
 	if (const auto current = correlate())
 		correlation_ = *current;
@@ -201,7 +418,8 @@ WaveformSessionSummary WaveformCapture::trigger(
 	auto active = std::find_if(sessions_.begin(), sessions_.end(),
 		[](const Session &session) {
 			return session.summary.state ==
-				WaveformSessionState::capturing;
+				       WaveformSessionState::capturing &&
+				!session.materialization_queued;
 		});
 	if (active == sessions_.end() ||
 	    requested_first > active->summary.last_sequence + 1u) {
@@ -227,98 +445,111 @@ WaveformSessionSummary WaveformCapture::trigger(
 	return active->summary;
 }
 
+bool WaveformCapture::intersects_gap(std::uint64_t first,
+				     std::uint64_t last) const
+{
+	return std::any_of(gaps_.begin(), gaps_.end(),
+		[first, last](const GapRange &gap) {
+			return gap.first <= last && gap.last >= first;
+		});
+}
+
 void WaveformCapture::finish_sessions()
 {
 	for (auto &session : sessions_) {
 		if (session.summary.state != WaveformSessionState::capturing ||
+		    session.materialization_queued ||
 		    latest_sequence_ < session.summary.last_sequence)
 			continue;
-		if (session.summary.first_sequence < oldest_sequence_) {
+		if (session.summary.first_sequence < oldest_sequence_ ||
+		    intersects_gap(session.summary.first_sequence,
+				   session.summary.last_sequence)) {
 			session.summary.state = WaveformSessionState::incomplete;
 			continue;
 		}
-		materialize(session);
+		try {
+			enqueue_materialization(session);
+		} catch (...) {
+			session.summary.state = WaveformSessionState::incomplete;
+			++materialization_failures_;
+		}
 	}
 }
 
-void WaveformCapture::materialize(Session &session)
+void WaveformCapture::enqueue_materialization(Session &session)
 {
-	std::ostringstream name;
-	name << "waveform-" << session.summary.id << "-"
-	     << session.summary.trigger_tai_nanoseconds << ".mncwf";
-	const auto path = output_directory_ / name.str();
-	const auto temporary = path.string() + ".tmp";
-	std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-	if (!output)
-		throw std::runtime_error("create waveform file " + temporary);
+	AsyncWriter::Job job{};
+	job.summary = session.summary;
+	job.events = session.events;
+	job.correlation = correlation_;
+	job.output_directory = output_directory_;
 
-	const std::array<char, 8> magic{'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'};
-	output.write(magic.data(), magic.size());
-	const std::uint32_t version = 1;
-	const std::uint32_t header_bytes = 128;
-	write_binary(output, version);
-	write_binary(output, header_bytes);
-	write_binary(output, session.summary.id);
-	write_binary(output, session.summary.first_sequence);
-	write_binary(output, session.summary.last_sequence);
-	write_binary(output, session.summary.trigger_sequence);
-	write_binary(output, session.summary.trigger_tai_nanoseconds);
-	write_binary(output, session.summary.sample_rate_hz);
-	const auto event_count =
-		static_cast<std::uint32_t>(session.events.size());
-	write_binary(output, event_count);
-	write_binary(output, correlation_.tai_nanoseconds);
-	write_binary(output, correlation_.pl_tick);
-	write_binary(output, correlation_.frame_sequence);
-	write_binary(output, correlation_.uncertainty_nanoseconds);
-	std::array<std::byte, 32> reserved{};
-	output.write(reinterpret_cast<const char *>(reserved.data()),
-		     reserved.size());
-
-	for (const auto &event : session.events) {
-		write_binary(output, event.sequence);
-		write_binary(output, event.tai_nanoseconds);
-		const auto source = static_cast<std::uint32_t>(event.source);
-		write_binary(output, source);
-		const std::uint32_t event_reserved = 0;
-		write_binary(output, event_reserved);
+	const auto frame_count =
+		session.summary.last_sequence -
+		session.summary.first_sequence + 1u;
+	if (frame_count > history_.size())
+		throw std::runtime_error("waveform session exceeds history");
+	job.frames.reserve(static_cast<std::size_t>(frame_count));
+	for (std::uint64_t offset = 0; offset < frame_count; ++offset) {
+		const auto sequence = session.summary.first_sequence + offset;
+		job.frames.push_back(history_[sequence % history_.size()]);
 	}
-	for (auto sequence = session.summary.first_sequence;
-	     sequence <= session.summary.last_sequence; ++sequence) {
-		const auto &frame = history_[sequence % history_.size()];
-		output.write(reinterpret_cast<const char *>(frame.data()),
-			     sizeof(frame));
-	}
-	output.close();
-	if (!output)
-		throw std::runtime_error("write waveform file " + temporary);
-	std::filesystem::rename(temporary, path);
-
-	const auto filename = name.str();
-	std::copy_n(filename.c_str(),
-		    std::min(filename.size(),
-			     session.summary.filename.size() - 1u),
-		    session.summary.filename.begin());
-	session.summary.state = WaveformSessionState::complete;
+	writer_->enqueue(std::move(job));
+	session.materialization_queued = true;
 }
 
-WaveformStatus WaveformCapture::status() const noexcept
+void WaveformCapture::collect_materialization_results()
 {
+	if (!writer_)
+		return;
+	for (auto &result : writer_->collect()) {
+		const auto session = std::find_if(
+			sessions_.begin(), sessions_.end(),
+			[&result](const Session &candidate) {
+				return candidate.summary.id == result.session_id;
+			});
+		if (session == sessions_.end())
+			continue;
+		session->materialization_queued = false;
+		if (!result.success) {
+			session->summary.state =
+				WaveformSessionState::incomplete;
+			++materialization_failures_;
+			continue;
+		}
+		std::copy_n(
+			result.filename.c_str(),
+			std::min(result.filename.size(),
+				 session->summary.filename.size() - 1u),
+			session->summary.filename.begin());
+		session->summary.state = WaveformSessionState::complete;
+	}
+}
+
+WaveformStatus WaveformCapture::status()
+{
+	collect_materialization_results();
+	update_transport_status();
+
 	WaveformStatus result{};
 	result.running = running() ? 1u : 0u;
 	result.active_session = std::any_of(sessions_.begin(), sessions_.end(),
 		[](const Session &session) {
 			return session.summary.state ==
-				WaveformSessionState::capturing;
+				       WaveformSessionState::capturing &&
+				!session.materialization_queued;
 		})
 		? 1u
 		: 0u;
 	result.sample_rate_hz = sample_rate_hz_;
+	result.transport_ring_blocks = transport_ring_blocks_;
 	result.blocks = blocks_;
 	result.frames = frames_;
 	result.bytes = bytes_;
 	result.invalid_blocks = invalid_blocks_;
 	result.sequence_gaps = sequence_gaps_;
+	result.transport_overrun_blocks = transport_overrun_blocks_;
+	result.materialization_failures = materialization_failures_;
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
 	result.correlation = correlation_;
@@ -331,8 +562,9 @@ WaveformStatus WaveformCapture::status() const noexcept
 	return result;
 }
 
-std::vector<WaveformSessionSummary> WaveformCapture::sessions() const
+std::vector<WaveformSessionSummary> WaveformCapture::sessions()
 {
+	collect_materialization_results();
 	std::vector<WaveformSessionSummary> result;
 	const auto count =
 		std::min(sessions_.size(), waveform_max_ipc_sessions);

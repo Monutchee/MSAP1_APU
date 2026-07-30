@@ -1,12 +1,15 @@
 #include "msap1/waveform_capture.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <unistd.h>
 
@@ -24,7 +27,9 @@ std::filesystem::path unique_path(const std::string &suffix)
 		("msap1-waveform-test-" + std::to_string(::getpid()) + suffix);
 }
 
-void write_test_block(const std::filesystem::path &path)
+void write_test_block(const std::filesystem::path &path,
+		      std::uint64_t first_sequence = 1,
+		      bool append = false)
 {
 	msap1::WaveformBlock block{};
 	block.header.magic = msap1::waveform_block_magic;
@@ -32,11 +37,15 @@ void write_test_block(const std::filesystem::path &path)
 	block.header.block_bytes = msap1::waveform_block_bytes;
 	block.header.frame_count = msap1::waveform_frames_per_block;
 	block.header.frame_bytes = msap1::waveform_frame_bytes;
-	block.header.first_sequence_low = 1;
+	block.header.first_sequence_low =
+		static_cast<std::uint32_t>(first_sequence);
+	block.header.first_sequence_high =
+		static_cast<std::uint32_t>(first_sequence >> 32u);
 	block.header.first_tick_low = 100;
 	block.header.measured_sample_rate_hz = 32000;
 	block.header.configuration_generation = 0x12345678u;
-	block.header.block_sequence = 1;
+	block.header.block_sequence = static_cast<std::uint32_t>(
+		(first_sequence - 1u) / msap1::waveform_frames_per_block + 1u);
 	for (std::size_t frame = 0; frame < block.frames.size(); ++frame) {
 		for (std::size_t channel = 0;
 		     channel < block.frames[frame].size(); ++channel) {
@@ -45,10 +54,27 @@ void write_test_block(const std::filesystem::path &path)
 		}
 	}
 
-	std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+	std::ofstream stream(path, std::ios::binary |
+		(append ? std::ios::app : std::ios::trunc));
 	require(static_cast<bool>(stream), "create synthetic waveform device");
 	stream.write(reinterpret_cast<const char *>(&block), sizeof(block));
 	require(static_cast<bool>(stream), "write synthetic waveform block");
+}
+
+std::vector<msap1::WaveformSessionSummary> wait_for_session(
+	msap1::WaveformCapture &capture, std::uint64_t id)
+{
+	for (unsigned int attempt = 0; attempt < 200; ++attempt) {
+		auto sessions = capture.sessions();
+		const auto found = std::find_if(
+			sessions.begin(), sessions.end(),
+			[id](const auto &session) { return session.id == id; });
+		if (found != sessions.end() &&
+		    found->state != msap1::WaveformSessionState::capturing)
+			return sessions;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	throw std::runtime_error("waveform materialization timed out");
 }
 
 } // namespace
@@ -83,9 +109,9 @@ int main()
 		require(triggered.last_sequence == 1024,
 			"post-trigger frame calculation mismatch");
 
-		/* EOF still runs session completion after the read loop. */
+		/* EOF still queues session completion after the read loop. */
 		capture.read_available();
-		const auto sessions = capture.sessions();
+		const auto sessions = wait_for_session(capture, triggered.id);
 		require(sessions.size() == 1, "session was not retained");
 		require(sessions.front().state ==
 				msap1::WaveformSessionState::complete,
@@ -100,6 +126,31 @@ int main()
 			(1024u - 704u + 1u) * msap1::waveform_frame_bytes;
 		require(std::filesystem::file_size(capture_file) == expected_size,
 			"capture file layout mismatch");
+
+		/*
+		 * A forward DMA discontinuity must be retained as a gap and must
+		 * make any session spanning it incomplete rather than producing a
+		 * corrupt file.
+		 */
+		write_test_block(device, 2049, true);
+		capture.read_available();
+		const auto gap_status = capture.status();
+		require(gap_status.sequence_gaps == 1024,
+			"missing frame count mismatch");
+		const auto gap_triggered = capture.trigger(
+			50, 0, msap1::WaveformTriggerSource::manual_cli);
+		capture.read_available();
+		const auto gap_sessions = capture.sessions();
+		const auto gap_session = std::find_if(
+			gap_sessions.begin(), gap_sessions.end(),
+			[&gap_triggered](const auto &session) {
+				return session.id == gap_triggered.id;
+			});
+		require(gap_session != gap_sessions.end(),
+			"gap session was not retained");
+		require(gap_session->state ==
+				msap1::WaveformSessionState::incomplete,
+			"gap-crossing session was materialized");
 		capture.stop();
 		std::filesystem::remove_all(output);
 		std::filesystem::remove(device);

@@ -147,7 +147,11 @@ sequence. The daemon retains 128 MiB of raw eight-channel frames (about
 precede the trigger. Overlapping manual or future PQ-event windows are merged
 into one longest capture and retain every event marker. Each trigger refreshes
 an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the separate
-waveform AXI-Lite registers. Completed files are written atomically below:
+waveform AXI-Lite registers. The acquisition loop snapshots a completed
+session from history and a background writer publishes it atomically, so
+filesystem latency cannot block DMA draining. A session that intersects a
+reported transport gap is marked incomplete and is not published as a valid
+capture. Completed files are written below:
 
 ```text
 /var/lib/monutchee/waveforms/

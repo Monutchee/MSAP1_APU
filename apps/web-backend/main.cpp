@@ -288,11 +288,14 @@ struct WaveformDto {
 	bool running;
 	bool active_session;
 	std::uint32_t sample_rate_hz;
+	std::uint32_t transport_ring_blocks;
 	std::uint64_t blocks;
 	std::uint64_t frames;
 	std::uint64_t bytes;
 	std::uint64_t invalid_blocks;
 	std::uint64_t sequence_gaps;
+	std::uint64_t transport_overrun_blocks;
+	std::uint64_t materialization_failures;
 	std::uint64_t history_oldest_sequence;
 	std::uint64_t history_latest_sequence;
 	std::uint64_t history_capacity_frames;
@@ -592,11 +595,14 @@ WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
 		status.running != 0u,
 		status.active_session != 0u,
 		status.sample_rate_hz,
+		status.transport_ring_blocks,
 		status.blocks,
 		status.frames,
 		status.bytes,
 		status.invalid_blocks,
 		status.sequence_gaps,
+		status.transport_overrun_blocks,
+		status.materialization_failures,
 		status.history_oldest_sequence,
 		status.history_latest_sequence,
 		status.history_capacity_frames,

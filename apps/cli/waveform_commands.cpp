@@ -73,6 +73,8 @@ public:
 		       << (status.active_session ? "yes" : "no") << '\n'
 		       << "  Sample rate:          " << status.sample_rate_hz
 		       << " frame/s\n"
+		       << "  Transport ring:       "
+		       << status.transport_ring_blocks << " DMA blocks\n"
 		       << "  DMA blocks:           " << status.blocks << '\n'
 		       << "  History frames:       " << status.frames << '\n'
 		       << "  History range:        " << status.history_oldest_sequence
@@ -81,6 +83,10 @@ public:
 		       << " frames (128 MiB)\n"
 		       << "  Invalid blocks:       " << status.invalid_blocks << '\n'
 		       << "  Sequence gaps:        " << status.sequence_gaps << '\n'
+		       << "  Transport overruns:   "
+		       << status.transport_overrun_blocks << " DMA blocks\n"
+		       << "  File write failures:  "
+		       << status.materialization_failures << '\n'
 		       << "  Completed sessions:   " << status.completed_sessions
 		       << '\n'
 		       << "  Incomplete sessions:  " << status.incomplete_sessions
