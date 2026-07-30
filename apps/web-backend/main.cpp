@@ -279,6 +279,7 @@ struct WaveformSessionDto {
 	std::uint64_t first_sequence;
 	std::uint64_t last_sequence;
 	std::uint64_t trigger_tai_nanoseconds;
+	std::uint64_t trigger_realtime_nanoseconds;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t event_count;
 	std::string filename;
@@ -623,6 +624,7 @@ WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
 			session.first_sequence,
 			session.last_sequence,
 			session.trigger_tai_nanoseconds,
+			session.trigger_realtime_nanoseconds,
 			session.sample_rate_hz,
 			session.event_count,
 			session.filename.data(),
@@ -845,7 +847,9 @@ int main()
 		engine.set_socket_path(getenv_or("MSAP1_WEB_SOCKET", web_socket_path))
 			.set_threads(2)
 			.enable_signal_shutdown()
-			.enable_auth_endpoints();
+			.enable_auth_endpoints()
+			.protect_path("/protected/waveforms/",
+				      webengine::Role::Viewer);
 
 		engine.add_api(webengine::http::verb::get, "/api/v1/session",
 			[](const webengine::RequestContext &context) {

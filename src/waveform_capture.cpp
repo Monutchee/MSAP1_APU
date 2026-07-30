@@ -4,9 +4,11 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <mutex>
 #include <sstream>
@@ -39,11 +41,68 @@ std::uint64_t tai_now_nanoseconds()
 		static_cast<std::uint64_t>(timestamp.tv_nsec);
 }
 
+std::uint64_t realtime_now_nanoseconds()
+{
+	timespec timestamp{};
+	if (::clock_gettime(CLOCK_REALTIME, &timestamp) != 0)
+		throw_errno("read CLOCK_REALTIME");
+	return static_cast<std::uint64_t>(timestamp.tv_sec) * 1000000000ull +
+		static_cast<std::uint64_t>(timestamp.tv_nsec);
+}
+
+std::string filename_timestamp(std::uint64_t realtime_nanoseconds)
+{
+	const auto seconds =
+		static_cast<std::time_t>(realtime_nanoseconds / 1000000000ull);
+	std::tm broken_down{};
+	if (::gmtime_r(&seconds, &broken_down) == nullptr)
+		throw std::runtime_error("convert waveform trigger time");
+	std::ostringstream formatted;
+	formatted << std::put_time(&broken_down, "%Y-%m-%d_%H-%M-%S-")
+		  << std::setw(3) << std::setfill('0')
+		  << (realtime_nanoseconds / 1000000ull) % 1000ull;
+	return formatted.str();
+}
+
 template <typename T>
 void write_binary(std::ofstream &stream, const T &value)
 {
 	stream.write(reinterpret_cast<const char *>(&value), sizeof(value));
 }
+
+#pragma pack(push, 1)
+struct WaveformFileHeaderV2 {
+	std::array<char, 8> magic{};
+	std::uint32_t version = 2;
+	std::uint32_t header_bytes = 256;
+	std::uint64_t session_id = 0;
+	std::uint64_t first_sequence = 0;
+	std::uint64_t last_sequence = 0;
+	std::uint64_t trigger_sequence = 0;
+	std::uint64_t trigger_tai_nanoseconds = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint32_t event_count = 0;
+	std::uint64_t correlation_tai_nanoseconds = 0;
+	std::uint64_t correlation_pl_tick = 0;
+	std::uint64_t correlation_frame_sequence = 0;
+	std::uint64_t correlation_uncertainty_nanoseconds = 0;
+	std::uint32_t channel_count = waveform_persisted_channels;
+	std::uint32_t frame_bytes =
+		waveform_persisted_channels * sizeof(std::int32_t);
+	std::uint32_t channel_descriptor_bytes =
+		sizeof(WaveformChannelMetadata);
+	std::uint32_t flags = 0;
+	std::uint64_t channel_table_offset = 256;
+	std::uint64_t event_table_offset = 0;
+	std::uint64_t frame_data_offset = 0;
+	std::uint64_t frame_count = 0;
+	std::uint64_t trigger_realtime_nanoseconds = 0;
+	std::array<std::byte, 104> reserved{};
+};
+#pragma pack(pop)
+
+static_assert(sizeof(WaveformChannelMetadata) == 32);
+static_assert(sizeof(WaveformFileHeaderV2) == 256);
 
 } // namespace
 
@@ -73,6 +132,9 @@ struct WaveformCapture::AsyncWriter {
 		std::vector<Event> events;
 		WaveformCorrelation correlation{};
 		std::filesystem::path output_directory;
+		std::array<WaveformChannelMetadata,
+			   waveform_persisted_channels>
+			channel_metadata{};
 		std::vector<Frame> frames;
 	};
 
@@ -124,7 +186,9 @@ private:
 
 		std::ostringstream name;
 		name << "waveform-" << job.summary.id << "-"
-		     << job.summary.trigger_tai_nanoseconds << ".mncwf";
+		     << filename_timestamp(
+				job.summary.trigger_realtime_nanoseconds)
+		     << ".mncwf";
 		result.filename = name.str();
 		const auto path = job.output_directory / result.filename;
 		const auto temporary = path.string() + ".tmp";
@@ -136,32 +200,40 @@ private:
 				throw std::runtime_error(
 					"create waveform file " + temporary);
 
-			const std::array<char, 8> magic{
-				'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'};
-			output.write(magic.data(), magic.size());
-			const std::uint32_t version = 1;
-			const std::uint32_t header_bytes = 128;
-			write_binary(output, version);
-			write_binary(output, header_bytes);
-			write_binary(output, job.summary.id);
-			write_binary(output, job.summary.first_sequence);
-			write_binary(output, job.summary.last_sequence);
-			write_binary(output, job.summary.trigger_sequence);
-			write_binary(output,
-				     job.summary.trigger_tai_nanoseconds);
-			write_binary(output, job.summary.sample_rate_hz);
-			const auto event_count =
+			WaveformFileHeaderV2 header{};
+			header.magic =
+				{'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'};
+			header.session_id = job.summary.id;
+			header.first_sequence = job.summary.first_sequence;
+			header.last_sequence = job.summary.last_sequence;
+			header.trigger_sequence = job.summary.trigger_sequence;
+			header.trigger_tai_nanoseconds =
+				job.summary.trigger_tai_nanoseconds;
+			header.sample_rate_hz = job.summary.sample_rate_hz;
+			header.event_count =
 				static_cast<std::uint32_t>(job.events.size());
-			write_binary(output, event_count);
-			write_binary(output, job.correlation.tai_nanoseconds);
-			write_binary(output, job.correlation.pl_tick);
-			write_binary(output, job.correlation.frame_sequence);
-			write_binary(
-				output, job.correlation.uncertainty_nanoseconds);
-			std::array<std::byte, 32> reserved{};
+			header.correlation_tai_nanoseconds =
+				job.correlation.tai_nanoseconds;
+			header.correlation_pl_tick = job.correlation.pl_tick;
+			header.correlation_frame_sequence =
+				job.correlation.frame_sequence;
+			header.correlation_uncertainty_nanoseconds =
+				job.correlation.uncertainty_nanoseconds;
+			header.event_table_offset =
+				header.channel_table_offset +
+				sizeof(job.channel_metadata);
+			header.frame_data_offset =
+				header.event_table_offset +
+				job.events.size() * 24u;
+			header.frame_count = job.frames.size();
+			header.trigger_realtime_nanoseconds =
+				job.summary.trigger_realtime_nanoseconds;
+			output.write(reinterpret_cast<const char *>(&header),
+				     sizeof(header));
 			output.write(
-				reinterpret_cast<const char *>(reserved.data()),
-				reserved.size());
+				reinterpret_cast<const char *>(
+					job.channel_metadata.data()),
+				sizeof(job.channel_metadata));
 
 			for (const auto &event : job.events) {
 				write_binary(output, event.sequence);
@@ -176,7 +248,8 @@ private:
 				output.write(
 					reinterpret_cast<const char *>(
 						frame.data()),
-					sizeof(frame));
+					waveform_persisted_channels *
+						sizeof(std::int32_t));
 			}
 			output.close();
 			if (!output)
@@ -226,12 +299,33 @@ private:
 };
 
 WaveformCapture::WaveformCapture(std::string device_path,
-				 std::filesystem::path output_directory)
+				 std::filesystem::path output_directory,
+				 std::array<WaveformChannelMetadata,
+					    waveform_persisted_channels>
+					 channel_metadata)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
+	  channel_metadata_(std::move(channel_metadata)),
 	  history_(waveform_history_frames),
 	  writer_(std::make_unique<AsyncWriter>())
 {
+	static constexpr std::array<const char *, waveform_persisted_channels>
+		default_names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+	for (std::size_t channel = 0; channel < channel_metadata_.size();
+	     ++channel) {
+		auto &metadata = channel_metadata_[channel];
+		if (metadata.name.front() != '\0')
+			continue;
+		metadata.source_channel = static_cast<std::uint32_t>(channel);
+		metadata.kind = channel < 4u ? WaveformChannelKind::current
+					   : WaveformChannelKind::voltage;
+		std::copy_n(default_names[channel],
+			    std::min(std::strlen(default_names[channel]),
+				     metadata.name.size() - 1u),
+			    metadata.name.begin());
+		const char *unit = channel < 4u ? "A" : "V";
+		std::copy_n(unit, 1u, metadata.unit.begin());
+	}
 }
 
 WaveformCapture::~WaveformCapture()
@@ -248,6 +342,7 @@ void WaveformCapture::start()
 	if (fd_ < 0)
 		throw_errno("open " + device_path_);
 	std::filesystem::create_directories(output_directory_);
+	discover_persisted_sessions();
 	transport_last_overrun_blocks_ = 0;
 	if (const auto current = correlate())
 		correlation_ = *current;
@@ -269,6 +364,123 @@ void WaveformCapture::stop() noexcept
 		    !session.materialization_queued)
 			session.summary.state = WaveformSessionState::incomplete;
 	}
+}
+
+void WaveformCapture::discover_persisted_sessions()
+{
+	if (persisted_sessions_discovered_)
+		return;
+	persisted_sessions_discovered_ = true;
+
+	std::error_code error;
+	if (!std::filesystem::exists(output_directory_, error))
+		return;
+
+	for (const auto &entry :
+	     std::filesystem::directory_iterator(output_directory_, error)) {
+		if (error)
+			break;
+		if (!entry.is_regular_file() ||
+		    entry.path().extension() != ".mncwf")
+			continue;
+
+		std::ifstream input(entry.path(), std::ios::binary);
+		WaveformFileHeaderV2 header{};
+		input.read(reinterpret_cast<char *>(&header), sizeof(header));
+		const auto bytes_read = static_cast<std::size_t>(input.gcount());
+		if (input.gcount() < 64 ||
+		    header.magic !=
+			    std::array<char, 8>{
+				    'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} ||
+		    (header.version != 1u && header.version != 2u))
+			continue;
+
+		Session session{};
+		session.summary.id = header.session_id;
+		session.summary.first_sequence = header.first_sequence;
+		session.summary.last_sequence = header.last_sequence;
+		session.summary.trigger_sequence = header.trigger_sequence;
+		session.summary.trigger_tai_nanoseconds =
+			header.trigger_tai_nanoseconds;
+		session.summary.sample_rate_hz = header.sample_rate_hz;
+		session.summary.event_count = header.event_count;
+		session.summary.state = WaveformSessionState::complete;
+
+		std::uint64_t expected_file_bytes = 0;
+		if (header.version == 2u && bytes_read == sizeof(header) &&
+		    header.header_bytes == sizeof(header) &&
+		    header.channel_count > 0u &&
+		    header.channel_count <= waveform_channels &&
+		    header.channel_descriptor_bytes ==
+			    sizeof(WaveformChannelMetadata) &&
+		    header.frame_bytes ==
+			    header.channel_count * sizeof(std::int32_t) &&
+		    header.channel_table_offset == sizeof(header) &&
+		    header.event_table_offset ==
+			    header.channel_table_offset +
+				    header.channel_count *
+					    header.channel_descriptor_bytes &&
+		    header.frame_data_offset ==
+			    header.event_table_offset +
+				    static_cast<std::uint64_t>(
+					    header.event_count) *
+					    24u &&
+		    header.last_sequence >= header.first_sequence &&
+		    header.frame_count ==
+			    header.last_sequence - header.first_sequence + 1u) {
+			expected_file_bytes =
+				header.frame_data_offset +
+				header.frame_count * header.frame_bytes;
+			session.summary.trigger_realtime_nanoseconds =
+				header.trigger_realtime_nanoseconds;
+		} else if (header.version == 1u &&
+			   header.header_bytes == 128u &&
+			   header.last_sequence >= header.first_sequence) {
+			const auto frame_count =
+				header.last_sequence - header.first_sequence + 1u;
+			expected_file_bytes =
+				128u +
+				static_cast<std::uint64_t>(
+					header.event_count) *
+					24u +
+				frame_count * waveform_frame_bytes;
+			const auto modified =
+				entry.last_write_time(error);
+			if (!error) {
+				const auto system_time =
+					std::chrono::system_clock::now() +
+					(modified -
+					 std::filesystem::file_time_type::
+						 clock::now());
+				session.summary.trigger_realtime_nanoseconds =
+					static_cast<std::uint64_t>(
+						std::chrono::duration_cast<
+							std::chrono::nanoseconds>(
+							system_time.time_since_epoch())
+							.count());
+			}
+		} else {
+			continue;
+		}
+		const auto file_bytes = entry.file_size(error);
+		if (error || file_bytes != expected_file_bytes) {
+			error.clear();
+			continue;
+		}
+
+		const auto filename = entry.path().filename().string();
+		std::copy_n(filename.c_str(),
+			    std::min(filename.size(),
+				     session.summary.filename.size() - 1u),
+			    session.summary.filename.begin());
+		sessions_.push_back(std::move(session));
+		next_session_id_ =
+			std::max(next_session_id_, header.session_id + 1u);
+	}
+	std::sort(sessions_.begin(), sessions_.end(),
+		[](const Session &left, const Session &right) {
+			return left.summary.id < right.summary.id;
+		});
 }
 
 std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
@@ -414,6 +626,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 	if (const auto current = correlate())
 		correlation_ = *current;
 	const auto now_tai = tai_now_nanoseconds();
+	const auto now_realtime = realtime_now_nanoseconds();
 
 	auto active = std::find_if(sessions_.begin(), sessions_.end(),
 		[](const Session &session) {
@@ -429,6 +642,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 		session.summary.first_sequence = requested_first;
 		session.summary.last_sequence = requested_last;
 		session.summary.trigger_tai_nanoseconds = now_tai;
+		session.summary.trigger_realtime_nanoseconds = now_realtime;
 		session.summary.sample_rate_hz = sample_rate_hz_;
 		session.summary.state = WaveformSessionState::capturing;
 		sessions_.push_back(std::move(session));
@@ -483,6 +697,7 @@ void WaveformCapture::enqueue_materialization(Session &session)
 	job.events = session.events;
 	job.correlation = correlation_;
 	job.output_directory = output_directory_;
+	job.channel_metadata = channel_metadata_;
 
 	const auto frame_count =
 		session.summary.last_sequence -

@@ -106,7 +106,7 @@ struct Options {
 	std::string rpmsg_device;
 	std::string meter_device = "/dev/msap1-meter";
 	std::string waveform_device = "/dev/msap1-waveform";
-	std::string waveform_directory = "/var/lib/monutchee/waveforms";
+	std::string waveform_directory = "/data/mnc/waveform";
 	std::string configuration = msap1::default_meter_config_path;
 	std::string active_configuration =
 		"/etc/monutchee/msap1/adc_config/active.json";
@@ -180,6 +180,38 @@ msap1::PreparedMeterConfiguration load_runtime_configuration(
 		}
 	}
 	return msap1::load_meter_configuration(options.configuration);
+}
+
+std::array<msap1::WaveformChannelMetadata,
+	   msap1::waveform_persisted_channels>
+waveform_metadata(const msap1::PreparedMeterConfiguration &configuration)
+{
+	static constexpr std::array<const char *,
+				    msap1::waveform_persisted_channels>
+		names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+	std::array<msap1::WaveformChannelMetadata,
+		   msap1::waveform_persisted_channels>
+		result{};
+	for (std::size_t channel = 0; channel < result.size(); ++channel) {
+		auto &metadata = result[channel];
+		metadata.source_channel = static_cast<std::uint32_t>(channel);
+		metadata.kind = channel < 4u
+			? msap1::WaveformChannelKind::current
+			: msap1::WaveformChannelKind::voltage;
+		metadata.scale_micro_units_q16 =
+			configuration.wire.scale_micro_units_q16[channel];
+		metadata.flags =
+			(configuration.wire.valid_mask & (1u << channel)) != 0u
+			? 1u
+			: 0u;
+		std::copy_n(names[channel],
+			    std::min(std::strlen(names[channel]),
+				     metadata.name.size() - 1u),
+			    metadata.name.begin());
+		const char *unit = channel < 4u ? "A" : "V";
+		std::copy_n(unit, 1u, metadata.unit.begin());
+	}
+	return result;
 }
 
 std::string frequency_mode_name(std::uint32_t mode)
@@ -257,7 +289,8 @@ public:
 		: options_(options),
 		  configuration_(load_runtime_configuration(options)),
 		  meter_(options.meter_device),
-		  waveform_(options.waveform_device, options.waveform_directory),
+		  waveform_(options.waveform_device, options.waveform_directory,
+			    waveform_metadata(configuration_)),
 		  endpoint_(options.service, options.rpmsg_device)
 	{
 		create_socket();

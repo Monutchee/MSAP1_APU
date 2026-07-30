@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -85,7 +86,30 @@ int main()
 	const auto output = unique_path(".captures");
 	try {
 		write_test_block(device);
-		msap1::WaveformCapture capture(device.string(), output);
+		std::array<msap1::WaveformChannelMetadata,
+			   msap1::waveform_persisted_channels>
+			metadata{};
+		static constexpr std::array<const char *,
+					    msap1::waveform_persisted_channels>
+			names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		for (std::size_t channel = 0; channel < metadata.size();
+		     ++channel) {
+			metadata[channel].source_channel = channel;
+			metadata[channel].kind =
+				channel < 4
+					? msap1::WaveformChannelKind::current
+					: msap1::WaveformChannelKind::voltage;
+			metadata[channel].scale_micro_units_q16 =
+				static_cast<std::uint32_t>(1000 + channel);
+			metadata[channel].flags = 1;
+			std::copy_n(names[channel],
+				    std::strlen(names[channel]),
+				    metadata[channel].name.begin());
+			metadata[channel].unit.front() =
+				channel < 4 ? 'A' : 'V';
+		}
+		msap1::WaveformCapture capture(
+			device.string(), output, metadata);
 		capture.start();
 		capture.read_available();
 
@@ -122,10 +146,56 @@ int main()
 		require(std::filesystem::exists(capture_file),
 			"capture file is missing");
 
-		const auto expected_size = 128u + 24u +
-			(1024u - 704u + 1u) * msap1::waveform_frame_bytes;
+		const auto expected_size = 256u +
+			msap1::waveform_persisted_channels *
+				sizeof(msap1::WaveformChannelMetadata) +
+			24u + (1024u - 704u + 1u) *
+				msap1::waveform_persisted_channels *
+				sizeof(std::int32_t);
 		require(std::filesystem::file_size(capture_file) == expected_size,
 			"capture file layout mismatch");
+		std::ifstream persisted(capture_file, std::ios::binary);
+		persisted.seekg(8);
+		std::uint32_t file_version = 0;
+		persisted.read(reinterpret_cast<char *>(&file_version),
+			       sizeof(file_version));
+		require(file_version == 2u, "capture file version mismatch");
+		persisted.seekg(96);
+		std::uint32_t channel_count = 0;
+		std::uint32_t frame_bytes = 0;
+		persisted.read(reinterpret_cast<char *>(&channel_count),
+			       sizeof(channel_count));
+		persisted.read(reinterpret_cast<char *>(&frame_bytes),
+			       sizeof(frame_bytes));
+		require(channel_count == 7u && frame_bytes == 28u,
+			"persisted channel layout mismatch");
+		persisted.seekg(256);
+		msap1::WaveformChannelMetadata persisted_channel{};
+		persisted.read(
+			reinterpret_cast<char *>(&persisted_channel),
+			sizeof(persisted_channel));
+		require(std::string(persisted_channel.name.data()) == "Ia" &&
+				persisted_channel.scale_micro_units_q16 == 1000u,
+			"channel conversion metadata mismatch");
+		persisted.seekg(256 +
+			msap1::waveform_persisted_channels *
+				sizeof(msap1::WaveformChannelMetadata) +
+			24);
+		std::array<std::int32_t,
+			   msap1::waveform_persisted_channels>
+			persisted_frame{};
+		persisted.read(
+			reinterpret_cast<char *>(persisted_frame.data()),
+			sizeof(persisted_frame));
+		require(persisted_frame[0] == 7030 &&
+				persisted_frame[6] == 7036,
+			"persisted sample channel selection mismatch");
+		const std::string capture_name =
+			sessions.front().filename.data();
+		require(capture_name.find("waveform-1-") == 0 &&
+				capture_name.ends_with(".mncwf") &&
+				capture_name.find('_') != std::string::npos,
+			"human-readable capture filename mismatch");
 
 		/*
 		 * A forward DMA discontinuity must be retained as a gap and must
@@ -152,6 +222,21 @@ int main()
 				msap1::WaveformSessionState::incomplete,
 			"gap-crossing session was materialized");
 		capture.stop();
+
+		const auto empty_device = unique_path(".empty-device");
+		std::ofstream(empty_device, std::ios::binary);
+		msap1::WaveformCapture restarted(empty_device.string(), output);
+		restarted.start();
+		const auto restored = restarted.sessions();
+		require(!restored.empty() &&
+				restored.front().id == triggered.id &&
+				restored.front().state ==
+					msap1::WaveformSessionState::complete &&
+				restored.front()
+						.trigger_realtime_nanoseconds != 0,
+			"persisted waveform history was not restored");
+		restarted.stop();
+		std::filesystem::remove(empty_device);
 		std::filesystem::remove_all(output);
 		std::filesystem::remove(device);
 		return 0;

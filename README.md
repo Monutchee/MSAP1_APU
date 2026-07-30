@@ -92,6 +92,9 @@ The authenticated external API is:
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`
 - `POST /api/v1/waveforms/trigger` (administrator only)
+- `GET /protected/waveforms/view/<filename>` (authenticated viewer)
+- `GET /protected/waveforms/download/<filename>` (authenticated viewer,
+  attachment)
 - `GET /api/v1/developer/logs` (administrator only; bounded journal page with
   `component`, `module`, `priority`, `after`, and `limit` query parameters)
 - `GET /api/v1/developer/temperatures` (administrator only; label-discovered
@@ -151,16 +154,19 @@ waveform AXI-Lite registers. The acquisition loop snapshots a completed
 session from history and a background writer publishes it atomically, so
 filesystem latency cannot block DMA draining. A session that intersects a
 reported transport gap is marked incomplete and is not published as a valid
-capture. Completed files are written below:
+capture. Completed files survive service and system restarts under:
 
 ```text
-/var/lib/monutchee/waveforms/
+/data/mnc/waveform/
 ```
 
-The `.mncwf` header records the session range, trigger sequence and TAI time,
-sample rate, correlation tuple, and event count, followed by event records and
-raw signed 32-bit channel words. R5 firmware and RPMsg are not in this payload
-path.
+New `.mncwf` version 2 files store CH0 through CH6 as raw signed 32-bit counts
+and deliberately omit diagnostic CH7. Channel descriptors carry names and the
+active Q16.16 conversion coefficients, allowing raw-count and converted-unit
+views without duplicating the sample payload. Legacy eight-channel version 1
+files remain readable. See [the MNCWF reader guide](docs/MNCWF_FILE_FORMAT.md)
+for the exact binary layout, conversion equation, and a Python example. R5
+firmware and RPMsg are not in this payload path.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

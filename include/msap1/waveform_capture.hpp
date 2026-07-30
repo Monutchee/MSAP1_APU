@@ -25,6 +25,31 @@ inline constexpr std::size_t waveform_history_frames =
 	waveform_history_bytes / waveform_frame_bytes;
 inline constexpr std::size_t waveform_max_ipc_sessions = 16;
 inline constexpr std::size_t waveform_session_name_size = 96;
+inline constexpr std::size_t waveform_persisted_channels = 7;
+
+enum class WaveformChannelKind : std::uint32_t {
+	current = 1,
+	voltage = 2,
+	debug = 3,
+};
+
+/*
+ * A persisted capture retains exact ADC counts. This descriptor provides the
+ * profile-specific transform used by readers:
+ *
+ *   engineering units = raw * scale_micro_units_q16 / (65536 * 1,000,000)
+ *
+ * Keeping the transform beside the samples permits raw/converted display
+ * without duplicating every waveform frame.
+ */
+struct WaveformChannelMetadata {
+	std::uint32_t source_channel = 0;
+	WaveformChannelKind kind = WaveformChannelKind::debug;
+	std::uint32_t scale_micro_units_q16 = 0;
+	std::uint32_t flags = 0;
+	std::array<char, 8> name{};
+	std::array<char, 8> unit{};
+};
 
 enum class WaveformTriggerSource : std::uint32_t {
 	manual_cli = 1,
@@ -51,6 +76,7 @@ struct WaveformSessionSummary {
 	std::uint64_t first_sequence = 0;
 	std::uint64_t last_sequence = 0;
 	std::uint64_t trigger_tai_nanoseconds = 0;
+	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
@@ -139,7 +165,10 @@ static_assert(sizeof(WaveformBlock) == waveform_block_bytes);
 class WaveformCapture {
 public:
 	explicit WaveformCapture(std::string device_path,
-				 std::filesystem::path output_directory);
+				 std::filesystem::path output_directory,
+				 std::array<WaveformChannelMetadata,
+					    waveform_persisted_channels>
+					 channel_metadata = {});
 	~WaveformCapture();
 
 	WaveformCapture(const WaveformCapture &) = delete;
@@ -170,12 +199,16 @@ private:
 	void finish_sessions();
 	void enqueue_materialization(Session &session);
 	void collect_materialization_results();
+	void discover_persisted_sessions();
 	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
 	void update_transport_status() noexcept;
 	std::optional<WaveformCorrelation> correlate() const noexcept;
 
 	std::string device_path_;
 	std::filesystem::path output_directory_;
+	std::array<WaveformChannelMetadata, waveform_persisted_channels>
+		channel_metadata_{};
+	bool persisted_sessions_discovered_ = false;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
 	bool have_history_ = false;

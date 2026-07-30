@@ -33,11 +33,17 @@
 - The daemon is also the sole `/dev/msap1-waveform` owner. It maintains the
   128 MiB multi-trigger raw history, refreshes the PL tick/CLOCK_TAI
   correlation at each trigger, merges overlapping trigger windows, and writes
-  completed `.mncwf` files asynchronously below
-  `/var/lib/monutchee/waveforms`. A session intersecting a transport sequence
+  completed `.mncwf` files asynchronously below persistent storage at
+  `/data/mnc/waveform`. Persisted files contain CH0 through CH6 raw counts plus
+  profile conversion metadata; CH7 remains available in live transport/debug
+  logic but is omitted from product capture files. A session intersecting a transport sequence
   gap is incomplete and must not be materialized as a valid capture. Other
   processes request captures through the daemon IPC/API and never open the
   waveform DMA directly.
+- Completed waveform history is rediscovered from persistent storage at daemon
+  startup. Authenticated Web viewers may inspect or download captures through
+  nginx's `/protected/waveforms/` routes; never expose the storage directory
+  without WebEngine authorization.
 - The daemon also owns full RPU ADC register-health audits. Run them after the
   capture-start measurement window has stabilized, after coordinated
   configuration changes, and on the low-rate periodic schedule. CLI/Web health
