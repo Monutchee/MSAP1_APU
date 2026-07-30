@@ -2,6 +2,7 @@ add_library(mnc_cli STATIC
     cli.cpp
     meter_commands.cpp
     adc_commands.cpp
+    waveform_commands.cpp
     log_commands.cpp
     machine_commands.cpp
     system_commands.cpp

@@ -5,19 +5,23 @@ R5 core 0 RPMsg control endpoint. It converts the product JSON configuration
 to fixed-point PL coefficients, commits them through the RPU, starts capture,
 and caches fixed 256-byte `MTR1` records from `/dev/msap1-meter`.
 
-The data path is:
+The runtime data paths are:
 
 ```text
 AD7771 capture -> PL conversion -> PL RMS + VLA frequency -> AXI DMA
     -> /dev/msap1-meter -> msap1-fpga-acquisition
     -> CLI and authenticated JSON API
+
+AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
+    -> /dev/msap1-waveform -> 128 MiB daemon history
+    -> triggered .mncwf files
 ```
 
 R5 core 0 retains exclusive ownership of AD7771 SPI, reset/synchronization,
-capture control, and metering AXI-Lite registers. Linux owns AXI DMA S2MM,
-scatter-gather descriptors, interrupts, and CMA-backed DDR buffers. RPMsg
-carries configuration, control, health, and acknowledgements—never sample or
-meter payloads.
+capture control, and metering AXI-Lite registers. Linux owns both AXI DMA S2MM
+engines, scatter-gather descriptors, interrupts, and CMA-backed DDR buffers.
+RPMsg carries configuration, control, health, and acknowledgements—never
+sample, waveform, or meter payloads.
 
 ## Build
 
@@ -86,6 +90,8 @@ The authenticated external API is:
 - `GET /api/v1/meter/readings`
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
+- `GET /api/v1/waveforms`
+- `POST /api/v1/waveforms/trigger` (administrator only)
 - `GET /api/v1/developer/logs` (administrator only; bounded journal page with
   `component`, `module`, `priority`, `after`, and `limit` query parameters)
 - `GET /api/v1/developer/temperatures` (administrator only; label-discovered
@@ -117,6 +123,9 @@ mnc adc start
 mnc adc rate
 mnc adc rate --sps 16000
 mnc adc testflw --flow 1
+mnc waveform status
+mnc waveform trigger --pre-ms 10000 --post-ms 10000
+mnc waveform list
 mnc log
 mnc log --component fpga-acquisition
 mnc log --module dma --priority warning
@@ -131,6 +140,23 @@ mnc --output json meter health
 their `Temp_LPD`, `Temp_FPD`, and `Temp_PL` hwmon labels. It deliberately does
 not depend on a fixed `/sys/class/hwmon/hwmonN` index because Linux may assign
 that index differently across boots and kernel versions.
+
+`mnc waveform trigger` records a manual event against the newest raw ADC
+sequence. The daemon retains 128 MiB of raw eight-channel frames (about
+131 seconds at 32 kSPS), so the resulting file can include samples that
+precede the trigger. Overlapping manual or future PQ-event windows are merged
+into one longest capture and retain every event marker. Each trigger refreshes
+an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the separate
+waveform AXI-Lite registers. Completed files are written atomically below:
+
+```text
+/var/lib/monutchee/waveforms/
+```
+
+The `.mncwf` header records the session range, trigger sequence and TAI time,
+sample rate, correlation tuple, and event count, followed by event records and
+raw signed 32-bit channel words. R5 firmware and RPMsg are not in this payload
+path.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,
