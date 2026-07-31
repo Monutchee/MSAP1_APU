@@ -4,6 +4,7 @@
 #include "msap1/meter_record.hpp"
 #include "msap1/protocol.hpp"
 #include "msap1/rpmsg_endpoint.hpp"
+#include "msap1/waveform_capture.hpp"
 #include "mnc/logging/logging.hpp"
 
 #include <algorithm>
@@ -52,6 +53,7 @@ const mnc::logging::Logger dma_log("fpga-acquisition", "dma");
 const mnc::logging::Logger rpmsg_log("fpga-acquisition", "rpmsg");
 const mnc::logging::Logger config_log("fpga-acquisition", "adc-config");
 const mnc::logging::Logger health_log("fpga-acquisition", "health");
+const mnc::logging::Logger waveform_log("fpga-acquisition", "waveform");
 
 void log_message(
 	const mnc::logging::Logger &logger, mnc::logging::Priority priority,
@@ -103,6 +105,8 @@ struct Options {
 	std::string service = "mncos-r5c0-ctrl";
 	std::string rpmsg_device;
 	std::string meter_device = "/dev/msap1-meter";
+	std::string waveform_device = "/dev/msap1-waveform";
+	std::string waveform_directory = "/data/mnc/waveform";
 	std::string configuration = msap1::default_meter_config_path;
 	std::string active_configuration =
 		"/etc/monutchee/msap1/adc_config/active.json";
@@ -116,6 +120,8 @@ void usage(const char *program)
 		<< "  --service NAME       RPMsg service (default: mncos-r5c0-ctrl)\n"
 		<< "  --rpmsg-device PATH  Use an existing /dev/rpmsgN endpoint\n"
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
+		<< "  --waveform-device PATH Waveform DMA device (default: /dev/msap1-waveform)\n"
+		<< "  --waveform-directory PATH Completed waveform storage\n"
 		<< "  --config PATH        Meter conversion JSON\n"
 		<< "  --active-config PATH Persisted complete runtime profile\n"
 		<< "  --socket PATH        Control socket path\n";
@@ -139,6 +145,10 @@ Options parse_options(int argc, char **argv)
 			options.rpmsg_device = value;
 		else if (option == "--meter-device")
 			options.meter_device = value;
+		else if (option == "--waveform-device")
+			options.waveform_device = value;
+		else if (option == "--waveform-directory")
+			options.waveform_directory = value;
 		else if (option == "--config")
 			options.configuration = value;
 		else if (option == "--active-config")
@@ -170,6 +180,38 @@ msap1::PreparedMeterConfiguration load_runtime_configuration(
 		}
 	}
 	return msap1::load_meter_configuration(options.configuration);
+}
+
+std::array<msap1::WaveformChannelMetadata,
+	   msap1::waveform_persisted_channels>
+waveform_metadata(const msap1::PreparedMeterConfiguration &configuration)
+{
+	static constexpr std::array<const char *,
+				    msap1::waveform_persisted_channels>
+		names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+	std::array<msap1::WaveformChannelMetadata,
+		   msap1::waveform_persisted_channels>
+		result{};
+	for (std::size_t channel = 0; channel < result.size(); ++channel) {
+		auto &metadata = result[channel];
+		metadata.source_channel = static_cast<std::uint32_t>(channel);
+		metadata.kind = channel < 4u
+			? msap1::WaveformChannelKind::current
+			: msap1::WaveformChannelKind::voltage;
+		metadata.scale_micro_units_q16 =
+			configuration.wire.scale_micro_units_q16[channel];
+		metadata.flags =
+			(configuration.wire.valid_mask & (1u << channel)) != 0u
+			? 1u
+			: 0u;
+		std::copy_n(names[channel],
+			    std::min(std::strlen(names[channel]),
+				     metadata.name.size() - 1u),
+			    metadata.name.begin());
+		const char *unit = channel < 4u ? "A" : "V";
+		std::copy_n(unit, 1u, metadata.unit.begin());
+	}
+	return result;
 }
 
 std::string frequency_mode_name(std::uint32_t mode)
@@ -247,6 +289,8 @@ public:
 		: options_(options),
 		  configuration_(load_runtime_configuration(options)),
 		  meter_(options.meter_device),
+		  waveform_(options.waveform_device, options.waveform_directory,
+			    waveform_metadata(configuration_)),
 		  endpoint_(options.service, options.rpmsg_device)
 	{
 		create_socket();
@@ -273,11 +317,12 @@ public:
 			  std::to_string(configuration_.wire.generation)},
 			 {"MNC_DEVICE", meter_.path()}});
 		while (!stop_requested) {
-			pollfd descriptors[2] = {
+			pollfd descriptors[3] = {
 				{meter_.fd(), POLLIN, 0},
+				{waveform_.fd(), POLLIN, 0},
 				{listen_fd_, POLLIN, 0},
 			};
-			const int result = ::poll(descriptors, 2, 250);
+			const int result = ::poll(descriptors, 3, 250);
 			if (result < 0) {
 				if (errno == EINTR)
 					continue;
@@ -293,7 +338,22 @@ public:
 					"dma_disconnected");
 				throw std::runtime_error("meter DMA device disconnected");
 			}
-			if ((descriptors[1].revents & POLLIN) != 0)
+			if ((descriptors[1].revents & POLLIN) != 0) {
+				try {
+					waveform_.read_available();
+				} catch (const std::exception &error) {
+					log_message(waveform_log,
+						mnc::logging::Priority::error,
+						"waveform DMA read failed: " +
+							std::string(error.what()),
+						"waveform_read_failed");
+				}
+			}
+			if ((descriptors[1].revents &
+			     (POLLERR | POLLHUP | POLLNVAL)) != 0)
+				throw std::runtime_error(
+					"waveform DMA device disconnected");
+			if ((descriptors[2].revents & POLLIN) != 0)
 				handle_client();
 
 			if (running_ && Clock::now() >= next_health_audit_) {
@@ -589,8 +649,14 @@ private:
 	{
 		if (running_)
 			return;
-		meter_.start();
 		try {
+			/*
+			 * Both DMA consumers must own their S2MM channels before the
+			 * RPU enables capture. This prevents losing the first waveform
+			 * history block after a restart.
+			 */
+			waveform_.start();
+			meter_.start();
 			// PGA and coefficient changes are a coordinated ADC/PL
 			// transaction and may only occur with capture stopped. STOP is
 			// idempotent, so this also recovers cleanly after a daemon crash.
@@ -610,6 +676,7 @@ private:
 					"unexpected RPU capture-start response");
 		} catch (...) {
 			meter_.stop();
+			waveform_.stop();
 			throw;
 		}
 		running_ = true;
@@ -618,7 +685,8 @@ private:
 		next_health_audit_ =
 			Clock::now() + health_startup_settle_interval;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
-			"ADC capture and meter DMA started", "capture_started",
+			"ADC capture, meter DMA, and waveform DMA started",
+			"capture_started",
 			{{"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(configuration_.wire.generation)}});
 	}
@@ -637,10 +705,12 @@ private:
 				"capture_stop_failed");
 		}
 		meter_.stop();
+		waveform_.stop();
 		running_ = false;
 		health_stabilizing_ = false;
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
-			"ADC capture and meter DMA stopped", "capture_stopped");
+			"ADC capture, meter DMA, and waveform DMA stopped",
+			"capture_stopped");
 	}
 
 	void apply_frequency_configuration(
@@ -876,7 +946,7 @@ private:
 	}
 
 	msap1::AcquisitionResponse make_response(
-		const msap1::AcquisitionRequest &request) const
+		const msap1::AcquisitionRequest &request)
 	{
 		const auto age_milliseconds =
 			[](const std::optional<Clock::time_point> &timestamp) {
@@ -916,6 +986,12 @@ private:
 		if (latest_record_)
 			response.latest_record = *latest_record_;
 		response.frequency = frequency_ipc(configuration_.source.frequency);
+		response.waveform = waveform_.status();
+		const auto waveform_sessions = waveform_.sessions();
+		response.waveform_session_count =
+			static_cast<std::uint32_t>(waveform_sessions.size());
+		std::copy(waveform_sessions.begin(), waveform_sessions.end(),
+			  response.waveform_sessions.begin());
 		return response;
 	}
 
@@ -962,6 +1038,38 @@ private:
 					break;
 				case msap1::AcquisitionCommand::adc_diagnostic_run:
 					run_adc_diagnostic(request.diagnostic_flow);
+					break;
+				case msap1::AcquisitionCommand::waveform_status:
+				case msap1::AcquisitionCommand::waveform_list:
+					break;
+				case msap1::AcquisitionCommand::waveform_trigger: {
+					const auto session = waveform_.trigger(
+						request.waveform_pretrigger_ms,
+						request.waveform_posttrigger_ms,
+						request.waveform_trigger_source);
+					log_message(waveform_log,
+						mnc::logging::Priority::notice,
+						"waveform capture triggered",
+						"waveform_triggered",
+						{{"MNC_WAVEFORM_SESSION",
+						  std::to_string(session.id)},
+						 {"MNC_PRETRIGGER_MS",
+						  std::to_string(request
+							 .waveform_pretrigger_ms)},
+						 {"MNC_POSTTRIGGER_MS",
+						  std::to_string(request
+							 .waveform_posttrigger_ms)}});
+					break;
+				}
+				case msap1::AcquisitionCommand::waveform_delete:
+					waveform_.erase(request.waveform_session_id);
+					log_message(waveform_log,
+						mnc::logging::Priority::notice,
+						"waveform capture deleted",
+						"waveform_deleted",
+						{{"MNC_WAVEFORM_SESSION",
+						  std::to_string(
+							  request.waveform_session_id)}});
 					break;
 				default:
 					response.status =
@@ -1012,6 +1120,7 @@ private:
 	Options options_;
 	msap1::PreparedMeterConfiguration configuration_;
 	MeterDevice meter_;
+	msap1::WaveformCapture waveform_;
 	msap1::RpmsgEndpoint endpoint_;
 	int listen_fd_ = -1;
 	std::uint32_t rpmsg_sequence_ = 0x90000000u;

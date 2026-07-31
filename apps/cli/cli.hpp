@@ -32,6 +32,8 @@ struct Options {
 	std::optional<double> duration_seconds;
 	std::optional<std::uint32_t> sample_rate_hz;
 	std::optional<std::uint32_t> diagnostic_flow;
+	std::uint32_t waveform_pretrigger_ms = 10000;
+	std::uint32_t waveform_posttrigger_ms = 10000;
 	std::optional<std::string> log_component;
 	std::optional<std::string> log_module;
 	std::optional<std::string> log_priority;
@@ -158,6 +160,7 @@ void write_json_error(std::ostream &output, std::string_view code,
 Application make_application();
 void register_meter_commands(Application &application);
 void register_adc_commands(Application &application);
+void register_waveform_commands(Application &application);
 void register_log_command(Application &application);
 void register_system_commands(Application &application);
 void register_machine_commands(Application &application);

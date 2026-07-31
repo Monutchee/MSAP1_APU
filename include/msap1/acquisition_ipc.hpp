@@ -3,6 +3,7 @@
 
 #include "msap1/meter_record.hpp"
 #include "msap1/rpu_control_protocol.h"
+#include "msap1/waveform_capture.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +15,7 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 8;
+inline constexpr std::uint16_t acquisition_ipc_version = 12;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 
 enum class AcquisitionCommand : std::uint16_t {
@@ -27,6 +28,10 @@ enum class AcquisitionCommand : std::uint16_t {
 	sample_rate_set = 7,
 	adc_diagnostic_run = 8,
 	health_refresh = 9,
+	waveform_status = 10,
+	waveform_trigger = 11,
+	waveform_list = 12,
+	waveform_delete = 13,
 };
 
 struct FrequencyIpcConfiguration {
@@ -57,6 +62,11 @@ struct AcquisitionRequest {
 	std::uint64_t sequence = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t diagnostic_flow = 0;
+	std::uint32_t waveform_pretrigger_ms = 10000;
+	std::uint32_t waveform_posttrigger_ms = 10000;
+	WaveformTriggerSource waveform_trigger_source =
+		WaveformTriggerSource::manual_cli;
+	std::uint64_t waveform_session_id = 0;
 	FrequencyIpcConfiguration frequency{};
 };
 
@@ -84,6 +94,11 @@ struct AcquisitionResponse {
 	msap1_adc_diagnostic_payload adc_diagnostic{};
 	MeterRecord latest_record{};
 	FrequencyIpcConfiguration frequency{};
+	WaveformStatus waveform{};
+	std::uint32_t waveform_session_count = 0;
+	std::uint32_t waveform_reserved = 0;
+	std::array<WaveformSessionSummary, waveform_max_ipc_sessions>
+		waveform_sessions{};
 };
 
 class AcquisitionUnavailable : public std::runtime_error {
@@ -100,7 +115,12 @@ public:
 				    const FrequencyIpcConfiguration *frequency =
 					    nullptr,
 				    std::uint32_t sample_rate_hz = 0,
-				    std::uint32_t diagnostic_flow = 0) const;
+				    std::uint32_t diagnostic_flow = 0,
+				    std::uint32_t waveform_pretrigger_ms = 10000,
+				    std::uint32_t waveform_posttrigger_ms = 10000,
+				    WaveformTriggerSource waveform_trigger_source =
+					    WaveformTriggerSource::manual_cli,
+				    std::uint64_t waveform_session_id = 0) const;
 
 private:
 	std::string socket_path_;

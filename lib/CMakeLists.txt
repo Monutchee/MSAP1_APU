@@ -43,6 +43,7 @@ add_library(msap1_apu_core STATIC
     ${PROJECT_SOURCE_DIR}/src/rpmsg_endpoint.cpp
     ${PROJECT_SOURCE_DIR}/src/soc_temperature.cpp
     ${PROJECT_SOURCE_DIR}/src/system_identity.cpp
+    ${PROJECT_SOURCE_DIR}/src/waveform_capture.cpp
 )
 add_library(msap1::apu-core ALIAS msap1_apu_core)
 
@@ -84,4 +85,11 @@ if(BUILD_TESTING)
     target_compile_options(system_identity_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME system_identity_test COMMAND system_identity_test)
+
+    add_executable(waveform_capture_test
+        ${PROJECT_SOURCE_DIR}/tests/waveform_capture_test.cpp)
+    target_link_libraries(waveform_capture_test PRIVATE msap1::apu-core)
+    target_compile_options(waveform_capture_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME waveform_capture_test COMMAND waveform_capture_test)
 endif()

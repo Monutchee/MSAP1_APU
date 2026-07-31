@@ -30,6 +30,20 @@
 - `msap1-fpga-acquisition` is the sole meter DMA and RPMsg lifecycle owner. It
   opens/arms DMA, commits the JSON-derived configuration through R5 core 0,
   requests capture START, and requests STOP before closing DMA.
+- The daemon is also the sole `/dev/msap1-waveform` owner. It maintains the
+  128 MiB multi-trigger raw history, refreshes the PL tick/CLOCK_TAI
+  correlation at each trigger, merges overlapping trigger windows, and writes
+  completed `.mncwf` files asynchronously below persistent storage at
+  `/data/mnc/waveform`. Persisted files contain CH0 through CH6 raw counts plus
+  profile conversion metadata; CH7 remains available in live transport/debug
+  logic but is omitted from product capture files. A session intersecting a transport sequence
+  gap is incomplete and must not be materialized as a valid capture. Other
+  processes request captures through the daemon IPC/API and never open the
+  waveform DMA directly.
+- Completed waveform history is rediscovered from persistent storage at daemon
+  startup. Authenticated Web viewers may inspect or download captures through
+  nginx's `/protected/waveforms/` routes; never expose the storage directory
+  without WebEngine authorization.
 - The daemon also owns full RPU ADC register-health audits. Run them after the
   capture-start measurement window has stabilized, after coordinated
   configuration changes, and on the low-rate periodic schedule. CLI/Web health
@@ -59,7 +73,7 @@
   runtime default is `msap1-sensor-board-5a.json`. Profiles also define CH6/VLA
   zero-crossing frequency measurement; a valid Web-generated complete profile
   is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
-- ADC and meter payloads never travel over RPMsg. RPMsg carries only
+- ADC, meter, and waveform payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
 - ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`
   falling-edge rate through the CLI and external JSON API. A missing or
@@ -70,6 +84,9 @@
   Daemon restart restores the 32 kSPS profile default.
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
+- Linux consumes fixed 32,832-byte `WFM1` blocks from the independent waveform
+  DMA. WFM1 carries 1024 raw eight-channel frames and 64-bit sequence/tick
+  metadata; it does not replace MTR1 and does not change the RPU wire ABI.
 - Voltage and current readings are RMS values calculated in PL and encoded in
   Q16 microvolts and microamps. The selected complete profile chooses
   mean-corrected AC RMS or zero-referenced total RMS and supplies the

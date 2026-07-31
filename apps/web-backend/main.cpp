@@ -267,6 +267,48 @@ struct DeveloperAboutDto {
 	std::vector<ComponentFingerprintDto> components;
 };
 
+struct WaveformTriggerDto {
+	std::uint32_t pretrigger_ms = 10000;
+	std::uint32_t posttrigger_ms = 10000;
+};
+
+struct WaveformDeleteDto {
+	std::uint64_t session_id = 0;
+};
+
+struct WaveformSessionDto {
+	std::uint64_t id;
+	std::string state;
+	std::uint64_t trigger_sequence;
+	std::uint64_t first_sequence;
+	std::uint64_t last_sequence;
+	std::uint64_t trigger_tai_nanoseconds;
+	std::uint64_t trigger_realtime_nanoseconds;
+	std::uint32_t sample_rate_hz;
+	std::uint32_t event_count;
+	std::string filename;
+};
+
+struct WaveformDto {
+	bool running;
+	bool active_session;
+	std::uint32_t sample_rate_hz;
+	std::uint32_t transport_ring_blocks;
+	std::uint64_t blocks;
+	std::uint64_t frames;
+	std::uint64_t bytes;
+	std::uint64_t invalid_blocks;
+	std::uint64_t sequence_gaps;
+	std::uint64_t transport_overrun_blocks;
+	std::uint64_t materialization_failures;
+	std::uint64_t history_oldest_sequence;
+	std::uint64_t history_latest_sequence;
+	std::uint64_t history_capacity_frames;
+	std::uint64_t completed_sessions;
+	std::uint64_t incomplete_sessions;
+	std::vector<WaveformSessionDto> sessions;
+};
+
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
 				  const T &value)
@@ -541,6 +583,60 @@ DeveloperAboutDto developer_about()
 	return result;
 }
 
+std::string waveform_state_name(msap1::WaveformSessionState state)
+{
+	switch (state) {
+	case msap1::WaveformSessionState::capturing: return "capturing";
+	case msap1::WaveformSessionState::complete: return "complete";
+	case msap1::WaveformSessionState::incomplete: return "incomplete";
+	}
+	return "unknown";
+}
+
+WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
+{
+	const auto &status = response.waveform;
+	WaveformDto result{
+		status.running != 0u,
+		status.active_session != 0u,
+		status.sample_rate_hz,
+		status.transport_ring_blocks,
+		status.blocks,
+		status.frames,
+		status.bytes,
+		status.invalid_blocks,
+		status.sequence_gaps,
+		status.transport_overrun_blocks,
+		status.materialization_failures,
+		status.history_oldest_sequence,
+		status.history_latest_sequence,
+		status.history_capacity_frames,
+		status.completed_sessions,
+		status.incomplete_sessions,
+		{},
+	};
+	const auto count = std::min<std::size_t>(
+		response.waveform_session_count,
+		response.waveform_sessions.size());
+	result.sessions.reserve(count);
+	for (std::size_t index = 0; index < count; ++index) {
+		const auto &session = response.waveform_sessions[index];
+		result.sessions.push_back({
+			session.id,
+			waveform_state_name(session.state),
+			session.trigger_sequence,
+			session.first_sequence,
+			session.last_sequence,
+			session.trigger_tai_nanoseconds,
+			session.trigger_realtime_nanoseconds,
+			session.sample_rate_hz,
+			session.event_count,
+			session.filename.data(),
+		});
+	}
+	return result;
+}
+
 void require_acquisition_ok(const msap1::AcquisitionResponse &response)
 {
 	if (response.status != msap1::AcquisitionStatus::ok)
@@ -755,7 +851,9 @@ int main()
 		engine.set_socket_path(getenv_or("MSAP1_WEB_SOCKET", web_socket_path))
 			.set_threads(2)
 			.enable_signal_shutdown()
-			.enable_auth_endpoints();
+			.enable_auth_endpoints()
+			.protect_path("/protected/waveforms/",
+				      webengine::Role::Viewer);
 
 		engine.add_api(webengine::http::verb::get, "/api/v1/session",
 			[](const webengine::RequestContext &context) {
@@ -876,6 +974,108 @@ int main()
 						error.what());
 				}
 			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/waveforms",
+			[](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::waveform_status,
+						1000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						waveform_status(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/waveforms", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::post,
+			"/api/v1/waveforms/trigger",
+			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				try {
+					WaveformTriggerDto trigger;
+					if (const auto error = glz::read_json(
+						    trigger, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid waveform trigger JSON");
+					if (trigger.pretrigger_ms > 120000u ||
+					    trigger.posttrigger_ms > 120000u)
+						return error_response(
+							webengine::http::status::bad_request,
+							"waveform durations must be 0..120000 ms");
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::waveform_trigger,
+						3000, nullptr, 0, 0,
+						trigger.pretrigger_ms,
+						trigger.posttrigger_ms,
+						msap1::WaveformTriggerSource::manual_web);
+					require_acquisition_ok(response);
+					log_message(api_log,
+						mnc::logging::Priority::notice,
+						"manual waveform capture triggered",
+						"waveform_triggered",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_PRETRIGGER_MS",
+						  std::to_string(trigger.pretrigger_ms)},
+						 {"MNC_POSTTRIGGER_MS",
+						  std::to_string(trigger.posttrigger_ms)}});
+					return json_response(webengine::http::status::ok,
+						waveform_status(response));
+				} catch (const std::exception &error) {
+					log_api_failure(
+						"/api/v1/waveforms/trigger", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::delete_,
+			"/api/v1/waveforms",
+			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				try {
+					WaveformDeleteDto deletion;
+					if (const auto error = glz::read_json(
+						    deletion, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid waveform deletion JSON");
+					if (deletion.session_id == 0u)
+						return error_response(
+							webengine::http::status::bad_request,
+							"waveform session ID is required");
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::waveform_delete,
+						3000, nullptr, 0, 0, 0, 0,
+						msap1::WaveformTriggerSource::manual_web,
+						deletion.session_id);
+					require_acquisition_ok(response);
+					log_message(api_log,
+						mnc::logging::Priority::notice,
+						"waveform capture deleted",
+						"waveform_deleted",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_WAVEFORM_SESSION",
+						  std::to_string(deletion.session_id)}});
+					return json_response(webengine::http::status::ok,
+						waveform_status(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/waveforms", error);
+					return error_response(
+						webengine::http::status::conflict,
+						error.what());
+				}
+			}, webengine::Role::Admin);
 
 		engine.add_api(webengine::http::verb::get,
 			"/api/v1/meter/configuration/frequency",
