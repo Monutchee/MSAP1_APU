@@ -1,53 +1,166 @@
 # MNCWF waveform file format
 
-This is the normative reader guide for MSAP1 `.mncwf` capture files. It is
-written for engineers and AI-assisted diagnostic tools. All multi-byte
-integers are little-endian.
+## Status and ownership
+
+This document is the normative reader specification for MSAP1 `.mncwf`
+waveform capture files. It is intended for:
+
+- product Web and CLI implementations;
+- offline waveform viewers and export tools;
+- test and calibration utilities;
+- engineers diagnosing captures; and
+- AI-assisted diagnostic tools.
+
+The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
+The authoritative writer and public data definitions are:
+
+```text
+src/waveform_capture.cpp
+include/msap1/waveform_capture.hpp
+```
+
+Consumers in other repositories should link to this document instead of
+maintaining a second copy of the binary definition.
+
+Completed captures are stored under:
+
+```text
+/data/mnc/waveform/
+```
+
+The version 2 writer uses this UTC filename convention:
+
+```text
+waveform-<session-id>-YYYY-MM-DD_HH-MM-SS-mmm.mncwf
+```
+
+For example:
+
+```text
+waveform-12-2026-07-30_20-52-08-006.mncwf
+```
+
+The filename is descriptive only. A reader must use the metadata inside the
+file as the authoritative source. The daemon writes a `.tmp` file and renames
+it to `.mncwf` only after the complete payload has been written successfully.
+An incomplete capture or a capture intersecting a known transport gap is not
+published as a valid `.mncwf` file.
+
+## MNCWF is not the WFM1 DMA transport
+
+Two related formats exist, but they serve different purposes:
+
+| Format | Scope | Header | Channels | Purpose |
+|---|---|---:|---:|---|
+| `WFM1` | PL-to-Linux DMA transport | 64 bytes | 8 | Fixed 32,832-byte blocks used by the kernel driver and acquisition daemon |
+| `.mncwf` | Persistent capture file | 256 bytes in v2 | 7 | Variable-length, self-describing product waveform archive |
+
+Each `WFM1` block contains 1024 frames of eight signed 32-bit channel words.
+The daemon uses these blocks to maintain its rolling history. When a completed
+trigger window is materialized, it creates an `.mncwf` file, adds timing,
+event, and conversion metadata, and omits diagnostic CH7.
+
+Do not parse an `.mncwf` file as a sequence of `WFM1` blocks. `WFM1` headers
+are not copied into the persistent file.
+
+## Binary conventions
+
+Unless a field explicitly says otherwise:
+
+- all multi-byte integers are little-endian;
+- structures are packed and contain no implicit compiler padding;
+- offsets are absolute byte offsets from the start of the file;
+- sequence ranges are inclusive;
+- `u32` and `u64` are unsigned 32-bit and 64-bit integers;
+- `s32` is a two's-complement signed 32-bit integer;
+- strings have fixed storage and are NUL-terminated when shorter than their
+  field;
+- reserved bytes are written as zero and must be ignored by readers; and
+- every offset, count, size, and multiplication must be treated as untrusted
+  input.
+
+A reader must not cast unaligned file data directly to a native C or C++
+structure. Decode little-endian fields explicitly or copy them into a packed
+structure after validating the available size.
 
 ## Channel model
 
-Version 2 files preserve exact signed ADC counts for seven product channels:
+Version 2 stores exact raw ADC samples for seven product channels:
 
-| Stored index | ADC source | Name | Kind | Unit |
+| Stored index | ADC source | Name | Kind | Engineering unit |
 |---:|---:|---|---|---|
-| 0 | CH0 | Ia | current | A |
-| 1 | CH1 | Ib | current | A |
-| 2 | CH2 | Ic | current | A |
-| 3 | CH3 | In | current | A |
-| 4 | CH4 | Vc | voltage | V |
-| 5 | CH5 | Vb | voltage | V |
-| 6 | CH6 | Va | voltage | V |
+| 0 | CH0 | `Ia` | current | A |
+| 1 | CH1 | `Ib` | current | A |
+| 2 | CH2 | `Ic` | current | A |
+| 3 | CH3 | `In` | current | A |
+| 4 | CH4 | `Vc` | voltage | V |
+| 5 | CH5 | `Vb` | voltage | V |
+| 6 | CH6 | `Va` | voltage | V |
 
 ADC CH7 remains present in the live PL/DMA transport for internal diagnostics,
-but it is omitted from persisted version 2 files. Version 1 files contain all
-eight legacy channels and remain readable.
+but it is deliberately omitted from version 2 product capture files. Version
+1 files contain all eight legacy channels and remain readable.
 
-The file stores raw values once. Every version 2 channel descriptor carries
-the configuration active at capture time, so readers can switch between raw
-counts and converted amperes/volts without duplicating the waveform:
+Each stored sample is the signed 24-bit AD7771 value sign-extended to `s32`.
+The upper eight bits must therefore equal the sign extension of bit 23 for
+files produced by the current capture path. Readers should preserve all 32
+bits and should not silently mask the value to 24 bits.
+
+### Raw-to-engineering conversion
+
+The file stores raw samples only once. Each version 2 channel descriptor
+contains the profile-specific conversion scale active when the capture was
+created. This lets a viewer switch between raw ADC counts and converted
+amperes or volts without duplicating the sample payload.
+
+The descriptor scale is an **unsigned Q16.16 micro-unit per count**:
 
 ```text
-micro_units_q16 = raw_count * scale_micro_units_q16
-engineering_units = micro_units_q16 / (65536 * 1,000,000)
+scale_micro_units_per_count =
+    scale_micro_units_q16 / 65536
+
+value_micro_units =
+    raw_count * scale_micro_units_q16 / 65536
+
+value_engineering_units =
+    raw_count * scale_micro_units_q16 /
+    (65536 * 1,000,000)
 ```
 
-Use signed 64-bit or wider arithmetic for the multiplication.
+For a current channel, the micro-unit is a microampere and the final unit is
+amperes. For a voltage channel, the micro-unit is a microvolt and the final
+unit is volts.
 
-## Version 2 layout
+Use signed 64-bit or wider arithmetic for the multiplication:
+
+```text
+signed_product = int64(raw_count) * uint64(scale_micro_units_q16)
+```
+
+Do not apply the scale when descriptor flag bit 0 is clear. Such a channel is
+raw-only for that capture. The conversion coefficients are a capture-time
+snapshot; a later meter profile change must not alter conversion of an older
+file.
+
+## Version 2 file layout
 
 ```text
 +-----------------------------+ offset 0
 | 256-byte fixed header       |
 +-----------------------------+ channel_table_offset
-| channel_count descriptors   | 32 bytes each
+| channel_count descriptors   | channel_descriptor_bytes each
 +-----------------------------+ event_table_offset
 | event_count trigger events  | 24 bytes each
 +-----------------------------+ frame_data_offset
 | frame_count waveform frames | frame_bytes each
-+-----------------------------+
++-----------------------------+ exact end of file
 ```
 
-### Fixed header (256 bytes)
+The current version 2 writer emits all regions contiguously without padding.
+
+### Fixed header
+
+The version 2 fixed header is exactly 256 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -57,34 +170,58 @@ Use signed 64-bit or wider arithmetic for the multiplication.
 | 16 | 8 | `u64` | Session ID |
 | 24 | 8 | `u64` | First frame sequence |
 | 32 | 8 | `u64` | Last frame sequence, inclusive |
-| 40 | 8 | `u64` | Trigger frame sequence |
-| 48 | 8 | `u64` | Trigger `CLOCK_TAI`, nanoseconds |
+| 40 | 8 | `u64` | Primary trigger frame sequence |
+| 48 | 8 | `u64` | Primary trigger `CLOCK_TAI`, nanoseconds |
 | 56 | 4 | `u32` | Measured sample rate, frames/s |
-| 60 | 4 | `u32` | Event count |
+| 60 | 4 | `u32` | Trigger event count |
 | 64 | 8 | `u64` | Correlation `CLOCK_TAI`, nanoseconds |
 | 72 | 8 | `u64` | Correlated PL tick |
 | 80 | 8 | `u64` | Correlated frame sequence |
 | 88 | 8 | `u64` | Correlation uncertainty, nanoseconds |
-| 96 | 4 | `u32` | Stored channel count (`7`) |
-| 100 | 4 | `u32` | Frame bytes (`28`) |
-| 104 | 4 | `u32` | Channel descriptor bytes (`32`) |
+| 96 | 4 | `u32` | Stored channel count; currently `7` |
+| 100 | 4 | `u32` | Bytes per frame; currently `28` |
+| 104 | 4 | `u32` | Bytes per channel descriptor; currently `32` |
 | 108 | 4 | `u32` | File flags; currently zero |
-| 112 | 8 | `u64` | Channel-table offset |
+| 112 | 8 | `u64` | Channel-table offset; currently `256` |
 | 120 | 8 | `u64` | Event-table offset |
 | 128 | 8 | `u64` | Frame-data offset |
 | 136 | 8 | `u64` | Frame count |
-| 144 | 8 | `u64` | Trigger `CLOCK_REALTIME`, nanoseconds |
-| 152 | 104 | bytes | Reserved |
+| 144 | 8 | `u64` | Primary trigger `CLOCK_REALTIME`, nanoseconds |
+| 152 | 104 | bytes | Reserved; currently zero |
 
-Validate all declared ranges against the actual file size. A complete capture
-satisfies:
+#### Session and trigger fields
+
+`session_id` is assigned by the acquisition daemon and identifies the capture
+within the device's persistent waveform history. It is not globally unique.
+
+`trigger_sequence` and the two trigger timestamps describe the primary event
+that created the capture. If overlapping triggers are merged, the event table
+contains every trigger. Readers should use the event table to display all
+markers rather than assuming there is only one event.
+
+`trigger_realtime_nanoseconds` is intended for filenames and human calendar
+display. `trigger_tai_nanoseconds` is the stable time base for event
+correlation. `CLOCK_REALTIME` may be adjusted by time synchronization or an
+administrator.
+
+#### PL/time correlation fields
+
+The correlation tuple relates one PL tick and waveform frame sequence to
+`CLOCK_TAI`:
 
 ```text
-frame_count = last_sequence - first_sequence + 1
-file_size >= frame_data_offset + frame_count * frame_bytes
+(correlation_pl_tick, correlation_frame_sequence)
+    <-> correlation_tai_nanoseconds
 ```
 
-### Channel descriptor (32 bytes)
+`correlation_uncertainty_nanoseconds` bounds the observation interval used to
+obtain that relationship. It is diagnostic metadata for correlation with
+other PL or system events. Normal waveform plotting can use frame sequence and
+the measured sample rate.
+
+### Channel descriptor
+
+Each version 2 channel descriptor is exactly 32 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -95,93 +232,388 @@ file_size >= frame_data_offset + frame_count * frame_bytes
 | 16 | 8 | char | NUL-terminated channel name |
 | 24 | 8 | char | NUL-terminated engineering unit |
 
-### Trigger event (24 bytes)
+The descriptor order defines the word order in every sample frame. Do not
+infer frame ordering from `source_channel`, and do not assume future files
+always contain exactly seven channels.
+
+Unknown kind values or flag bits should be preserved and reported as unknown,
+not reinterpreted as a known channel type.
+
+### Trigger event
+
+Each event entry is exactly 24 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
 | 0 | 8 | `u64` | Event frame sequence |
 | 8 | 8 | `u64` | Event `CLOCK_TAI`, nanoseconds |
 | 16 | 4 | `u32` | Source: `1=CLI`, `2=Web`, `3=PQ event` |
-| 20 | 4 | `u32` | Reserved |
+| 20 | 4 | `u32` | Reserved; currently zero |
+
+An event sequence should fall within the stored inclusive frame range.
+Overlapping manual and future PQ-event windows may share one capture, so
+`event_count` may be greater than one. Unknown source values should still be
+shown as event markers with an unknown source.
 
 ### Sample frames
 
 Each frame is an interleaved array of `channel_count` signed 32-bit raw ADC
-counts. The first frame corresponds to `first_sequence`; frame `n` has sequence
-`first_sequence + n`.
+counts:
+
+```text
+frame 0: sample[0], sample[1], ... sample[channel_count - 1]
+frame 1: sample[0], sample[1], ... sample[channel_count - 1]
+...
+```
+
+There is no timestamp, sequence, or padding word inside an individual frame.
+For zero-based frame index `n`:
+
+```text
+sequence(n) = first_sequence + n
+file_offset(n) = frame_data_offset + n * frame_bytes
+```
+
+The primary trigger index is:
+
+```text
+trigger_index = trigger_sequence - first_sequence
+```
+
+Time relative to the primary trigger is:
+
+```text
+relative_seconds(n) =
+    (sequence(n) - trigger_sequence) / sample_rate_hz
+```
+
+An approximate absolute TAI timestamp can be calculated as:
+
+```text
+tai_nanoseconds(n) =
+    trigger_tai_nanoseconds +
+    round((sequence(n) - trigger_sequence) * 1,000,000,000 /
+          sample_rate_hz)
+```
+
+The same equation can use `trigger_realtime_nanoseconds` for human display,
+but realtime is not the preferred clock for cross-system event correlation.
+
+## Version 2 validation rules
+
+A current, complete version 2 file satisfies all of these invariants:
+
+```text
+magic == "MNCWF1\0\0"
+version == 2
+header_bytes == 256
+channel_count > 0
+channel_count <= 8
+channel_descriptor_bytes == 32
+frame_bytes == channel_count * 4
+channel_table_offset == 256
+event_table_offset ==
+    channel_table_offset + channel_count * channel_descriptor_bytes
+frame_data_offset ==
+    event_table_offset + event_count * 24
+last_sequence >= first_sequence
+frame_count == last_sequence - first_sequence + 1
+file_size == frame_data_offset + frame_count * frame_bytes
+```
+
+Also validate:
+
+- every addition and multiplication for a range calculation cannot overflow;
+- every table and payload range lies within the actual file;
+- declared regions are ordered and do not overlap;
+- channel names and units are decoded from at most eight bytes;
+- each event sequence lies within the frame range; and
+- `trigger_sequence` lies within the frame range.
+
+The current daemon requires the exact expected file size when rediscovering
+captures after a reboot. Appending private data to the file is therefore not
+supported.
 
 ## Version 1 compatibility
 
 Legacy version 1 has a 128-byte header. Fields at offsets 0 through 95 match
-version 2. Events begin at offset 128 and remain 24 bytes each. Sample data
-follows and contains eight signed 32-bit channels per frame. Version 1 has no
-channel descriptors or conversion scale, so a reader should label channels
-CH0 through CH7 and present raw counts only.
+the corresponding fields in version 2. Version 1 does not contain the version
+2 channel-count, descriptor, or offset fields.
 
-## Minimal Python reader
+Its layout is:
+
+```text
++----------------------------+ offset 0
+| 128-byte legacy header     |
++----------------------------+ offset 128
+| event_count events         | 24 bytes each
++----------------------------+
+| eight-channel frames       | 8 * s32 = 32 bytes each
++----------------------------+ exact end of file
+```
+
+For version 1:
+
+```text
+frame_count = last_sequence - first_sequence + 1
+frame_data_offset = 128 + event_count * 24
+file_size = frame_data_offset + frame_count * 32
+```
+
+Version 1 has no conversion metadata. A reader should label its samples CH0
+through CH7 and present raw counts only. It must not apply the currently
+installed meter profile to a legacy capture because that profile may differ
+from the one active when the file was recorded.
+
+## Defensive Python reader
+
+This example demonstrates the binary contract and reads frames on demand. A
+production viewer should use `mmap` for large captures instead of loading the
+whole file.
 
 ```python
+from dataclasses import dataclass
 from pathlib import Path
 import struct
 
-data = memoryview(Path("capture.mncwf").read_bytes())
-magic, version, header_bytes = struct.unpack_from("<8sII", data, 0)
-if magic != b"MNCWF1\0\0":
-    raise ValueError("not an MNCWF file")
+MAGIC = b"MNCWF1\0\0"
+EVENT_BYTES = 24
 
-session_id, first_seq, last_seq = struct.unpack_from("<QQQ", data, 16)
-sample_rate_hz, event_count = struct.unpack_from("<II", data, 56)
 
-if version == 2:
-    channel_count, frame_bytes, descriptor_bytes = struct.unpack_from(
-        "<III", data, 96)
-    channel_offset, event_offset, frame_offset, frame_count = struct.unpack_from(
-        "<QQQQ", data, 112)
-    channels = []
-    for index in range(channel_count):
-        offset = channel_offset + index * descriptor_bytes
-        source, kind, scale_q16, flags, name, unit = struct.unpack_from(
-            "<IIII8s8s", data, offset)
-        channels.append({
+def checked_range(file_size: int, offset: int, count: int, item_size: int):
+    if offset < 0 or count < 0 or item_size < 0:
+        raise ValueError("negative file range")
+    end = offset + count * item_size
+    if end < offset or end > file_size:
+        raise ValueError("file range is truncated or overflows")
+    return offset, end
+
+
+def fixed_string(value: bytes) -> str:
+    return value.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+
+@dataclass
+class Channel:
+    source: int
+    kind: int
+    scale_q16: int
+    valid: bool
+    name: str
+    unit: str
+
+    def convert(self, raw: int):
+        if not self.valid:
+            return None
+        return raw * self.scale_q16 / (65536.0 * 1_000_000.0)
+
+
+class Mncwf:
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self.data = memoryview(self.path.read_bytes())
+        if len(self.data) < 16:
+            raise ValueError("truncated MNCWF header")
+
+        magic, self.version, self.header_bytes = struct.unpack_from(
+            "<8sII", self.data, 0)
+        if magic != MAGIC:
+            raise ValueError("not an MNCWF file")
+        if self.version not in (1, 2):
+            raise ValueError(f"unsupported MNCWF version {self.version}")
+
+        if len(self.data) < self.header_bytes:
+            raise ValueError("truncated MNCWF header")
+
+        (
+            self.session_id,
+            self.first_sequence,
+            self.last_sequence,
+            self.trigger_sequence,
+            self.trigger_tai_ns,
+        ) = struct.unpack_from("<QQQQQ", self.data, 16)
+        self.sample_rate_hz, self.event_count = struct.unpack_from(
+            "<II", self.data, 56)
+
+        if self.last_sequence < self.first_sequence:
+            raise ValueError("invalid sequence range")
+        sequence_frame_count = (
+            self.last_sequence - self.first_sequence + 1
+        )
+
+        if self.version == 2:
+            if self.header_bytes != 256:
+                raise ValueError("invalid version 2 header size")
+            (
+                self.channel_count,
+                self.frame_bytes,
+                descriptor_bytes,
+                self.flags,
+            ) = struct.unpack_from("<IIII", self.data, 96)
+            (
+                channel_offset,
+                self.event_offset,
+                self.frame_offset,
+                self.frame_count,
+                self.trigger_realtime_ns,
+            ) = struct.unpack_from("<QQQQQ", self.data, 112)
+
+            if not 0 < self.channel_count <= 8:
+                raise ValueError("invalid channel count")
+            if descriptor_bytes != 32:
+                raise ValueError("unsupported channel descriptor size")
+            if self.frame_bytes != self.channel_count * 4:
+                raise ValueError("invalid frame size")
+            if self.frame_count != sequence_frame_count:
+                raise ValueError("frame count and sequence range disagree")
+            if channel_offset != self.header_bytes:
+                raise ValueError("invalid channel table offset")
+            if self.event_offset != channel_offset + self.channel_count * 32:
+                raise ValueError("invalid event table offset")
+            if self.frame_offset != self.event_offset + self.event_count * 24:
+                raise ValueError("invalid frame data offset")
+
+            checked_range(len(self.data), channel_offset,
+                          self.channel_count, 32)
+            self.channels = []
+            for index in range(self.channel_count):
+                offset = channel_offset + index * descriptor_bytes
+                source, kind, scale, flags, name, unit = struct.unpack_from(
+                    "<IIII8s8s", self.data, offset)
+                self.channels.append(Channel(
+                    source, kind, scale, bool(flags & 1),
+                    fixed_string(name), fixed_string(unit)))
+        else:
+            if self.header_bytes != 128:
+                raise ValueError("invalid version 1 header size")
+            self.channel_count = 8
+            self.frame_bytes = 32
+            self.frame_count = sequence_frame_count
+            self.event_offset = 128
+            self.frame_offset = (
+                self.event_offset + self.event_count * EVENT_BYTES
+            )
+            self.trigger_realtime_ns = None
+            self.flags = 0
+            self.channels = [
+                Channel(i, 3, 0, False, f"CH{i}", "")
+                for i in range(8)
+            ]
+
+        checked_range(len(self.data), self.event_offset,
+                      self.event_count, EVENT_BYTES)
+        _, expected_size = checked_range(
+            len(self.data), self.frame_offset,
+            self.frame_count, self.frame_bytes)
+        if expected_size != len(self.data):
+            raise ValueError("unexpected trailing MNCWF data")
+        if not (self.first_sequence <= self.trigger_sequence
+                <= self.last_sequence):
+            raise ValueError("trigger lies outside frame range")
+
+    def event(self, index: int):
+        if not 0 <= index < self.event_count:
+            raise IndexError(index)
+        offset = self.event_offset + index * EVENT_BYTES
+        sequence, tai_ns, source, reserved = struct.unpack_from(
+            "<QQII", self.data, offset)
+        if not self.first_sequence <= sequence <= self.last_sequence:
+            raise ValueError("event lies outside frame range")
+        return {
+            "sequence": sequence,
+            "tai_ns": tai_ns,
             "source": source,
-            "kind": kind,
-            "scale_q16": scale_q16,
-            "valid": bool(flags & 1),
-            "name": name.split(b"\0", 1)[0].decode(),
-            "unit": unit.split(b"\0", 1)[0].decode(),
-        })
-elif version == 1:
-    channel_count, frame_bytes, descriptor_bytes = 8, 32, 0
-    event_offset = 128
-    frame_offset = event_offset + event_count * 24
-    frame_count = last_seq - first_seq + 1
-    channels = [{"name": f"CH{i}", "source": i} for i in range(8)]
-else:
-    raise ValueError(f"unsupported MNCWF version {version}")
+            "reserved": reserved,
+        }
 
-required = frame_offset + frame_count * frame_bytes
-if required > len(data):
-    raise ValueError("truncated MNCWF sample payload")
+    def frame(self, index: int):
+        if not 0 <= index < self.frame_count:
+            raise IndexError(index)
+        offset = self.frame_offset + index * self.frame_bytes
+        return struct.unpack_from(
+            f"<{self.channel_count}i", self.data, offset)
 
-raw_frame_0 = struct.unpack_from(f"<{channel_count}i", data, frame_offset)
-if version == 2:
-    converted = [
-        raw * channel["scale_q16"] / (65536.0 * 1_000_000.0)
-        if channel["valid"] else None
-        for raw, channel in zip(raw_frame_0, channels)
-    ]
+    def converted_frame(self, index: int):
+        return [
+            channel.convert(raw)
+            for channel, raw in zip(self.channels, self.frame(index))
+        ]
+
+    def relative_seconds(self, index: int):
+        sequence = self.first_sequence + index
+        return (
+            sequence - self.trigger_sequence
+        ) / self.sample_rate_hz
+
+
+capture = Mncwf("capture.mncwf")
+print(capture.channels)
+print(capture.frame(0))
+print(capture.converted_frame(0))
 ```
 
-For large captures, do not unpack every sample into Python objects. Keep the
-file memory-mapped and read only the requested frame window, or aggregate
-min/max envelopes per display pixel.
+Python's `int` has arbitrary precision, so the conversion multiplication does
+not overflow. C++, Rust, JavaScript, and TypeScript readers must select types
+carefully. In particular, JavaScript/TypeScript must decode 64-bit header
+fields with `BigInt`; many frame sequence values are not safely represented by
+a JavaScript `number`.
+
+## Large-capture viewer guidance
+
+A capture can contain millions of frames. A viewer should:
+
+1. memory-map or range-read the file;
+2. retain 64-bit sequences and offsets without converting them to floating
+   point;
+3. read only the visible frame window;
+4. aggregate minimum/maximum envelopes per horizontal display pixel;
+5. convert only the visible channels and visible window;
+6. keep event markers indexed by sequence;
+7. use the declared channel descriptors for labels and units; and
+8. clamp zoom and cursor calculations to the validated frame range.
+
+Do not create one language object, DOM node, or chart point for every stored
+sample. Downsampling by simply selecting every Nth sample can hide narrow
+transients; a min/max envelope is preferred.
+
+## Integrity and security
+
+Version 2 currently has no embedded checksum, signature, compression, or
+encryption. Files stored by the product are protected by filesystem and
+authenticated download policy, but an external `.mncwf` file must still be
+treated as untrusted binary input.
+
+Structural validation can identify truncation and many corrupt layouts, but it
+cannot prove the sample payload is authentic. If transport or archival
+integrity requirements later require a checksum or signature, introduce it
+through a documented format-version change rather than placing private bytes
+after the current payload.
+
+## Versioning rules for future writers
+
+- A reader must reject an unsupported format version.
+- Reserved fields and unknown flag bits must be ignored unless a future
+  specification defines them as mandatory.
+- Changing the meaning or byte layout of an existing field requires a new
+  version.
+- Adding optional behavior through currently reserved flags is permitted only
+  when old readers can continue interpreting the core data safely.
+- New writers should continue publishing atomically and should never expose a
+  partially written `.mncwf` filename.
+- A format change must update this document, the APU writer/reader tests, and
+  all supported Web/offline readers in the same coordinated change.
 
 ## Reader safety checklist
 
-1. Reject unknown magic, version, or undersized headers.
-2. Treat every offset, count, and multiplication as untrusted input.
-3. Confirm table and sample ranges fit within the file.
+1. Reject unknown magic, unsupported versions, and incorrect header sizes.
+2. Treat every offset, count, size, and multiplication as untrusted.
+3. Confirm table and sample ranges are ordered, non-overlapping, and within
+   the exact file size.
 4. Use little-endian signed interpretation for sample words.
-5. Do not infer ordering when version 2 descriptors are available.
-6. Treat descriptors with conversion-valid clear as raw-only.
-7. Treat TAI as event correlation time and realtime as filename/UI time.
+5. Use 64-bit integer or `BigInt` handling for sequences, timestamps, counts,
+   and offsets.
+6. Do not infer channel ordering when version 2 descriptors are available.
+7. Treat conversion-invalid descriptors as raw-only.
+8. Use the capture's stored scale rather than the device's current profile.
+9. Display every event in the event table, including unknown event sources.
+10. Treat TAI as event-correlation time and realtime as filename/UI time.
