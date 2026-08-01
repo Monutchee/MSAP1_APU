@@ -28,14 +28,26 @@ std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 {
 	std::vector<HealthReason> reasons;
+	const bool simulator = health.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	if (simulator) {
+		if (!health_flag(health, MSAP1_ADC_HEALTH_INITIALIZED))
+			append_reason(reasons, "not_initialized",
+				      "ADC simulator is not initialized");
+		if (!health_flag(health, MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY))
+			append_reason(reasons, "simulator_unhealthy",
+				      "PL ADC simulator configuration or status is invalid");
+	} else if (health.adc_source != MSAP1_ADC_SOURCE_PHYSICAL) {
+		append_reason(reasons, "invalid_adc_source",
+			      "RPU reports an unsupported ADC source");
+	}
 	const bool spi_snapshot_valid =
 		health_flag(health, MSAP1_ADC_HEALTH_SPI_RESPONSIVE) &&
 		health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
-	if (!spi_snapshot_valid)
+	if (!simulator && !spi_snapshot_valid)
 		append_reason(reasons, "spi_unresponsive",
 			      "ADC SPI register-health check failed (error " +
 				      std::to_string(health.spi_error) + ")");
-	if (!health_flag(health, MSAP1_ADC_HEALTH_INITIALIZED))
+	if (!simulator && !health_flag(health, MSAP1_ADC_HEALTH_INITIALIZED))
 		append_reason(reasons, "not_initialized",
 			      "ADC driver is not initialized");
 	/*
@@ -43,7 +55,7 @@ evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 	 * audit snapshot. When that snapshot is invalid, reporting them as
 	 * independent failures obscures the actual transport fault.
 	 */
-	if (spi_snapshot_valid) {
+	if (!simulator && spi_snapshot_valid) {
 		if (!health_flag(health, MSAP1_ADC_HEALTH_INIT_COMPLETE))
 			append_reason(reasons, "init_incomplete",
 				      "ADC INIT_COMPLETE is not asserted");
@@ -79,6 +91,13 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 {
 	const auto &adc = response.rpu_health;
 	MeterHealth result;
+	result.adc_source = adc.adc_source;
+	result.simulator_active =
+		adc.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	result.simulator_healthy =
+		health_flag(adc, MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY);
+	result.physical_diagnostics_applicable =
+		health_flag(adc, MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS);
 	result.adc_degraded_reasons = evaluate_rpu_adc_health_reasons(adc);
 	result.spi_responsive =
 		health_flag(adc, MSAP1_ADC_HEALTH_SPI_RESPONSIVE);
@@ -128,8 +147,11 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
 		response.invalid_records == 0u && response.sequence_gaps == 0u &&
 		!result.record_stale && result.frequency_arithmetic_ok;
-	result.adc_healthy = result.spi_responsive && result.initialized &&
-		result.configuration_match && result.rate_match &&
+	const bool source_healthy = result.simulator_active
+		? result.simulator_healthy
+		: result.spi_responsive && result.initialized &&
+			result.configuration_match;
+	result.adc_healthy = source_healthy && result.rate_match &&
 		result.capture_active && result.fifo_ok && result.headers_valid &&
 		result.meter_configured &&
 		result.meter_generation_match;

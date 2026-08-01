@@ -66,6 +66,8 @@ enum msap1_adc_health_flag {
 	MSAP1_ADC_HEALTH_NO_OVERFLOW = 1u << 5,
 	MSAP1_ADC_HEALTH_HEADERS_VALID = 1u << 6,
 	MSAP1_ADC_HEALTH_RATE_MATCH = 1u << 7,
+	MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY = 1u << 8,
+	MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS = 1u << 9,
 };
 
 enum msap1_adc_spi_health_error {
@@ -74,6 +76,12 @@ enum msap1_adc_spi_health_error {
 	MSAP1_ADC_SPI_HEALTH_TRANSFER_FAILED = 2,
 	MSAP1_ADC_SPI_HEALTH_PROTOCOL_FAILED = 3,
 	MSAP1_ADC_SPI_HEALTH_INTERNAL_ERROR = 4,
+	MSAP1_ADC_SPI_HEALTH_NOT_APPLICABLE = 5,
+};
+
+enum msap1_adc_source {
+	MSAP1_ADC_SOURCE_PHYSICAL = 0,
+	MSAP1_ADC_SOURCE_SIMULATOR = 1,
 };
 
 enum msap1_adc_diagnostic_flag {
@@ -182,6 +190,13 @@ struct msap1_meter_config_payload {
 	uint32_t frequency_minimum_millihz;
 	uint32_t frequency_maximum_millihz;
 	uint32_t frequency_hysteresis_microvolts;
+	/* Raw-sample source and simulator values. Phases are Q0.32 turns. */
+	uint32_t adc_source;
+	uint32_t simulator_frequency_millihz;
+	uint32_t simulator_valid_mask;
+	int32_t simulator_peak_counts[8];
+	uint32_t simulator_phase_q32[8];
+	uint32_t simulator_phase_step_q32;
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {
@@ -190,6 +205,8 @@ struct msap1_meter_config_ack_payload {
 	uint32_t processing_active_generation;
 	uint32_t conversion_status;
 	uint32_t processing_status;
+	uint32_t adc_source;
+	uint32_t simulator_active_generation;
 } __attribute__((packed));
 
 /*
@@ -249,6 +266,12 @@ struct msap1_adc_health_payload {
 	uint8_t spi_last_failed_register;
 	uint8_t spi_last_received_header;
 	uint8_t spi_diagnostics_reserved[2];
+	uint32_t adc_source;
+	uint32_t simulator_status;
+	uint32_t simulator_active_generation;
+	uint32_t simulator_frame_count;
+	uint32_t simulator_saturation_count;
+	uint32_t simulator_missed_sample_count;
 } __attribute__((packed));
 
 struct msap1_adc_diagnostic_request {

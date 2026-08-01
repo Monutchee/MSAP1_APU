@@ -15,6 +15,8 @@ namespace {
 
 constexpr double adc_positive_codes = 8388608.0;
 constexpr double q16_scale = 65536.0;
+constexpr double q32_scale = 4294967296.0;
+constexpr double square_root_two = 1.4142135623730950488;
 
 bool valid_pga_gain(std::uint32_t gain)
 {
@@ -53,6 +55,18 @@ std::uint32_t frequency_mode(const std::string &mode)
 	if (mode == "rolling_time")
 		return MSAP1_FREQUENCY_MODE_ROLLING_TIME;
 	throw std::runtime_error("unsupported frequency measurement mode");
+}
+
+std::uint32_t phase_q32(double phase_degrees)
+{
+	if (!std::isfinite(phase_degrees))
+		throw std::runtime_error("simulator phase is not finite");
+	double turns = std::fmod(phase_degrees / 360.0, 1.0);
+	if (turns < 0.0)
+		turns += 1.0;
+	const auto phase = static_cast<std::uint64_t>(
+		std::llround(turns * q32_scale));
+	return static_cast<std::uint32_t>(phase & 0xffffffffu);
 }
 
 } // namespace
@@ -96,8 +110,24 @@ PreparedMeterConfiguration prepare_meter_configuration(
 {
 	PreparedMeterConfiguration result;
 	result.source = std::move(source);
-	if (result.source.schema_version != 2u)
+	if (result.source.schema_version != 2u &&
+	    result.source.schema_version != 3u)
 		throw std::runtime_error("unsupported meter configuration schema");
+	/*
+	 * Schema-v2 profiles predate the simulator object. Give those physical
+	 * profiles a conservative 1 A diagnostic signal that is representable by
+	 * every supported current-profile gain. Schema-v3 profiles retain their
+	 * explicit simulator amplitudes and are range checked below.
+	 */
+	if (result.source.schema_version == 2u) {
+		for (auto &channel : result.source.simulator.channels) {
+			if (channel.channel < 3u)
+				channel.rms = 1.0;
+		}
+	}
+	if (result.source.adc_source != "physical" &&
+	    result.source.adc_source != "simulator")
+		throw std::runtime_error("unsupported ADC source");
 	if (!supported_adc_sample_rate(sample_rate_hz) ||
 	    result.source.profile_id.empty() ||
 	    result.source.rms_window_ms == 0u ||
@@ -241,6 +271,74 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	result.wire.frequency_hysteresis_microvolts =
 		static_cast<std::uint32_t>(
 			std::llround(frequency.hysteresis_volts * 1000000.0));
+
+	/*
+	 * Convert engineering RMS values back through the same per-channel
+	 * coefficient used by the PL conversion stage. The generated raw samples
+	 * therefore exercise conversion, RMS, frequency, meter, and waveform logic.
+	 */
+	const auto &simulator = result.source.simulator;
+	if (!std::isfinite(simulator.frequency_hz) ||
+	    simulator.frequency_hz <= 0.0 ||
+	    simulator.frequency_hz >= static_cast<double>(sample_rate_hz) / 2.0)
+		throw std::runtime_error("simulator frequency is out of range");
+	if (simulator.channels.size() != 7u)
+		throw std::runtime_error(
+			"simulator must define channels 0 through 6 exactly once");
+
+	std::uint32_t simulator_mask = 0u;
+	for (const auto &channel : simulator.channels) {
+		if (channel.channel > 6u ||
+		    (simulator_mask & (1u << channel.channel)) != 0u ||
+		    !std::isfinite(channel.rms) || channel.rms < 0.0)
+			throw std::runtime_error(
+				"simulator channel configuration is invalid");
+		const auto coefficient =
+			result.wire.scale_micro_units_q16[channel.channel];
+		/*
+		 * Some physical profiles intentionally disable current channels (for
+		 * example the voltage-output sensor profile until its current rating is
+		 * supplied).  Such a channel cannot be expressed in engineering units,
+		 * so model it as a disabled zero-valued simulator input instead of making
+		 * an otherwise valid physical profile impossible to load.
+		 */
+		if (coefficient == 0u) {
+			result.wire.simulator_peak_counts[channel.channel] = 0;
+			result.wire.simulator_phase_q32[channel.channel] =
+				phase_q32(channel.phase_degrees);
+			simulator_mask |= 1u << channel.channel;
+			continue;
+		}
+		const double raw_peak = channel.rms * 1000000.0 *
+			square_root_two * q16_scale /
+			static_cast<double>(coefficient);
+		if (!std::isfinite(raw_peak) || raw_peak < 0.0 ||
+		    raw_peak > 8388607.0)
+			throw std::runtime_error("simulator CH" +
+				std::to_string(channel.channel) +
+				" amplitude exceeds signed 24-bit range");
+		result.wire.simulator_peak_counts[channel.channel] =
+			static_cast<std::int32_t>(std::llround(raw_peak));
+		result.wire.simulator_phase_q32[channel.channel] =
+			phase_q32(channel.phase_degrees);
+		simulator_mask |= 1u << channel.channel;
+	}
+	if (simulator_mask != 0x7fu)
+		throw std::runtime_error(
+			"simulator must define channels 0 through 6 exactly once");
+	result.wire.adc_source = result.source.adc_source == "simulator"
+		? MSAP1_ADC_SOURCE_SIMULATOR
+		: MSAP1_ADC_SOURCE_PHYSICAL;
+	result.wire.simulator_frequency_millihz =
+		static_cast<std::uint32_t>(
+			std::llround(simulator.frequency_hz * 1000.0));
+	result.wire.simulator_valid_mask = simulator_mask;
+	result.wire.simulator_phase_step_q32 =
+		static_cast<std::uint32_t>(std::llround(
+			simulator.frequency_hz * q32_scale /
+			static_cast<double>(sample_rate_hz)));
+	if (result.wire.simulator_phase_step_q32 == 0u)
+		throw std::runtime_error("simulator phase step is zero");
 
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;

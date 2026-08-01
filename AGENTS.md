@@ -67,12 +67,19 @@
 - CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
   `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
   endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
-- The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-2
+- The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-3
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
-  physical current/voltage frontends, and the 200 ms RMS window. The packaged
-  runtime default is `msap1-sensor-board-5a.json`. Profiles also define CH6/VLA
+  physical current/voltage frontends, the 200 ms RMS window, the selected ADC
+  source, and raw-simulator amplitudes/phases. The packaged runtime default is
+  `msap1-sensor-board-5a.json`. Schema-v2 profiles remain readable as physical
+  source with conservative simulator defaults. Profiles also define CH6/VLA
   zero-crossing frequency measurement; a valid Web-generated complete profile
   is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
+- Source and simulator changes must use the daemon's coordinated stop,
+  configure, readback, rollback, DMA re-arm, and restart transaction. Convert
+  engineering RMS settings to signed-24-bit peak counts before crossing RPMsg;
+  reject overflow rather than wrapping. Simulator mode must expose simulator
+  health while marking physical SPI diagnostics not applicable.
 - ADC, meter, and waveform payloads never travel over RPMsg. RPMsg carries only
   configuration, control, health, and acknowledgements.
 - ADC health exposes the PL-measured DCLK rate and physical `ADC_DRDY_N`

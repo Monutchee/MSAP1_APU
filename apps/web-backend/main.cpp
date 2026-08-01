@@ -129,6 +129,13 @@ struct AdcHealthDto {
 	std::uint32_t spi_retry_recoveries;
 	std::uint32_t spi_last_failed_register;
 	std::uint32_t spi_last_received_header;
+	std::string source;
+	bool physical_diagnostics_available;
+	bool simulator_healthy;
+	std::uint32_t simulator_active_generation;
+	std::uint32_t simulator_frame_count;
+	std::uint32_t simulator_saturation_count;
+	std::uint32_t simulator_missed_sample_count;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 
@@ -187,6 +194,31 @@ struct FrequencyConfigurationDto {
 	double minimum_hz = 40.0;
 	double maximum_hz = 70.0;
 	double hysteresis_volts = 1.0;
+};
+
+struct AdcSourceDto {
+	std::string source = "physical";
+	std::uint32_t configuration_generation = 0;
+	bool active = false;
+	bool healthy = false;
+};
+
+struct AdcSimulatorChannelDto {
+	std::uint32_t channel = 0;
+	double rms = 0.0;
+	double phase_degrees = 0.0;
+};
+
+struct AdcSimulatorDto {
+	double frequency_hz = 60.0;
+	std::array<AdcSimulatorChannelDto, 8> channels{};
+	std::string active_source = "physical";
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t active_generation = 0;
+	std::uint32_t generated_frames = 0;
+	std::uint32_t saturation_count = 0;
+	std::uint32_t missed_sample_count = 0;
+	bool healthy = false;
 };
 
 struct MeterReadingsDto {
@@ -308,6 +340,8 @@ struct WaveformDto {
 	std::uint64_t incomplete_sessions;
 	std::vector<WaveformSessionDto> sessions;
 };
+
+std::string adc_source_name(std::uint32_t source);
 
 template <typename T>
 webengine::Response json_response(webengine::http::status status,
@@ -676,6 +710,13 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		 adc.spi_retry_recovery_count,
 		 adc.spi_last_failed_register,
 		 adc.spi_last_received_header,
+		 adc_source_name(adc.adc_source),
+		 (adc.health_flags & MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS) != 0u,
+		 (adc.health_flags & MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u,
+		 adc.simulator_active_generation,
+		 adc.simulator_frame_count,
+		 adc.simulator_saturation_count,
+		 adc.simulator_missed_sample_count,
 		 std::move(degraded_reasons)},
 		status.frequency_arithmetic_ok,
 	};
@@ -795,6 +836,90 @@ msap1::FrequencyIpcConfiguration frequency_ipc(
 		static_cast<std::uint32_t>(
 			std::llround(frequency.hysteresis_volts * 1000000.0)),
 	};
+}
+
+std::string adc_source_name(std::uint32_t source)
+{
+	if (source == MSAP1_ADC_SOURCE_PHYSICAL)
+		return "physical";
+	if (source == MSAP1_ADC_SOURCE_SIMULATOR)
+		return "simulator";
+	return "unknown";
+}
+
+std::uint32_t adc_source_value(std::string_view source)
+{
+	if (source == "physical")
+		return MSAP1_ADC_SOURCE_PHYSICAL;
+	if (source == "simulator")
+		return MSAP1_ADC_SOURCE_SIMULATOR;
+	throw std::invalid_argument("ADC source must be physical or simulator");
+}
+
+AdcSourceDto adc_source(const msap1::AcquisitionResponse &response)
+{
+	const bool simulator = response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	const auto &health = response.rpu_health;
+	const bool source_healthy = simulator
+		? (health.health_flags & MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u
+		: (health.health_flags & MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS) != 0u;
+	return {adc_source_name(response.adc_source),
+		response.configuration_generation,
+		response.running != 0u,
+		source_healthy};
+}
+
+AdcSimulatorDto adc_simulator(const msap1::AcquisitionResponse &response)
+{
+	AdcSimulatorDto result;
+	result.frequency_hz =
+		static_cast<double>(response.simulator.frequency_millihz) / 1000.0;
+	for (std::size_t index = 0; index < result.channels.size(); ++index) {
+		result.channels[index] = {
+			static_cast<std::uint32_t>(index),
+			response.simulator.channels[index].rms,
+			response.simulator.channels[index].phase_degrees,
+		};
+	}
+	result.active_source = adc_source_name(response.adc_source);
+	result.configuration_generation = response.configuration_generation;
+	result.active_generation = response.rpu_health.simulator_active_generation;
+	result.generated_frames = response.rpu_health.simulator_frame_count;
+	result.saturation_count = response.rpu_health.simulator_saturation_count;
+	result.missed_sample_count =
+		response.rpu_health.simulator_missed_sample_count;
+	result.healthy =
+		(response.rpu_health.health_flags &
+		 MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u;
+	return result;
+}
+
+msap1::SimulatorIpcConfiguration adc_simulator_ipc(
+	const AdcSimulatorDto &configuration)
+{
+	if (!std::isfinite(configuration.frequency_hz) ||
+	    configuration.frequency_hz < 0.001 ||
+	    configuration.frequency_hz > 1000.0)
+		throw std::invalid_argument(
+			"simulator frequency must be between 0.001 and 1000 Hz");
+
+	msap1::SimulatorIpcConfiguration result;
+	result.frequency_millihz = static_cast<std::uint32_t>(
+		std::llround(configuration.frequency_hz * 1000.0));
+	std::array<bool, 8> seen{};
+	for (const auto &channel : configuration.channels) {
+		if (channel.channel >= result.channels.size() || seen[channel.channel])
+			throw std::invalid_argument(
+				"simulator channel indices must contain CH0 through CH7 once");
+		if (!std::isfinite(channel.rms) || channel.rms < 0.0 ||
+		    !std::isfinite(channel.phase_degrees))
+			throw std::invalid_argument(
+				"simulator RMS and phase values must be finite");
+		seen[channel.channel] = true;
+		result.channels[channel.channel] = {
+			channel.rms, channel.phase_degrees};
+	}
+	return result;
 }
 
 std::string getenv_or(const char *name, const char *fallback)
@@ -1167,6 +1292,133 @@ int main()
 							std::string(error.what()),
 						"frequency_update_failed",
 						{{"MNC_REQUEST_ID", correlation}});
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/adc/source",
+			[](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::adc_source_get,
+						1000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						adc_source(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/adc/source", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::put,
+			"/api/v1/adc/source",
+			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				try {
+					AdcSourceDto configuration;
+					if (const auto error = glz::read_json(
+						    configuration, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid ADC source JSON");
+					const auto source = adc_source_value(configuration.source);
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::adc_source_set,
+						5000, nullptr, 0, 0, 10000, 10000,
+						msap1::WaveformTriggerSource::manual_cli,
+						0, source);
+					if (response.status ==
+					    msap1::AcquisitionStatus::configuration_error)
+						return error_response(
+							webengine::http::status::bad_request,
+							"ADC source change was rejected");
+					require_acquisition_ok(response);
+					log_message(api_log, mnc::logging::Priority::notice,
+						"ADC source changed to " + configuration.source,
+						"adc_source_changed",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_ADC_SOURCE", configuration.source},
+						 {"MNC_CONFIGURATION_GENERATION",
+						  std::to_string(response
+							.configuration_generation)}});
+					return json_response(webengine::http::status::ok,
+						adc_source(response));
+				} catch (const std::invalid_argument &error) {
+					return error_response(webengine::http::status::bad_request,
+						error.what());
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/adc/source", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/adc/simulator",
+			[](const webengine::RequestContext &) {
+				try {
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::adc_simulator_get,
+						1000);
+					require_acquisition_ok(response);
+					return json_response(webengine::http::status::ok,
+						adc_simulator(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/adc/simulator", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::put,
+			"/api/v1/adc/simulator",
+			[](const webengine::RequestContext &context) {
+				const auto correlation = request_id();
+				try {
+					AdcSimulatorDto configuration;
+					if (const auto error = glz::read_json(
+						    configuration, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid ADC simulator JSON");
+					const auto wire = adc_simulator_ipc(configuration);
+					msap1::AcquisitionClient client;
+					const auto response = client.request(
+						msap1::AcquisitionCommand::adc_simulator_set,
+						5000, nullptr, 0, 0, 10000, 10000,
+						msap1::WaveformTriggerSource::manual_cli,
+						0, MSAP1_ADC_SOURCE_PHYSICAL, &wire);
+					if (response.status ==
+					    msap1::AcquisitionStatus::configuration_error)
+						return error_response(
+							webengine::http::status::bad_request,
+							"ADC simulator configuration was rejected");
+					require_acquisition_ok(response);
+					log_message(api_log, mnc::logging::Priority::notice,
+						"ADC simulator configuration applied",
+						"adc_simulator_configuration_applied",
+						{{"MNC_REQUEST_ID", correlation},
+						 {"MNC_CONFIGURATION_GENERATION",
+						  std::to_string(response
+							.configuration_generation)}});
+					return json_response(webengine::http::status::ok,
+						adc_simulator(response));
+				} catch (const std::invalid_argument &error) {
+					return error_response(webengine::http::status::bad_request,
+						error.what());
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/adc/simulator", error);
 					return error_response(
 						webengine::http::status::service_unavailable,
 						error.what());
