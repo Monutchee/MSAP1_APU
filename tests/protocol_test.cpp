@@ -232,11 +232,24 @@ void meter_configuration()
 	{
 		std::ofstream output(path);
 		output << R"({
-  "schema_version": 2,
+  "schema_version": 3,
   "profile_id": "msap1-sensor-board-5a",
+  "adc_source": "simulator",
   "rms_window_ms": 200,
   "remove_dc": false,
   "adc_reference_volts": 1.0,
+  "simulator": {
+    "frequency_hz": 60.0,
+    "channels": [
+      {"channel":0,"rms":5.0,"phase_degrees":0.0},
+      {"channel":1,"rms":5.0,"phase_degrees":-120.0},
+      {"channel":2,"rms":5.0,"phase_degrees":120.0},
+      {"channel":3,"rms":0.0,"phase_degrees":0.0},
+      {"channel":4,"rms":120.0,"phase_degrees":120.0},
+      {"channel":5,"rms":120.0,"phase_degrees":-120.0},
+      {"channel":6,"rms":120.0,"phase_degrees":0.0}
+    ]
+  },
   "current_channels": [
     {"channel":0,"name":"ILA","enabled":true,"adc_pga_gain":2,
      "sensor_model":"internal_ct","primary_rated_amps":5.0,
@@ -279,6 +292,16 @@ void meter_configuration()
 		configuration.wire.adc_pga_gain[4] == 1 &&
 		configuration.wire.adc_pga_gain[7] == 1,
 		"wrong per-channel PGA configuration");
+	require(configuration.wire.adc_source == MSAP1_ADC_SOURCE_SIMULATOR &&
+		configuration.wire.simulator_frequency_millihz == 60000 &&
+		configuration.wire.simulator_valid_mask == 0x7f,
+		"wrong simulator source configuration");
+	require(configuration.wire.simulator_peak_counts[0] > 0 &&
+		configuration.wire.simulator_peak_counts[3] == 0 &&
+		configuration.wire.simulator_peak_counts[4] > 0 &&
+		configuration.wire.simulator_phase_q32[0] == 0 &&
+		configuration.wire.simulator_phase_q32[6] == 0,
+		"wrong simulator amplitude or phase conversion");
 	require(configuration.wire.frequency_mode ==
 			MSAP1_FREQUENCY_MODE_ROLLING_CYCLES &&
 		configuration.wire.frequency_reference_channel == 6 &&
@@ -287,7 +310,7 @@ void meter_configuration()
 		configuration.wire.frequency_minimum_millihz == 40000 &&
 		configuration.wire.frequency_maximum_millihz == 70000 &&
 		configuration.wire.frequency_hysteresis_microvolts == 1000000,
-		"schema-v2 frequency defaults are incorrect");
+		"frequency configuration is incorrect");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
 	const auto half_rate = msap1::prepare_meter_configuration(

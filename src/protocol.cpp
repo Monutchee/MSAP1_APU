@@ -8,11 +8,11 @@ namespace msap1 {
 
 static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
-static_assert(sizeof(msap1_adc_health_payload) == 174,
+static_assert(sizeof(msap1_adc_health_payload) == 198,
 	      "unexpected ADC health payload layout");
-static_assert(sizeof(msap1_meter_config_payload) == 92,
+static_assert(sizeof(msap1_meter_config_payload) == 172,
 	      "unexpected meter configuration payload layout");
-static_assert(sizeof(msap1_meter_config_ack_payload) == 20,
+static_assert(sizeof(msap1_meter_config_ack_payload) == 28,
 	      "unexpected meter configuration acknowledgement layout");
 static_assert(sizeof(msap1_adc_diagnostic_payload) == 188,
 	      "unexpected ADC diagnostic payload layout");

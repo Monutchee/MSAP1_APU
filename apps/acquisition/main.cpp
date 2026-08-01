@@ -22,6 +22,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <fcntl.h>
@@ -245,6 +246,31 @@ msap1::FrequencyIpcConfiguration frequency_ipc(
 		static_cast<std::uint32_t>(
 			std::llround(frequency.hysteresis_volts * 1000000.0)),
 	};
+}
+
+msap1::SimulatorIpcConfiguration simulator_ipc(
+	const msap1::SimulatorConfig &simulator)
+{
+	msap1::SimulatorIpcConfiguration result{};
+	result.frequency_millihz = static_cast<std::uint32_t>(
+		std::llround(simulator.frequency_hz * 1000.0));
+	for (const auto &channel : simulator.channels) {
+		if (channel.channel >= result.channels.size())
+			continue;
+		result.channels[channel.channel].rms = channel.rms;
+		result.channels[channel.channel].phase_degrees =
+			channel.phase_degrees;
+	}
+	return result;
+}
+
+std::string adc_source_name(std::uint32_t source)
+{
+	if (source == MSAP1_ADC_SOURCE_PHYSICAL)
+		return "physical";
+	if (source == MSAP1_ADC_SOURCE_SIMULATOR)
+		return "simulator";
+	throw std::invalid_argument("invalid ADC source");
 }
 
 class MeterDevice {
@@ -524,6 +550,15 @@ private:
 				Clock::now() + health_confirmation_interval;
 			throw;
 		}
+		if (health.adc_source == MSAP1_ADC_SOURCE_SIMULATOR) {
+			health_probe_failures_ = 0;
+			cached_health_ = health;
+			has_cached_health_ = true;
+			last_rpu_health_time_ = Clock::now();
+			next_health_audit_ = Clock::now() + health_audit_interval;
+			observe_rpu_health(health);
+			return;
+		}
 		const bool spi_snapshot_valid =
 			(health.health_flags &
 			 MSAP1_ADC_HEALTH_SPI_RESPONSIVE) != 0u &&
@@ -632,6 +667,12 @@ private:
 			configuration_.wire.generation ||
 		    acknowledgement.processing_active_generation !=
 			configuration_.wire.generation ||
+		    acknowledgement.adc_source !=
+			configuration_.wire.adc_source ||
+		    (configuration_.wire.adc_source ==
+			     MSAP1_ADC_SOURCE_SIMULATOR &&
+		     acknowledgement.simulator_active_generation !=
+			     configuration_.wire.generation) ||
 		    (acknowledgement.conversion_status & 1u) == 0u ||
 		    (acknowledgement.processing_status & 1u) == 0u)
 			throw std::runtime_error(
@@ -643,6 +684,88 @@ private:
 			  std::to_string(configuration_.wire.generation)},
 			 {"MNC_SAMPLE_RATE_HZ",
 			  std::to_string(configuration_.wire.sample_rate_hz)}});
+	}
+
+	void apply_complete_configuration(
+		msap1::PreparedMeterConfiguration staged, bool persist,
+		std::string_view event)
+	{
+		const auto previous = configuration_;
+		const bool restart = running_;
+		if (restart)
+			stop();
+		configuration_ = std::move(staged);
+		latest_record_.reset();
+		last_record_time_.reset();
+		try {
+			if (restart)
+				start();
+			else
+				configure_meter();
+			if (persist)
+				msap1::save_meter_configuration(
+					configuration_.source,
+					options_.active_configuration);
+			log_message(config_log, mnc::logging::Priority::notice,
+				"ADC configuration applied: source=" +
+					configuration_.source.adc_source,
+				event,
+				{{"MNC_CONFIGURATION_GENERATION",
+				  std::to_string(configuration_.wire.generation)},
+				 {"MNC_ADC_SOURCE",
+				  configuration_.source.adc_source}});
+		} catch (...) {
+			if (running_)
+				stop();
+			configuration_ = previous;
+			latest_record_.reset();
+			last_record_time_.reset();
+			try {
+				if (restart)
+					start();
+				else
+					configure_meter();
+			} catch (const std::exception &rollback_error) {
+				log_message(config_log,
+					mnc::logging::Priority::critical,
+					"ADC configuration rollback failed: " +
+						std::string(rollback_error.what()),
+					"adc_configuration_rollback_failed");
+			}
+			throw;
+		}
+	}
+
+	void apply_adc_source(std::uint32_t source)
+	{
+		auto updated = configuration_.source;
+		updated.schema_version = 3u;
+		updated.adc_source = adc_source_name(source);
+		apply_complete_configuration(
+			msap1::prepare_meter_configuration(
+				std::move(updated),
+				configuration_.wire.sample_rate_hz),
+			true, "adc_source_applied");
+	}
+
+	void apply_simulator_configuration(
+		const msap1::SimulatorIpcConfiguration &request)
+	{
+		auto updated = configuration_.source;
+		updated.schema_version = 3u;
+		updated.simulator.frequency_hz =
+			static_cast<double>(request.frequency_millihz) / 1000.0;
+		updated.simulator.channels.clear();
+		for (std::uint32_t channel = 0; channel < 7u; ++channel) {
+			updated.simulator.channels.push_back({
+				channel, request.channels[channel].rms,
+				request.channels[channel].phase_degrees});
+		}
+		apply_complete_configuration(
+			msap1::prepare_meter_configuration(
+				std::move(updated),
+				configuration_.wire.sample_rate_hz),
+			true, "adc_simulator_configuration_applied");
 	}
 
 	void start(bool apply_configuration = true)
@@ -986,6 +1109,8 @@ private:
 		if (latest_record_)
 			response.latest_record = *latest_record_;
 		response.frequency = frequency_ipc(configuration_.source.frequency);
+		response.adc_source = configuration_.wire.adc_source;
+		response.simulator = simulator_ipc(configuration_.source.simulator);
 		response.waveform = waveform_.status();
 		const auto waveform_sessions = waveform_.sessions();
 		response.waveform_session_count =
@@ -1071,6 +1196,15 @@ private:
 						  std::to_string(
 							  request.waveform_session_id)}});
 					break;
+				case msap1::AcquisitionCommand::adc_source_get:
+				case msap1::AcquisitionCommand::adc_simulator_get:
+					break;
+				case msap1::AcquisitionCommand::adc_source_set:
+					apply_adc_source(request.adc_source);
+					break;
+				case msap1::AcquisitionCommand::adc_simulator_set:
+					apply_simulator_configuration(request.simulator);
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
@@ -1098,6 +1232,10 @@ private:
 						 frequency_configuration_set ||
 					 request.command ==
 					 msap1::AcquisitionCommand::sample_rate_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::adc_source_set ||
+					 request.command ==
+					 msap1::AcquisitionCommand::adc_simulator_set ||
 					 request.command ==
 					 msap1::AcquisitionCommand::
 						 adc_diagnostic_run)

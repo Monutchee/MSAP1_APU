@@ -5,6 +5,7 @@
 #include "msap1/rpu_control_protocol.h"
 #include "msap1/waveform_capture.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -15,7 +16,7 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 12;
+inline constexpr std::uint16_t acquisition_ipc_version = 13;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 
 enum class AcquisitionCommand : std::uint16_t {
@@ -32,6 +33,10 @@ enum class AcquisitionCommand : std::uint16_t {
 	waveform_trigger = 11,
 	waveform_list = 12,
 	waveform_delete = 13,
+	adc_source_get = 14,
+	adc_source_set = 15,
+	adc_simulator_get = 16,
+	adc_simulator_set = 17,
 };
 
 struct FrequencyIpcConfiguration {
@@ -43,6 +48,17 @@ struct FrequencyIpcConfiguration {
 	std::uint32_t minimum_millihz = 40000;
 	std::uint32_t maximum_millihz = 70000;
 	std::uint32_t hysteresis_microvolts = 1000000;
+};
+
+struct SimulatorIpcChannel {
+	double rms = 0.0;
+	double phase_degrees = 0.0;
+};
+
+struct SimulatorIpcConfiguration {
+	std::uint32_t frequency_millihz = 60000;
+	std::uint32_t reserved = 0;
+	std::array<SimulatorIpcChannel, 8> channels{};
 };
 
 enum class AcquisitionStatus : std::uint32_t {
@@ -67,7 +83,10 @@ struct AcquisitionRequest {
 	WaveformTriggerSource waveform_trigger_source =
 		WaveformTriggerSource::manual_cli;
 	std::uint64_t waveform_session_id = 0;
+	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
+	std::uint32_t adc_source_reserved = 0;
 	FrequencyIpcConfiguration frequency{};
+	SimulatorIpcConfiguration simulator{};
 };
 
 struct AcquisitionResponse {
@@ -94,6 +113,9 @@ struct AcquisitionResponse {
 	msap1_adc_diagnostic_payload adc_diagnostic{};
 	MeterRecord latest_record{};
 	FrequencyIpcConfiguration frequency{};
+	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
+	std::uint32_t adc_source_reserved = 0;
+	SimulatorIpcConfiguration simulator{};
 	WaveformStatus waveform{};
 	std::uint32_t waveform_session_count = 0;
 	std::uint32_t waveform_reserved = 0;
@@ -120,7 +142,11 @@ public:
 				    std::uint32_t waveform_posttrigger_ms = 10000,
 				    WaveformTriggerSource waveform_trigger_source =
 					    WaveformTriggerSource::manual_cli,
-				    std::uint64_t waveform_session_id = 0) const;
+				    std::uint64_t waveform_session_id = 0,
+				    std::uint32_t adc_source =
+					    MSAP1_ADC_SOURCE_PHYSICAL,
+				    const SimulatorIpcConfiguration *simulator =
+					    nullptr) const;
 
 private:
 	std::string socket_path_;

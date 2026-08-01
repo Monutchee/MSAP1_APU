@@ -39,7 +39,7 @@ repository.
 
 ## Runtime
 
-The Yocto package installs complete schema-version-2 ADC profiles at:
+The Yocto package installs complete schema-version-3 ADC profiles at:
 
 ```text
 /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-1a.json
@@ -47,10 +47,11 @@ The Yocto package installs complete schema-version-2 ADC profiles at:
 /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-mv.json
 ```
 
-Each profile also contains the CH6/VLA positive zero-crossing frequency
-configuration. Older schema-version-2 profiles without that object receive
-the rolling-10-cycle, 40–70 Hz, 1 V hysteresis defaults. Runtime frequency
-limits must remain ordered within the supported 10–200 Hz range.
+Each profile contains the CH6/VLA positive zero-crossing frequency
+configuration, an `adc_source`, and nominal simulator amplitudes/phases for
+CH0 through CH6. Existing schema-version-2 profiles are accepted as physical
+source and receive conservative simulator defaults. Runtime frequency limits
+must remain ordered within the supported 10–200 Hz range.
 
 The systemd service selects `msap1-sensor-board-5a.json` by default. Pass exactly one
 complete profile with `msap1-fpga-acquisition --config <path>`; files are not
@@ -104,6 +105,8 @@ The authenticated external API is:
   executables)
 - `GET /api/v1/adc/capture`
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
+- `GET /api/v1/adc/source` and `PUT /api/v1/adc/source`
+- `GET /api/v1/adc/simulator` and `PUT /api/v1/adc/simulator`
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
@@ -126,6 +129,12 @@ mnc adc start
 mnc adc rate
 mnc adc rate --sps 16000
 mnc adc testflw --flow 1
+mnc adc source
+mnc adc source --set simulator
+mnc adc simulator show
+mnc adc simulator configure --frequency-hz 60 \
+    --va-rms 120 --vb-rms 120 --vc-rms 120 \
+    --ia-rms 5 --ib-rms 5 --ic-rms 5 --in-rms 0
 mnc waveform status
 mnc waveform trigger --pre-ms 10000 --post-ms 10000
 mnc waveform list

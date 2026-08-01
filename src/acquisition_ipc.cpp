@@ -38,7 +38,9 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 						std::uint32_t waveform_pretrigger_ms,
 						std::uint32_t waveform_posttrigger_ms,
 						WaveformTriggerSource waveform_trigger_source,
-						std::uint64_t waveform_session_id) const
+						std::uint64_t waveform_session_id,
+						std::uint32_t adc_source,
+						const SimulatorIpcConfiguration *simulator) const
 {
 	const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	if (fd < 0)
@@ -68,8 +70,11 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionCommand command,
 	request.waveform_posttrigger_ms = waveform_posttrigger_ms;
 	request.waveform_trigger_source = waveform_trigger_source;
 	request.waveform_session_id = waveform_session_id;
+	request.adc_source = adc_source;
 	if (frequency != nullptr)
 		request.frequency = *frequency;
+	if (simulator != nullptr)
+		request.simulator = *simulator;
 	request.sequence = static_cast<std::uint64_t>(
 		std::chrono::steady_clock::now().time_since_epoch().count());
 	if (::send(fd, &request, sizeof(request), MSG_NOSIGNAL) !=

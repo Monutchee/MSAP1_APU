@@ -18,6 +18,9 @@ struct MeterHealth {
 	bool acquisition_healthy = false;
 	bool record_stale = false;
 	bool adc_healthy = false;
+	bool simulator_active = false;
+	bool simulator_healthy = false;
+	bool physical_diagnostics_applicable = true;
 	bool spi_responsive = false;
 	bool initialized = false;
 	bool configuration_match = false;
@@ -29,6 +32,7 @@ struct MeterHealth {
 	bool meter_generation_match = false;
 	bool dc_offset_removal = false;
 	bool frequency_arithmetic_ok = false;
+	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
 	std::vector<HealthReason> adc_degraded_reasons;
 };
 

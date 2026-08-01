@@ -232,6 +232,180 @@ int run_rate(const Options &options, std::ostream &output)
 			     AdcRateJsonGenerator{});
 }
 
+double parse_finite_double(const std::string &value, const char *option)
+{
+	std::size_t end = 0;
+	double result = 0.0;
+	try {
+		result = std::stod(value, &end);
+	} catch (const std::exception &) {
+		throw std::invalid_argument(std::string(option) +
+			" requires a numeric value");
+	}
+	if (end != value.size() || !std::isfinite(result))
+		throw std::invalid_argument(std::string(option) +
+			" requires a finite numeric value");
+	return result;
+}
+
+std::uint32_t adc_source_value(const std::string &source)
+{
+	if (source == "physical")
+		return MSAP1_ADC_SOURCE_PHYSICAL;
+	if (source == "simulator")
+		return MSAP1_ADC_SOURCE_SIMULATOR;
+	throw std::invalid_argument("--set must be physical or simulator");
+}
+
+const char *adc_source_text(std::uint32_t source)
+{
+	return source == MSAP1_ADC_SOURCE_SIMULATOR ? "simulator" : "physical";
+}
+
+struct AdcSourceResult {
+	std::string source;
+	bool running = false;
+	std::uint32_t generation = 0;
+};
+
+class AdcSourceTextGenerator final : public ResultGenerator<AdcSourceResult> {
+public:
+	int write(const AdcSourceResult &result,
+		  std::ostream &output) const override
+	{
+		output << "ADC source\n"
+		       << "  Active source:        " << result.source << '\n'
+		       << "  Capture running:      "
+		       << (result.running ? "yes" : "no") << '\n'
+		       << "  Configuration gen:    0x" << std::hex
+		       << result.generation << std::dec << '\n';
+		return 0;
+	}
+};
+
+class AdcSourceJsonGenerator final : public ResultGenerator<AdcSourceResult> {
+public:
+	int write(const AdcSourceResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_source(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	AcquisitionResponse response;
+	if (options.adc_source) {
+		response = client.request(
+			AcquisitionCommand::adc_source_set, options.timeout_ms,
+			nullptr, 0u, 0u, 10000u, 10000u,
+			WaveformTriggerSource::manual_cli, 0u,
+			adc_source_value(*options.adc_source));
+	} else {
+		response = client.request(AcquisitionCommand::adc_source_get,
+			options.timeout_ms);
+	}
+	require_daemon_ok(response);
+	const AdcSourceResult result{
+		adc_source_text(response.adc_source), response.running != 0u,
+		response.configuration_generation};
+	return render_result(options, result, output, AdcSourceTextGenerator{},
+			     AdcSourceJsonGenerator{});
+}
+
+struct AdcSimulatorResult {
+	double frequency_hz = 0.0;
+	std::array<double, 7> rms{};
+	std::array<double, 7> phase_degrees{};
+	bool active = false;
+	std::uint32_t generation = 0;
+};
+
+class AdcSimulatorTextGenerator final :
+	public ResultGenerator<AdcSimulatorResult> {
+public:
+	int write(const AdcSimulatorResult &result,
+		  std::ostream &output) const override
+	{
+		static constexpr std::array<const char *, 7> names{
+			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		output << "ADC simulator\n"
+		       << "  Active:               "
+		       << (result.active ? "yes" : "no") << '\n'
+		       << "  Frequency:            " << std::fixed
+		       << std::setprecision(3) << result.frequency_hz << " Hz\n"
+		       << "  Configuration gen:    0x" << std::hex
+		       << result.generation << std::dec << '\n';
+		for (std::size_t channel = 0; channel < names.size(); ++channel)
+			output << "  CH" << channel << ' ' << names[channel]
+			       << ": " << result.rms[channel] << " RMS, "
+			       << result.phase_degrees[channel] << " deg\n";
+		return 0;
+	}
+};
+
+class AdcSimulatorJsonGenerator final :
+	public ResultGenerator<AdcSimulatorResult> {
+public:
+	int write(const AdcSimulatorResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_simulator(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	auto response = client.request(AcquisitionCommand::adc_simulator_get,
+		options.timeout_ms);
+	require_daemon_ok(response);
+	const bool configure = options.simulator_frequency_hz.has_value() ||
+		std::any_of(options.simulator_rms.begin(),
+			options.simulator_rms.end(), [](const auto &value) {
+				return value.has_value();
+			}) ||
+		std::any_of(options.simulator_phase_degrees.begin(),
+			options.simulator_phase_degrees.end(),
+			[](const auto &value) { return value.has_value(); });
+	if (configure) {
+		auto simulator = response.simulator;
+		if (options.simulator_frequency_hz)
+			simulator.frequency_millihz =
+				static_cast<std::uint32_t>(std::llround(
+					*options.simulator_frequency_hz * 1000.0));
+		for (std::size_t channel = 0; channel < 7u; ++channel) {
+			if (options.simulator_rms[channel])
+				simulator.channels[channel].rms =
+					*options.simulator_rms[channel];
+			if (options.simulator_phase_degrees[channel])
+				simulator.channels[channel].phase_degrees =
+					*options.simulator_phase_degrees[channel];
+		}
+		response = client.request(
+			AcquisitionCommand::adc_simulator_set, options.timeout_ms,
+			nullptr, 0u, 0u, 10000u, 10000u,
+			WaveformTriggerSource::manual_cli, 0u,
+			response.adc_source, &simulator);
+		require_daemon_ok(response);
+	}
+	AdcSimulatorResult result{};
+	result.frequency_hz =
+		static_cast<double>(response.simulator.frequency_millihz) / 1000.0;
+	for (std::size_t channel = 0; channel < 7u; ++channel) {
+		result.rms[channel] = response.simulator.channels[channel].rms;
+		result.phase_degrees[channel] =
+			response.simulator.channels[channel].phase_degrees;
+	}
+	result.active = response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	result.generation = response.configuration_generation;
+	return render_result(options, result, output, AdcSimulatorTextGenerator{},
+			     AdcSimulatorJsonGenerator{});
+}
+
 std::uint32_t parse_diagnostic_flow(const std::string &value)
 {
 	std::size_t end = 0;
@@ -452,6 +626,100 @@ int run_test_flow(const Options &options, std::ostream &output)
 void register_adc_commands(Application &application)
 {
 	Command adc("adc", "Control ADC capture and FPGA acquisition");
+	Command source(
+		"source", "Inspect or select the physical ADC/simulator source",
+		run_source,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {
+				{"--set physical|simulator",
+				 AccessLevel::operator_control,
+				 "Transactionally select the ADC source"},
+			},
+		});
+	source.set_access_resolver([](const Options &options) {
+		return options.adc_source ? AccessLevel::operator_control
+					  : AccessLevel::diagnostic;
+	});
+	source.add_option({
+		"set", "SOURCE", "Select physical or simulator input",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			(void)adc_source_value(value);
+			options.adc_source = value;
+		},
+	});
+	adc.add_subcommand(std::move(source));
+
+	Command simulator("simulator", "Inspect or configure the PL ADC simulator");
+	simulator.add_subcommand(Command(
+		"show", "Show the persisted ADC simulator configuration",
+		run_simulator,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	Command simulator_configure(
+		"configure", "Configure simulator RMS amplitudes and phases",
+		run_simulator,
+		{
+			.access = AccessLevel::operator_control,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	simulator_configure.add_option({
+		"frequency-hz", "HZ", "Fundamental frequency",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			const auto parsed = parse_finite_double(value, "--frequency-hz");
+			if (parsed <= 0.0)
+				throw std::invalid_argument(
+					"--frequency-hz must be positive");
+			options.simulator_frequency_hz = parsed;
+		},
+	});
+	static constexpr std::array<const char *, 7> channel_options{
+		"ia", "ib", "ic", "in", "vc", "vb", "va"};
+	for (std::size_t channel = 0; channel < channel_options.size(); ++channel) {
+		const std::string rms_option =
+			std::string(channel_options[channel]) + "-rms";
+		simulator_configure.add_option({
+			rms_option, "VALUE", "Channel engineering RMS amplitude",
+			CompletionKind::none,
+			[channel, rms_option](Options &options,
+					      const std::string &value) {
+				const auto parsed = parse_finite_double(
+					value, ("--" + rms_option).c_str());
+				if (parsed < 0.0)
+					throw std::invalid_argument(
+						"simulator RMS must not be negative");
+				options.simulator_rms[channel] = parsed;
+			},
+		});
+		const std::string phase_option =
+			std::string(channel_options[channel]) + "-phase-degrees";
+		simulator_configure.add_option({
+			phase_option, "DEGREES", "Channel phase offset",
+			CompletionKind::none,
+			[channel, phase_option](Options &options,
+						const std::string &value) {
+				options.simulator_phase_degrees[channel] =
+					parse_finite_double(
+						value,
+						("--" + phase_option).c_str());
+			},
+		});
+	}
+	simulator.add_subcommand(std::move(simulator_configure));
+	adc.add_subcommand(std::move(simulator));
 	adc.add_subcommand(Command(
 		"start", "Start ADC capture and meter acquisition",
 		[](const Options &options, std::ostream &output) {

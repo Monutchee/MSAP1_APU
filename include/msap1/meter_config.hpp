@@ -50,9 +50,29 @@ struct FrequencyConfig {
 	double hysteresis_volts = 1.0;
 };
 
+struct SimulatorChannelConfig {
+	std::uint32_t channel = 0;
+	double rms = 0.0;
+	double phase_degrees = 0.0;
+};
+
+struct SimulatorConfig {
+	double frequency_hz = 60.0;
+	std::vector<SimulatorChannelConfig> channels{
+		{0u, 5.0, 0.0},
+		{1u, 5.0, -120.0},
+		{2u, 5.0, 120.0},
+		{3u, 0.0, 0.0},
+		{4u, 120.0, 120.0},
+		{5u, 120.0, -120.0},
+		{6u, 120.0, 0.0},
+	};
+};
+
 struct MeterConversionFile {
-	std::uint32_t schema_version = 2;
+	std::uint32_t schema_version = 3;
 	std::string profile_id;
+	std::string adc_source = "physical";
 	std::uint32_t rms_window_ms = 200;
 	bool remove_dc = true;
 	double adc_reference_volts = 1.0;
@@ -61,6 +81,7 @@ struct MeterConversionFile {
 	// Kept optional-by-default for compatible schema-v2 profiles created
 	// before frequency measurement was introduced.
 	FrequencyConfig frequency;
+	SimulatorConfig simulator;
 };
 
 struct PreparedMeterConfiguration {

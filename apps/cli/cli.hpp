@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <iosfwd>
 #include <optional>
@@ -32,6 +33,10 @@ struct Options {
 	std::optional<double> duration_seconds;
 	std::optional<std::uint32_t> sample_rate_hz;
 	std::optional<std::uint32_t> diagnostic_flow;
+	std::optional<std::string> adc_source;
+	std::optional<double> simulator_frequency_hz;
+	std::array<std::optional<double>, 7> simulator_rms{};
+	std::array<std::optional<double>, 7> simulator_phase_degrees{};
 	std::uint32_t waveform_pretrigger_ms = 10000;
 	std::uint32_t waveform_posttrigger_ms = 10000;
 	std::optional<std::string> log_component;
