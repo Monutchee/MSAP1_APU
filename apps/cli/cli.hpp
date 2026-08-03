@@ -169,6 +169,7 @@ void register_waveform_commands(Application &application);
 void register_log_command(Application &application);
 void register_system_commands(Application &application);
 void register_machine_commands(Application &application);
+void register_service_commands(Application &application);
 void request_stop() noexcept;
 bool stop_was_requested() noexcept;
 

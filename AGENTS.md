@@ -64,9 +64,20 @@
   allow the browser to open journald directly.
 - SoC temperature monitoring discovers the LPD, FPD, and PL sensors by their
   hwmon labels. Never bind product behavior to a particular `hwmonN` index.
-- CLI and web consumers use the daemon's binary `SOCK_SEQPACKET` protocol at
-  `/run/monutchee/fpga-acquisition.sock`. Do not open the DMA device, RPMsg
-  endpoint, `/dev/spidev*`, `/dev/mem`, or UIO from another process.
+- CLI, web, and future publisher consumers use the versioned `MNCI` framed
+  Boost.Asio Unix-stream protocol at
+  `/run/monutchee/fpga-acquisition.sock`. Product messages use explicit
+  little-endian serialization; never transmit native C++ structure padding.
+  Do not open the DMA device, RPMsg endpoint, `/dev/spidev*`, `/dev/mem`, or
+  UIO from another process.
+- Every validated PL meter record is committed to the SQLite WAL stream at
+  `/data/mnc/meter/record-stream.sqlite3` before it enters the typed latest
+  store or is published to lossy consumers. A storage failure is critical and
+  must stop acquisition instead of silently losing accepted records.
+- `mnc::Service` provides lifecycle, readiness, watchdog, reload, and shutdown
+  behavior for product daemons. `msap1-service-manager` orders/adopts the
+  acquisition and web systemd units through sd-bus; systemd remains the only
+  process supervisor and restart-policy owner.
 - The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-3
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
   physical current/voltage frontends, the 200 ms RMS window, the selected ADC

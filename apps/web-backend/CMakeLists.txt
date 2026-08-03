@@ -1,12 +1,12 @@
 add_executable(msap1-web-backend
     main.cpp
     msap1_auth_provider.cpp
-    systemd_notifier.cpp
 )
 
 target_link_libraries(msap1-web-backend PRIVATE
     msap1::apu-core
     mnc::logging
+    mnc::service
     webengine::webengine
     glaze::glaze
 )

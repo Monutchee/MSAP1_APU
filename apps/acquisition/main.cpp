@@ -1,35 +1,43 @@
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_config.hpp"
+#include "msap1/meter_data.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/meter_record.hpp"
+#include "msap1/meter_record_stream.hpp"
 #include "msap1/protocol.hpp"
 #include "msap1/rpmsg_endpoint.hpp"
 #include "msap1/waveform_capture.hpp"
 #include "mnc/logging/logging.hpp"
+#include "mnc/service.hpp"
+
+#include <boost/asio/io_context.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <initializer_list>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include <fcntl.h>
 #include <poll.h>
-#include <sys/socket.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 namespace {
@@ -47,7 +55,7 @@ constexpr auto health_confirmation_interval = 1s;
 constexpr auto health_startup_settle_interval = 2s;
 constexpr std::uint32_t health_failures_before_degraded = 2;
 
-volatile std::sig_atomic_t stop_requested = 0;
+volatile std::sig_atomic_t acquisition_stop_requested = 0;
 
 const mnc::logging::Logger lifecycle_log("fpga-acquisition", "lifecycle");
 const mnc::logging::Logger dma_log("fpga-acquisition", "dma");
@@ -92,11 +100,6 @@ std::string health_reason_messages(
 	return result;
 }
 
-void handle_signal(int)
-{
-	stop_requested = 1;
-}
-
 [[noreturn]] void throw_errno(const std::string &operation)
 {
 	throw std::runtime_error(operation + ": " + std::strerror(errno));
@@ -112,6 +115,7 @@ struct Options {
 	std::string active_configuration =
 		"/etc/monutchee/msap1/adc_config/active.json";
 	std::string socket_path = msap1::acquisition_socket_path;
+	std::string record_stream = "/data/mnc/meter/record-stream.sqlite3";
 };
 
 void usage(const char *program)
@@ -125,7 +129,8 @@ void usage(const char *program)
 		<< "  --waveform-directory PATH Completed waveform storage\n"
 		<< "  --config PATH        Meter conversion JSON\n"
 		<< "  --active-config PATH Persisted complete runtime profile\n"
-		<< "  --socket PATH        Control socket path\n";
+		<< "  --socket PATH        Control socket path\n"
+		<< "  --record-stream PATH Durable meter record database\n";
 }
 
 Options parse_options(int argc, char **argv)
@@ -156,6 +161,8 @@ Options parse_options(int argc, char **argv)
 			options.active_configuration = value;
 		else if (option == "--socket")
 			options.socket_path = value;
+		else if (option == "--record-stream")
+			options.record_stream = value;
 		else
 			throw std::invalid_argument("unknown option '" + option + "'");
 	}
@@ -317,18 +324,22 @@ public:
 		  meter_(options.meter_device),
 		  waveform_(options.waveform_device, options.waveform_directory,
 			    waveform_metadata(configuration_)),
-		  endpoint_(options.service, options.rpmsg_device)
+		  endpoint_(options.service, options.rpmsg_device),
+		  record_stream_(options.record_stream)
 	{
-		create_socket();
+		create_ipc_server();
 	}
 
 	~AcquisitionDaemon()
 	{
 		stop();
-		if (listen_fd_ >= 0)
-			::close(listen_fd_);
-		if (!options_.socket_path.empty())
-			::unlink(options_.socket_path.c_str());
+		if (ipc_server_)
+			ipc_server_->stop();
+		ipc_context_.stop();
+		if (ipc_thread_.joinable())
+			ipc_thread_.join();
+		if (ipc_event_fd_ >= 0)
+			::close(ipc_event_fd_);
 	}
 
 	void run()
@@ -342,11 +353,11 @@ public:
 			{{"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(configuration_.wire.generation)},
 			 {"MNC_DEVICE", meter_.path()}});
-		while (!stop_requested) {
+		while (!acquisition_stop_requested) {
 			pollfd descriptors[3] = {
 				{meter_.fd(), POLLIN, 0},
 				{waveform_.fd(), POLLIN, 0},
-				{listen_fd_, POLLIN, 0},
+				{ipc_event_fd_, POLLIN, 0},
 			};
 			const int result = ::poll(descriptors, 3, 250);
 			if (result < 0) {
@@ -380,7 +391,7 @@ public:
 				throw std::runtime_error(
 					"waveform DMA device disconnected");
 			if ((descriptors[2].revents & POLLIN) != 0)
-				handle_client();
+				drain_ipc_requests();
 
 			if (running_ && Clock::now() >= next_health_audit_) {
 				try {
@@ -406,28 +417,40 @@ public:
 	}
 
 private:
-	void create_socket()
+	struct PendingIpcRequest {
+		std::shared_ptr<mnc::ipc::FramedConnection> connection;
+		mnc::ipc::Frame frame;
+	};
+
+	struct MeterSubscription {
+		std::weak_ptr<mnc::ipc::FramedConnection> connection;
+		msap1::UpdatePeriod period = msap1::UpdatePeriod::ms200;
+	};
+
+	void create_ipc_server()
 	{
-		const auto parent =
-			std::filesystem::path(options_.socket_path).parent_path();
-		if (!parent.empty())
-			std::filesystem::create_directories(parent);
-		listen_fd_ = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-		if (listen_fd_ < 0)
-			throw_errno("create acquisition control socket");
-		::unlink(options_.socket_path.c_str());
-		sockaddr_un address{};
-		address.sun_family = AF_UNIX;
-		if (options_.socket_path.size() >= sizeof(address.sun_path))
-			throw std::invalid_argument("acquisition socket path is too long");
-		std::memcpy(address.sun_path, options_.socket_path.c_str(),
-			    options_.socket_path.size() + 1);
-		if (::bind(listen_fd_, reinterpret_cast<sockaddr *>(&address),
-			   sizeof(address)) < 0)
-			throw_errno("bind " + options_.socket_path);
-		(void)::chmod(options_.socket_path.c_str(), 0660);
-		if (::listen(listen_fd_, 8) < 0)
-			throw_errno("listen on acquisition socket");
+		ipc_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (ipc_event_fd_ < 0)
+			throw_errno("create acquisition IPC eventfd");
+		ipc_server_ = std::make_unique<mnc::ipc::UnixStreamServer>(
+			ipc_context_.get_executor(), options_.socket_path);
+		ipc_server_->start(
+			[this](auto connection, auto frame) {
+				{
+					std::scoped_lock lock(ipc_mutex_);
+					ipc_requests_.push_back(
+						{std::move(connection), std::move(frame)});
+				}
+				const std::uint64_t signal = 1;
+				(void)::write(ipc_event_fd_, &signal, sizeof(signal));
+			},
+			[](const std::string &message) {
+				log_message(lifecycle_log,
+					mnc::logging::Priority::warning,
+					"acquisition IPC connection failed: " + message,
+					"ipc_connection_failed");
+			});
+		ipc_thread_ = std::thread([this] { ipc_context_.run(); });
 	}
 
 	msap1::Message transact(std::uint8_t type, const void *payload = nullptr,
@@ -1032,9 +1055,40 @@ private:
 				sequence_gaps_ += static_cast<std::uint32_t>(
 					received - expected);
 		}
+		/* Durability is the publication boundary. A record is never made
+		 * visible to web/CLI/publisher consumers until SQLite has committed
+		 * the exact 256-byte PL record to the ordered WAL stream. */
+		const auto received_at = std::chrono::system_clock::now();
+		const auto cursor = record_stream_.append(record, received_at);
+		const auto update = decoders_.decode(record, received_at);
+		meter_data_.apply(update);
 		latest_record_ = record;
 		last_record_time_ = Clock::now();
 		++meter_records_;
+		(void)cursor;
+		publish_meter_event(update.period);
+	}
+
+	void publish_meter_event(msap1::UpdatePeriod period)
+	{
+		msap1::AcquisitionResponse response{};
+		response.sequence = 0;
+		response.meter_period_view = msap1::to_ipc_period_view(
+			meter_data_.latest(period), period);
+		auto frame = msap1::encode_acquisition_response(
+			response,
+			static_cast<std::uint32_t>(
+				msap1::AcquisitionCommand::meter_subscribe));
+		frame.kind = mnc::ipc::FrameKind::event;
+		frame.correlation_id = 0;
+		std::erase_if(meter_subscriptions_, [&](auto &subscription) {
+			auto connection = subscription.connection.lock();
+			if (!connection)
+				return true;
+			if (subscription.period == period)
+				connection->post_send(frame);
+			return false;
+		});
 	}
 
 	void read_meter_records()
@@ -1117,23 +1171,64 @@ private:
 			static_cast<std::uint32_t>(waveform_sessions.size());
 		std::copy(waveform_sessions.begin(), waveform_sessions.end(),
 			  response.waveform_sessions.begin());
+		response.meter_period_view = msap1::to_ipc_period_view(
+			meter_data_.latest(request.meter_period),
+			request.meter_period);
+		if (request.command == msap1::AcquisitionCommand::meter_stream_read) {
+			const auto limit = std::clamp<std::uint32_t>(
+				request.meter_limit, 1,
+				msap1::acquisition_stream_read_max);
+			for (const auto &stored :
+			     record_stream_.read_after(request.meter_cursor, limit)) {
+				response.meter_stream_records.push_back({
+					stored.cursor,
+					std::chrono::duration_cast<
+						std::chrono::nanoseconds>(
+						stored.received_at.time_since_epoch())
+						.count(),
+					stored.record});
+				response.meter_next_cursor = stored.cursor;
+			}
+		}
 		return response;
 	}
 
-	void handle_client()
+	void drain_ipc_requests()
 	{
-		const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
-		if (fd < 0)
-			return;
+		std::uint64_t signal = 0;
+		while (::read(ipc_event_fd_, &signal, sizeof(signal)) < 0 &&
+		       errno == EINTR) {
+		}
+		std::deque<PendingIpcRequest> requests;
+		{
+			std::scoped_lock lock(ipc_mutex_);
+			requests.swap(ipc_requests_);
+		}
+		for (auto &pending : requests)
+			handle_ipc_request(std::move(pending));
+	}
+
+	void handle_ipc_request(PendingIpcRequest pending)
+	{
 		msap1::AcquisitionRequest request{};
-		const auto size = ::recv(fd, &request, sizeof(request), 0);
-		auto response = make_response(request);
-		if (size != static_cast<ssize_t>(sizeof(request)) ||
-		    request.magic != msap1::acquisition_ipc_magic ||
-		    request.version != msap1::acquisition_ipc_version) {
+		request.sequence = pending.frame.correlation_id;
+		try {
+			request = msap1::decode_acquisition_request(pending.frame);
+		} catch (const std::exception &error) {
+			msap1::AcquisitionResponse response{};
+			response.sequence = pending.frame.correlation_id;
 			response.status = msap1::AcquisitionStatus::bad_request;
-		} else {
-			try {
+			pending.connection->post_send(msap1::encode_acquisition_response(
+				response, pending.frame.message_type));
+			log_message(lifecycle_log, mnc::logging::Priority::warning,
+				"rejected malformed acquisition IPC request: " +
+					std::string(error.what()),
+				"ipc_request_rejected");
+			return;
+		}
+		msap1::AcquisitionResponse response{};
+		response.sequence = request.sequence;
+		try {
 				switch (request.command) {
 				case msap1::AcquisitionCommand::info:
 					break;
@@ -1205,12 +1300,36 @@ private:
 				case msap1::AcquisitionCommand::adc_simulator_set:
 					apply_simulator_configuration(request.simulator);
 					break;
+				case msap1::AcquisitionCommand::meter_latest:
+				case msap1::AcquisitionCommand::meter_stream_read:
+					break;
+				case msap1::AcquisitionCommand::meter_stream_register:
+					record_stream_.register_consumer(
+						request.meter_consumer);
+					break;
+				case msap1::AcquisitionCommand::meter_stream_acknowledge:
+					record_stream_.acknowledge(
+						request.meter_consumer,
+						request.meter_cursor);
+					break;
+				case msap1::AcquisitionCommand::meter_subscribe:
+					meter_subscriptions_.push_back(
+						{pending.connection,
+						 request.meter_period});
+					break;
+				case msap1::AcquisitionCommand::meter_unsubscribe:
+					std::erase_if(meter_subscriptions_,
+						[&](const auto &subscription) {
+							return subscription.connection.lock() ==
+							       pending.connection;
+						});
+					break;
 				default:
 					response.status =
 						msap1::AcquisitionStatus::bad_request;
 					break;
 				}
-			} catch (const std::exception &error) {
+		} catch (const std::exception &error) {
 				log_message(lifecycle_log,
 					mnc::logging::Priority::error,
 					"acquisition command failed: " +
@@ -1244,15 +1363,14 @@ private:
 				else
 					response.status =
 						msap1::AcquisitionStatus::dma_error;
-			}
 		}
 
 		const auto current = make_response(request);
 		const auto saved_status = response.status;
 		response = current;
 		response.status = saved_status;
-		(void)::send(fd, &response, sizeof(response), MSG_NOSIGNAL);
-		::close(fd);
+		pending.connection->post_send(msap1::encode_acquisition_response(
+			response, static_cast<std::uint32_t>(request.command)));
 	}
 
 	Options options_;
@@ -1260,7 +1378,17 @@ private:
 	MeterDevice meter_;
 	msap1::WaveformCapture waveform_;
 	msap1::RpmsgEndpoint endpoint_;
-	int listen_fd_ = -1;
+	msap1::MeterRecordStream record_stream_;
+	msap1::MeterDecoderRegistry decoders_ =
+		msap1::MeterDecoderRegistry::with_builtin_decoders();
+	msap1::MeterData meter_data_;
+	boost::asio::io_context ipc_context_;
+	std::unique_ptr<mnc::ipc::UnixStreamServer> ipc_server_;
+	std::thread ipc_thread_;
+	int ipc_event_fd_ = -1;
+	std::mutex ipc_mutex_;
+	std::deque<PendingIpcRequest> ipc_requests_;
+	std::vector<MeterSubscription> meter_subscriptions_;
 	std::uint32_t rpmsg_sequence_ = 0x90000000u;
 	bool running_ = false;
 	std::uint64_t meter_records_ = 0;
@@ -1282,16 +1410,77 @@ private:
 	std::uint32_t last_spi_error_ = 0;
 };
 
+class AcquisitionService final : public mnc::Service {
+public:
+	explicit AcquisitionService(const Options &options)
+		: Service("MSAP1 FPGA acquisition", "fpga-acquisition"),
+		  daemon_(options)
+	{
+	}
+
+protected:
+	void on_start() override
+	{
+		acquisition_stop_requested = 0;
+		worker_ = std::thread([this] {
+			try {
+				daemon_.run();
+			} catch (...) {
+				failure_ = std::current_exception();
+				failed_ = true;
+				request_stop();
+			}
+		});
+	}
+
+	void on_reload() override
+	{
+		(void)logger().write(mnc::logging::Priority::info,
+			"acquisition configuration reload requested; runtime "
+			"configuration remains transaction-controlled",
+			"reload_deferred");
+	}
+
+	void on_stop() noexcept override
+	{
+		acquisition_stop_requested = 1;
+		if (worker_.joinable())
+			worker_.join();
+		if (!failure_)
+			return;
+		try {
+			std::rethrow_exception(failure_);
+		} catch (const std::exception &error) {
+			(void)logger().write(mnc::logging::Priority::critical,
+				"acquisition worker failed: " + std::string(error.what()),
+				"worker_failed");
+		} catch (...) {
+			(void)logger().write(mnc::logging::Priority::critical,
+				"acquisition worker failed", "worker_failed");
+		}
+	}
+
+	[[nodiscard]] mnc::ServiceHealth health() const override
+	{
+		return failed_.load()
+			? mnc::ServiceHealth{false, "acquisition worker failed"}
+			: mnc::ServiceHealth{true, "acquisition running"};
+	}
+
+private:
+	AcquisitionDaemon daemon_;
+	std::thread worker_;
+	std::exception_ptr failure_;
+	std::atomic<bool> failed_{false};
+};
+
 } // namespace
 
 int main(int argc, char **argv)
 {
-	std::signal(SIGINT, handle_signal);
-	std::signal(SIGTERM, handle_signal);
 	try {
-		AcquisitionDaemon daemon(parse_options(argc, argv));
-		daemon.run();
-		return 0;
+		AcquisitionService service(parse_options(argc, argv));
+		return service.execute();
 	} catch (const std::exception &error) {
 		log_message(lifecycle_log, mnc::logging::Priority::critical,
 			"msap1-fpga-acquisition: " + std::string(error.what()),
