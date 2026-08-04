@@ -130,3 +130,114 @@ mnc service reload fpga-acquisition
 Future publishers should inherit `mnc::Service`, use a persistent
 `mnc::ipc::RequestClient`, subscribe to the desired `MeterData` period, and
 keep their protocol-specific serialization outside the reusable transport.
+
+## Focused libraries and ownership
+
+The CMake graph deliberately separates reusable infrastructure from MSAP1
+product behavior:
+
+```text
+mnc::ipc                 framed Unix-stream transport only
+mnc::logging             structured journal writer and reader
+mnc::service             process lifecycle and systemd integration
+
+msap1::meter             record values, decoders, durable stream, latest store
+msap1::waveform          waveform DMA/session/file ownership
+msap1::acquisition       product protocol, meter DMA and RPU adapters
+msap1::system            temperature and image identity
+msap1::service-protocol  service-manager product messages
+```
+
+The compatibility target `msap1::apu-core` remains an interface-only umbrella
+for downstream code that has not yet selected a focused dependency. New code
+must link the smallest target it needs. Configure-time checks reject direct
+dependencies from meter/waveform value libraries to IPC, WebEngine, or CLI
+presentation code.
+
+```mermaid
+classDiagram
+    class AcquisitionService {
+        +on_start()
+        +on_reload()
+        +on_stop()
+        +health()
+    }
+    class CaptureCoordinator {
+        -MeterRecordSource meter
+        -RpuControl rpu
+        -WaveformCapture waveform
+        -MeterRecordStream stream
+        -MeterData latest
+    }
+    class MeterRecordSource {
+        <<interface>>
+        +start()
+        +stop()
+        +native_handle()
+        +read_available()
+    }
+    class MeterDmaReader {
+        -int descriptor
+    }
+    class RpuControl {
+        <<interface>>
+        +transact()
+        +query_health()
+    }
+    class RpuController {
+        -RpmsgEndpoint endpoint
+        -uint32 sequence
+    }
+    class ProtocolCodec {
+        <<static>>
+        +encode_request()
+        +decode_request()
+        +encode_response()
+        +decode_response()
+    }
+
+    AcquisitionService *-- CaptureCoordinator
+    CaptureCoordinator o-- MeterRecordSource
+    CaptureCoordinator o-- RpuControl
+    MeterRecordSource <|.. MeterDmaReader
+    RpuControl <|.. RpuController
+    CaptureCoordinator --> ProtocolCodec
+```
+
+`MeterDmaReader` and `RpuController` are RAII adapters. Their abstract source
+and control contracts let host tests inject fakes without opening `/dev` or an
+RPMsg endpoint. `CaptureCoordinator` owns ordering and policy; it does not own
+transport details. `AcquisitionService` stays thin and delegates lifecycle to
+the coordinator while `mnc::Service` handles signals, readiness, watchdogs,
+and exception containment.
+
+The Web backend follows the same boundary. `AcquisitionGateway` owns the
+persistent `AcquisitionClient` and presents typed product operations to HTTP
+handlers. A handler can ask for `information()`, `waveform_status()`, or
+`set_adc_source()` but cannot construct an MNCI frame or manage correlation
+IDs. Existing routes and JSON DTOs remain unchanged.
+
+The CLI already uses a command registry plus polymorphic text/JSON result
+generators. Command handlers share typed acquisition/service clients; output
+selection does not repeat an operation or change its side effects.
+
+## Dependency direction
+
+Maintain this one-way dependency flow:
+
+```mermaid
+flowchart TD
+    VALUE["Value types and product protocol"]
+    CORE["Meter, waveform, and acquisition libraries"]
+    ADAPTER["Service and IPC adapters"]
+    APP["CLI and Web applications"]
+
+    VALUE --> CORE --> ADAPTER --> APP
+```
+
+- `mnc::ipc` never interprets MSAP1 message types or meter payloads.
+- `msap1::meter` never links WebEngine or CLI formatting.
+- HTTP handlers never open DMA, RPMsg, SPI, `/dev/mem`, or SQLite resources.
+- CLI commands never access DMA or durable storage directly.
+- Acquisition-owned adapters are the only owners of hardware descriptors.
+- Lossy latest-state subscribers never block the durable stream.

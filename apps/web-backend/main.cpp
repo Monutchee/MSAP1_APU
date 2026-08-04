@@ -1,4 +1,5 @@
 #include "msap1_auth_provider.hpp"
+#include "acquisition_gateway.hpp"
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/soc_temperature.hpp"
@@ -950,13 +951,12 @@ bool wait_for_socket(const std::filesystem::path &path,
 	return false;
 }
 
-msap1::AcquisitionClient &acquisition_client()
+msap1::web::AcquisitionGateway &acquisition_gateway()
 {
-	// One persistent, correlation-aware AF_UNIX stream is shared by every HTTP
-	// worker.  AcquisitionClient serializes complete framed writes and routes
-	// responses by correlation ID, so handlers do not create transient sockets.
-	static msap1::AcquisitionClient client;
-	return client;
+	// The gateway owns one persistent, correlation-aware AF_UNIX stream. HTTP
+	// handlers express typed product operations and never construct IPC frames.
+	static msap1::web::AcquisitionGateway gateway;
+	return gateway;
 }
 
 std::atomic<webengine::WebEngine *> active_web_engine{nullptr};
@@ -1011,8 +1011,8 @@ int run_web_backend()
 		engine.add_api(webengine::http::verb::get, "/api/v1/health",
 			[&nginx](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::info, 1000);
+					const auto response =
+						acquisition_gateway().information();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						system_health(response, nginx));
@@ -1087,8 +1087,8 @@ int run_web_backend()
 			"/api/v1/meter/health",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::info, 1000);
+					const auto response =
+						acquisition_gateway().information();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						meter_health(response));
@@ -1104,8 +1104,8 @@ int run_web_backend()
 			"/api/v1/meter/readings",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::info, 1000);
+					const auto response =
+						acquisition_gateway().information();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						readings(response));
@@ -1121,9 +1121,8 @@ int run_web_backend()
 			"/api/v1/waveforms",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::waveform_status,
-						1000);
+					const auto response =
+						acquisition_gateway().waveform_status();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						waveform_status(response));
@@ -1151,12 +1150,11 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"waveform durations must be 0..120000 ms");
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::waveform_trigger,
-						3000, nullptr, 0, 0,
-						trigger.pretrigger_ms,
-						trigger.posttrigger_ms,
-						msap1::WaveformTriggerSource::manual_web);
+					const auto response =
+						acquisition_gateway().trigger_waveform(
+							trigger.pretrigger_ms,
+							trigger.posttrigger_ms,
+							msap1::WaveformTriggerSource::manual_web);
 					require_acquisition_ok(response);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
@@ -1193,11 +1191,9 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"waveform session ID is required");
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::waveform_delete,
-						3000, nullptr, 0, 0, 0, 0,
-						msap1::WaveformTriggerSource::manual_web,
-						deletion.session_id);
+					const auto response =
+						acquisition_gateway().delete_waveform(
+							deletion.session_id);
 					require_acquisition_ok(response);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
@@ -1220,10 +1216,8 @@ int run_web_backend()
 			"/api/v1/meter/configuration/frequency",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::
-							frequency_configuration_get,
-						1000);
+					const auto response = acquisition_gateway()
+						.frequency_configuration();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						frequency_configuration(response.frequency));
@@ -1260,10 +1254,8 @@ int run_web_backend()
 							"invalid frequency configuration JSON");
 					}
 					const auto wire = frequency_ipc(configuration);
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::
-							frequency_configuration_set,
-						5000, &wire);
+					const auto response = acquisition_gateway()
+						.set_frequency_configuration(wire);
 					if (response.status ==
 					    msap1::AcquisitionStatus::configuration_error) {
 						log_message(api_log,
@@ -1314,9 +1306,8 @@ int run_web_backend()
 			"/api/v1/adc/source",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::adc_source_get,
-						1000);
+					const auto response =
+						acquisition_gateway().adc_source();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						adc_source(response));
@@ -1340,11 +1331,8 @@ int run_web_backend()
 							webengine::http::status::bad_request,
 							"invalid ADC source JSON");
 					const auto source = adc_source_value(configuration.source);
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::adc_source_set,
-						5000, nullptr, 0, 0, 10000, 10000,
-						msap1::WaveformTriggerSource::manual_cli,
-						0, source);
+					const auto response =
+						acquisition_gateway().set_adc_source(source);
 					if (response.status ==
 					    msap1::AcquisitionStatus::configuration_error)
 						return error_response(
@@ -1376,9 +1364,8 @@ int run_web_backend()
 			"/api/v1/adc/simulator",
 			[](const webengine::RequestContext &) {
 				try {
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::adc_simulator_get,
-						1000);
+					const auto response = acquisition_gateway()
+						.simulator_configuration();
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
 						adc_simulator(response));
@@ -1402,11 +1389,8 @@ int run_web_backend()
 							webengine::http::status::bad_request,
 							"invalid ADC simulator JSON");
 					const auto wire = adc_simulator_ipc(configuration);
-					const auto response = acquisition_client().request(
-						msap1::AcquisitionCommand::adc_simulator_set,
-						5000, nullptr, 0, 0, 10000, 10000,
-						msap1::WaveformTriggerSource::manual_cli,
-						0, MSAP1_ADC_SOURCE_PHYSICAL, &wire);
+					const auto response = acquisition_gateway()
+						.set_simulator_configuration(wire);
 					if (response.status ==
 					    msap1::AcquisitionStatus::configuration_error)
 						return error_response(
@@ -1451,7 +1435,9 @@ int run_web_backend()
 							: "capture_stop_requested",
 						{{"MNC_REQUEST_ID", correlation}});
 				try {
-					const auto response = acquisition_client().request(command, 3000);
+					const auto response = query
+						? acquisition_gateway().information(3000)
+						: acquisition_gateway().set_capture(starting);
 					require_acquisition_ok(response);
 					if (!query)
 						log_message(api_log,
