@@ -795,6 +795,15 @@ private:
 	{
 		if (running_)
 			return;
+		/*
+		 * Every deliberate DMA/capture restart starts a new continuity epoch.
+		 * Source selection and other coordinated configurations may reset or
+		 * advance PL record sequences while DMA is stopped; that boundary is
+		 * not packet loss and must not increment the health gap counter.
+		 */
+		latest_record_.reset();
+		last_record_time_.reset();
+		sequence_gaps_ = 0;
 		try {
 			/*
 			 * Both DMA consumers must own their S2MM channels before the
@@ -1051,9 +1060,19 @@ private:
 		if (latest_record_) {
 			const auto expected = latest_record_->sequence() + 1u;
 			const auto received = record.sequence();
-			if (received != expected)
-				sequence_gaps_ += static_cast<std::uint32_t>(
-					received - expected);
+			const auto forward_distance = received - expected;
+			if (forward_distance != 0u &&
+			    forward_distance < (std::uint32_t{1} << 31u))
+				sequence_gaps_ += forward_distance;
+			else if (forward_distance != 0u) {
+				/*
+				 * A stale/out-of-order record is invalid, not billions of
+				 * missing records. The half-range comparison keeps normal
+				 * uint32 sequence wraparound valid.
+				 */
+				++invalid_records_;
+				return;
+			}
 		}
 		/* Durability is the publication boundary. A record is never made
 		 * visible to web/CLI/publisher consumers until SQLite has committed
