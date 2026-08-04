@@ -227,6 +227,44 @@ encode_acquisition_response(const AcquisitionResponse &response,
 [[nodiscard]] AcquisitionResponse
 decode_acquisition_response(const mnc::ipc::Frame &frame);
 
+/**
+ * Typed MSAP1 acquisition protocol boundary.
+ *
+ * `mnc::ipc` owns stream framing only. This codec owns product message types,
+ * little-endian payload serialization, validation, and IPC-v14 compatibility.
+ * The free functions above remain as source-compatible implementation hooks.
+ */
+namespace acquisition {
+
+class ProtocolCodec final {
+public:
+	[[nodiscard]] static mnc::ipc::Frame encode_request(
+		const AcquisitionRequest &request)
+	{
+		return encode_acquisition_request(request);
+	}
+
+	[[nodiscard]] static AcquisitionRequest decode_request(
+		const mnc::ipc::Frame &frame)
+	{
+		return decode_acquisition_request(frame);
+	}
+
+	[[nodiscard]] static mnc::ipc::Frame encode_response(
+		const AcquisitionResponse &response, std::uint32_t message_type)
+	{
+		return encode_acquisition_response(response, message_type);
+	}
+
+	[[nodiscard]] static AcquisitionResponse decode_response(
+		const mnc::ipc::Frame &frame)
+	{
+		return decode_acquisition_response(frame);
+	}
+};
+
+} // namespace acquisition
+
 } // namespace msap1
 
 #endif

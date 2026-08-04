@@ -752,7 +752,8 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 				.get();
 		auto frame = boost::asio::co_spawn(
 			impl_->context,
-			impl_->client->request(encode_acquisition_request(request),
+			impl_->client->request(
+				acquisition::ProtocolCodec::encode_request(request),
 				std::chrono::milliseconds(timeout_ms)),
 			boost::asio::use_future)
 			.get();
@@ -760,7 +761,7 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 		    frame.message_type !=
 			    static_cast<std::uint32_t>(request.command))
 			throw std::runtime_error("invalid acquisition response identity");
-		return decode_acquisition_response(frame);
+		return acquisition::ProtocolCodec::decode_response(frame);
 	} catch (const std::exception &error) {
 		throw AcquisitionUnavailable(error.what());
 	}
@@ -773,7 +774,8 @@ void AcquisitionClient::set_event_handler(EventHandler handler)
 		if (!impl->event_handler)
 			return;
 		try {
-			impl->event_handler(decode_acquisition_response(frame));
+			impl->event_handler(
+				acquisition::ProtocolCodec::decode_response(frame));
 		} catch (...) {
 			/* A malformed event closes no request path. Product code can
 			 * detect missed updates by sequence and request a fresh snapshot. */

@@ -1,6 +1,6 @@
 add_executable(msap1-service-manager main.cpp)
 target_link_libraries(msap1-service-manager PRIVATE
-    msap1::apu-core
+    msap1::service-protocol
     mnc::ipc
     mnc::logging
     mnc::service

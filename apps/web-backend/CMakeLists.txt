@@ -1,10 +1,13 @@
 add_executable(msap1-web-backend
     main.cpp
+    acquisition_gateway.cpp
     msap1_auth_provider.cpp
 )
 
 target_link_libraries(msap1-web-backend PRIVATE
-    msap1::apu-core
+    msap1::acquisition
+    msap1::meter
+    msap1::system
     mnc::logging
     mnc::service
     webengine::webengine

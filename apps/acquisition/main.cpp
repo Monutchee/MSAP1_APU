@@ -1,11 +1,12 @@
 #include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition/meter_dma_reader.hpp"
+#include "msap1/acquisition/rpu_controller.hpp"
 #include "msap1/meter_config.hpp"
 #include "msap1/meter_data.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/meter_record.hpp"
 #include "msap1/meter_record_stream.hpp"
 #include "msap1/protocol.hpp"
-#include "msap1/rpmsg_endpoint.hpp"
 #include "msap1/waveform_capture.hpp"
 #include "mnc/logging/logging.hpp"
 #include "mnc/service.hpp"
@@ -34,7 +35,6 @@
 #include <thread>
 #include <utility>
 
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/stat.h>
@@ -104,6 +104,47 @@ std::string health_reason_messages(
 {
 	throw std::runtime_error(operation + ": " + std::strerror(errno));
 }
+
+/** Owns the eventfd used to hand IPC work from Asio to the acquisition loop. */
+class EventSignal final {
+public:
+	EventSignal() = default;
+	~EventSignal()
+	{
+		if (fd_ >= 0)
+			::close(fd_);
+	}
+	EventSignal(const EventSignal &) = delete;
+	EventSignal &operator=(const EventSignal &) = delete;
+
+	void open()
+	{
+		if (fd_ >= 0)
+			return;
+		fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (fd_ < 0)
+			throw_errno("create acquisition IPC eventfd");
+	}
+
+	[[nodiscard]] int native_handle() const noexcept { return fd_; }
+
+	void notify() noexcept
+	{
+		const std::uint64_t value = 1;
+		while (::write(fd_, &value, sizeof(value)) < 0 && errno == EINTR) {
+		}
+	}
+
+	void consume() noexcept
+	{
+		std::uint64_t value = 0;
+		while (::read(fd_, &value, sizeof(value)) < 0 && errno == EINTR) {
+		}
+	}
+
+private:
+	int fd_ = -1;
+};
 
 struct Options {
 	std::string service = "mncos-r5c0-ctrl";
@@ -280,57 +321,21 @@ std::string adc_source_name(std::uint32_t source)
 	throw std::invalid_argument("invalid ADC source");
 }
 
-class MeterDevice {
+class CaptureCoordinator {
 public:
-	explicit MeterDevice(std::string path) : path_(std::move(path)) {}
-	~MeterDevice() { stop(); }
-
-	void start()
-	{
-		if (fd_ >= 0)
-			return;
-		fd_ = ::open(path_.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-		if (fd_ < 0)
-			throw_errno("open " + path_);
-		log_message(dma_log, mnc::logging::Priority::info,
-			"meter DMA device opened: " + path_, "dma_opened",
-			{{"MNC_DEVICE", path_}});
-	}
-
-	void stop() noexcept
-	{
-		if (fd_ >= 0) {
-			::close(fd_);
-			log_message(dma_log, mnc::logging::Priority::info,
-				"meter DMA device closed: " + path_, "dma_closed",
-				{{"MNC_DEVICE", path_}});
-		}
-		fd_ = -1;
-	}
-
-	int fd() const { return fd_; }
-	const std::string &path() const { return path_; }
-
-private:
-	std::string path_;
-	int fd_ = -1;
-};
-
-class AcquisitionDaemon {
-public:
-	explicit AcquisitionDaemon(const Options &options)
+	explicit CaptureCoordinator(const Options &options)
 		: options_(options),
 		  configuration_(load_runtime_configuration(options)),
 		  meter_(options.meter_device),
 		  waveform_(options.waveform_device, options.waveform_directory,
 			    waveform_metadata(configuration_)),
-		  endpoint_(options.service, options.rpmsg_device),
+		  rpu_(options.service, options.rpmsg_device),
 		  record_stream_(options.record_stream)
 	{
 		create_ipc_server();
 	}
 
-	~AcquisitionDaemon()
+	~CaptureCoordinator()
 	{
 		stop();
 		if (ipc_server_)
@@ -338,26 +343,24 @@ public:
 		ipc_context_.stop();
 		if (ipc_thread_.joinable())
 			ipc_thread_.join();
-		if (ipc_event_fd_ >= 0)
-			::close(ipc_event_fd_);
 	}
 
 	void run()
 	{
 		start();
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
-			"meter acquisition started: " + meter_.path() +
+			"meter acquisition started: " + std::string(meter_.name()) +
 				", configuration generation " +
 				std::to_string(configuration_.wire.generation),
 			"service_started",
 			{{"MNC_CONFIGURATION_GENERATION",
 			  std::to_string(configuration_.wire.generation)},
-			 {"MNC_DEVICE", meter_.path()}});
+			 {"MNC_DEVICE", std::string(meter_.name())}});
 		while (!acquisition_stop_requested) {
 			pollfd descriptors[3] = {
-				{meter_.fd(), POLLIN, 0},
+				{meter_.native_handle(), POLLIN, 0},
 				{waveform_.fd(), POLLIN, 0},
-				{ipc_event_fd_, POLLIN, 0},
+				{ipc_event_.native_handle(), POLLIN, 0},
 			};
 			const int result = ::poll(descriptors, 3, 250);
 			if (result < 0) {
@@ -429,9 +432,7 @@ private:
 
 	void create_ipc_server()
 	{
-		ipc_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-		if (ipc_event_fd_ < 0)
-			throw_errno("create acquisition IPC eventfd");
+		ipc_event_.open();
 		ipc_server_ = std::make_unique<mnc::ipc::UnixStreamServer>(
 			ipc_context_.get_executor(), options_.socket_path);
 		ipc_server_->start(
@@ -441,8 +442,7 @@ private:
 					ipc_requests_.push_back(
 						{std::move(connection), std::move(frame)});
 				}
-				const std::uint64_t signal = 1;
-				(void)::write(ipc_event_fd_, &signal, sizeof(signal));
+				ipc_event_.notify();
 			},
 			[](const std::string &message) {
 				log_message(lifecycle_log,
@@ -457,49 +457,12 @@ private:
 				std::size_t payload_size = 0,
 				std::chrono::milliseconds timeout = 1000ms)
 	{
-		const auto sequence = ++rpmsg_sequence_;
-		endpoint_.send(msap1::encode_request(
-			type, sequence, payload, payload_size));
-		const auto deadline = Clock::now() + timeout;
-		while (Clock::now() < deadline) {
-			const auto remaining =
-				std::chrono::duration_cast<std::chrono::milliseconds>(
-					deadline - Clock::now());
-			const auto frame = endpoint_.receive(remaining);
-			if (frame.empty())
-				continue;
-			auto message = msap1::decode_message(frame.data(), frame.size());
-			if (message.header.sequence != sequence)
-				continue;
-			if (message.header.type == MSAP1_RPU_MSG_ERROR ||
-			    message.header.status != MSAP1_RPU_STATUS_OK) {
-				log_message(rpmsg_log,
-					mnc::logging::Priority::error,
-					"RPU rejected request with status " +
-						std::to_string(
-							message.header.status),
-					"request_rejected",
-					{{"MNC_REQUEST_ID",
-					  std::to_string(sequence)},
-					 {"MNC_RPU_STATUS",
-					  std::to_string(
-						  message.header.status)}});
-				throw std::runtime_error(
-					"RPU rejected request (status " +
-					std::to_string(message.header.status) + ")");
-			}
-			return message;
-		}
-		log_message(rpmsg_log, mnc::logging::Priority::error,
-			"timed out waiting for RPU response", "request_timeout",
-			{{"MNC_REQUEST_ID", std::to_string(sequence)}});
-		throw std::runtime_error("timed out waiting for RPU response");
+		return rpu_.transact(type, payload, payload_size, timeout);
 	}
 
 	msap1_adc_health_payload query_rpu_health_raw()
 	{
-		return msap1::decode_adc_health(
-			transact(MSAP1_RPU_MSG_ADC_HEALTH_GET));
+		return rpu_.query_health();
 	}
 
 	void observe_spi_recovery(const msap1_adc_health_payload &health)
@@ -812,6 +775,11 @@ private:
 			 */
 			waveform_.start();
 			meter_.start();
+			log_message(dma_log, mnc::logging::Priority::info,
+				"meter DMA device opened: " +
+					std::string(meter_.name()),
+				"dma_opened",
+				{{"MNC_DEVICE", std::string(meter_.name())}});
 			// PGA and coefficient changes are a coordinated ADC/PL
 			// transaction and may only occur with capture stopped. STOP is
 			// idempotent, so this also recovers cleanly after a daemon crash.
@@ -831,6 +799,11 @@ private:
 					"unexpected RPU capture-start response");
 		} catch (...) {
 			meter_.stop();
+			log_message(dma_log, mnc::logging::Priority::info,
+				"meter DMA device closed: " +
+					std::string(meter_.name()),
+				"dma_closed",
+				{{"MNC_DEVICE", std::string(meter_.name())}});
 			waveform_.stop();
 			throw;
 		}
@@ -860,6 +833,10 @@ private:
 				"capture_stop_failed");
 		}
 		meter_.stop();
+		log_message(dma_log, mnc::logging::Priority::info,
+			"meter DMA device closed: " + std::string(meter_.name()),
+			"dma_closed",
+			{{"MNC_DEVICE", std::string(meter_.name())}});
 		waveform_.stop();
 		running_ = false;
 		health_stabilizing_ = false;
@@ -1094,7 +1071,7 @@ private:
 		response.sequence = 0;
 		response.meter_period_view = msap1::to_ipc_period_view(
 			meter_data_.latest(period), period);
-		auto frame = msap1::encode_acquisition_response(
+		auto frame = msap1::acquisition::ProtocolCodec::encode_response(
 			response,
 			static_cast<std::uint32_t>(
 				msap1::AcquisitionCommand::meter_subscribe));
@@ -1112,33 +1089,29 @@ private:
 
 	void read_meter_records()
 	{
-		std::array<msap1::MeterRecord, 16> records{};
-		const auto size = ::read(meter_.fd(), records.data(), sizeof(records));
-		if (size < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-				return;
+		msap1::acquisition::MeterRecordBatch batch{};
+		try {
+			batch = meter_.read_available();
+		} catch (const std::exception &error) {
 			++dma_read_errors_;
 			log_message(dma_log, mnc::logging::Priority::error,
-				"meter DMA read failed: " +
-					std::string(std::strerror(errno)),
+				"meter DMA read failed: " + std::string(error.what()),
 				"dma_read_failed");
 			return;
 		}
-		if (size == 0)
+		if (batch.bytes == 0)
 			return;
-		dma_bytes_ += static_cast<std::uint64_t>(size);
-		if (size % static_cast<ssize_t>(sizeof(msap1::MeterRecord)) != 0) {
+		dma_bytes_ += batch.bytes;
+		if (batch.partial_record) {
 			++invalid_records_;
 			log_message(dma_log, mnc::logging::Priority::warning,
 				"meter DMA returned a partial record",
 				"dma_partial_record",
-				{{"MNC_DMA_BYTES", std::to_string(size)}});
+				{{"MNC_DMA_BYTES", std::to_string(batch.bytes)}});
 			return;
 		}
-		const auto count = static_cast<std::size_t>(size) /
-			sizeof(msap1::MeterRecord);
-		for (std::size_t index = 0; index < count; ++index)
-			accept_record(records[index]);
+		for (std::size_t index = 0; index < batch.count; ++index)
+			accept_record(batch.records[index]);
 	}
 
 	msap1::AcquisitionResponse make_response(
@@ -1214,10 +1187,7 @@ private:
 
 	void drain_ipc_requests()
 	{
-		std::uint64_t signal = 0;
-		while (::read(ipc_event_fd_, &signal, sizeof(signal)) < 0 &&
-		       errno == EINTR) {
-		}
+		ipc_event_.consume();
 		std::deque<PendingIpcRequest> requests;
 		{
 			std::scoped_lock lock(ipc_mutex_);
@@ -1232,12 +1202,14 @@ private:
 		msap1::AcquisitionRequest request{};
 		request.sequence = pending.frame.correlation_id;
 		try {
-			request = msap1::decode_acquisition_request(pending.frame);
+			request = msap1::acquisition::ProtocolCodec::decode_request(
+				pending.frame);
 		} catch (const std::exception &error) {
 			msap1::AcquisitionResponse response{};
 			response.sequence = pending.frame.correlation_id;
 			response.status = msap1::AcquisitionStatus::bad_request;
-			pending.connection->post_send(msap1::encode_acquisition_response(
+			pending.connection->post_send(
+				msap1::acquisition::ProtocolCodec::encode_response(
 				response, pending.frame.message_type));
 			log_message(lifecycle_log, mnc::logging::Priority::warning,
 				"rejected malformed acquisition IPC request: " +
@@ -1388,15 +1360,16 @@ private:
 		const auto saved_status = response.status;
 		response = current;
 		response.status = saved_status;
-		pending.connection->post_send(msap1::encode_acquisition_response(
+		pending.connection->post_send(
+			msap1::acquisition::ProtocolCodec::encode_response(
 			response, static_cast<std::uint32_t>(request.command)));
 	}
 
 	Options options_;
 	msap1::PreparedMeterConfiguration configuration_;
-	MeterDevice meter_;
+	msap1::acquisition::MeterDmaReader meter_;
 	msap1::WaveformCapture waveform_;
-	msap1::RpmsgEndpoint endpoint_;
+	msap1::acquisition::RpuController rpu_;
 	msap1::MeterRecordStream record_stream_;
 	msap1::MeterDecoderRegistry decoders_ =
 		msap1::MeterDecoderRegistry::with_builtin_decoders();
@@ -1404,11 +1377,10 @@ private:
 	boost::asio::io_context ipc_context_;
 	std::unique_ptr<mnc::ipc::UnixStreamServer> ipc_server_;
 	std::thread ipc_thread_;
-	int ipc_event_fd_ = -1;
+	EventSignal ipc_event_;
 	std::mutex ipc_mutex_;
 	std::deque<PendingIpcRequest> ipc_requests_;
 	std::vector<MeterSubscription> meter_subscriptions_;
-	std::uint32_t rpmsg_sequence_ = 0x90000000u;
 	bool running_ = false;
 	std::uint64_t meter_records_ = 0;
 	std::uint64_t dma_bytes_ = 0;
@@ -1433,7 +1405,7 @@ class AcquisitionService final : public mnc::Service {
 public:
 	explicit AcquisitionService(const Options &options)
 		: Service("MSAP1 FPGA acquisition", "fpga-acquisition"),
-		  daemon_(options)
+		  coordinator_(options)
 	{
 	}
 
@@ -1443,7 +1415,7 @@ protected:
 		acquisition_stop_requested = 0;
 		worker_ = std::thread([this] {
 			try {
-				daemon_.run();
+				coordinator_.run();
 			} catch (...) {
 				failure_ = std::current_exception();
 				failed_ = true;
@@ -1487,7 +1459,7 @@ protected:
 	}
 
 private:
-	AcquisitionDaemon daemon_;
+	CaptureCoordinator coordinator_;
 	std::thread worker_;
 	std::exception_ptr failure_;
 	std::atomic<bool> failed_{false};

@@ -9,7 +9,10 @@ add_library(mnc_cli STATIC
     service_commands.cpp
 )
 target_link_libraries(mnc_cli PUBLIC
-    msap1::apu-core
+    msap1::acquisition
+    msap1::meter
+    msap1::service-protocol
+    msap1::system
     mnc::logging
     glaze::glaze
 )

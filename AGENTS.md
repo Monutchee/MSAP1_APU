@@ -78,6 +78,15 @@
   behavior for product daemons. `msap1-service-manager` orders/adopts the
   acquisition and web systemd units through sd-bus; systemd remains the only
   process supervisor and restart-policy owner.
+- Link new code against the focused `msap1::meter`, `msap1::waveform`,
+  `msap1::acquisition`, `msap1::system`, or `msap1::service-protocol` target.
+  `msap1::apu-core` is a compatibility umbrella, not the default dependency.
+  Maintain the dependency direction from value types to core libraries to
+  adapters to applications. Meter and waveform libraries must not depend on
+  WebEngine, CLI presentation, or product IPC transport.
+- The acquisition process owns device descriptors through RAII adapters.
+  HTTP handlers use `msap1::web::AcquisitionGateway`; they must not construct
+  MNCI frames, correlation IDs, or acquisition payload byte streams directly.
 - The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-3
   profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
   physical current/voltage frontends, the 200 ms RMS window, the selected ADC
