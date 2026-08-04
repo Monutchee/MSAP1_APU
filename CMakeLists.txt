@@ -19,6 +19,7 @@ add_subdirectory(libs/glaze EXCLUDE_FROM_ALL)
 add_subdirectory(lib)
 add_subdirectory(apps/cli)
 add_subdirectory(apps/acquisition)
+add_subdirectory(apps/service-manager)
 
 if(MSAP1_BUILD_WEB_BACKEND)
     set(WEBENGINE_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)

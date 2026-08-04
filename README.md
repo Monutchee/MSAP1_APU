@@ -10,7 +10,8 @@ The runtime data paths are:
 ```text
 AD7771 capture -> PL conversion -> PL RMS + VLA frequency -> AXI DMA
     -> /dev/msap1-meter -> msap1-fpga-acquisition
-    -> CLI and authenticated JSON API
+    -> durable MeterRecordStream -> typed MeterData
+    -> CLI, authenticated JSON API, and future publishers
 
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
     -> /dev/msap1-waveform -> 128 MiB daemon history
@@ -32,7 +33,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The project uses C++23, Glaze 7.9.0, OpenAMP-helper-APU, and WebEngine.
+The project uses C++23, Boost.Asio, Glaze 7.9.0, OpenAMP-helper-APU, and
+WebEngine.
 The reusable `mnc::logging` library writes and reads structured systemd
 journal entries; MSAP1-specific component/event policy remains in this
 repository.
@@ -74,11 +76,26 @@ DMA.
 RMS about the window mean. Set it to `false` for total RMS referenced to zero,
 then restart `msap1-fpga-acquisition` to commit the updated configuration.
 
-Internal readers use the fixed binary `SOCK_SEQPACKET` endpoint:
+Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
 ```text
 /run/monutchee/fpga-acquisition.sock
 ```
+
+The stream uses the version-1 24-byte `MNCI` envelope and explicitly
+little-endian product payloads. Acquisition IPC version 14 replaced the old
+native-structure `SOCK_SEQPACKET` protocol atomically. Every validated PL
+record is committed first to the SQLite WAL stream at:
+
+```text
+/data/mnc/meter/record-stream.sqlite3
+```
+
+The durable stream has ordered cursors and independent consumer
+acknowledgements. `MeterData` separately publishes typed latest values for
+200 ms, 1 s, 3 s, 10 s, 10 min, and 2 h periods; unavailable values are never
+represented as valid zero and values never inherit between periods. See
+[IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 
 The authenticated external API is:
 
@@ -146,6 +163,9 @@ mnc log --json
 mnc system temperature
 mnc machine describe
 mnc --output json meter health
+mnc service list
+mnc service status fpga-acquisition
+mnc service restart web-backend
 ```
 
 `mnc system temperature` discovers the ZynqMP LPD, FPD, and PL sensors from

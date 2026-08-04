@@ -1,12 +1,11 @@
 #include "msap1_auth_provider.hpp"
-#include "systemd_notifier.hpp"
-
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/soc_temperature.hpp"
 #include "msap1/system_identity.hpp"
 #include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"
+#include "mnc/service.hpp"
 
 #include <algorithm>
 #include <array>
@@ -951,9 +950,29 @@ bool wait_for_socket(const std::filesystem::path &path,
 	return false;
 }
 
+msap1::AcquisitionClient &acquisition_client()
+{
+	// One persistent, correlation-aware AF_UNIX stream is shared by every HTTP
+	// worker.  AcquisitionClient serializes complete framed writes and routes
+	// responses by correlation ID, so handlers do not create transient sockets.
+	static msap1::AcquisitionClient client;
+	return client;
+}
+
+std::atomic<webengine::WebEngine *> active_web_engine{nullptr};
+
+class ActiveEngineRegistration {
+public:
+	explicit ActiveEngineRegistration(webengine::WebEngine &engine)
+	{
+		active_web_engine = &engine;
+	}
+	~ActiveEngineRegistration() { active_web_engine = nullptr; }
+};
+
 } // namespace
 
-int main()
+int run_web_backend()
 {
 	try {
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
@@ -973,6 +992,7 @@ int main()
 		webengine::NginxController nginx(std::move(nginx_options));
 
 		webengine::WebEngine engine(auth);
+		ActiveEngineRegistration active_engine(engine);
 		engine.set_socket_path(getenv_or("MSAP1_WEB_SOCKET", web_socket_path))
 			.set_threads(2)
 			.enable_signal_shutdown()
@@ -991,8 +1011,7 @@ int main()
 		engine.add_api(webengine::http::verb::get, "/api/v1/health",
 			[&nginx](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
@@ -1068,8 +1087,7 @@ int main()
 			"/api/v1/meter/health",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
@@ -1086,8 +1104,7 @@ int main()
 			"/api/v1/meter/readings",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::info, 1000);
 					require_acquisition_ok(response);
 					return json_response(webengine::http::status::ok,
@@ -1104,8 +1121,7 @@ int main()
 			"/api/v1/waveforms",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::waveform_status,
 						1000);
 					require_acquisition_ok(response);
@@ -1135,8 +1151,7 @@ int main()
 						return error_response(
 							webengine::http::status::bad_request,
 							"waveform durations must be 0..120000 ms");
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::waveform_trigger,
 						3000, nullptr, 0, 0,
 						trigger.pretrigger_ms,
@@ -1178,8 +1193,7 @@ int main()
 						return error_response(
 							webengine::http::status::bad_request,
 							"waveform session ID is required");
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::waveform_delete,
 						3000, nullptr, 0, 0, 0, 0,
 						msap1::WaveformTriggerSource::manual_web,
@@ -1206,8 +1220,7 @@ int main()
 			"/api/v1/meter/configuration/frequency",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::
 							frequency_configuration_get,
 						1000);
@@ -1247,8 +1260,7 @@ int main()
 							"invalid frequency configuration JSON");
 					}
 					const auto wire = frequency_ipc(configuration);
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::
 							frequency_configuration_set,
 						5000, &wire);
@@ -1302,8 +1314,7 @@ int main()
 			"/api/v1/adc/source",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::adc_source_get,
 						1000);
 					require_acquisition_ok(response);
@@ -1329,8 +1340,7 @@ int main()
 							webengine::http::status::bad_request,
 							"invalid ADC source JSON");
 					const auto source = adc_source_value(configuration.source);
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::adc_source_set,
 						5000, nullptr, 0, 0, 10000, 10000,
 						msap1::WaveformTriggerSource::manual_cli,
@@ -1366,8 +1376,7 @@ int main()
 			"/api/v1/adc/simulator",
 			[](const webengine::RequestContext &) {
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::adc_simulator_get,
 						1000);
 					require_acquisition_ok(response);
@@ -1393,8 +1402,7 @@ int main()
 							webengine::http::status::bad_request,
 							"invalid ADC simulator JSON");
 					const auto wire = adc_simulator_ipc(configuration);
-					msap1::AcquisitionClient client;
-					const auto response = client.request(
+					const auto response = acquisition_client().request(
 						msap1::AcquisitionCommand::adc_simulator_set,
 						5000, nullptr, 0, 0, 10000, 10000,
 						msap1::WaveformTriggerSource::manual_cli,
@@ -1443,8 +1451,7 @@ int main()
 							: "capture_stop_requested",
 						{{"MNC_REQUEST_ID", correlation}});
 				try {
-					msap1::AcquisitionClient client;
-					const auto response = client.request(command, 3000);
+					const auto response = acquisition_client().request(command, 3000);
 					require_acquisition_ok(response);
 					if (!query)
 						log_message(api_log,
@@ -1512,8 +1519,6 @@ int main()
 			"nginx started under web-backend supervision",
 			"nginx_started");
 
-		msap1::web::SystemdNotifier notifier;
-		(void)notifier.ready("MSAP1 web backend and nginx are ready");
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"MSAP1 web backend and nginx are ready", "service_ready");
 		unsigned recovery_failures = 0;
@@ -1544,10 +1549,8 @@ int main()
 					"nginx recovered successfully",
 					"nginx_recovered");
 			}
-			(void)notifier.watchdog("MSAP1 web backend and nginx are healthy");
 		}
 
-		(void)notifier.stopping("MSAP1 web backend is stopping");
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"MSAP1 web backend is stopping", "service_stopping");
 		(void)nginx.off();
@@ -1567,4 +1570,60 @@ int main()
 			"service_failed");
 		return 1;
 	}
+}
+
+namespace {
+
+class WebBackendService final : public mnc::Service {
+public:
+	WebBackendService()
+		: Service("MSAP1 web backend", "web-backend")
+	{
+	}
+
+protected:
+	void on_start() override
+	{
+		worker_ = std::thread([this] {
+			const int result = run_web_backend();
+			failed_ = result != 0;
+			request_stop();
+		});
+	}
+
+	void on_reload() override
+	{
+		/* WebEngine owns nginx configuration. A reload request is handled by
+		 * its normal stop/start lifecycle so no partially updated listener is
+		 * exposed. */
+		(void)logger().write(mnc::logging::Priority::notice,
+			"web backend reload requested", "reload_requested");
+	}
+
+	void on_stop() noexcept override
+	{
+		if (auto *engine = active_web_engine.load())
+			engine->stop();
+		if (worker_.joinable())
+			worker_.join();
+	}
+
+	[[nodiscard]] mnc::ServiceHealth health() const override
+	{
+		return failed_.load()
+			? mnc::ServiceHealth{false, "web backend worker failed"}
+			: mnc::ServiceHealth{true, "web backend running"};
+	}
+
+private:
+	std::thread worker_;
+	std::atomic<bool> failed_{false};
+};
+
+} // namespace
+
+int main()
+{
+	WebBackendService service;
+	return service.execute();
 }

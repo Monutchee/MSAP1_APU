@@ -2,21 +2,26 @@
 #define MSAP1_ACQUISITION_IPC_HPP
 
 #include "msap1/meter_record.hpp"
+#include "msap1/meter_data.hpp"
 #include "msap1/rpu_control_protocol.h"
 #include "msap1/waveform_capture.hpp"
+#include "mnc/ipc/ipc.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 13;
+inline constexpr std::uint16_t acquisition_ipc_version = 14;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 
 enum class AcquisitionCommand : std::uint16_t {
@@ -37,6 +42,45 @@ enum class AcquisitionCommand : std::uint16_t {
 	adc_source_set = 15,
 	adc_simulator_get = 16,
 	adc_simulator_set = 17,
+	meter_latest = 18,
+	meter_stream_read = 19,
+	meter_stream_register = 20,
+	meter_stream_acknowledge = 21,
+	meter_subscribe = 22,
+	meter_unsubscribe = 23,
+};
+
+inline constexpr std::size_t acquisition_consumer_name_max = 64;
+inline constexpr std::size_t acquisition_stream_read_max = 64;
+
+struct MeterReadingIpc {
+	std::int64_t value = 0;
+	MeasurementQuality quality = MeasurementQuality::unavailable;
+	std::uint64_t source_sequence = 0;
+	std::int64_t measured_at_nanoseconds = 0;
+	std::uint32_t window_sample_count = 0;
+	std::uint64_t window_nanoseconds = 0;
+};
+
+struct FundamentalValuesIpc {
+	MeterReadingIpc frequency{};
+	std::array<MeterReadingIpc, 3> voltage_ln{};
+	std::array<MeterReadingIpc, 4> current{};
+};
+
+struct MeterPeriodViewIpc {
+	std::uint32_t available = 0;
+	UpdatePeriod period = UpdatePeriod::ms200;
+	std::uint64_t latest_sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::int64_t updated_at_nanoseconds = 0;
+	FundamentalValuesIpc fundamental{};
+};
+
+struct MeterStreamRecordIpc {
+	std::uint64_t cursor = 0;
+	std::int64_t received_at_nanoseconds = 0;
+	MeterRecord record{};
 };
 
 struct FrequencyIpcConfiguration {
@@ -87,6 +131,10 @@ struct AcquisitionRequest {
 	std::uint32_t adc_source_reserved = 0;
 	FrequencyIpcConfiguration frequency{};
 	SimulatorIpcConfiguration simulator{};
+	UpdatePeriod meter_period = UpdatePeriod::ms200;
+	std::uint64_t meter_cursor = 0;
+	std::uint32_t meter_limit = 32;
+	std::string meter_consumer;
 };
 
 struct AcquisitionResponse {
@@ -121,7 +169,14 @@ struct AcquisitionResponse {
 	std::uint32_t waveform_reserved = 0;
 	std::array<WaveformSessionSummary, waveform_max_ipc_sessions>
 		waveform_sessions{};
+	MeterPeriodViewIpc meter_period_view{};
+	std::uint64_t meter_next_cursor = 0;
+	std::vector<MeterStreamRecordIpc> meter_stream_records;
 };
+
+[[nodiscard]] MeterPeriodViewIpc
+to_ipc_period_view(const std::optional<MeterPeriodView> &view,
+		   UpdatePeriod requested_period);
 
 class AcquisitionUnavailable : public std::runtime_error {
 public:
@@ -130,8 +185,14 @@ public:
 
 class AcquisitionClient {
 public:
+	using EventHandler = std::function<void(const AcquisitionResponse &)>;
 	explicit AcquisitionClient(
 		std::string socket_path = acquisition_socket_path);
+	~AcquisitionClient();
+	AcquisitionClient(const AcquisitionClient &) = delete;
+	AcquisitionClient &operator=(const AcquisitionClient &) = delete;
+	AcquisitionClient(AcquisitionClient &&) noexcept;
+	AcquisitionClient &operator=(AcquisitionClient &&) noexcept;
 	AcquisitionResponse request(AcquisitionCommand command,
 				    int timeout_ms = 3000,
 				    const FrequencyIpcConfiguration *frequency =
@@ -146,11 +207,25 @@ public:
 				    std::uint32_t adc_source =
 					    MSAP1_ADC_SOURCE_PHYSICAL,
 				    const SimulatorIpcConfiguration *simulator =
-					    nullptr) const;
+					    nullptr);
+	AcquisitionResponse request(AcquisitionRequest request,
+				    int timeout_ms = 3000);
+	void set_event_handler(EventHandler handler);
 
 private:
-	std::string socket_path_;
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
 };
+
+[[nodiscard]] mnc::ipc::Frame
+encode_acquisition_request(const AcquisitionRequest &request);
+[[nodiscard]] AcquisitionRequest
+decode_acquisition_request(const mnc::ipc::Frame &frame);
+[[nodiscard]] mnc::ipc::Frame
+encode_acquisition_response(const AcquisitionResponse &response,
+			    std::uint32_t message_type);
+[[nodiscard]] AcquisitionResponse
+decode_acquisition_response(const mnc::ipc::Frame &frame);
 
 } // namespace msap1
 

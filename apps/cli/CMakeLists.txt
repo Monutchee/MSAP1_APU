@@ -6,6 +6,7 @@ add_library(mnc_cli STATIC
     log_commands.cpp
     machine_commands.cpp
     system_commands.cpp
+    service_commands.cpp
 )
 target_link_libraries(mnc_cli PUBLIC
     msap1::apu-core
