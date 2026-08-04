@@ -338,6 +338,13 @@ void WaveformCapture::start()
 {
 	if (fd_ >= 0)
 		return;
+	/*
+	 * Closing and reopening the DMA device is an explicit continuity
+	 * boundary. The PL sequence may legitimately restart or advance while
+	 * Linux is rearming the channel, so old history must not establish the
+	 * expected sequence for the new acquisition epoch.
+	 */
+	begin_stream_epoch();
 	fd_ = ::open(device_path_.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (fd_ < 0)
 		throw_errno("open " + device_path_);
@@ -364,6 +371,23 @@ void WaveformCapture::stop() noexcept
 		    !session.materialization_queued)
 			session.summary.state = WaveformSessionState::incomplete;
 	}
+}
+
+void WaveformCapture::begin_stream_epoch() noexcept
+{
+	for (auto &session : sessions_) {
+		if (session.summary.state == WaveformSessionState::capturing &&
+		    !session.materialization_queued)
+			session.summary.state = WaveformSessionState::incomplete;
+	}
+	have_history_ = false;
+	oldest_sequence_ = 0;
+	latest_sequence_ = 0;
+	sequence_gaps_ = 0;
+	sample_rate_hz_ = 0;
+	gaps_.clear();
+	configuration_generation_.reset();
+	correlation_ = {};
 }
 
 void WaveformCapture::discover_persisted_sessions()
@@ -558,6 +582,20 @@ void WaveformCapture::accept_block(const WaveformBlock &block)
 		++invalid_blocks_;
 		return;
 	}
+
+	/*
+	 * A generation change is a second defensive epoch boundary. Normal
+	 * source/configuration transactions close and reopen the DMA device, but
+	 * this also prevents an unexpected in-place generation change from being
+	 * reported as lost waveform frames or joining two sources in one history.
+	 */
+	if (configuration_generation_ &&
+	    *configuration_generation_ != header.configuration_generation) {
+		begin_stream_epoch();
+		if (const auto current = correlate())
+			correlation_ = *current;
+	}
+	configuration_generation_ = header.configuration_generation;
 
 	const auto first = header.first_sequence();
 	if (have_history_) {

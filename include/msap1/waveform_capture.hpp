@@ -197,6 +197,7 @@ private:
 	};
 
 	void accept_block(const WaveformBlock &block);
+	void begin_stream_epoch() noexcept;
 	void finish_sessions();
 	void enqueue_materialization(Session &session);
 	void collect_materialization_results();
@@ -225,6 +226,7 @@ private:
 	std::uint64_t materialization_failures_ = 0;
 	std::uint32_t transport_ring_blocks_ = 0;
 	std::uint32_t sample_rate_hz_ = 0;
+	std::optional<std::uint32_t> configuration_generation_;
 	std::uint64_t next_session_id_ = 1;
 	std::vector<Session> sessions_;
 	std::vector<GapRange> gaps_;

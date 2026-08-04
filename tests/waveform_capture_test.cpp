@@ -30,7 +30,8 @@ std::filesystem::path unique_path(const std::string &suffix)
 
 void write_test_block(const std::filesystem::path &path,
 		      std::uint64_t first_sequence = 1,
-		      bool append = false)
+		      bool append = false,
+		      std::uint32_t configuration_generation = 0x12345678u)
 {
 	msap1::WaveformBlock block{};
 	block.header.magic = msap1::waveform_block_magic;
@@ -44,7 +45,7 @@ void write_test_block(const std::filesystem::path &path,
 		static_cast<std::uint32_t>(first_sequence >> 32u);
 	block.header.first_tick_low = 100;
 	block.header.measured_sample_rate_hz = 32000;
-	block.header.configuration_generation = 0x12345678u;
+	block.header.configuration_generation = configuration_generation;
 	block.header.block_sequence = static_cast<std::uint32_t>(
 		(first_sequence - 1u) / msap1::waveform_frames_per_block + 1u);
 	for (std::size_t frame = 0; frame < block.frames.size(); ++frame) {
@@ -198,11 +199,27 @@ int main()
 			"human-readable capture filename mismatch");
 
 		/*
+		 * A coordinated source change closes and reopens waveform DMA. The
+		 * next source is a new continuity epoch even if its first sequence is
+		 * unrelated to the previous source.
+		 */
+		capture.stop();
+		write_test_block(device, 70000, false);
+		capture.start();
+		capture.read_available();
+		const auto restarted_status = capture.status();
+		require(restarted_status.sequence_gaps == 0,
+			"source restart was reported as a sequence gap");
+		require(restarted_status.history_oldest_sequence == 70000 &&
+				restarted_status.history_latest_sequence == 71023,
+			"source restart did not establish a fresh history epoch");
+
+		/*
 		 * A forward DMA discontinuity must be retained as a gap and must
 		 * make any session spanning it incomplete rather than producing a
 		 * corrupt file.
 		 */
-		write_test_block(device, 2049, true);
+		write_test_block(device, 72048, true);
 		capture.read_available();
 		const auto gap_status = capture.status();
 		require(gap_status.sequence_gaps == 1024,
