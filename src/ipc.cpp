@@ -368,6 +368,15 @@ UnixStreamServer::connection_loop(Connection connection)
 			if (handler_)
 				handler_(connection, std::move(frame));
 		}
+	} catch (const boost::system::system_error &error) {
+		/* A framed stream is normally closed by the client after its final
+		 * response.  Boost reports that orderly shutdown as EOF; it is a
+		 * connection lifecycle event, not a service fault.  Cancellation is
+		 * likewise expected while the server is stopping. */
+		if (error.code() != boost::asio::error::eof &&
+		    error.code() != boost::asio::error::operation_aborted &&
+		    error_handler_)
+			error_handler_(error.what());
 	} catch (const std::exception &error) {
 		if (error_handler_)
 			error_handler_(error.what());
@@ -415,9 +424,11 @@ boost::asio::awaitable<void> RequestClient::connect()
 	if (connection_ && connection_->is_open())
 		co_return;
 	UnixStreamClient client(strand_, path_, limits_);
-	connection_ = co_await client.connect();
+	auto connection = co_await client.connect();
+	connection_ = connection;
 	open_ = true;
-	boost::asio::co_spawn(strand_, read_loop(), boost::asio::detached);
+	boost::asio::co_spawn(strand_, read_loop(std::move(connection)),
+		boost::asio::detached);
 }
 
 boost::asio::awaitable<Frame>
@@ -477,10 +488,13 @@ void RequestClient::set_event_handler(EventHandler handler)
 
 void RequestClient::close() noexcept
 {
+	/* Invalidate the public state immediately.  The actual socket close is
+	 * serialized on the strand, but a caller that catches an IPC failure must
+	 * never start another request on the stale connection in the meantime. */
+	open_ = false;
 	boost::asio::post(strand_, [self = shared_from_this()] {
 		if (self->connection_)
 			self->connection_->close();
-		self->open_ = false;
 		self->fail_pending(std::make_exception_ptr(
 			std::runtime_error("IPC connection closed")));
 	});
@@ -491,11 +505,12 @@ bool RequestClient::is_open() const noexcept
 	return open_.load();
 }
 
-boost::asio::awaitable<void> RequestClient::read_loop()
+boost::asio::awaitable<void> RequestClient::read_loop(
+	std::shared_ptr<FramedConnection> connection)
 {
 	try {
-		while (connection_ && connection_->is_open()) {
-			auto frame = co_await connection_->receive();
+		while (connection->is_open()) {
+			auto frame = co_await connection->receive();
 			if (frame.kind == FrameKind::event) {
 				if (event_handler_)
 					event_handler_(std::move(frame));
@@ -512,11 +527,16 @@ boost::asio::awaitable<void> RequestClient::read_loop()
 			found->second->wakeup.cancel(ignored);
 		}
 	} catch (...) {
-		fail_pending(std::current_exception());
+		/* A superseded read loop belongs to its captured connection and must
+		 * not fail requests issued on a newer connection. */
+		if (connection_ == connection)
+			fail_pending(std::current_exception());
 	}
-	if (connection_)
-		connection_->close();
-	open_ = false;
+	connection->close();
+	if (connection_ == connection) {
+		connection_.reset();
+		open_ = false;
+	}
 }
 
 void RequestClient::fail_pending(std::exception_ptr failure)

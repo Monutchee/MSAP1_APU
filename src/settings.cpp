@@ -379,7 +379,26 @@ void SettingsHandler::initialize()
 				const auto canonical = SettingsCodec::encode(active_.settings);
 				active_.content_hash = SettingsCodec::hash(canonical);
 				const auto history = revisions_.list();
-				active_.revision = history.empty() ? 0u : history.back().revision;
+				active_.revision = 0u;
+				/* A revision filename is not sufficient evidence that it is the
+				 * active snapshot. Match the canonical content, newest first, so an
+				 * orphan/corrupt file cannot silently move the revision number. */
+				for (auto entry = history.rbegin(); entry != history.rend(); ++entry) {
+					try {
+						auto snapshot = SettingsCodec::decode(
+							revisions_.read(entry->revision));
+						const auto snapshot_json = SettingsCodec::encode(snapshot);
+						if (SettingsCodec::hash(snapshot_json) ==
+						    active_.content_hash) {
+							active_.revision = entry->revision;
+							break;
+						}
+					} catch (...) {
+					}
+				}
+				if (active_.revision == 0u)
+					throw std::runtime_error(
+						"active settings do not match a valid revision");
 			} catch (const std::exception &error) {
 				/* Never overwrite a corrupt initialized configuration.  Keep the
 				 * best known snapshot in memory only so diagnostics and an explicit
@@ -422,6 +441,22 @@ void SettingsHandler::initialize()
 		try {
 			draft_ = decode_document<DraftSnapshot>(*persisted, "settings draft");
 			SettingsValidator::validate(draft_->settings);
+			const auto active_json = SettingsCodec::encode(active_.settings);
+			const auto draft_json = SettingsCodec::encode(draft_->settings);
+			if (!recovery_mode_ && active_json == draft_json) {
+				/* A crash after commit publication but before draft cleanup must
+				 * not resurrect a false unsaved change. */
+				draft_.reset();
+				repository_.remove_draft();
+			} else if (!recovery_mode_ &&
+				   draft_->base_revision != active_.revision) {
+				/* The settings service is the sole writer, so a base mismatch on
+				 * startup can only be interrupted transaction bookkeeping. Preserve
+				 * the user's candidate and rebase it onto the verified active state. */
+				draft_->base_revision = active_.revision;
+				++draft_->generation;
+				repository_.write_draft(encode_document(*draft_));
+			}
 		} catch (...) {
 			/* Preserve the bad file for diagnosis.  It is not authoritative and
 			 * therefore must not prevent reads of a valid active snapshot. */
@@ -559,24 +594,43 @@ CommitTransaction SettingsHandler::commit_locked(
 	const PendingDocument pending{active_.revision, draft_->generation, id,
 		std::string(message), active_.settings, draft_->settings};
 	repository_.write_pending(encode_document(pending));
+	const auto previous = active_;
+	std::optional<mnc::settings::RevisionFile> created_revision;
+	bool commit_marker_cleared = false;
 
 	try {
 		coordinator_.apply(draft_->settings, active_.settings);
-		repository_.write_active(candidate_json);
 		if (reset_history)
 			revisions_.reset(digest, candidate_json);
 		else
-			revisions_.create(next_revision, digest, candidate_json);
-		active_ = {next_revision, digest, draft_->settings};
-		revisions_.prune(active_.settings.system.retained_revisions);
-		draft_.reset();
-		repository_.remove_draft();
+			created_revision = revisions_.create(
+				next_revision, digest, candidate_json);
+		repository_.write_active(candidate_json);
+		/* Removing pending.json is the durable commit marker. Before this
+		 * point every failure rolls disk and hardware back to previous. */
 		repository_.remove_pending();
+		commit_marker_cleared = true;
+		active_ = {next_revision, digest, draft_->settings};
+		draft_.reset();
+		/* Housekeeping must not turn an already durable commit into a reported
+		 * failure. Startup reconciliation removes a stale identical draft. */
+		try { repository_.remove_draft(); } catch (...) {}
+		try {
+			revisions_.prune(active_.settings.system.retained_revisions);
+		} catch (...) {}
 		return {id, true, next_revision, std::string(message)};
 	} catch (...) {
-		coordinator_.rollback(active_.settings);
-		repository_.write_active(SettingsCodec::encode(active_.settings));
-		repository_.remove_pending();
+		if (!commit_marker_cleared) {
+			coordinator_.rollback(previous.settings);
+			try {
+				repository_.write_active(
+					SettingsCodec::encode(previous.settings));
+			} catch (...) {}
+			if (created_revision) {
+				try { revisions_.erase(*created_revision); } catch (...) {}
+			}
+			try { repository_.remove_pending(); } catch (...) {}
+		}
 		throw;
 	}
 }

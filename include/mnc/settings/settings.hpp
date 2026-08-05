@@ -66,6 +66,7 @@ public:
 			   std::string_view canonical_json) const;
 	[[nodiscard]] std::vector<RevisionFile> list() const;
 	[[nodiscard]] std::string read(std::uint64_t revision) const;
+	void erase(const RevisionFile &revision) const;
 	void prune(std::size_t retain) const;
 	void clear() const;
 

@@ -1,6 +1,8 @@
 #include "mnc/ipc/ipc.hpp"
 
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <array>
 #include <atomic>
@@ -155,6 +157,7 @@ void fragmented_and_coalesced_streams()
 		("mnc-ipc-test-" + std::to_string(::getpid()) + ".sock");
 	boost::asio::io_context context;
 	std::atomic<std::uint32_t> requests{0};
+	std::atomic<std::uint32_t> connection_errors{0};
 	std::atomic<bool> peer_valid{false};
 	mnc::ipc::UnixStreamServer server(context.get_executor(), path.string());
 	server.start([&](auto connection, auto frame) {
@@ -163,7 +166,7 @@ void fragmented_and_coalesced_streams()
 		++requests;
 		frame.kind = mnc::ipc::FrameKind::response;
 		connection->post_send(std::move(frame));
-	});
+	}, [&](const std::string &) { ++connection_errors; });
 	std::thread worker([&] { context.run(); });
 
 	try {
@@ -200,11 +203,39 @@ void fragmented_and_coalesced_streams()
 			"coalesced IPC frames were not separated");
 		::close(joined_socket);
 
-		for (int attempt = 0; attempt != 100 && requests.load() != 4;
+		/* Product requests pass correlation zero and let the persistent
+		 * transport allocate unique identifiers, including when independent
+		 * HTTP-style callers submit requests concurrently. */
+		auto persistent = std::make_shared<mnc::ipc::RequestClient>(
+			context.get_executor(), path.string());
+		boost::asio::co_spawn(context, persistent->connect(),
+			boost::asio::use_future).get();
+		auto first = boost::asio::co_spawn(context,
+			persistent->request(
+				{mnc::ipc::FrameKind::request, 11, 0, {std::byte{7}}},
+				1000ms),
+			boost::asio::use_future);
+		auto second_request = boost::asio::co_spawn(context,
+			persistent->request(
+				{mnc::ipc::FrameKind::request, 12, 0, {std::byte{8}}},
+				1000ms),
+			boost::asio::use_future);
+		const auto first_persistent = first.get();
+		const auto second_persistent = second_request.get();
+		require(first_persistent.correlation_id != 0 &&
+			second_persistent.correlation_id != 0 &&
+			first_persistent.correlation_id !=
+				second_persistent.correlation_id,
+			"persistent IPC client reused a correlation ID");
+		persistent->close();
+
+		for (int attempt = 0; attempt != 100 && requests.load() != 6;
 		     ++attempt)
 			std::this_thread::sleep_for(2ms);
-		require(requests == 4 && peer_valid,
+		require(requests == 6 && peer_valid,
 			"server did not process all frames or expose SO_PEERCRED");
+		require(connection_errors == 0,
+			"orderly client disconnect was reported as a server error");
 	} catch (...) {
 		server.stop();
 		context.stop();

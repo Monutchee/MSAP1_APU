@@ -10,6 +10,7 @@
 #include <limits>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <span>
 
@@ -714,6 +715,7 @@ struct AcquisitionClient::Impl {
 	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work;
 	std::shared_ptr<mnc::ipc::RequestClient> client;
 	AcquisitionClient::EventHandler event_handler;
+	std::mutex connect_mutex;
 	std::thread thread;
 };
 
@@ -755,13 +757,21 @@ AcquisitionResponse AcquisitionClient::request(
 AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 						 int timeout_ms)
 {
-	request.sequence = static_cast<std::uint64_t>(
-		std::chrono::steady_clock::now().time_since_epoch().count());
+	/* Correlation IDs belong to the transport.  A timestamp generated here can
+	 * collide when parallel HTTP handlers submit requests in the same clock
+	 * tick, which previously surfaced as "duplicate IPC correlation ID". */
+	request.sequence = 0;
 	try {
-		if (!impl_->client->is_open())
-			boost::asio::co_spawn(impl_->context, impl_->client->connect(),
-					      boost::asio::use_future)
-				.get();
+		if (!impl_->client->is_open()) {
+			/* Only one caller establishes the persistent stream. Requests remain
+			 * concurrent after connection because RequestClient serializes its
+			 * own frame queue and correlation map on an Asio strand. */
+			std::scoped_lock connect_lock(impl_->connect_mutex);
+			if (!impl_->client->is_open())
+				boost::asio::co_spawn(impl_->context,
+					impl_->client->connect(), boost::asio::use_future)
+					.get();
+		}
 		auto frame = boost::asio::co_spawn(
 			impl_->context,
 			impl_->client->request(
@@ -769,12 +779,17 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 				std::chrono::milliseconds(timeout_ms)),
 			boost::asio::use_future)
 			.get();
-		if (frame.correlation_id != request.sequence ||
-		    frame.message_type !=
+		if (frame.message_type !=
 			    static_cast<std::uint32_t>(request.command))
 			throw std::runtime_error("invalid acquisition response identity");
 		return acquisition::ProtocolCodec::decode_response(frame);
 	} catch (const std::exception &error) {
+		/* An EOF or reset can leave the native socket looking open until the
+		 * reader coroutine observes it. Explicit invalidation makes the next
+		 * product request establish a fresh stream. Side-effecting requests are
+		 * not retried here because the lost response may follow a successful
+		 * operation on the server. */
+		impl_->client->close();
 		throw AcquisitionUnavailable(error.what());
 	}
 }

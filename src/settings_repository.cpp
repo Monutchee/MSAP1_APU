@@ -248,6 +248,15 @@ RevisionFile RevisionStore::create(std::uint64_t revision, std::string_view hash
 	const auto path = directory_ /
 		(std::string(number) + "-" + std::string(hash.substr(0, 12)) + ".json");
 	AtomicFileWriter::write(path, canonical_json, 0440);
+	/* Do not publish a revision merely because rename(2) succeeded. Persistent
+	 * media faults have previously left a zero-length snapshot whose filename
+	 * looked valid and incorrectly advanced the active revision after reboot. */
+	if (read_file(path) != canonical_json) {
+		std::error_code ignored;
+		std::filesystem::remove(path, ignored);
+		throw std::runtime_error("settings revision readback mismatch: " +
+			path.string());
+	}
 	return {revision, std::string(hash), path};
 }
 
@@ -294,6 +303,10 @@ std::vector<RevisionFile> RevisionStore::list() const
 	for (const auto &entry : std::filesystem::directory_iterator(directory_)) {
 		if (!entry.is_regular_file())
 			continue;
+		std::error_code size_error;
+		const auto size = entry.file_size(size_error);
+		if (size_error || size == 0u)
+			continue;
 		std::smatch match;
 		const auto name = entry.path().filename().string();
 		if (!std::regex_match(name, match, pattern))
@@ -311,6 +324,12 @@ std::string RevisionStore::read(std::uint64_t revision) const
 		if (entry.revision == revision)
 			return read_file(entry.path);
 	throw std::out_of_range("settings revision does not exist");
+}
+
+void RevisionStore::erase(const RevisionFile &revision) const
+{
+	remove_if_present(revision.path);
+	sync_directory(directory_);
 }
 
 void RevisionStore::prune(std::size_t retain) const

@@ -229,6 +229,52 @@ void test_empty_active_reloads_factory_defaults()
 	assert(recovered.history().size() == 1u);
 }
 
+void test_zero_length_revision_does_not_advance_active_or_lose_draft()
+{
+	TestTree tree("empty-revision");
+	{
+		SettingsHandler handler(tree.data, tree.factory);
+		handler.initialize();
+		auto candidate = handler.draft();
+		candidate.settings.metering.frequency.maximum_hz = 80.0;
+		const auto patched = handler.patch(
+			{candidate.settings}, candidate.generation).draft;
+		assert(patched.base_revision == 1u);
+	}
+
+	/* Reproduce the target state: active.json still contains revision 1,
+	 * draft.json names interrupted revision 2 as its base, and the only
+	 * apparent revision-2 snapshot is an empty file. */
+	auto draft_json = [&] {
+		std::ifstream input(tree.data / "draft.json");
+		return std::string(std::istreambuf_iterator<char>(input), {});
+	}();
+	msap1::settings::DraftSnapshot interrupted;
+	const auto read_error = glz::read_json(interrupted, draft_json);
+	assert(!read_error);
+	interrupted.base_revision = 2u;
+	const auto encoded = glz::write<glz::opts{.prettify = true}>(interrupted);
+	assert(encoded);
+	{
+		std::ofstream output(tree.data / "draft.json", std::ios::trunc);
+		output << *encoded << '\n';
+	}
+	{
+		std::ofstream empty(tree.data / "revisions" /
+			"0000000000000002-0123456789ab.json", std::ios::trunc);
+	}
+
+	SettingsHandler recovered(tree.data, tree.factory);
+	recovered.initialize();
+	assert(!recovered.recovery_mode());
+	assert(recovered.active().revision == 1u);
+	assert(recovered.history().size() == 1u);
+	const auto draft = recovered.draft();
+	assert(draft.base_revision == 1u);
+	assert(draft.generation == 2u);
+	assert(draft.settings.metering.frequency.maximum_hz == 80.0);
+}
+
 void test_factory_document_is_required_and_valid()
 {
 	{
@@ -361,6 +407,7 @@ int main()
 	test_secrets_and_factory_reset();
 	test_corrupt_active_enters_recovery();
 	test_empty_active_reloads_factory_defaults();
+	test_zero_length_revision_does_not_advance_active_or_lose_draft();
 	test_factory_document_is_required_and_valid();
 	test_pending_transaction_restores_active_and_preserves_candidate();
 	test_settings_ipc_round_trip();
