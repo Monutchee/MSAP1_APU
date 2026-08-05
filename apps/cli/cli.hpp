@@ -1,5 +1,7 @@
 #pragma once
 
+#include "msap1/acquisition_ipc.hpp"
+
 #include <cstdint>
 #include <array>
 #include <functional>
@@ -37,8 +39,8 @@ struct Options {
 	std::optional<double> simulator_frequency_hz;
 	std::array<std::optional<double>, 7> simulator_rms{};
 	std::array<std::optional<double>, 7> simulator_phase_degrees{};
-	std::uint32_t waveform_pretrigger_ms = 10000;
-	std::uint32_t waveform_posttrigger_ms = 10000;
+	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
+	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
 	std::optional<std::string> log_component;
 	std::optional<std::string> log_module;
 	std::optional<std::string> log_priority;
@@ -48,6 +50,11 @@ struct Options {
 	bool log_json = false;
 	bool health_refresh = false;
 	bool health_full = false;
+	bool settings_draft = false;
+	bool settings_confirm = false;
+	std::optional<std::uint64_t> settings_revision;
+	std::optional<std::string> settings_message;
+	std::optional<std::string> settings_transaction;
 	bool socket_overridden = false;
 	bool timeout_overridden = false;
 	int timeout_ms = 3000;
@@ -170,6 +177,7 @@ void register_log_command(Application &application);
 void register_system_commands(Application &application);
 void register_machine_commands(Application &application);
 void register_service_commands(Application &application);
+void register_settings_commands(Application &application);
 void request_stop() noexcept;
 bool stop_was_requested() noexcept;
 

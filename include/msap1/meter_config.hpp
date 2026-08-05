@@ -10,9 +10,6 @@
 
 namespace msap1 {
 
-inline constexpr const char *default_meter_config_path =
-	"/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json";
-
 struct VoltageChannelConfig {
 	std::uint32_t channel = 0;
 	std::string name;
@@ -91,10 +88,14 @@ struct PreparedMeterConfiguration {
 
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
 PreparedMeterConfiguration load_meter_configuration(
-	const std::filesystem::path &path = default_meter_config_path,
+	const std::filesystem::path &path,
 	std::uint32_t sample_rate_hz = 32000);
 PreparedMeterConfiguration prepare_meter_configuration(
 	MeterConversionFile source, std::uint32_t sample_rate_hz = 32000);
+[[nodiscard]] MeterConversionFile decode_meter_configuration(
+	std::string_view json);
+[[nodiscard]] std::string encode_meter_configuration(
+	const MeterConversionFile &configuration, bool pretty = false);
 void save_meter_configuration(const MeterConversionFile &configuration,
 			      const std::filesystem::path &path);
 

@@ -75,8 +75,8 @@
   store or is published to lossy consumers. A storage failure is critical and
   must stop acquisition instead of silently losing accepted records.
 - `mnc::Service` provides lifecycle, readiness, watchdog, reload, and shutdown
-  behavior for product daemons. `msap1-service-manager` orders/adopts the
-  acquisition and web systemd units through sd-bus; systemd remains the only
+  behavior for product daemons. `msap1-service-manager` orders/adopts settings,
+  acquisition, and web systemd units through sd-bus; systemd remains the only
   process supervisor and restart-policy owner.
 - Link new code against the focused `msap1::meter`, `msap1::waveform`,
   `msap1::acquisition`, `msap1::system`, or `msap1::service-protocol` target.
@@ -87,14 +87,19 @@
 - The acquisition process owns device descriptors through RAII adapters.
   HTTP handlers use `msap1::web::AcquisitionGateway`; they must not construct
   MNCI frames, correlation IDs, or acquisition payload byte streams directly.
-- The ADC capture rate defaults to 32,000 frames/s. Complete schema-version-3
-  profiles under `/etc/monutchee/msap1/default/adc_config/` define the ADC PGA,
-  physical current/voltage frontends, the 200 ms RMS window, the selected ADC
-  source, and raw-simulator amplitudes/phases. The packaged runtime default is
-  `msap1-sensor-board-5a.json`. Schema-v2 profiles remain readable as physical
-  source with conservative simulator defaults. Profiles also define CH6/VLA
-  zero-crossing frequency measurement; a valid Web-generated complete profile
-  is persisted as `/etc/monutchee/msap1/adc_config/active.json`.
+- `msap1-settings` is the sole persistent settings authority. The canonical
+  factory document is `config/settings/factory-defaults.json`; Yocto installs
+  that exact file under `/usr/share/monutchee/msap1/settings/`, while active,
+  draft, pending, revision, and secret state belongs under
+  `/data/mnc/settings/`. Acquisition, CLI, and Web code must use the typed
+  settings IPC API rather than reading or writing product configuration files.
+  Do not reintroduce legacy `/etc` ADC profiles or duplicate factory values in
+  packaging recipes.
+- The ADC capture rate defaults to 32,000 frames/s. Persistent changes to the
+  ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
+  waveform defaults must be committed through the settings authority and
+  hot-applied by acquisition. `mnc adc rate --sps` remains an explicitly
+  temporary diagnostic override.
 - Source and simulator changes must use the daemon's coordinated stop,
   configure, readback, rollback, DMA re-arm, and restart transaction. Convert
   engineering RMS settings to signed-24-bit peak counts before crossing RPMsg;

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "system": {
+    "retained_revisions": 20
+  },
+  "metering": {
+    "sample_rate_hz": 32000,
+    "rms": {
+      "window_ms": 200,
+      "remove_dc": true
+    },
+    "frequency": {
+      "enabled": true,
+      "reference_channel": 6,
+      "mode": "rolling_cycles",
+      "averaging_cycles": 10,
+      "averaging_window_ms": 1000,
+      "minimum_hz": 40.0,
+      "maximum_hz": 70.0,
+      "hysteresis_volts": 1.0
+    },
+    "conversion": {
+      "profile_id": "msap1-sensor-board-5a",
+      "adc_reference_volts": 1.0,
+      "current_channels": [
+        {"channel": 0, "name": "ILA", "enabled": true, "adc_pga_gain": 2, "sensor_model": "internal_ct", "primary_rated_amps": 5.0, "secondary_rated_amps": 0.0025, "burden_ohms": 95.0, "rated_output_millivolts": 0.0, "frontend_gain": 1.0},
+        {"channel": 1, "name": "ILB", "enabled": true, "adc_pga_gain": 2, "sensor_model": "internal_ct", "primary_rated_amps": 5.0, "secondary_rated_amps": 0.0025, "burden_ohms": 95.0, "rated_output_millivolts": 0.0, "frontend_gain": 1.0},
+        {"channel": 2, "name": "ILC", "enabled": true, "adc_pga_gain": 2, "sensor_model": "internal_ct", "primary_rated_amps": 5.0, "secondary_rated_amps": 0.0025, "burden_ohms": 95.0, "rated_output_millivolts": 0.0, "frontend_gain": 1.0},
+        {"channel": 3, "name": "ILN", "enabled": true, "adc_pga_gain": 2, "sensor_model": "internal_ct", "primary_rated_amps": 5.0, "secondary_rated_amps": 0.0025, "burden_ohms": 95.0, "rated_output_millivolts": 0.0, "frontend_gain": 1.0}
+      ],
+      "voltage_channels": [
+        {"channel": 4, "name": "VLC", "enabled": true, "adc_pga_gain": 1, "rin_ohms": 6000000.0, "rf_ohms": 4640.0},
+        {"channel": 5, "name": "VLB", "enabled": true, "adc_pga_gain": 1, "rin_ohms": 6000000.0, "rf_ohms": 4640.0},
+        {"channel": 6, "name": "VLA", "enabled": true, "adc_pga_gain": 1, "rin_ohms": 6000000.0, "rf_ohms": 4640.0}
+      ]
+    }
+  },
+  "adc": {
+    "source": "physical",
+    "simulator": {
+      "frequency_hz": 60.0,
+      "channels": [
+        {"channel": 0, "rms": 5.0, "phase_degrees": 0.0},
+        {"channel": 1, "rms": 5.0, "phase_degrees": -120.0},
+        {"channel": 2, "rms": 5.0, "phase_degrees": 120.0},
+        {"channel": 3, "rms": 0.0, "phase_degrees": 0.0},
+        {"channel": 4, "rms": 120.0, "phase_degrees": 120.0},
+        {"channel": 5, "rms": 120.0, "phase_degrees": -120.0},
+        {"channel": 6, "rms": 120.0, "phase_degrees": 0.0}
+      ]
+    }
+  },
+  "waveform": {
+    "default_pretrigger_ms": 10000,
+    "default_posttrigger_ms": 10000
+  }
+}

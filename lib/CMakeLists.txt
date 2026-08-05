@@ -90,6 +90,32 @@ target_link_libraries(msap1_meter PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+add_library(mnc_settings STATIC
+    ${PROJECT_SOURCE_DIR}/src/settings_repository.cpp
+)
+add_library(mnc::settings ALIAS mnc_settings)
+target_include_directories(mnc_settings PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_settings PUBLIC cxx_std_23)
+target_compile_options(mnc_settings PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_settings PRIVATE glaze::glaze)
+
+msap1_library(msap1_settings msap1::settings
+    ${PROJECT_SOURCE_DIR}/src/settings.cpp
+    ${PROJECT_SOURCE_DIR}/src/settings_ipc.cpp
+)
+target_link_libraries(msap1_settings PUBLIC
+    mnc::settings
+    mnc::ipc
+    msap1::meter
+)
+target_link_libraries(msap1_settings PRIVATE
+    glaze::glaze
+    OpenSSL::Crypto
+)
+
 # Waveform device/session ownership is isolated from the meter record path so
 # future analysis code does not acquire access to the DMA descriptor.
 msap1_library(msap1_waveform msap1::waveform
@@ -137,6 +163,7 @@ target_link_libraries(msap1_apu_core INTERFACE
     msap1::acquisition
     msap1::system
     msap1::service-protocol
+    msap1::settings
 )
 
 # Reject accidental dependency inversion at configure time. These checks make
@@ -234,4 +261,12 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME acquisition_architecture_test
         COMMAND acquisition_architecture_test)
+
+    add_executable(settings_test
+        ${PROJECT_SOURCE_DIR}/tests/settings_test.cpp)
+    target_link_libraries(settings_test PRIVATE msap1::settings glaze::glaze)
+    target_compile_definitions(settings_test PRIVATE
+        PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    target_compile_options(settings_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME settings_test COMMAND settings_test)
 endif()

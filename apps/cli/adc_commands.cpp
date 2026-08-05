@@ -3,11 +3,14 @@
 
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_config.hpp"
+#include "msap1/settings.hpp"
+#include "msap1/settings_ipc.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <ostream>
@@ -24,6 +27,46 @@ void require_daemon_ok(const AcquisitionResponse &response)
 	if (response.status != AcquisitionStatus::ok)
 		throw std::runtime_error("acquisition daemon request failed (status " +
 			std::to_string(static_cast<std::uint32_t>(response.status)) + ")");
+}
+
+void require_settings_ok(const msap1::settings::ipc::Response &response)
+{
+	if (response.status != msap1::settings::ipc::Status::ok)
+		throw std::runtime_error(response.message.empty()
+			? "settings service rejected the request" : response.message);
+}
+
+void update_persistent_settings(
+	const Options &options,
+	const std::function<void(msap1::settings::ProductSettings &)> &update,
+	std::string message)
+{
+	using SettingsCommand = msap1::settings::ipc::Command;
+	using SettingsRequest = msap1::settings::ipc::Request;
+	msap1::settings::ipc::SettingsClient client;
+
+	SettingsRequest get;
+	get.command = SettingsCommand::get_draft;
+	auto draft = client.request(std::move(get), options.timeout_ms);
+	require_settings_ok(draft);
+	auto settings = msap1::settings::SettingsCodec::decode(draft.json);
+	update(settings);
+
+	SettingsRequest patch;
+	patch.command = SettingsCommand::patch_draft;
+	patch.expected_generation = draft.generation;
+	patch.json = msap1::settings::SettingsCodec::encode(settings, false);
+	auto patched = client.request(std::move(patch), options.timeout_ms);
+	require_settings_ok(patched);
+
+	SettingsRequest commit;
+	commit.command = SettingsCommand::commit_draft;
+	commit.expected_revision = patched.revision;
+	commit.expected_generation = patched.generation;
+	commit.message = std::move(message);
+	const auto committed = client.request(std::move(commit),
+		std::max(options.timeout_ms, 30000));
+	require_settings_ok(committed);
 }
 
 struct CaptureControlResult {
@@ -296,17 +339,16 @@ public:
 int run_source(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	AcquisitionResponse response;
 	if (options.adc_source) {
-		response = client.request(
-			AcquisitionCommand::adc_source_set, options.timeout_ms,
-			nullptr, 0u, 0u, 10000u, 10000u,
-			WaveformTriggerSource::manual_cli, 0u,
-			adc_source_value(*options.adc_source));
-	} else {
-		response = client.request(AcquisitionCommand::adc_source_get,
-			options.timeout_ms);
+		(void)adc_source_value(*options.adc_source);
+		update_persistent_settings(options,
+			[&](auto &settings) {
+				settings.adc.source = *options.adc_source;
+			},
+			"change ADC source to " + *options.adc_source);
 	}
+	const auto response = client.request(AcquisitionCommand::adc_source_get,
+		options.timeout_ms);
 	require_daemon_ok(response);
 	const AdcSourceResult result{
 		adc_source_text(response.adc_source), response.running != 0u,
@@ -372,24 +414,23 @@ int run_simulator(const Options &options, std::ostream &output)
 			options.simulator_phase_degrees.end(),
 			[](const auto &value) { return value.has_value(); });
 	if (configure) {
-		auto simulator = response.simulator;
-		if (options.simulator_frequency_hz)
-			simulator.frequency_millihz =
-				static_cast<std::uint32_t>(std::llround(
-					*options.simulator_frequency_hz * 1000.0));
-		for (std::size_t channel = 0; channel < 7u; ++channel) {
-			if (options.simulator_rms[channel])
-				simulator.channels[channel].rms =
-					*options.simulator_rms[channel];
-			if (options.simulator_phase_degrees[channel])
-				simulator.channels[channel].phase_degrees =
-					*options.simulator_phase_degrees[channel];
-		}
-		response = client.request(
-			AcquisitionCommand::adc_simulator_set, options.timeout_ms,
-			nullptr, 0u, 0u, 10000u, 10000u,
-			WaveformTriggerSource::manual_cli, 0u,
-			response.adc_source, &simulator);
+		update_persistent_settings(options,
+			[&](auto &settings) {
+				if (options.simulator_frequency_hz)
+					settings.adc.simulator.frequency_hz =
+						*options.simulator_frequency_hz;
+				for (std::size_t channel = 0; channel < 7u; ++channel) {
+					auto &target = settings.adc.simulator.channels[channel];
+					if (options.simulator_rms[channel])
+						target.rms = *options.simulator_rms[channel];
+					if (options.simulator_phase_degrees[channel])
+						target.phase_degrees =
+							*options.simulator_phase_degrees[channel];
+				}
+			},
+			"update ADC simulator configuration");
+		response = client.request(AcquisitionCommand::adc_simulator_get,
+			options.timeout_ms);
 		require_daemon_ok(response);
 	}
 	AdcSimulatorResult result{};

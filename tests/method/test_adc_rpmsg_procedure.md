@@ -25,7 +25,7 @@ No fixed reserved-memory region is required; buffers come from DMA/CMA.
 
 ```sh
 systemctl cat msap1-fpga-acquisition
-cat /etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
+mnc settings show
 mnc meter health
 ```
 
@@ -90,7 +90,7 @@ PUT /api/v1/meter/configuration/frequency
 
 Verify single-cycle, rolling-cycle, and rolling-time modes. A valid update must
 stop, apply, restart, change the configuration generation, and create the
-complete `/etc/monutchee/msap1/adc_config/active.json`. An invalid update must
+complete `/data/mnc/settings/active.json` through `msap1-settings`. An invalid update must
 return a client error, retain the prior profile, and restore capture.
 
 ## 4. Concurrent readers

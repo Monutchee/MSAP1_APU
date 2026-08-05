@@ -1,12 +1,14 @@
 add_executable(msap1-web-backend
     main.cpp
     acquisition_gateway.cpp
+    settings_gateway.cpp
     msap1_auth_provider.cpp
 )
 
 target_link_libraries(msap1-web-backend PRIVATE
     msap1::acquisition
     msap1::meter
+    msap1::settings
     msap1::system
     mnc::logging
     mnc::service

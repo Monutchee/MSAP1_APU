@@ -543,6 +543,11 @@ mnc::ipc::Frame encode_acquisition_request(const AcquisitionRequest &request)
 	writer.u32(request.meter_limit);
 	writer.fixed_string(request.meter_consumer,
 			    acquisition_consumer_name_max);
+	if (request.configuration_json.size() > mnc::ipc::default_max_payload / 2u)
+		throw std::length_error("acquisition configuration JSON is oversized");
+	writer.u32(static_cast<std::uint32_t>(request.configuration_json.size()));
+	writer.bytes(std::as_bytes(std::span(request.configuration_json.data(),
+		request.configuration_json.size())));
 	return {mnc::ipc::FrameKind::request,
 		static_cast<std::uint32_t>(request.command), request.sequence,
 		writer.take()};
@@ -578,6 +583,13 @@ AcquisitionRequest decode_acquisition_request(const mnc::ipc::Frame &frame)
 	request.meter_limit = reader.u32();
 	request.meter_consumer =
 		reader.fixed_string(acquisition_consumer_name_max);
+	const auto configuration_size = reader.u32();
+	if (configuration_size > mnc::ipc::default_max_payload / 2u)
+		throw std::invalid_argument("acquisition configuration JSON is oversized");
+	const auto configuration = reader.bytes(configuration_size);
+	request.configuration_json.assign(
+		reinterpret_cast<const char *>(configuration.data()),
+		configuration.size());
 	reader.require_finished();
 	return request;
 }

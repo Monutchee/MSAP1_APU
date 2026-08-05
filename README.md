@@ -1,9 +1,11 @@
 # MSAP1 Linux meter acquisition
 
+`msap1-settings` is the sole persistent settings authority, while
 `msap1-fpga-acquisition` is the sole Linux owner of meter-result DMA and the
-R5 core 0 RPMsg control endpoint. It converts the product JSON configuration
-to fixed-point PL coefficients, commits them through the RPU, starts capture,
-and caches fixed 256-byte `MTR1` records from `/dev/msap1-meter`.
+R5 core 0 RPMsg control endpoint. Acquisition consumes an immutable typed
+settings snapshot, converts it to fixed-point PL coefficients, commits it
+through the RPU, starts capture, and caches fixed 256-byte `MTR1` records from
+`/dev/msap1-meter`.
 
 The runtime data paths are:
 
@@ -39,28 +41,30 @@ The reusable `mnc::logging` library writes and reads structured systemd
 journal entries; MSAP1-specific component/event policy remains in this
 repository.
 
-## Runtime
+## Runtime settings
 
-The Yocto package installs complete schema-version-3 ADC profiles at:
+The canonical factory document is maintained in this repository at
+`config/settings/factory-defaults.json` and installed byte-for-byte at:
 
 ```text
-/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-1a.json
-/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-5a.json
-/etc/monutchee/msap1/default/adc_config/msap1-sensor-board-mv.json
+/usr/share/monutchee/msap1/settings/factory-defaults.json
 ```
 
-Each profile contains the CH6/VLA positive zero-crossing frequency
-configuration, an `adc_source`, and nominal simulator amplitudes/phases for
-CH0 through CH6. Existing schema-version-2 profiles are accepted as physical
-source and receive conservative simulator defaults. Runtime frequency limits
-must remain ordered within the supported 10–200 Hz range.
+On first boot, `msap1-settings` validates that document, creates revision 1,
+and initializes `/data/mnc/settings/active.json`. It is the only process that
+may mutate active settings, persistent drafts, bounded immutable revisions,
+or the separately protected secrets document. Frequency, RMS, conversion,
+normal sample rate, ADC source/simulator, and waveform defaults are all part
+of this one schema-version-1 product document. No legacy `/etc` profile is
+read or migrated.
 
-The systemd service selects `msap1-sensor-board-5a.json` by default. Pass exactly one
-complete profile with `msap1-fpga-acquisition --config <path>`; files are not
-merged. A valid `/etc/monutchee/msap1/adc_config/active.json` takes precedence
-at boot. An authenticated frequency update stages and validates the complete
-profile, restarts the coordinated RPU/PL capture transaction, and atomically
-persists that complete active profile. The package never overwrites it.
+Settings changes are staged as a persistent draft and committed with stale
+revision/generation protection. A commit invokes acquisition's coordinated
+stop/configure/readback/restart transaction, publishes the active document
+only after successful verification, and restores the prior configuration on
+failure. Factory reset loads the packaged APU-owned document, clears settings
+history and secrets, and preserves meter records, waveforms, logs, and
+firmware.
 
 `mnc meter-view` displays the user-facing meter channels CH0 through CH6.
 CH7/VCM remains available in the MTR1 record and internal API model for future
@@ -72,9 +76,9 @@ through the RPU, sends the derived PL coefficients, verifies the PL generation
 readback, then requests capture START. Shutdown requests STOP before closing
 DMA.
 
-`remove_dc` selects the PL RMS reference. It defaults to `true`, producing AC
-RMS about the window mean. Set it to `false` for total RMS referenced to zero,
-then restart `msap1-fpga-acquisition` to commit the updated configuration.
+`metering.rms.remove_dc` selects the PL RMS reference. It defaults to `true`,
+producing AC RMS about the window mean. Commit a settings draft to hot-apply
+the change; no process or device reboot is required.
 
 Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
@@ -83,7 +87,7 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 14 replaced the old
+little-endian product payloads. Acquisition IPC version 15 replaced the old
 native-structure `SOCK_SEQPACKET` protocol atomically. Every validated PL
 record is committed first to the SQLite WAL stream at:
 
@@ -124,6 +128,11 @@ The authenticated external API is:
 - `PUT /api/v1/adc/capture` and `DELETE /api/v1/adc/capture`
 - `GET /api/v1/adc/source` and `PUT /api/v1/adc/source`
 - `GET /api/v1/adc/simulator` and `PUT /api/v1/adc/simulator`
+- `GET /api/v1/settings/active`
+- `GET` and `PUT /api/v1/settings/draft` (administrator write)
+- `GET /api/v1/settings/diff` and `GET /api/v1/settings/history`
+- `POST /api/v1/settings/commit`, `/discard`, `/restore`, and
+  `/factory-reset` (administrator only)
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes

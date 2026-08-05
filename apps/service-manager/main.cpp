@@ -31,8 +31,10 @@ public:
 		  server_(context_.get_executor(),
 			  std::string(msap1::service_control::socket_path))
 	{
+		manager_.register_service({"settings",
+			"msap1-settings.service", {}});
 		manager_.register_service({"fpga-acquisition",
-			"msap1-fpga-acquisition.service", {}});
+			"msap1-fpga-acquisition.service", {"settings"}});
 		manager_.register_service({"web-backend",
 			"msap1-web-backend.service", {"fpga-acquisition"}});
 	}

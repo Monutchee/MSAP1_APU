@@ -167,7 +167,7 @@ Command trigger_command()
 			.variants = {},
 		});
 	trigger.add_option({
-		"pre-ms", "MS", "History before the trigger (default: 10000)",
+		"pre-ms", "MS", "History before the trigger (default: committed setting)",
 		CompletionKind::none,
 		[](Options &options, const std::string &value) {
 			options.waveform_pretrigger_ms =
@@ -175,7 +175,7 @@ Command trigger_command()
 		},
 	});
 	trigger.add_option({
-		"post-ms", "MS", "Capture after the trigger (default: 10000)",
+		"post-ms", "MS", "Capture after the trigger (default: committed setting)",
 		CompletionKind::none,
 		[](Options &options, const std::string &value) {
 			options.waveform_posttrigger_ms =
