@@ -1,5 +1,6 @@
 #include "msap1_auth_provider.hpp"
 #include "acquisition_gateway.hpp"
+#include "settings_gateway.hpp"
 #include "msap1/acquisition_ipc.hpp"
 #include "msap1/meter_health.hpp"
 #include "msap1/soc_temperature.hpp"
@@ -23,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <source_location>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -300,8 +302,8 @@ struct DeveloperAboutDto {
 };
 
 struct WaveformTriggerDto {
-	std::uint32_t pretrigger_ms = 10000;
-	std::uint32_t posttrigger_ms = 10000;
+	std::uint32_t pretrigger_ms = msap1::waveform_duration_unspecified;
+	std::uint32_t posttrigger_ms = msap1::waveform_duration_unspecified;
 };
 
 struct WaveformDeleteDto {
@@ -340,6 +342,18 @@ struct WaveformDto {
 	std::uint64_t incomplete_sessions;
 	std::vector<WaveformSessionDto> sessions;
 };
+
+struct SettingsDocumentDto {
+	std::string content_hash;
+	bool recovery_mode = false;
+	std::string recovery_reason;
+	msap1::settings::ProductSettings settings;
+};
+
+struct SettingsFactoryResetDto {
+	bool confirmed = false;
+};
+
 
 std::string adc_source_name(std::uint32_t source);
 
@@ -838,6 +852,18 @@ msap1::FrequencyIpcConfiguration frequency_ipc(
 	};
 }
 
+msap1::FrequencyConfig frequency_settings(
+	const FrequencyConfigurationDto &frequency)
+{
+	/* Reuse the wire conversion as the single range-validation authority, then
+	 * preserve the human-facing values in the persistent typed document. */
+	(void)frequency_ipc(frequency);
+	return {frequency.enabled, frequency.reference_channel, frequency.mode,
+		frequency.averaging_cycles, frequency.averaging_window_ms,
+		frequency.minimum_hz, frequency.maximum_hz,
+		frequency.hysteresis_volts};
+}
+
 std::string adc_source_name(std::uint32_t source)
 {
 	if (source == MSAP1_ADC_SOURCE_PHYSICAL)
@@ -922,6 +948,30 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 	return result;
 }
 
+msap1::SimulatorConfig adc_simulator_settings(
+	const AdcSimulatorDto &configuration)
+{
+	(void)adc_simulator_ipc(configuration);
+	msap1::SimulatorConfig result;
+	result.frequency_hz = configuration.frequency_hz;
+	result.channels.clear();
+	result.channels.reserve(configuration.channels.size());
+	for (const auto &channel : configuration.channels)
+		result.channels.push_back(
+			{channel.channel, channel.rms, channel.phase_degrees});
+	return result;
+}
+
+SettingsDocumentDto settings_document(
+	const msap1::settings::ipc::Response &response)
+{
+	return {response.content_hash,
+		response.status == msap1::settings::ipc::Status::recovery_mode,
+		response.status == msap1::settings::ipc::Status::recovery_mode
+			? response.message : std::string{},
+		msap1::settings::SettingsCodec::decode(response.json)};
+}
+
 std::string getenv_or(const char *name, const char *fallback)
 {
 	const char *value = std::getenv(name);
@@ -956,6 +1006,12 @@ msap1::web::AcquisitionGateway &acquisition_gateway()
 	// The gateway owns one persistent, correlation-aware AF_UNIX stream. HTTP
 	// handlers express typed product operations and never construct IPC frames.
 	static msap1::web::AcquisitionGateway gateway;
+	return gateway;
+}
+
+msap1::web::SettingsGateway &settings_gateway()
+{
+	static msap1::web::SettingsGateway gateway;
 	return gateway;
 }
 
@@ -1029,6 +1085,61 @@ int run_web_backend()
 				return json_response(webengine::http::status::ok,
 					system_about());
 			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::get,
+			"/api/v1/settings/active",
+			[](const webengine::RequestContext &) {
+				try {
+					return json_response(webengine::http::status::ok,
+						settings_document(settings_gateway().active()));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/settings/active", error);
+					return error_response(
+						webengine::http::status::service_unavailable,
+						error.what());
+				}
+			}, webengine::Role::Viewer);
+
+		engine.add_api(webengine::http::verb::put,
+			"/api/v1/settings/active",
+			[](const webengine::RequestContext &context) {
+				try {
+					msap1::settings::ProductSettings settings;
+					if (glz::read_json(settings, context.request.body()))
+						return error_response(
+							webengine::http::status::bad_request,
+							"invalid settings JSON");
+					return json_response(webengine::http::status::ok,
+						settings_document(settings_gateway().save(settings)));
+				} catch (const std::invalid_argument &error) {
+					return error_response(webengine::http::status::bad_request,
+						error.what());
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/settings/active", error);
+					return error_response(webengine::http::status::conflict,
+						error.what());
+				}
+			}, webengine::Role::Admin);
+
+		engine.add_api(webengine::http::verb::post,
+			"/api/v1/settings/factory-reset",
+			[](const webengine::RequestContext &context) {
+				try {
+					SettingsFactoryResetDto reset;
+					if (glz::read_json(reset, context.request.body()) ||
+					    !reset.confirmed)
+						return error_response(
+							webengine::http::status::bad_request,
+							"factory reset confirmation is required");
+					const auto response = settings_gateway().factory_reset(true);
+					return json_response(webengine::http::status::ok,
+						settings_document(response));
+				} catch (const std::exception &error) {
+					log_api_failure("/api/v1/settings/factory-reset", error);
+					return error_response(webengine::http::status::conflict,
+						error.what());
+				}
+			}, webengine::Role::Admin);
 
 		engine.add_api(webengine::http::verb::get,
 			"/api/v1/developer/temperatures",
@@ -1253,21 +1364,13 @@ int run_web_backend()
 							webengine::http::status::bad_request,
 							"invalid frequency configuration JSON");
 					}
-					const auto wire = frequency_ipc(configuration);
+					(void)settings_gateway().update_and_save(
+						[&](auto &settings) {
+							settings.metering.frequency =
+								frequency_settings(configuration);
+						});
 					const auto response = acquisition_gateway()
-						.set_frequency_configuration(wire);
-					if (response.status ==
-					    msap1::AcquisitionStatus::configuration_error) {
-						log_message(api_log,
-							mnc::logging::Priority::warning,
-							"frequency configuration was rejected",
-							"frequency_update_rejected",
-							{{"MNC_REQUEST_ID",
-							  correlation}});
-						return error_response(
-							webengine::http::status::bad_request,
-							"frequency configuration was rejected");
-					}
+						.frequency_configuration();
 					require_acquisition_ok(response);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
@@ -1330,14 +1433,12 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"invalid ADC source JSON");
-					const auto source = adc_source_value(configuration.source);
-					const auto response =
-						acquisition_gateway().set_adc_source(source);
-					if (response.status ==
-					    msap1::AcquisitionStatus::configuration_error)
-						return error_response(
-							webengine::http::status::bad_request,
-							"ADC source change was rejected");
+					(void)adc_source_value(configuration.source);
+					(void)settings_gateway().update_and_save(
+						[&](auto &settings) {
+							settings.adc.source = configuration.source;
+						});
+					const auto response = acquisition_gateway().adc_source();
 					require_acquisition_ok(response);
 					log_message(api_log, mnc::logging::Priority::notice,
 						"ADC source changed to " + configuration.source,
@@ -1388,14 +1489,13 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"invalid ADC simulator JSON");
-					const auto wire = adc_simulator_ipc(configuration);
+					(void)settings_gateway().update_and_save(
+						[&](auto &settings) {
+							settings.adc.simulator =
+								adc_simulator_settings(configuration);
+						});
 					const auto response = acquisition_gateway()
-						.set_simulator_configuration(wire);
-					if (response.status ==
-					    msap1::AcquisitionStatus::configuration_error)
-						return error_response(
-							webengine::http::status::bad_request,
-							"ADC simulator configuration was rejected");
+						.simulator_configuration();
 					require_acquisition_ok(response);
 					log_message(api_log, mnc::logging::Priority::notice,
 						"ADC simulator configuration applied",

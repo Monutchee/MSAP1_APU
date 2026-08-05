@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -21,8 +22,10 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 inline constexpr std::uint32_t acquisition_ipc_magic = 0x4d534151u;
-inline constexpr std::uint16_t acquisition_ipc_version = 14;
+inline constexpr std::uint16_t acquisition_ipc_version = 15;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
+inline constexpr std::uint32_t waveform_duration_unspecified =
+	std::numeric_limits<std::uint32_t>::max();
 
 enum class AcquisitionCommand : std::uint16_t {
 	info = 1,
@@ -48,6 +51,7 @@ enum class AcquisitionCommand : std::uint16_t {
 	meter_stream_acknowledge = 21,
 	meter_subscribe = 22,
 	meter_unsubscribe = 23,
+	configuration_apply = 24,
 };
 
 inline constexpr std::size_t acquisition_consumer_name_max = 64;
@@ -122,8 +126,8 @@ struct AcquisitionRequest {
 	std::uint64_t sequence = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t diagnostic_flow = 0;
-	std::uint32_t waveform_pretrigger_ms = 10000;
-	std::uint32_t waveform_posttrigger_ms = 10000;
+	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
+	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
 	WaveformTriggerSource waveform_trigger_source =
 		WaveformTriggerSource::manual_cli;
 	std::uint64_t waveform_session_id = 0;
@@ -135,6 +139,7 @@ struct AcquisitionRequest {
 	std::uint64_t meter_cursor = 0;
 	std::uint32_t meter_limit = 32;
 	std::string meter_consumer;
+	std::string configuration_json;
 };
 
 struct AcquisitionResponse {
@@ -199,8 +204,10 @@ public:
 					    nullptr,
 				    std::uint32_t sample_rate_hz = 0,
 				    std::uint32_t diagnostic_flow = 0,
-				    std::uint32_t waveform_pretrigger_ms = 10000,
-				    std::uint32_t waveform_posttrigger_ms = 10000,
+				    std::uint32_t waveform_pretrigger_ms =
+					    waveform_duration_unspecified,
+				    std::uint32_t waveform_posttrigger_ms =
+					    waveform_duration_unspecified,
 				    WaveformTriggerSource waveform_trigger_source =
 					    WaveformTriggerSource::manual_cli,
 				    std::uint64_t waveform_session_id = 0,

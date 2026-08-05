@@ -10,6 +10,7 @@
 #include <limits>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <span>
 
@@ -543,6 +544,11 @@ mnc::ipc::Frame encode_acquisition_request(const AcquisitionRequest &request)
 	writer.u32(request.meter_limit);
 	writer.fixed_string(request.meter_consumer,
 			    acquisition_consumer_name_max);
+	if (request.configuration_json.size() > mnc::ipc::default_max_payload / 2u)
+		throw std::length_error("acquisition configuration JSON is oversized");
+	writer.u32(static_cast<std::uint32_t>(request.configuration_json.size()));
+	writer.bytes(std::as_bytes(std::span(request.configuration_json.data(),
+		request.configuration_json.size())));
 	return {mnc::ipc::FrameKind::request,
 		static_cast<std::uint32_t>(request.command), request.sequence,
 		writer.take()};
@@ -578,6 +584,13 @@ AcquisitionRequest decode_acquisition_request(const mnc::ipc::Frame &frame)
 	request.meter_limit = reader.u32();
 	request.meter_consumer =
 		reader.fixed_string(acquisition_consumer_name_max);
+	const auto configuration_size = reader.u32();
+	if (configuration_size > mnc::ipc::default_max_payload / 2u)
+		throw std::invalid_argument("acquisition configuration JSON is oversized");
+	const auto configuration = reader.bytes(configuration_size);
+	request.configuration_json.assign(
+		reinterpret_cast<const char *>(configuration.data()),
+		configuration.size());
 	reader.require_finished();
 	return request;
 }
@@ -702,6 +715,7 @@ struct AcquisitionClient::Impl {
 	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work;
 	std::shared_ptr<mnc::ipc::RequestClient> client;
 	AcquisitionClient::EventHandler event_handler;
+	std::mutex connect_mutex;
 	std::thread thread;
 };
 
@@ -743,13 +757,21 @@ AcquisitionResponse AcquisitionClient::request(
 AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 						 int timeout_ms)
 {
-	request.sequence = static_cast<std::uint64_t>(
-		std::chrono::steady_clock::now().time_since_epoch().count());
+	/* Correlation IDs belong to the transport.  A timestamp generated here can
+	 * collide when parallel HTTP handlers submit requests in the same clock
+	 * tick, which previously surfaced as "duplicate IPC correlation ID". */
+	request.sequence = 0;
 	try {
-		if (!impl_->client->is_open())
-			boost::asio::co_spawn(impl_->context, impl_->client->connect(),
-					      boost::asio::use_future)
-				.get();
+		if (!impl_->client->is_open()) {
+			/* Only one caller establishes the persistent stream. Requests remain
+			 * concurrent after connection because RequestClient serializes its
+			 * own frame queue and correlation map on an Asio strand. */
+			std::scoped_lock connect_lock(impl_->connect_mutex);
+			if (!impl_->client->is_open())
+				boost::asio::co_spawn(impl_->context,
+					impl_->client->connect(), boost::asio::use_future)
+					.get();
+		}
 		auto frame = boost::asio::co_spawn(
 			impl_->context,
 			impl_->client->request(
@@ -757,12 +779,17 @@ AcquisitionResponse AcquisitionClient::request(AcquisitionRequest request,
 				std::chrono::milliseconds(timeout_ms)),
 			boost::asio::use_future)
 			.get();
-		if (frame.correlation_id != request.sequence ||
-		    frame.message_type !=
+		if (frame.message_type !=
 			    static_cast<std::uint32_t>(request.command))
 			throw std::runtime_error("invalid acquisition response identity");
 		return acquisition::ProtocolCodec::decode_response(frame);
 	} catch (const std::exception &error) {
+		/* An EOF or reset can leave the native socket looking open until the
+		 * reader coroutine observes it. Explicit invalidation makes the next
+		 * product request establish a fresh stream. Side-effecting requests are
+		 * not retried here because the lost response may follow a successful
+		 * operation on the server. */
+		impl_->client->close();
 		throw AcquisitionUnavailable(error.what());
 	}
 }

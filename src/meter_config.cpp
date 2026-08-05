@@ -105,6 +105,27 @@ PreparedMeterConfiguration load_meter_configuration(
 	return prepare_meter_configuration(std::move(source), sample_rate_hz);
 }
 
+MeterConversionFile decode_meter_configuration(std::string_view json)
+{
+	MeterConversionFile source;
+	if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = true}>(
+		source, json))
+		throw std::runtime_error("invalid meter configuration: " +
+			glz::format_error(error, json));
+	return source;
+}
+
+std::string encode_meter_configuration(const MeterConversionFile &configuration,
+				       bool pretty)
+{
+	const auto encoded = pretty
+		? glz::write<glz::opts{.prettify = true}>(configuration)
+		: glz::write_json(configuration);
+	if (!encoded)
+		throw std::runtime_error("cannot serialize meter configuration");
+	return *encoded;
+}
+
 PreparedMeterConfiguration prepare_meter_configuration(
 	MeterConversionFile source, std::uint32_t sample_rate_hz)
 {
@@ -347,16 +368,14 @@ PreparedMeterConfiguration prepare_meter_configuration(
 void save_meter_configuration(const MeterConversionFile &configuration,
 			      const std::filesystem::path &path)
 {
-	const auto json = glz::write_json(configuration);
-	if (!json)
-		throw std::runtime_error("cannot serialize meter configuration");
+	const auto json = encode_meter_configuration(configuration);
 	const auto parent = path.parent_path();
 	if (!parent.empty())
 		std::filesystem::create_directories(parent);
 	const auto temporary = path.string() + ".tmp";
 	{
 		std::ofstream output(temporary, std::ios::trunc);
-		if (!output || !(output << *json << '\n'))
+		if (!output || !(output << json << '\n'))
 			throw std::runtime_error("cannot write meter configuration " +
 				temporary);
 	}

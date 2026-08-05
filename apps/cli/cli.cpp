@@ -493,6 +493,7 @@ Application make_application()
 	register_system_commands(application);
 	register_machine_commands(application);
 	register_service_commands(application);
+	register_settings_commands(application);
 	return application;
 }
 

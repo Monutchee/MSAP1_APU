@@ -7,6 +7,8 @@
 #include "msap1/meter_record.hpp"
 #include "msap1/meter_record_stream.hpp"
 #include "msap1/protocol.hpp"
+#include "msap1/settings.hpp"
+#include "msap1/settings_ipc.hpp"
 #include "msap1/waveform_capture.hpp"
 #include "mnc/logging/logging.hpp"
 #include "mnc/service.hpp"
@@ -152,9 +154,6 @@ struct Options {
 	std::string meter_device = "/dev/msap1-meter";
 	std::string waveform_device = "/dev/msap1-waveform";
 	std::string waveform_directory = "/data/mnc/waveform";
-	std::string configuration = msap1::default_meter_config_path;
-	std::string active_configuration =
-		"/etc/monutchee/msap1/adc_config/active.json";
 	std::string socket_path = msap1::acquisition_socket_path;
 	std::string record_stream = "/data/mnc/meter/record-stream.sqlite3";
 };
@@ -168,8 +167,6 @@ void usage(const char *program)
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
 		<< "  --waveform-device PATH Waveform DMA device (default: /dev/msap1-waveform)\n"
 		<< "  --waveform-directory PATH Completed waveform storage\n"
-		<< "  --config PATH        Meter conversion JSON\n"
-		<< "  --active-config PATH Persisted complete runtime profile\n"
 		<< "  --socket PATH        Control socket path\n"
 		<< "  --record-stream PATH Durable meter record database\n";
 }
@@ -196,10 +193,6 @@ Options parse_options(int argc, char **argv)
 			options.waveform_device = value;
 		else if (option == "--waveform-directory")
 			options.waveform_directory = value;
-		else if (option == "--config")
-			options.configuration = value;
-		else if (option == "--active-config")
-			options.active_configuration = value;
 		else if (option == "--socket")
 			options.socket_path = value;
 		else if (option == "--record-stream")
@@ -210,25 +203,10 @@ Options parse_options(int argc, char **argv)
 	return options;
 }
 
-msap1::PreparedMeterConfiguration load_runtime_configuration(
-	const Options &options)
+msap1::settings::ProductSettings load_runtime_settings()
 {
-	if (!options.active_configuration.empty() &&
-	    std::filesystem::exists(options.active_configuration)) {
-		try {
-			return msap1::load_meter_configuration(
-				options.active_configuration);
-		} catch (const std::exception &error) {
-			log_message(config_log, mnc::logging::Priority::warning,
-				"ignoring invalid active meter profile " +
-					options.active_configuration + ": " +
-					error.what(),
-				"active_profile_invalid",
-				{{"MNC_CONFIG_PATH",
-				  options.active_configuration}});
-		}
-	}
-	return msap1::load_meter_configuration(options.configuration);
+	msap1::settings::ipc::SettingsClient client;
+	return client.active(5000);
 }
 
 std::array<msap1::WaveformChannelMetadata,
@@ -325,7 +303,10 @@ class CaptureCoordinator {
 public:
 	explicit CaptureCoordinator(const Options &options)
 		: options_(options),
-		  configuration_(load_runtime_configuration(options)),
+		  product_settings_(load_runtime_settings()),
+		  configuration_(msap1::prepare_meter_configuration(
+			  msap1::settings::to_meter_configuration(product_settings_),
+			  product_settings_.metering.sample_rate_hz)),
 		  meter_(options.meter_device),
 		  waveform_(options.waveform_device, options.waveform_directory,
 			    waveform_metadata(configuration_)),
@@ -673,7 +654,7 @@ private:
 	}
 
 	void apply_complete_configuration(
-		msap1::PreparedMeterConfiguration staged, bool persist,
+		msap1::PreparedMeterConfiguration staged,
 		std::string_view event)
 	{
 		const auto previous = configuration_;
@@ -688,10 +669,6 @@ private:
 				start();
 			else
 				configure_meter();
-			if (persist)
-				msap1::save_meter_configuration(
-					configuration_.source,
-					options_.active_configuration);
 			log_message(config_log, mnc::logging::Priority::notice,
 				"ADC configuration applied: source=" +
 					configuration_.source.adc_source,
@@ -731,7 +708,7 @@ private:
 			msap1::prepare_meter_configuration(
 				std::move(updated),
 				configuration_.wire.sample_rate_hz),
-			true, "adc_source_applied");
+			"adc_source_applied");
 	}
 
 	void apply_simulator_configuration(
@@ -751,7 +728,7 @@ private:
 			msap1::prepare_meter_configuration(
 				std::move(updated),
 				configuration_.wire.sample_rate_hz),
-			true, "adc_simulator_configuration_applied");
+			"adc_simulator_configuration_applied");
 	}
 
 	void start(bool apply_configuration = true)
@@ -863,48 +840,37 @@ private:
 			static_cast<double>(request.hysteresis_microvolts) /
 			1000000.0;
 
-		auto staged = msap1::prepare_meter_configuration(
-			std::move(source), configuration_.wire.sample_rate_hz);
-		const auto previous = configuration_;
-		const bool restart = running_;
-		if (restart)
-			stop();
-		configuration_ = std::move(staged);
-		// The previous snapshot belongs to a different configuration
-		// generation. Publish no record until the restarted pipeline produces
-		// a coherent MTR1 result for the new generation.
-		latest_record_.reset();
-		last_record_time_.reset();
-		try {
-			if (restart)
-				start();
-			msap1::save_meter_configuration(
-				configuration_.source,
-				options_.active_configuration);
+		apply_complete_configuration(
+			msap1::prepare_meter_configuration(
+				std::move(source), configuration_.wire.sample_rate_hz),
+			"frequency_configuration_applied");
+	}
+
+	/** Applies one complete settings snapshot as a coordinated pipeline update. */
+	void apply_product_settings(std::string_view json)
+	{
+		auto candidate = msap1::settings::SettingsCodec::decode(json);
+		msap1::settings::SettingsValidator::validate(candidate);
+		auto meter_settings =
+			msap1::settings::to_meter_configuration(candidate);
+		const bool pipeline_changed =
+			candidate.metering.sample_rate_hz !=
+				configuration_.wire.sample_rate_hz ||
+			msap1::encode_meter_configuration(meter_settings, false) !=
+				msap1::encode_meter_configuration(
+					configuration_.source, false);
+		if (pipeline_changed) {
+			auto staged = msap1::prepare_meter_configuration(
+				std::move(meter_settings),
+				candidate.metering.sample_rate_hz);
+			apply_complete_configuration(std::move(staged),
+				"central_settings_applied");
+		} else {
 			log_message(config_log, mnc::logging::Priority::notice,
-				"frequency configuration applied and persisted",
-				"frequency_configuration_applied",
-				{{"MNC_CONFIGURATION_GENERATION",
-				  std::to_string(
-					  configuration_.wire.generation)}});
-		} catch (...) {
-			if (running_)
-				stop();
-			configuration_ = previous;
-			if (restart) {
-				try {
-					start();
-				} catch (const std::exception &rollback_error) {
-					log_message(config_log,
-						mnc::logging::Priority::critical,
-						"frequency configuration rollback failed: " +
-							std::string(
-								rollback_error.what()),
-						"frequency_rollback_failed");
-				}
-			}
-			throw;
+				"live service settings refreshed without restarting capture",
+				"central_settings_live_applied");
 		}
+		product_settings_ = std::move(candidate);
 	}
 
 	void apply_sample_rate(std::uint32_t sample_rate_hz)
@@ -1254,9 +1220,18 @@ private:
 				case msap1::AcquisitionCommand::waveform_list:
 					break;
 				case msap1::AcquisitionCommand::waveform_trigger: {
+					const auto pretrigger_ms =
+						request.waveform_pretrigger_ms ==
+							msap1::waveform_duration_unspecified
+						? product_settings_.waveform.default_pretrigger_ms
+						: request.waveform_pretrigger_ms;
+					const auto posttrigger_ms =
+						request.waveform_posttrigger_ms ==
+							msap1::waveform_duration_unspecified
+						? product_settings_.waveform.default_posttrigger_ms
+						: request.waveform_posttrigger_ms;
 					const auto session = waveform_.trigger(
-						request.waveform_pretrigger_ms,
-						request.waveform_posttrigger_ms,
+						pretrigger_ms, posttrigger_ms,
 						request.waveform_trigger_source);
 					log_message(waveform_log,
 						mnc::logging::Priority::notice,
@@ -1265,11 +1240,9 @@ private:
 						{{"MNC_WAVEFORM_SESSION",
 						  std::to_string(session.id)},
 						 {"MNC_PRETRIGGER_MS",
-						  std::to_string(request
-							 .waveform_pretrigger_ms)},
+						  std::to_string(pretrigger_ms)},
 						 {"MNC_POSTTRIGGER_MS",
-						  std::to_string(request
-							 .waveform_posttrigger_ms)}});
+						  std::to_string(posttrigger_ms)}});
 					break;
 				}
 				case msap1::AcquisitionCommand::waveform_delete:
@@ -1290,6 +1263,9 @@ private:
 					break;
 				case msap1::AcquisitionCommand::adc_simulator_set:
 					apply_simulator_configuration(request.simulator);
+					break;
+				case msap1::AcquisitionCommand::configuration_apply:
+					apply_product_settings(request.configuration_json);
 					break;
 				case msap1::AcquisitionCommand::meter_latest:
 				case msap1::AcquisitionCommand::meter_stream_read:
@@ -1347,6 +1323,8 @@ private:
 					 request.command ==
 					 msap1::AcquisitionCommand::adc_simulator_set ||
 					 request.command ==
+					 msap1::AcquisitionCommand::configuration_apply ||
+					 request.command ==
 					 msap1::AcquisitionCommand::
 						 adc_diagnostic_run)
 					response.status =
@@ -1366,6 +1344,7 @@ private:
 	}
 
 	Options options_;
+	msap1::settings::ProductSettings product_settings_;
 	msap1::PreparedMeterConfiguration configuration_;
 	msap1::acquisition::MeterDmaReader meter_;
 	msap1::WaveformCapture waveform_;

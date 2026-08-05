@@ -106,6 +106,7 @@ Command target_group(std::string name, std::string summary,
 		     AccessLevel access)
 {
 	Command group(std::move(name), std::move(summary));
+	group.add_subcommand(service_target("settings", command, access));
 	group.add_subcommand(service_target("fpga-acquisition", command, access));
 	group.add_subcommand(service_target("web-backend", command, access));
 	return group;

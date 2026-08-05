@@ -199,7 +199,8 @@ public:
 
 private:
 	struct PendingRequest;
-	boost::asio::awaitable<void> read_loop();
+	boost::asio::awaitable<void>
+	read_loop(std::shared_ptr<FramedConnection> connection);
 	void fail_pending(std::exception_ptr failure);
 
 	boost::asio::any_io_executor executor_;

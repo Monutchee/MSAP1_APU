@@ -2,6 +2,7 @@ add_executable(msap1-fpga-acquisition main.cpp)
 target_link_libraries(msap1-fpga-acquisition PRIVATE
     msap1::acquisition
     msap1::meter
+    msap1::settings
     msap1::waveform
     mnc::logging
     mnc::service
