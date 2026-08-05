@@ -16,6 +16,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 namespace mnc::settings {
@@ -125,6 +126,15 @@ void AtomicFileWriter::write(const std::filesystem::path &path,
 	const auto parent = path.parent_path();
 	if (!parent.empty())
 		std::filesystem::create_directories(parent);
+	const auto filesystem_path = parent.empty()
+		? std::filesystem::path{"."} : parent;
+	struct statvfs filesystem_status {};
+	if (::statvfs(filesystem_path.c_str(), &filesystem_status) != 0)
+		throw std::runtime_error("cannot inspect filesystem containing " +
+			path.string() + ": " + std::strerror(errno));
+	if ((filesystem_status.f_flag & ST_RDONLY) != 0)
+		throw std::runtime_error("filesystem containing " + path.string() +
+			" is read-only; repair the persistent-data filesystem before saving settings");
 	const auto temporary = path.string() + ".tmp." +
 		std::to_string(static_cast<unsigned long>(::getpid()));
 	const int descriptor = ::open(temporary.c_str(),
@@ -164,7 +174,7 @@ void AtomicFileWriter::write(const std::filesystem::path &path,
 		if (::rename(temporary.c_str(), path.c_str()) != 0)
 			throw std::runtime_error("cannot publish " + path.string() +
 				": " + std::strerror(errno));
-		sync_directory(parent.empty() ? std::filesystem::path{"."} : parent);
+		sync_directory(filesystem_path);
 	} catch (...) {
 		if (descriptor_open)
 			(void)::close(descriptor);
