@@ -38,33 +38,23 @@ void require_settings_ok(const msap1::settings::ipc::Response &response)
 
 void update_persistent_settings(
 	const Options &options,
-	const std::function<void(msap1::settings::ProductSettings &)> &update,
-	std::string message)
+	const std::function<void(msap1::settings::ProductSettings &)> &update)
 {
 	using SettingsCommand = msap1::settings::ipc::Command;
 	using SettingsRequest = msap1::settings::ipc::Request;
 	msap1::settings::ipc::SettingsClient client;
 
 	SettingsRequest get;
-	get.command = SettingsCommand::get_draft;
-	auto draft = client.request(std::move(get), options.timeout_ms);
-	require_settings_ok(draft);
-	auto settings = msap1::settings::SettingsCodec::decode(draft.json);
+	get.command = SettingsCommand::get_active;
+	auto active = client.request(std::move(get), options.timeout_ms);
+	require_settings_ok(active);
+	auto settings = msap1::settings::SettingsCodec::decode(active.json);
 	update(settings);
 
-	SettingsRequest patch;
-	patch.command = SettingsCommand::patch_draft;
-	patch.expected_generation = draft.generation;
-	patch.json = msap1::settings::SettingsCodec::encode(settings, false);
-	auto patched = client.request(std::move(patch), options.timeout_ms);
-	require_settings_ok(patched);
-
-	SettingsRequest commit;
-	commit.command = SettingsCommand::commit_draft;
-	commit.expected_revision = patched.revision;
-	commit.expected_generation = patched.generation;
-	commit.message = std::move(message);
-	const auto committed = client.request(std::move(commit),
+	SettingsRequest save;
+	save.command = SettingsCommand::save_active;
+	save.json = msap1::settings::SettingsCodec::encode(settings, false);
+	const auto committed = client.request(std::move(save),
 		std::max(options.timeout_ms, 30000));
 	require_settings_ok(committed);
 }
@@ -344,8 +334,7 @@ int run_source(const Options &options, std::ostream &output)
 		update_persistent_settings(options,
 			[&](auto &settings) {
 				settings.adc.source = *options.adc_source;
-			},
-			"change ADC source to " + *options.adc_source);
+			});
 	}
 	const auto response = client.request(AcquisitionCommand::adc_source_get,
 		options.timeout_ms);
@@ -427,8 +416,7 @@ int run_simulator(const Options &options, std::ostream &output)
 						target.phase_degrees =
 							*options.simulator_phase_degrees[channel];
 				}
-			},
-			"update ADC simulator configuration");
+			});
 		response = client.request(AcquisitionCommand::adc_simulator_get,
 			options.timeout_ms);
 		require_daemon_ok(response);

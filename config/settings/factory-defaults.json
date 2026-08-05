@@ -1,8 +1,5 @@
 {
   "schema_version": 1,
-  "system": {
-    "retained_revisions": 20
-  },
   "metering": {
     "sample_rate_hz": 32000,
     "rms": {

@@ -15,26 +15,14 @@ public:
 	using Mutator = std::function<void(settings::ProductSettings &)>;
 
 	[[nodiscard]] settings::ipc::Response active(int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response draft(int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response diff(int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response history(int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response revision(
-		std::uint64_t revision, int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response patch(
-		const settings::ProductSettings &value,
-		std::uint64_t expected_generation, int timeout_ms = 5000) const;
-	[[nodiscard]] settings::ipc::Response commit(
-		std::string_view message, std::uint64_t expected_revision,
-		std::uint64_t expected_generation, int timeout_ms = 35000) const;
-	[[nodiscard]] settings::ipc::Response discard(int timeout_ms = 3000) const;
-	[[nodiscard]] settings::ipc::Response restore(
-		std::uint64_t revision, int timeout_ms = 3000) const;
+	[[nodiscard]] settings::ipc::Response save(
+		const settings::ProductSettings &value, int timeout_ms = 35000) const;
 	[[nodiscard]] settings::ipc::Response factory_reset(
 		bool confirmed, int timeout_ms = 35000) const;
 
-	/** Update one typed section and commit it through the common transaction. */
-	[[nodiscard]] settings::ProductSettings update_and_commit(
-		const Mutator &mutator, std::string_view message,
+	/** Update one typed section, hot-apply it, and persist active.json. */
+	[[nodiscard]] settings::ProductSettings update_and_save(
+		const Mutator &mutator,
 		int timeout_ms = 35000) const;
 
 private:

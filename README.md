@@ -50,21 +50,21 @@ The canonical factory document is maintained in this repository at
 /usr/share/monutchee/msap1/settings/factory-defaults.json
 ```
 
-On first boot, `msap1-settings` validates that document, creates revision 1,
-and initializes `/data/mnc/settings/active.json`. It is the only process that
-may mutate active settings, persistent drafts, bounded immutable revisions,
-or the separately protected secrets document. Frequency, RMS, conversion,
-normal sample rate, ADC source/simulator, and waveform defaults are all part
-of this one schema-version-1 product document. No legacy `/etc` profile is
-read or migrated.
+On first boot, or when `active.json` is missing or empty, `msap1-settings`
+validates the factory document and initializes
+`/data/mnc/settings/active.json`. It is the only process that may mutate the
+active settings or the separately protected secrets document. Frequency, RMS,
+conversion, normal sample rate, ADC source/simulator, and waveform defaults
+are all part of this one schema-version-1 product document. No legacy `/etc`
+profile is read or migrated.
 
-Settings changes are staged as a persistent draft and committed with stale
-revision/generation protection. A commit invokes acquisition's coordinated
-stop/configure/readback/restart transaction, publishes the active document
-only after successful verification, and restores the prior configuration on
-failure. Factory reset loads the packaged APU-owned document, clears settings
-history and secrets, and preserves meter records, waveforms, logs, and
-firmware.
+Each settings update validates the complete candidate, invokes acquisition's
+coordinated stop/configure/readback/restart transaction, and atomically saves
+`active.json` only after successful verification. A failed apply or write
+restores the prior runtime configuration. Factory reset loads the packaged
+APU-owned document, clears secrets, and preserves meter records, waveforms,
+logs, and firmware. The service intentionally keeps no drafts or revision
+history.
 
 `mnc meter-view` displays the user-facing meter channels CH0 through CH6.
 CH7/VCM remains available in the MTR1 record and internal API model for future
@@ -77,8 +77,8 @@ readback, then requests capture START. Shutdown requests STOP before closing
 DMA.
 
 `metering.rms.remove_dc` selects the PL RMS reference. It defaults to `true`,
-producing AC RMS about the window mean. Commit a settings draft to hot-apply
-the change; no process or device reboot is required.
+producing AC RMS about the window mean. Saving the settings hot-applies the
+change; no process or device reboot is required.
 
 Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
@@ -129,10 +129,8 @@ The authenticated external API is:
 - `GET /api/v1/adc/source` and `PUT /api/v1/adc/source`
 - `GET /api/v1/adc/simulator` and `PUT /api/v1/adc/simulator`
 - `GET /api/v1/settings/active`
-- `GET` and `PUT /api/v1/settings/draft` (administrator write)
-- `GET /api/v1/settings/diff` and `GET /api/v1/settings/history`
-- `POST /api/v1/settings/commit`, `/discard`, `/restore`, and
-  `/factory-reset` (administrator only)
+- `PUT /api/v1/settings/active` (administrator only)
+- `POST /api/v1/settings/factory-reset` (administrator only)
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes

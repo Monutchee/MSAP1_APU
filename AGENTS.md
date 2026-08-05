@@ -89,15 +89,16 @@
   MNCI frames, correlation IDs, or acquisition payload byte streams directly.
 - `msap1-settings` is the sole persistent settings authority. The canonical
   factory document is `config/settings/factory-defaults.json`; Yocto installs
-  that exact file under `/usr/share/monutchee/msap1/settings/`, while active,
-  draft, pending, revision, and secret state belongs under
-  `/data/mnc/settings/`. Acquisition, CLI, and Web code must use the typed
-  settings IPC API rather than reading or writing product configuration files.
-  Do not reintroduce legacy `/etc` ADC profiles or duplicate factory values in
-  packaging recipes.
+  that exact file under `/usr/share/monutchee/msap1/settings/`, while the
+  active document and secret state belong under `/data/mnc/settings/`.
+  Missing, empty, or invalid active settings recover atomically from the
+  packaged factory document. Acquisition, CLI, and Web code must
+  use the typed settings IPC API rather than reading or writing product
+  configuration files. Do not add drafts or revision history, reintroduce
+  legacy `/etc` ADC profiles, or duplicate factory values in packaging recipes.
 - The ADC capture rate defaults to 32,000 frames/s. Persistent changes to the
   ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
-  waveform defaults must be committed through the settings authority and
+  waveform defaults must be saved through the settings authority and
   hot-applied by acquisition. `mnc adc rate --sps` remains an explicitly
   temporary diagnostic override.
 - Source and simulator changes must use the daemon's coordinated stop,

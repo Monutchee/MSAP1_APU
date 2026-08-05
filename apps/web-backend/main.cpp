@@ -344,51 +344,16 @@ struct WaveformDto {
 };
 
 struct SettingsDocumentDto {
-	std::uint64_t revision = 0;
-	std::uint64_t draft_generation = 0;
+	std::string content_hash;
 	bool recovery_mode = false;
 	std::string recovery_reason;
 	msap1::settings::ProductSettings settings;
-};
-
-struct SettingsDiffDto {
-	bool dirty = false;
-	std::string unified;
-};
-
-struct SettingsRevisionDto {
-	std::uint64_t revision = 0;
-	std::string hash;
-};
-
-struct SettingsHistoryDto {
-	std::vector<SettingsRevisionDto> revisions;
-};
-
-struct SettingsPatchDto {
-	std::uint64_t expected_draft_generation = 0;
-	msap1::settings::ProductSettings settings;
-};
-
-struct SettingsCommitDto {
-	std::uint64_t expected_base_revision = 0;
-	std::uint64_t expected_draft_generation = 0;
-	std::string message;
-};
-
-struct SettingsRestoreDto {
-	std::uint64_t revision = 0;
 };
 
 struct SettingsFactoryResetDto {
 	bool confirmed = false;
 };
 
-struct SettingsTransactionDto {
-	std::string transaction_id;
-	std::uint64_t revision = 0;
-	std::string status;
-};
 
 std::string adc_source_name(std::uint32_t source);
 
@@ -1000,20 +965,11 @@ msap1::SimulatorConfig adc_simulator_settings(
 SettingsDocumentDto settings_document(
 	const msap1::settings::ipc::Response &response)
 {
-	return {response.revision, response.generation,
+	return {response.content_hash,
 		response.status == msap1::settings::ipc::Status::recovery_mode,
 		response.status == msap1::settings::ipc::Status::recovery_mode
 			? response.message : std::string{},
 		msap1::settings::SettingsCodec::decode(response.json)};
-}
-
-SettingsHistoryDto settings_history(std::string_view text)
-{
-	SettingsHistoryDto result;
-	std::istringstream input(std::string{text});
-	for (SettingsRevisionDto entry; input >> entry.revision >> entry.hash;)
-		result.revisions.push_back(std::move(entry));
-	return result;
 }
 
 std::string getenv_or(const char *name, const char *fallback)
@@ -1144,157 +1100,22 @@ int run_web_backend()
 				}
 			}, webengine::Role::Viewer);
 
-		engine.add_api(webengine::http::verb::get,
-			"/api/v1/settings/draft",
-			[](const webengine::RequestContext &) {
-				try {
-					return json_response(webengine::http::status::ok,
-						settings_document(settings_gateway().draft()));
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/draft", error);
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::get,
-			"/api/v1/settings/diff",
-			[](const webengine::RequestContext &) {
-				try {
-					const auto response = settings_gateway().diff();
-					return json_response(webengine::http::status::ok,
-						SettingsDiffDto{!response.message.empty(),
-							response.message});
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/diff", error);
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::get,
-			"/api/v1/settings/history",
-			[](const webengine::RequestContext &) {
-				try {
-					return json_response(webengine::http::status::ok,
-						settings_history(settings_gateway().history().message));
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/history", error);
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::get,
-			"/api/v1/settings/revision",
-			[](const webengine::RequestContext &context) {
-				try {
-					const auto target = context.request.target();
-					const auto params = query_parameters(std::string_view{
-						target.data(), target.size()});
-					const auto item = params.find("revision");
-					if (item == params.end())
-						throw std::invalid_argument(
-							"revision query parameter is required");
-					std::uint64_t revision = 0;
-					const auto parsed = std::from_chars(item->second.data(),
-						item->second.data() + item->second.size(), revision);
-					if (parsed.ec != std::errc{} ||
-					    parsed.ptr != item->second.data() + item->second.size() ||
-					    revision == 0u)
-						throw std::invalid_argument("revision is invalid");
-					return json_response(webengine::http::status::ok,
-						settings_document(
-							settings_gateway().revision(revision)));
-				} catch (const std::invalid_argument &error) {
-					return error_response(webengine::http::status::bad_request,
-						error.what());
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/revision", error);
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
 		engine.add_api(webengine::http::verb::put,
-			"/api/v1/settings/draft",
+			"/api/v1/settings/active",
 			[](const webengine::RequestContext &context) {
 				try {
-					SettingsPatchDto patch;
-					if (glz::read_json(patch, context.request.body()))
+					msap1::settings::ProductSettings settings;
+					if (glz::read_json(settings, context.request.body()))
 						return error_response(
 							webengine::http::status::bad_request,
-							"invalid settings draft JSON");
+							"invalid settings JSON");
 					return json_response(webengine::http::status::ok,
-						settings_document(settings_gateway().patch(
-							patch.settings,
-							patch.expected_draft_generation)));
+						settings_document(settings_gateway().save(settings)));
 				} catch (const std::invalid_argument &error) {
 					return error_response(webengine::http::status::bad_request,
 						error.what());
 				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/draft", error);
-					return error_response(webengine::http::status::conflict,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::post,
-			"/api/v1/settings/commit",
-			[](const webengine::RequestContext &context) {
-				try {
-					SettingsCommitDto commit;
-					if (glz::read_json(commit, context.request.body()))
-						return error_response(
-							webengine::http::status::bad_request,
-							"invalid settings commit JSON");
-					const auto response = settings_gateway().commit(
-						commit.message, commit.expected_base_revision,
-						commit.expected_draft_generation);
-					return json_response(webengine::http::status::ok,
-						SettingsTransactionDto{response.transaction_id,
-							response.revision, "completed"});
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/commit", error);
-					return error_response(webengine::http::status::conflict,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::post,
-			"/api/v1/settings/discard",
-			[](const webengine::RequestContext &) {
-				try {
-					(void)settings_gateway().discard();
-					return json_response(webengine::http::status::ok,
-						glz::obj{"discarded", true});
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/discard", error);
-					return error_response(
-						webengine::http::status::service_unavailable,
-						error.what());
-				}
-			}, webengine::Role::Admin);
-
-		engine.add_api(webengine::http::verb::post,
-			"/api/v1/settings/restore",
-			[](const webengine::RequestContext &context) {
-				try {
-					SettingsRestoreDto restore;
-					if (glz::read_json(restore, context.request.body()) ||
-					    restore.revision == 0u)
-						return error_response(
-							webengine::http::status::bad_request,
-							"valid settings revision is required");
-					return json_response(webengine::http::status::ok,
-						settings_document(settings_gateway().restore(
-							restore.revision)));
-				} catch (const std::exception &error) {
-					log_api_failure("/api/v1/settings/restore", error);
+					log_api_failure("/api/v1/settings/active", error);
 					return error_response(webengine::http::status::conflict,
 						error.what());
 				}
@@ -1310,11 +1131,9 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"factory reset confirmation is required");
-					const auto response =
-						settings_gateway().factory_reset(true);
+					const auto response = settings_gateway().factory_reset(true);
 					return json_response(webengine::http::status::ok,
-						SettingsTransactionDto{response.transaction_id,
-							response.revision, "completed"});
+						settings_document(response));
 				} catch (const std::exception &error) {
 					log_api_failure("/api/v1/settings/factory-reset", error);
 					return error_response(webengine::http::status::conflict,
@@ -1545,12 +1364,11 @@ int run_web_backend()
 							webengine::http::status::bad_request,
 							"invalid frequency configuration JSON");
 					}
-					(void)settings_gateway().update_and_commit(
+					(void)settings_gateway().update_and_save(
 						[&](auto &settings) {
 							settings.metering.frequency =
 								frequency_settings(configuration);
-						},
-						"frequency configuration updated");
+						});
 					const auto response = acquisition_gateway()
 						.frequency_configuration();
 					require_acquisition_ok(response);
@@ -1616,11 +1434,10 @@ int run_web_backend()
 							webengine::http::status::bad_request,
 							"invalid ADC source JSON");
 					(void)adc_source_value(configuration.source);
-					(void)settings_gateway().update_and_commit(
+					(void)settings_gateway().update_and_save(
 						[&](auto &settings) {
 							settings.adc.source = configuration.source;
-						},
-						"ADC source changed to " + configuration.source);
+						});
 					const auto response = acquisition_gateway().adc_source();
 					require_acquisition_ok(response);
 					log_message(api_log, mnc::logging::Priority::notice,
@@ -1672,12 +1489,11 @@ int run_web_backend()
 						return error_response(
 							webengine::http::status::bad_request,
 							"invalid ADC simulator JSON");
-					(void)settings_gateway().update_and_commit(
+					(void)settings_gateway().update_and_save(
 						[&](auto &settings) {
 							settings.adc.simulator =
 								adc_simulator_settings(configuration);
-						},
-						"ADC simulator configuration updated");
+						});
 					const auto response = acquisition_gateway()
 						.simulator_configuration();
 					require_acquisition_ok(response);

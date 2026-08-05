@@ -102,23 +102,15 @@ private:
 
 	static bool mutation_command(Command command)
 	{
-		return command == Command::patch_draft ||
-		       command == Command::commit_draft ||
-		       command == Command::discard_draft ||
-		       command == Command::restore_to_draft ||
+		return command == Command::save_active ||
 		       command == Command::factory_reset ||
 		       command == Command::set_secret;
 	}
 
-	static Response make_event(std::string message,
-				   std::uint64_t revision = 0,
-				   std::uint64_t generation = 0,
-				   std::string transaction_id = {})
+	static Response make_event(std::string message, std::string hash = {})
 	{
 		Response event;
-		event.revision = revision;
-		event.generation = generation;
-		event.transaction_id = std::move(transaction_id);
+		event.content_hash = std::move(hash);
 		event.message = std::move(message);
 		return event;
 	}
@@ -126,9 +118,6 @@ private:
 	static bool allowed_during_recovery(Command command)
 	{
 		return command == Command::get_active ||
-		       command == Command::list_revisions ||
-		       command == Command::get_revision ||
-		       command == Command::get_transaction_status ||
 		       command == Command::get_secret_status ||
 		       command == Command::factory_reset;
 	}
@@ -137,8 +126,7 @@ private:
 	{
 		if (message.find("recovery mode") != std::string_view::npos)
 			return Status::recovery_mode;
-		if (message.find("stale") != std::string_view::npos ||
-		    message.find("no settings draft") != std::string_view::npos)
+		if (message.find("stale") != std::string_view::npos)
 			return Status::conflict;
 		if (message.find("rejected settings apply") != std::string_view::npos ||
 		    message.find("settings verification failed") != std::string_view::npos)
@@ -203,7 +191,7 @@ private:
 				response.status = Status::permission_denied;
 				response.message = "settings mutation requires administrator access";
 			} else {
-				dispatch(request, credentials.uid, connection, response, event);
+				dispatch(request, connection, response, event);
 			}
 		} catch (const std::invalid_argument &error) {
 			response.status = Status::invalid_request;
@@ -219,15 +207,13 @@ private:
 	}
 
 	void dispatch(const msap1::settings::ipc::Request &request,
-		      std::uint32_t uid,
 		      const mnc::ipc::UnixStreamServer::Connection &connection,
 		      Response &response, std::optional<Response> &event)
 	{
 		switch (request.command) {
 		case Command::get_active: {
 			const auto snapshot = handler_.active();
-			response.revision = snapshot.revision;
-			response.message = snapshot.content_hash;
+			response.content_hash = snapshot.content_hash;
 			response.json = msap1::settings::SettingsCodec::encode(snapshot.settings);
 			if (handler_.recovery_mode()) {
 				response.status = Status::recovery_mode;
@@ -236,74 +222,19 @@ private:
 			}
 			break;
 		}
-		case Command::get_draft: {
-			const auto snapshot = handler_.draft();
-			response.revision = snapshot.base_revision;
-			response.generation = snapshot.generation;
-			response.json = msap1::settings::SettingsCodec::encode(snapshot.settings);
-			break;
-		}
-		case Command::patch_draft: {
+		case Command::save_active: {
 			const auto settings = msap1::settings::SettingsCodec::decode(request.json);
-			const auto result = handler_.patch({settings},
-				request.expected_generation);
-			response.revision = result.draft.base_revision;
-			response.generation = result.draft.generation;
-			response.json = msap1::settings::SettingsCodec::encode(
-				result.draft.settings);
-			event = make_event("SettingsDraftPatched",
-				result.draft.base_revision, result.draft.generation);
-			break;
-		}
-		case Command::get_diff: {
-			const auto diff = handler_.diff();
-			response.message = diff.unified;
-			break;
-		}
-		case Command::commit_draft: {
-			const auto transaction = handler_.commit(request.message,
-				request.expected_revision, request.expected_generation,
-				{uid, "uid:" + std::to_string(uid)});
-			response.transaction_id = transaction.id;
-			response.revision = transaction.revision;
-			event = make_event("SettingsCommitted", transaction.revision,
-				0u, transaction.id);
-			break;
-		}
-		case Command::discard_draft:
-			handler_.discard();
-			event = make_event("SettingsDraftDiscarded");
-			break;
-		case Command::list_revisions: {
-			for (const auto &entry : handler_.history()) {
-				if (!response.message.empty())
-					response.message += '\n';
-				response.message += std::to_string(entry.revision) + " " +
-					entry.hash;
-			}
-			break;
-		}
-		case Command::get_revision:
-			response.revision = request.revision;
-			response.json = msap1::settings::SettingsCodec::encode(
-				handler_.revision(request.revision));
-			break;
-		case Command::restore_to_draft: {
-			const auto snapshot = handler_.restore_to_draft(request.revision);
-			response.revision = snapshot.base_revision;
-			response.generation = snapshot.generation;
+			const auto snapshot = handler_.save(settings);
+			response.content_hash = snapshot.content_hash;
 			response.json = msap1::settings::SettingsCodec::encode(snapshot.settings);
-			event = make_event("SettingsRevisionRestoredToDraft",
-				snapshot.base_revision, snapshot.generation);
+			event = make_event("SettingsSaved", snapshot.content_hash);
 			break;
 		}
 		case Command::factory_reset: {
-			const auto transaction = handler_.factory_reset(
-				{request.confirmed, {uid, "uid:" + std::to_string(uid)}});
-			response.transaction_id = transaction.id;
-			response.revision = transaction.revision;
-			event = make_event("SettingsFactoryReset", transaction.revision,
-				0u, transaction.id);
+			const auto snapshot = handler_.factory_reset(request.confirmed);
+			response.content_hash = snapshot.content_hash;
+			response.json = msap1::settings::SettingsCodec::encode(snapshot.settings);
+			event = make_event("SettingsFactoryReset", snapshot.content_hash);
 			break;
 		}
 		case Command::set_secret:
@@ -313,20 +244,6 @@ private:
 		case Command::get_secret_status:
 			response.message = handler_.has_secrets() ? "present" : "absent";
 			break;
-		case Command::get_transaction_status: {
-			const auto active = handler_.active();
-			const auto expected = "settings-" + std::to_string(active.revision) +
-				"-" + active.content_hash.substr(0, 12);
-			response.transaction_id = request.message;
-			response.revision = active.revision;
-			if (request.message == expected)
-				response.message = "committed";
-			else {
-				response.status = Status::invalid_request;
-				response.message = "unknown settings transaction";
-			}
-			break;
-		}
 		case Command::subscribe_events:
 			subscribers_.push_back(connection);
 			response.message = "subscribed";

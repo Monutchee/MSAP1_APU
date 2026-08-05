@@ -9,23 +9,15 @@
 
 namespace msap1::settings::ipc {
 
-inline constexpr std::uint32_t protocol_version = 1;
+inline constexpr std::uint32_t protocol_version = 2;
 
 enum class Command : std::uint32_t {
 	get_active = 1,
-	get_draft = 2,
-	patch_draft = 3,
-	get_diff = 4,
-	commit_draft = 5,
-	discard_draft = 6,
-	list_revisions = 7,
-	get_revision = 8,
-	restore_to_draft = 9,
-	factory_reset = 10,
-	get_transaction_status = 11,
-	set_secret = 12,
-	get_secret_status = 13,
-	subscribe_events = 14,
+	save_active = 2,
+	factory_reset = 3,
+	set_secret = 4,
+	get_secret_status = 5,
+	subscribe_events = 6,
 };
 
 enum class Status : std::uint32_t {
@@ -40,19 +32,13 @@ enum class Status : std::uint32_t {
 
 struct Request {
 	Command command = Command::get_active;
-	std::uint64_t expected_revision = 0;
-	std::uint64_t expected_generation = 0;
-	std::uint64_t revision = 0;
 	bool confirmed = false;
-	std::string message;
 	std::string json;
 };
 
 struct Response {
 	Status status = Status::ok;
-	std::uint64_t revision = 0;
-	std::uint64_t generation = 0;
-	std::string transaction_id;
+	std::string content_hash;
 	std::string message;
 	std::string json;
 };

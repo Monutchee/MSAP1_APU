@@ -50,11 +50,7 @@ struct Options {
 	bool log_json = false;
 	bool health_refresh = false;
 	bool health_full = false;
-	bool settings_draft = false;
 	bool settings_confirm = false;
-	std::optional<std::uint64_t> settings_revision;
-	std::optional<std::string> settings_message;
-	std::optional<std::string> settings_transaction;
 	bool socket_overridden = false;
 	bool timeout_overridden = false;
 	int timeout_ms = 3000;

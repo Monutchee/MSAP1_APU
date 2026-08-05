@@ -47,13 +47,9 @@ mnc::ipc::Frame encode_request(const Request &request)
 	mnc::ipc::ByteWriter writer;
 	writer.u16(protocol_version);
 	writer.u16(0);
-	writer.u64(request.expected_revision);
-	writer.u64(request.expected_generation);
-	writer.u64(request.revision);
 	writer.u8(request.confirmed ? 1u : 0u);
 	writer.u8(0);
 	writer.u16(0);
-	write_string(writer, request.message);
 	write_string(writer, request.json);
 	return {mnc::ipc::FrameKind::request,
 		static_cast<std::uint32_t>(request.command), next_correlation(),
@@ -72,13 +68,9 @@ Request decode_request(const mnc::ipc::Frame &frame)
 	if (reader.u16() != protocol_version)
 		throw std::invalid_argument("unsupported settings protocol version");
 	(void)reader.u16();
-	result.expected_revision = reader.u64();
-	result.expected_generation = reader.u64();
-	result.revision = reader.u64();
 	result.confirmed = reader.u8() != 0u;
 	(void)reader.u8();
 	(void)reader.u16();
-	result.message = read_string(reader);
 	result.json = read_string(reader);
 	reader.require_finished();
 	return result;
@@ -90,9 +82,7 @@ mnc::ipc::Frame encode_response(const Response &response,
 	mnc::ipc::ByteWriter writer;
 	writer.u16(protocol_version);
 	writer.u16(static_cast<std::uint16_t>(response.status));
-	writer.u64(response.revision);
-	writer.u64(response.generation);
-	write_string(writer, response.transaction_id);
+	write_string(writer, response.content_hash);
 	write_string(writer, response.message);
 	write_string(writer, response.json);
 	return {response.status == Status::ok ? mnc::ipc::FrameKind::response
@@ -118,9 +108,7 @@ Response decode_response(const mnc::ipc::Frame &frame)
 		throw std::invalid_argument("unsupported settings protocol version");
 	Response result;
 	result.status = static_cast<Status>(reader.u16());
-	result.revision = reader.u64();
-	result.generation = reader.u64();
-	result.transaction_id = read_string(reader);
+	result.content_hash = read_string(reader);
 	result.message = read_string(reader);
 	result.json = read_string(reader);
 	reader.require_finished();
