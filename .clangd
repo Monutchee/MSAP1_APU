@@ -1,0 +1,5 @@
+CompileFlags:
+    # Preset binary dirs are build/Debug and build/Release; point clangd at
+    # the Debug database (change to build/Release if that's what you build).
+    CompilationDatabase: build/Debug
+    Add: [-Wno-unknown-warning-option]
