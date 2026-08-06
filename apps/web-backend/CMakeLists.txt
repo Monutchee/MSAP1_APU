@@ -3,6 +3,12 @@ add_executable(msap1-web-backend
     acquisition_gateway.cpp
     settings_gateway.cpp
     msap1_auth_provider.cpp
+    api/health_routes.cpp
+    api/meter_routes.cpp
+    api/adc_routes.cpp
+    api/waveform_routes.cpp
+    api/settings_routes.cpp
+    api/developer_routes.cpp
 )
 
 target_link_libraries(msap1-web-backend PRIVATE
