@@ -2,4 +2,7 @@ CompileFlags:
     # Preset binary dirs are build/Debug and build/Release; point clangd at
     # the Debug database (change to build/Release if that's what you build).
     CompilationDatabase: build/Debug
-    Add: [-Wno-unknown-warning-option]
+    # clangd 18 reports __cpp_concepts=201907L, which makes libstdc++ 13 hide
+    # std::expected and everything that includes it (fixed in clangd 19+).
+    # Force the C++20-conformant value so headers parse correctly.
+    Add: [-Wno-unknown-warning-option, -D__cpp_concepts=202002L, -Wno-builtin-macro-redefined]
