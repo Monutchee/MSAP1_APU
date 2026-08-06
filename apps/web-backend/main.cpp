@@ -641,7 +641,7 @@ std::string waveform_state_name(msap1::WaveformSessionState state)
 	return "unknown";
 }
 
-WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
+WaveformDto waveform_status(const msap1::WaveformResponse &response)
 {
 	const auto &status = response.waveform;
 	WaveformDto result{
@@ -663,12 +663,8 @@ WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
 		status.incomplete_sessions,
 		{},
 	};
-	const auto count = std::min<std::size_t>(
-		response.waveform_session_count,
-		response.waveform_sessions.size());
-	result.sessions.reserve(count);
-	for (std::size_t index = 0; index < count; ++index) {
-		const auto &session = response.waveform_sessions[index];
+	result.sessions.reserve(response.sessions.size());
+	for (const auto &session : response.sessions) {
 		result.sessions.push_back({
 			session.id,
 			waveform_state_name(session.state),
@@ -679,22 +675,22 @@ WaveformDto waveform_status(const msap1::AcquisitionResponse &response)
 			session.trigger_realtime_nanoseconds,
 			session.sample_rate_hz,
 			session.event_count,
-			session.filename.data(),
+			session.filename,
 		});
 	}
 	return result;
 }
 
-void require_acquisition_ok(const msap1::AcquisitionResponse &response)
+void require_acquisition_ok(msap1::AcquisitionStatus status)
 {
-	if (response.status != msap1::AcquisitionStatus::ok)
+	if (status != msap1::AcquisitionStatus::ok)
 		throw std::runtime_error("acquisition daemon returned status " +
-			std::to_string(static_cast<std::uint32_t>(response.status)));
+			std::to_string(static_cast<std::uint32_t>(status)));
 }
 
-MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
+MeterHealthDto meter_health(const msap1::InfoResponse &response)
 {
-	const auto &adc = response.rpu_health;
+	const auto adc = response.rpu_health.value();
 	const auto status = msap1::evaluate_meter_health(response);
 	std::vector<HealthReasonDto> degraded_reasons;
 	degraded_reasons.reserve(status.adc_degraded_reasons.size());
@@ -702,10 +698,10 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 		degraded_reasons.push_back({reason.code, reason.message});
 	return {
 		status.healthy,
-		{response.running != 0u, response.has_meter_record != 0u,
+		{response.running, response.has_meter_record,
 		 status.record_stale, response.meter_record_age_ms,
 		 response.rpu_health_age_ms, response.health_probe_failures,
-		 response.health_probe_pending != 0u,
+		 response.health_probe_pending,
 		 response.meter_records, response.dma_bytes, response.dma_read_errors,
 		 response.invalid_records, response.sequence_gaps,
 		 response.configuration_generation},
@@ -736,7 +732,7 @@ MeterHealthDto meter_health(const msap1::AcquisitionResponse &response)
 	};
 }
 
-HealthDto system_health(const msap1::AcquisitionResponse &response,
+HealthDto system_health(const msap1::InfoResponse &response,
 			const webengine::NginxController &nginx)
 {
 	const auto meter = meter_health(response);
@@ -751,9 +747,9 @@ HealthDto system_health(const msap1::AcquisitionResponse &response,
 	};
 }
 
-MeterReadingsDto readings(const msap1::AcquisitionResponse &response)
+MeterReadingsDto readings(const msap1::InfoResponse &response)
 {
-	if (response.running == 0u || response.has_meter_record == 0u)
+	if (!response.running || !response.has_meter_record)
 		throw std::runtime_error("no meter result is available");
 	const auto &record = response.latest_record;
 	if (!record.header_valid())
@@ -882,20 +878,19 @@ std::uint32_t adc_source_value(std::string_view source)
 	throw std::invalid_argument("ADC source must be physical or simulator");
 }
 
-AdcSourceDto adc_source(const msap1::AcquisitionResponse &response)
+AdcSourceDto adc_source(const msap1::AdcSourceResponse &response)
 {
 	const bool simulator = response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
-	const auto &health = response.rpu_health;
 	const bool source_healthy = simulator
-		? (health.health_flags & MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u
-		: (health.health_flags & MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS) != 0u;
+		? (response.health_flags & MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u
+		: (response.health_flags & MSAP1_ADC_HEALTH_PHYSICAL_DIAGNOSTICS) != 0u;
 	return {adc_source_name(response.adc_source),
 		response.configuration_generation,
-		response.running != 0u,
+		response.running,
 		source_healthy};
 }
 
-AdcSimulatorDto adc_simulator(const msap1::AcquisitionResponse &response)
+AdcSimulatorDto adc_simulator(const msap1::SimulatorResponse &response)
 {
 	AdcSimulatorDto result;
 	result.frequency_hz =
@@ -909,14 +904,12 @@ AdcSimulatorDto adc_simulator(const msap1::AcquisitionResponse &response)
 	}
 	result.active_source = adc_source_name(response.adc_source);
 	result.configuration_generation = response.configuration_generation;
-	result.active_generation = response.rpu_health.simulator_active_generation;
-	result.generated_frames = response.rpu_health.simulator_frame_count;
-	result.saturation_count = response.rpu_health.simulator_saturation_count;
-	result.missed_sample_count =
-		response.rpu_health.simulator_missed_sample_count;
+	result.active_generation = response.simulator_active_generation;
+	result.generated_frames = response.simulator_frame_count;
+	result.saturation_count = response.simulator_saturation_count;
+	result.missed_sample_count = response.simulator_missed_sample_count;
 	result.healthy =
-		(response.rpu_health.health_flags &
-		 MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u;
+		(response.health_flags & MSAP1_ADC_HEALTH_SIMULATOR_HEALTHY) != 0u;
 	return result;
 }
 
@@ -1069,7 +1062,7 @@ int run_web_backend()
 				try {
 					const auto response =
 						acquisition_gateway().information();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						system_health(response, nginx));
 				} catch (const std::exception &error) {
@@ -1200,7 +1193,7 @@ int run_web_backend()
 				try {
 					const auto response =
 						acquisition_gateway().information();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						meter_health(response));
 				} catch (const std::exception &error) {
@@ -1217,7 +1210,7 @@ int run_web_backend()
 				try {
 					const auto response =
 						acquisition_gateway().information();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						readings(response));
 				} catch (const std::exception &error) {
@@ -1234,7 +1227,7 @@ int run_web_backend()
 				try {
 					const auto response =
 						acquisition_gateway().waveform_status();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						waveform_status(response));
 				} catch (const std::exception &error) {
@@ -1266,7 +1259,7 @@ int run_web_backend()
 							trigger.pretrigger_ms,
 							trigger.posttrigger_ms,
 							msap1::WaveformTriggerSource::manual_web);
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
 						"manual waveform capture triggered",
@@ -1305,7 +1298,7 @@ int run_web_backend()
 					const auto response =
 						acquisition_gateway().delete_waveform(
 							deletion.session_id);
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
 						"waveform capture deleted",
@@ -1329,7 +1322,7 @@ int run_web_backend()
 				try {
 					const auto response = acquisition_gateway()
 						.frequency_configuration();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						frequency_configuration(response.frequency));
 				} catch (const std::exception &error) {
@@ -1371,7 +1364,7 @@ int run_web_backend()
 						});
 					const auto response = acquisition_gateway()
 						.frequency_configuration();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					log_message(api_log,
 						mnc::logging::Priority::notice,
 						"frequency configuration update applied",
@@ -1411,7 +1404,7 @@ int run_web_backend()
 				try {
 					const auto response =
 						acquisition_gateway().adc_source();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						adc_source(response));
 				} catch (const std::exception &error) {
@@ -1439,7 +1432,7 @@ int run_web_backend()
 							settings.adc.source = configuration.source;
 						});
 					const auto response = acquisition_gateway().adc_source();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					log_message(api_log, mnc::logging::Priority::notice,
 						"ADC source changed to " + configuration.source,
 						"adc_source_changed",
@@ -1467,7 +1460,7 @@ int run_web_backend()
 				try {
 					const auto response = acquisition_gateway()
 						.simulator_configuration();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					return json_response(webengine::http::status::ok,
 						adc_simulator(response));
 				} catch (const std::exception &error) {
@@ -1496,7 +1489,7 @@ int run_web_backend()
 						});
 					const auto response = acquisition_gateway()
 						.simulator_configuration();
-					require_acquisition_ok(response);
+					require_acquisition_ok(response.status);
 					log_message(api_log, mnc::logging::Priority::notice,
 						"ADC simulator configuration applied",
 						"adc_simulator_configuration_applied",
@@ -1517,13 +1510,12 @@ int run_web_backend()
 				}
 			}, webengine::Role::Admin);
 
-		const auto capture = [](msap1::AcquisitionCommand command) {
-			return [command](const webengine::RequestContext &) {
-				const bool query =
-					command == msap1::AcquisitionCommand::info;
+		// nullopt = report only; true/false = start/stop capture.
+		const auto capture = [](std::optional<bool> start_capture) {
+			return [start_capture](const webengine::RequestContext &) {
+				const bool query = !start_capture.has_value();
 				const auto correlation = request_id();
-				const bool starting =
-					command == msap1::AcquisitionCommand::start;
+				const bool starting = start_capture.value_or(false);
 				if (!query)
 					log_message(api_log,
 						mnc::logging::Priority::info,
@@ -1535,10 +1527,18 @@ int run_web_backend()
 							: "capture_stop_requested",
 						{{"MNC_REQUEST_ID", correlation}});
 				try {
-					const auto response = query
-						? acquisition_gateway().information(3000)
-						: acquisition_gateway().set_capture(starting);
-					require_acquisition_ok(response);
+					bool running = false;
+					if (query) {
+						const auto response =
+							acquisition_gateway().information(3000);
+						require_acquisition_ok(response.status);
+						running = response.running;
+					} else {
+						const auto response =
+							acquisition_gateway().set_capture(starting);
+						require_acquisition_ok(response.status);
+						running = response.running;
+					}
 					if (!query)
 						log_message(api_log,
 							mnc::logging::Priority::notice,
@@ -1551,7 +1551,7 @@ int run_web_backend()
 							{{"MNC_REQUEST_ID",
 							  correlation}});
 					return json_response(webengine::http::status::ok,
-						AdcCaptureDto{response.running != 0u});
+						AdcCaptureDto{running});
 				} catch (const std::exception &error) {
 					log_message(api_log,
 						mnc::logging::Priority::error,
@@ -1566,14 +1566,11 @@ int run_web_backend()
 			};
 		};
 		engine.add_api(webengine::http::verb::get, "/api/v1/adc/capture",
-			capture(msap1::AcquisitionCommand::info),
-			webengine::Role::Viewer);
+			capture(std::nullopt), webengine::Role::Viewer);
 		engine.add_api(webengine::http::verb::put, "/api/v1/adc/capture",
-			capture(msap1::AcquisitionCommand::start),
-			webengine::Role::Admin);
+			capture(true), webengine::Role::Admin);
 		engine.add_api(webengine::http::verb::delete_, "/api/v1/adc/capture",
-			capture(msap1::AcquisitionCommand::stop),
-			webengine::Role::Admin);
+			capture(false), webengine::Role::Admin);
 
 		std::atomic<bool> engine_finished{false};
 		std::exception_ptr engine_error;

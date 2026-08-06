@@ -147,13 +147,11 @@ private:
 
 	void apply(const msap1::settings::ProductSettings &settings)
 	{
-		msap1::AcquisitionRequest request;
-		request.command = msap1::AcquisitionCommand::configuration_apply;
-		request.sample_rate_hz = settings.metering.sample_rate_hz;
+		msap1::ConfigurationApplyRequest request;
 		request.configuration_json =
 			msap1::settings::SettingsCodec::encode(settings, false);
 		msap1::AcquisitionClient client;
-		const auto response = client.request(std::move(request), 30000);
+		const auto response = client.request(request, 30000);
 		if (response.status != msap1::AcquisitionStatus::ok)
 			throw std::runtime_error("acquisition rejected settings apply");
 	}

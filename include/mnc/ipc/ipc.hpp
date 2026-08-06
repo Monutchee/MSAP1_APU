@@ -42,6 +42,19 @@ struct Frame {
 	std::vector<std::byte> payload;
 };
 
+/** Adapts text-oriented serializers (JSON/BEVE buffers) to Frame::payload. */
+[[nodiscard]] inline std::vector<std::byte> to_payload(std::string_view text)
+{
+	const auto *data = reinterpret_cast<const std::byte *>(text.data());
+	return {data, data + text.size()};
+}
+
+[[nodiscard]] inline std::string_view
+payload_view(std::span<const std::byte> payload)
+{
+	return {reinterpret_cast<const char *>(payload.data()), payload.size()};
+}
+
 struct PeerCredentials {
 	std::int32_t pid = -1;
 	std::uint32_t uid = 0;

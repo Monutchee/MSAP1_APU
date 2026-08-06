@@ -3,10 +3,9 @@
 
 #include "msap1/acquisition_ipc.hpp"
 
-#include <algorithm>
 #include <cstdint>
-#include <iomanip>
 #include <ostream>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,7 +15,7 @@ namespace {
 
 struct WaveformResult {
 	WaveformStatus status;
-	std::vector<WaveformSessionSummary> sessions;
+	std::vector<WaveformSessionIpc> sessions;
 };
 
 std::uint32_t parse_duration_ms(const std::string &value,
@@ -34,9 +33,9 @@ std::uint32_t parse_duration_ms(const std::string &value,
 	return static_cast<std::uint32_t>(parsed);
 }
 
-void require_ok(const AcquisitionResponse &response)
+void require_ok(AcquisitionStatus status)
 {
-	if (response.status != AcquisitionStatus::ok)
+	if (status != AcquisitionStatus::ok)
 		throw std::runtime_error("acquisition daemon rejected waveform request");
 }
 
@@ -50,15 +49,9 @@ std::string state_name(WaveformSessionState state)
 	return "unknown";
 }
 
-WaveformResult collect(const AcquisitionResponse &response)
+WaveformResult collect(WaveformResponse response)
 {
-	WaveformResult result{response.waveform, {}};
-	const auto count = std::min<std::size_t>(
-		response.waveform_session_count,
-		response.waveform_sessions.size());
-	result.sessions.assign(response.waveform_sessions.begin(),
-			       response.waveform_sessions.begin() + count);
-	return result;
+	return {response.waveform, std::move(response.sessions)};
 }
 
 class WaveformTextGenerator final : public ResultGenerator<WaveformResult> {
@@ -99,8 +92,8 @@ public:
 				       << session.first_sequence << ".."
 				       << session.last_sequence << "  events "
 				       << session.event_count;
-				if (session.filename.front() != '\0')
-					output << "  " << session.filename.data();
+				if (!session.filename.empty())
+					output << "  " << session.filename;
 				output << '\n';
 			}
 		}
@@ -117,11 +110,11 @@ public:
 	}
 };
 
-int render(const Options &options, const AcquisitionResponse &response,
+int render(const Options &options, WaveformResponse response,
 	   std::ostream &output)
 {
-	require_ok(response);
-	return render_result(options, collect(response), output,
+	require_ok(response.status);
+	return render_result(options, collect(std::move(response)), output,
 			     WaveformTextGenerator{}, WaveformJsonGenerator{});
 }
 
@@ -129,8 +122,7 @@ int run_status(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
 	return render(options,
-		      client.request(AcquisitionCommand::waveform_status,
-				     options.timeout_ms),
+		      client.request(WaveformStatusRequest{}, options.timeout_ms),
 		      output);
 }
 
@@ -138,20 +130,18 @@ int run_list(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
 	return render(options,
-		      client.request(AcquisitionCommand::waveform_list,
-				     options.timeout_ms),
+		      client.request(WaveformListRequest{}, options.timeout_ms),
 		      output);
 }
 
 int run_trigger(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	return render(options,
-		      client.request(AcquisitionCommand::waveform_trigger,
-				     options.timeout_ms, nullptr, 0, 0,
-				     options.waveform_pretrigger_ms,
-				     options.waveform_posttrigger_ms,
-				     WaveformTriggerSource::manual_cli),
+	WaveformTriggerRequest trigger;
+	trigger.pretrigger_ms = options.waveform_pretrigger_ms;
+	trigger.posttrigger_ms = options.waveform_posttrigger_ms;
+	trigger.source = WaveformTriggerSource::manual_cli;
+	return render(options, client.request(trigger, options.timeout_ms),
 		      output);
 }
 

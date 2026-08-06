@@ -87,9 +87,9 @@ evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 	return reasons;
 }
 
-MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
+MeterHealth evaluate_meter_health(const InfoResponse &response)
 {
-	const auto &adc = response.rpu_health;
+	const auto adc = response.rpu_health.value();
 	MeterHealth result;
 	result.adc_source = adc.adc_source;
 	result.simulator_active =
@@ -140,11 +140,11 @@ MeterHealth evaluate_meter_health(const AcquisitionResponse &response)
 	// Missing and out-of-range grid signals are valid unavailable readings.
 	// Only an arithmetic error means the PL metering path itself is unhealthy.
 	result.frequency_arithmetic_ok =
-		response.has_meter_record != 0u && !frequency.arithmetic_error;
-	result.record_stale = response.running != 0u &&
+		response.has_meter_record && !frequency.arithmetic_error;
+	result.record_stale = response.running &&
 		response.meter_record_age_ms > meter_record_stale_after_ms;
-	result.acquisition_healthy = response.running != 0u &&
-		response.has_meter_record != 0u && response.dma_read_errors == 0u &&
+	result.acquisition_healthy = response.running &&
+		response.has_meter_record && response.dma_read_errors == 0u &&
 		response.invalid_records == 0u && response.sequence_gaps == 0u &&
 		!result.record_stale && result.frequency_arithmetic_ok;
 	const bool source_healthy = result.simulator_active

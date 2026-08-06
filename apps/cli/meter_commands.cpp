@@ -233,15 +233,15 @@ void print_adc_registers(std::ostream &output,
 	}
 }
 
-void require_daemon_ok(const AcquisitionResponse &response)
+void require_daemon_ok(AcquisitionStatus status)
 {
-	if (response.status != AcquisitionStatus::ok)
+	if (status != AcquisitionStatus::ok)
 		throw std::runtime_error("acquisition daemon request failed (status " +
-			std::to_string(static_cast<std::uint32_t>(response.status)) + ")");
+			std::to_string(static_cast<std::uint32_t>(status)) + ")");
 }
 
 struct MeterHealthResult {
-	AcquisitionResponse response;
+	InfoResponse response;
 	MeterHealth status;
 	bool full = false;
 };
@@ -251,14 +251,14 @@ int write_meter_health_text(const MeterHealthResult &result,
 {
 	const auto &response = result.response;
 	const auto &status = result.status;
-	const auto &health = response.rpu_health;
+	const auto health = response.rpu_health.value();
 
 	if (!result.full) {
 		output << "MSAP1 meter health: "
 		       << (status.healthy ? "PASS" : "FAIL") << '\n'
 		       << "  Acquisition:         "
 		       << (status.acquisition_healthy ? "healthy" : "degraded")
-		       << " (" << (response.running != 0u ? "running" : "stopped")
+		       << " (" << (response.running ? "running" : "stopped")
 		       << ", record ";
 		if (response.meter_record_age_ms !=
 		    std::numeric_limits<std::uint32_t>::max())
@@ -280,7 +280,7 @@ int write_meter_health_text(const MeterHealthResult &result,
 		       << health.overflow_count << ", headers "
 		       << health.header_error_count << '\n'
 		       << "  Health audit:        ";
-		if (response.health_probe_pending != 0u) {
+		if (response.health_probe_pending) {
 			if (response.health_probe_failures == 0u)
 				output << "startup stabilization\n";
 			else
@@ -305,8 +305,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 	}
 
 	output << "MSAP1 meter health: " << (status.healthy ? "PASS" : "FAIL") << '\n'
-	       << "  Linux acquisition:    " << yes_no(response.running != 0u) << '\n'
-	       << "  Meter record present: " << yes_no(response.has_meter_record != 0u)
+	       << "  Linux acquisition:    " << yes_no(response.running) << '\n'
+	       << "  Meter record present: " << yes_no(response.has_meter_record)
 	       << '\n'
 	       << "  Meter record stale:   " << yes_no(status.record_stale) << '\n'
 	       << "  Meter record age:     ";
@@ -322,7 +322,7 @@ int write_meter_health_text(const MeterHealthResult &result,
 	else
 		output << "unavailable\n";
 	output << "  Health confirmation:  "
-	       << (response.health_probe_pending == 0u
+	       << (!response.health_probe_pending
 			   ? "not pending"
 			   : response.health_probe_failures == 0u
 				   ? "startup stabilization"
@@ -514,7 +514,7 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 {
 	const auto &response = result.response;
 	const auto &status = result.status;
-	const auto &health = response.rpu_health;
+	const auto health = response.rpu_health.value();
 	MeterHealthDto dto{
 		.healthy = status.healthy,
 		.full = result.full,
@@ -529,12 +529,12 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 				? std::nullopt
 				: std::optional<std::uint32_t>(
 					  response.rpu_health_age_ms),
-		.health_probe_pending = response.health_probe_pending != 0u,
+		.health_probe_pending = response.health_probe_pending,
 		.health_probe_failures = response.health_probe_failures,
 		.acquisition = {
 			.healthy = status.acquisition_healthy,
-			.running = response.running != 0u,
-			.record_present = response.has_meter_record != 0u,
+			.running = response.running,
+			.record_present = response.has_meter_record,
 			.record_stale = status.record_stale,
 			.record_age_ms =
 				response.meter_record_age_ms ==
@@ -602,12 +602,10 @@ public:
 int run_meter_health(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	const auto response =
-		client.request(options.health_refresh
-				       ? AcquisitionCommand::health_refresh
-				       : AcquisitionCommand::health,
-			       options.timeout_ms);
-	require_daemon_ok(response);
+	const auto response = options.health_refresh
+		? client.request(HealthRefreshRequest{}, options.timeout_ms)
+		: client.request(HealthRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
 	const MeterHealthResult result{
 		.response = response,
 		.status = evaluate_meter_health(response),
@@ -679,12 +677,12 @@ int run_meter_view(const Options &options, std::ostream &output)
 		if (options.result_limit && displayed >= *options.result_limit)
 			break;
 		const auto response =
-			client.request(AcquisitionCommand::info, options.timeout_ms);
-		require_daemon_ok(response);
-		if (response.running == 0u)
+			client.request(InfoRequest{}, options.timeout_ms);
+		require_daemon_ok(response.status);
+		if (!response.running)
 			throw std::runtime_error(
 				"FPGA acquisition is stopped; run 'mnc adc start'");
-		if (response.has_meter_record != 0u &&
+		if (response.has_meter_record &&
 		    (!last_sequence || response.latest_record.sequence() != *last_sequence)) {
 			if (!response.latest_record.header_valid())
 				throw std::runtime_error(
@@ -825,9 +823,9 @@ int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
 	const auto response =
-		client.request(AcquisitionCommand::info, options.timeout_ms);
-	require_daemon_ok(response);
-	if (response.has_meter_record == 0u)
+		client.request(InfoRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	if (!response.has_meter_record)
 		throw std::runtime_error("no meter record is available");
 	if (!response.latest_record.header_valid())
 		throw std::runtime_error("daemon returned an invalid meter record");

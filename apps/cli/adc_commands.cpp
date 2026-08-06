@@ -22,11 +22,11 @@
 namespace msap1::cli {
 namespace {
 
-void require_daemon_ok(const AcquisitionResponse &response)
+void require_daemon_ok(AcquisitionStatus status)
 {
-	if (response.status != AcquisitionStatus::ok)
+	if (status != AcquisitionStatus::ok)
 		throw std::runtime_error("acquisition daemon request failed (status " +
-			std::to_string(static_cast<std::uint32_t>(response.status)) + ")");
+			std::to_string(static_cast<std::uint32_t>(status)) + ")");
 }
 
 void require_settings_ok(const msap1::settings::ipc::Response &response)
@@ -87,12 +87,14 @@ public:
 };
 
 int run_control(const Options &options, std::ostream &output,
-		AcquisitionCommand command)
+		bool start_capture)
 {
 	AcquisitionClient client(options.socket_path);
-	const auto response = client.request(command, options.timeout_ms);
-	require_daemon_ok(response);
-	const CaptureControlResult result{response.running != 0u};
+	const auto response = start_capture
+		? client.request(StartRequest{}, options.timeout_ms)
+		: client.request(StopRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	const CaptureControlResult result{response.running};
 	return render_result(options, result, output,
 			     CaptureControlTextGenerator{},
 			     CaptureControlJsonGenerator{});
@@ -213,11 +215,12 @@ public:
 int run_rate(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	AcquisitionResponse response;
+	InfoResponse response;
 	if (options.sample_rate_hz) {
-		response = client.request(AcquisitionCommand::sample_rate_set,
-			options.timeout_ms, nullptr, *options.sample_rate_hz);
-		require_daemon_ok(response);
+		SampleRateSetRequest set_rate;
+		set_rate.sample_rate_hz = *options.sample_rate_hz;
+		response = client.request(set_rate, options.timeout_ms);
+		require_daemon_ok(response.status);
 		/*
 		 * The PL publishes DRDY over independent one-second windows. Poll
 		 * across window boundaries until two consecutive measurements agree;
@@ -227,10 +230,11 @@ int run_rate(const Options &options, std::ostream &output)
 		for (unsigned int attempt = 0; attempt < 5; ++attempt) {
 			std::this_thread::sleep_for(
 				std::chrono::milliseconds(1100));
-			response = client.request(AcquisitionCommand::health_refresh,
+			response = client.request(HealthRefreshRequest{},
 				options.timeout_ms);
-			require_daemon_ok(response);
-			const auto current = response.rpu_health.drdy_frequency_hz;
+			require_daemon_ok(response.status);
+			const auto current =
+				response.rpu_health.value().drdy_frequency_hz;
 			if (rate_measurements_agree(previous_measurement, current))
 				break;
 			previous_measurement = current;
@@ -238,12 +242,11 @@ int run_rate(const Options &options, std::ostream &output)
 	} else {
 		// Read the daemon cache for the diagnostic getter. A fresh SPI audit
 		// is maintenance work and must not be triggered by restricted users.
-		response = client.request(AcquisitionCommand::health,
-			options.timeout_ms);
+		response = client.request(HealthRequest{}, options.timeout_ms);
 	}
-	require_daemon_ok(response);
+	require_daemon_ok(response.status);
 
-	const auto &health = response.rpu_health;
+	const auto health = response.rpu_health.value();
 	const auto derived = src_derived_rate(health);
 	const auto measured = health.drdy_frequency_hz;
 	const auto requested = response.sample_rate_hz;
@@ -336,11 +339,11 @@ int run_source(const Options &options, std::ostream &output)
 				settings.adc.source = *options.adc_source;
 			});
 	}
-	const auto response = client.request(AcquisitionCommand::adc_source_get,
+	const auto response = client.request(AdcSourceGetRequest{},
 		options.timeout_ms);
-	require_daemon_ok(response);
+	require_daemon_ok(response.status);
 	const AdcSourceResult result{
-		adc_source_text(response.adc_source), response.running != 0u,
+		adc_source_text(response.adc_source), response.running,
 		response.configuration_generation};
 	return render_result(options, result, output, AdcSourceTextGenerator{},
 			     AdcSourceJsonGenerator{});
@@ -391,9 +394,9 @@ public:
 int run_simulator(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	auto response = client.request(AcquisitionCommand::adc_simulator_get,
+	auto response = client.request(SimulatorGetRequest{},
 		options.timeout_ms);
-	require_daemon_ok(response);
+	require_daemon_ok(response.status);
 	const bool configure = options.simulator_frequency_hz.has_value() ||
 		std::any_of(options.simulator_rms.begin(),
 			options.simulator_rms.end(), [](const auto &value) {
@@ -417,9 +420,9 @@ int run_simulator(const Options &options, std::ostream &output)
 							*options.simulator_phase_degrees[channel];
 				}
 			});
-		response = client.request(AcquisitionCommand::adc_simulator_get,
+		response = client.request(SimulatorGetRequest{},
 			options.timeout_ms);
-		require_daemon_ok(response);
+		require_daemon_ok(response.status);
 	}
 	AdcSimulatorResult result{};
 	result.frequency_hz =
@@ -571,11 +574,11 @@ int run_test_flow(const Options &options, std::ostream &output)
 
 	AcquisitionClient client(options.socket_path);
 	const auto timeout = std::max(options.timeout_ms, 20000);
-	const auto response = client.request(
-		AcquisitionCommand::adc_diagnostic_run, timeout, nullptr, 0u,
-		*options.diagnostic_flow);
-	require_daemon_ok(response);
-	const auto &diagnostic = response.adc_diagnostic;
+	DiagnosticRunRequest run;
+	run.flow = *options.diagnostic_flow;
+	const auto response = client.request(run, timeout);
+	require_daemon_ok(response.status);
+	const auto diagnostic = response.diagnostic.value();
 	const auto flags = diagnostic.diagnostic_flags;
 
 	output << "AD7771 diagnostic test flow " << diagnostic.flow << "\n"
@@ -590,7 +593,7 @@ int run_test_flow(const Options &options, std::ostream &output)
 	       << "  Failure stage:        "
 	       << diagnostic_stage_name(diagnostic.failure_stage) << "\n"
 	       << "  Acquisition restored: "
-	       << yes_no(response.running != 0u) << "\n";
+	       << yes_no(response.running) << "\n";
 
 	print_diagnostic_snapshot(output, "Before reset", diagnostic.before);
 	print_diagnostic_snapshot(
@@ -631,8 +634,8 @@ int run_test_flow(const Options &options, std::ostream &output)
 	       << yes_no((flags &
 			  MSAP1_ADC_DIAGNOSTIC_FINAL_DRDY_MATCH) != 0u)
 	       << "\n  Restored live DRDY:   ";
-	if (response.rpu_health.drdy_frequency_hz != 0u)
-		output << response.rpu_health.drdy_frequency_hz << " frame/s\n";
+	if (response.live_drdy_frequency_hz != 0u)
+		output << response.live_drdy_frequency_hz << " frame/s\n";
 	else
 		output << "unavailable\n";
 
@@ -752,7 +755,7 @@ void register_adc_commands(Application &application)
 	adc.add_subcommand(Command(
 		"start", "Start ADC capture and meter acquisition",
 		[](const Options &options, std::ostream &output) {
-			return run_control(options, output, AcquisitionCommand::start);
+			return run_control(options, output, true);
 		},
 		{
 			.access = AccessLevel::operator_control,
@@ -764,7 +767,7 @@ void register_adc_commands(Application &application)
 	adc.add_subcommand(Command(
 		"stop", "Stop ADC capture and meter acquisition",
 		[](const Options &options, std::ostream &output) {
-			return run_control(options, output, AcquisitionCommand::stop);
+			return run_control(options, output, false);
 		},
 		{
 			.access = AccessLevel::operator_control,

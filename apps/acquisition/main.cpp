@@ -241,16 +241,6 @@ waveform_metadata(const msap1::PreparedMeterConfiguration &configuration)
 	return result;
 }
 
-std::string frequency_mode_name(std::uint32_t mode)
-{
-	switch (mode) {
-	case MSAP1_FREQUENCY_MODE_SINGLE_CYCLE: return "single_cycle";
-	case MSAP1_FREQUENCY_MODE_ROLLING_CYCLES: return "rolling_cycles";
-	case MSAP1_FREQUENCY_MODE_ROLLING_TIME: return "rolling_time";
-	default: throw std::runtime_error("invalid frequency IPC mode");
-	}
-}
-
 msap1::FrequencyIpcConfiguration frequency_ipc(
 	const msap1::FrequencyConfig &frequency)
 {
@@ -290,15 +280,6 @@ msap1::SimulatorIpcConfiguration simulator_ipc(
 	return result;
 }
 
-std::string adc_source_name(std::uint32_t source)
-{
-	if (source == MSAP1_ADC_SOURCE_PHYSICAL)
-		return "physical";
-	if (source == MSAP1_ADC_SOURCE_SIMULATOR)
-		return "simulator";
-	throw std::invalid_argument("invalid ADC source");
-}
-
 class CaptureCoordinator {
 public:
 	explicit CaptureCoordinator(const Options &options)
@@ -313,6 +294,7 @@ public:
 		  rpu_(options.service, options.rpmsg_device),
 		  record_stream_(options.record_stream)
 	{
+		configure_registry();
 		create_ipc_server();
 	}
 
@@ -404,11 +386,6 @@ private:
 	struct PendingIpcRequest {
 		std::shared_ptr<mnc::ipc::FramedConnection> connection;
 		mnc::ipc::Frame frame;
-	};
-
-	struct MeterSubscription {
-		std::weak_ptr<mnc::ipc::FramedConnection> connection;
-		msap1::UpdatePeriod period = msap1::UpdatePeriod::ms200;
 	};
 
 	void create_ipc_server()
@@ -699,38 +676,6 @@ private:
 		}
 	}
 
-	void apply_adc_source(std::uint32_t source)
-	{
-		auto updated = configuration_.source;
-		updated.schema_version = 3u;
-		updated.adc_source = adc_source_name(source);
-		apply_complete_configuration(
-			msap1::prepare_meter_configuration(
-				std::move(updated),
-				configuration_.wire.sample_rate_hz),
-			"adc_source_applied");
-	}
-
-	void apply_simulator_configuration(
-		const msap1::SimulatorIpcConfiguration &request)
-	{
-		auto updated = configuration_.source;
-		updated.schema_version = 3u;
-		updated.simulator.frequency_hz =
-			static_cast<double>(request.frequency_millihz) / 1000.0;
-		updated.simulator.channels.clear();
-		for (std::uint32_t channel = 0; channel < 7u; ++channel) {
-			updated.simulator.channels.push_back({
-				channel, request.channels[channel].rms,
-				request.channels[channel].phase_degrees});
-		}
-		apply_complete_configuration(
-			msap1::prepare_meter_configuration(
-				std::move(updated),
-				configuration_.wire.sample_rate_hz),
-			"adc_simulator_configuration_applied");
-	}
-
 	void start(bool apply_configuration = true)
 	{
 		if (running_)
@@ -820,30 +765,6 @@ private:
 		log_message(lifecycle_log, mnc::logging::Priority::notice,
 			"ADC capture, meter DMA, and waveform DMA stopped",
 			"capture_stopped");
-	}
-
-	void apply_frequency_configuration(
-		const msap1::FrequencyIpcConfiguration &request)
-	{
-		auto source = configuration_.source;
-		source.frequency.enabled = request.enabled != 0u;
-		source.frequency.reference_channel = request.reference_channel;
-		source.frequency.mode = frequency_mode_name(request.mode);
-		source.frequency.averaging_cycles = request.averaging_cycles;
-		source.frequency.averaging_window_ms =
-			request.averaging_window_ms;
-		source.frequency.minimum_hz =
-			static_cast<double>(request.minimum_millihz) / 1000.0;
-		source.frequency.maximum_hz =
-			static_cast<double>(request.maximum_millihz) / 1000.0;
-		source.frequency.hysteresis_volts =
-			static_cast<double>(request.hysteresis_microvolts) /
-			1000000.0;
-
-		apply_complete_configuration(
-			msap1::prepare_meter_configuration(
-				std::move(source), configuration_.wire.sample_rate_hz),
-			"frequency_configuration_applied");
 	}
 
 	/** Applies one complete settings snapshot as a coordinated pipeline update. */
@@ -1028,29 +949,6 @@ private:
 		last_record_time_ = Clock::now();
 		++meter_records_;
 		(void)cursor;
-		publish_meter_event(update.period);
-	}
-
-	void publish_meter_event(msap1::UpdatePeriod period)
-	{
-		msap1::AcquisitionResponse response{};
-		response.sequence = 0;
-		response.meter_period_view = msap1::to_ipc_period_view(
-			meter_data_.latest(period), period);
-		auto frame = msap1::acquisition::ProtocolCodec::encode_response(
-			response,
-			static_cast<std::uint32_t>(
-				msap1::AcquisitionCommand::meter_subscribe));
-		frame.kind = mnc::ipc::FrameKind::event;
-		frame.correlation_id = 0;
-		std::erase_if(meter_subscriptions_, [&](auto &subscription) {
-			auto connection = subscription.connection.lock();
-			if (!connection)
-				return true;
-			if (subscription.period == period)
-				connection->post_send(frame);
-			return false;
-		});
 	}
 
 	void read_meter_records()
@@ -1080,75 +978,219 @@ private:
 			accept_record(batch.records[index]);
 	}
 
-	msap1::AcquisitionResponse make_response(
-		const msap1::AcquisitionRequest &request)
+	static std::uint32_t age_milliseconds(
+		const std::optional<Clock::time_point> &timestamp)
 	{
-		const auto age_milliseconds =
-			[](const std::optional<Clock::time_point> &timestamp) {
-				if (!timestamp)
-					return std::numeric_limits<std::uint32_t>::max();
-				const auto age =
-					std::chrono::duration_cast<std::chrono::milliseconds>(
-						Clock::now() - *timestamp)
-						.count();
-				return static_cast<std::uint32_t>(
-					std::clamp<std::int64_t>(
-						age, 0,
-						std::numeric_limits<
-							std::uint32_t>::max()));
-			};
-		msap1::AcquisitionResponse response{};
-		response.sequence = request.sequence;
-		response.running = running_ ? 1u : 0u;
-		response.has_meter_record = latest_record_.has_value() ? 1u : 0u;
+		if (!timestamp)
+			return msap1::acquisition_age_unavailable;
+		const auto age =
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				Clock::now() - *timestamp)
+				.count();
+		return static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+			age, 0, std::numeric_limits<std::uint32_t>::max()));
+	}
+
+	msap1::InfoResponse info_response()
+	{
+		msap1::InfoResponse response{};
+		response.running = running_;
+		response.has_meter_record = latest_record_.has_value();
+		response.health_probe_pending =
+			health_stabilizing_ || health_probe_failures_ != 0u;
 		response.sample_rate_hz = configuration_.wire.sample_rate_hz;
 		response.configuration_generation = configuration_.wire.generation;
+		response.meter_record_age_ms = age_milliseconds(last_record_time_);
+		response.rpu_health_age_ms =
+			age_milliseconds(last_rpu_health_time_);
+		response.health_probe_failures = health_probe_failures_;
+		response.adc_source = configuration_.wire.adc_source;
 		response.meter_records = meter_records_;
 		response.dma_bytes = dma_bytes_;
 		response.dma_read_errors = dma_read_errors_;
 		response.invalid_records = invalid_records_;
 		response.sequence_gaps = sequence_gaps_;
-		response.meter_record_age_ms =
-			age_milliseconds(last_record_time_);
-		response.rpu_health_age_ms =
-			age_milliseconds(last_rpu_health_time_);
-		response.health_probe_failures = health_probe_failures_;
-		response.health_probe_pending =
-			health_stabilizing_ || health_probe_failures_ != 0u ? 1u
-									     : 0u;
 		response.rpu_health = cached_health_;
-		response.adc_diagnostic = last_adc_diagnostic_;
 		if (latest_record_)
 			response.latest_record = *latest_record_;
-		response.frequency = frequency_ipc(configuration_.source.frequency);
-		response.adc_source = configuration_.wire.adc_source;
-		response.simulator = simulator_ipc(configuration_.source.simulator);
-		response.waveform = waveform_.status();
-		const auto waveform_sessions = waveform_.sessions();
-		response.waveform_session_count =
-			static_cast<std::uint32_t>(waveform_sessions.size());
-		std::copy(waveform_sessions.begin(), waveform_sessions.end(),
-			  response.waveform_sessions.begin());
-		response.meter_period_view = msap1::to_ipc_period_view(
-			meter_data_.latest(request.meter_period),
-			request.meter_period);
-		if (request.command == msap1::AcquisitionCommand::meter_stream_read) {
-			const auto limit = std::clamp<std::uint32_t>(
-				request.meter_limit, 1,
-				msap1::acquisition_stream_read_max);
-			for (const auto &stored :
-			     record_stream_.read_after(request.meter_cursor, limit)) {
-				response.meter_stream_records.push_back({
-					stored.cursor,
-					std::chrono::duration_cast<
-						std::chrono::nanoseconds>(
-						stored.received_at.time_since_epoch())
-						.count(),
-					stored.record});
-				response.meter_next_cursor = stored.cursor;
-			}
-		}
 		return response;
+	}
+
+	msap1::CaptureResponse capture_response() const
+	{
+		return {msap1::AcquisitionStatus::ok, running_};
+	}
+
+	msap1::FrequencyResponse frequency_response() const
+	{
+		return {msap1::AcquisitionStatus::ok,
+			configuration_.wire.generation,
+			frequency_ipc(configuration_.source.frequency)};
+	}
+
+	msap1::DiagnosticResponse diagnostic_response() const
+	{
+		msap1::DiagnosticResponse response{};
+		response.running = running_;
+		response.live_drdy_frequency_hz = cached_health_.drdy_frequency_hz;
+		response.diagnostic = last_adc_diagnostic_;
+		return response;
+	}
+
+	msap1::WaveformResponse waveform_response()
+	{
+		msap1::WaveformResponse response{};
+		response.waveform = waveform_.status();
+		for (const auto &session : waveform_.sessions())
+			response.sessions.push_back(
+				{session.id, session.trigger_sequence,
+				 session.first_sequence, session.last_sequence,
+				 session.trigger_tai_nanoseconds,
+				 session.trigger_realtime_nanoseconds,
+				 session.sample_rate_hz, session.event_count,
+				 session.state,
+				 std::string(session.filename.data())});
+		return response;
+	}
+
+	msap1::AdcSourceResponse adc_source_response() const
+	{
+		msap1::AdcSourceResponse response{};
+		response.running = running_;
+		response.adc_source = configuration_.wire.adc_source;
+		response.configuration_generation = configuration_.wire.generation;
+		response.health_flags = cached_health_.health_flags;
+		return response;
+	}
+
+	msap1::SimulatorResponse simulator_response() const
+	{
+		msap1::SimulatorResponse response{};
+		response.adc_source = configuration_.wire.adc_source;
+		response.configuration_generation = configuration_.wire.generation;
+		response.health_flags = cached_health_.health_flags;
+		response.simulator_active_generation =
+			cached_health_.simulator_active_generation;
+		response.simulator_frame_count =
+			cached_health_.simulator_frame_count;
+		response.simulator_saturation_count =
+			cached_health_.simulator_saturation_count;
+		response.simulator_missed_sample_count =
+			cached_health_.simulator_missed_sample_count;
+		response.simulator =
+			simulator_ipc(configuration_.source.simulator);
+		return response;
+	}
+
+	void configure_registry()
+	{
+		using msap1::AcquisitionStatus;
+		registry_.set_error_observer(
+			[](std::string_view command, std::string_view what) {
+				log_message(lifecycle_log,
+					mnc::logging::Priority::error,
+					"acquisition command failed: " +
+						std::string(what),
+					"command_failed",
+					{{"MNC_COMMAND", std::string(command)}});
+			});
+		registry_.on<msap1::InfoRequest>(AcquisitionStatus::dma_error,
+			[this](const auto &) { return info_response(); });
+		// The public health path returns the daemon cache. Web polling
+		// must never trigger a 100-register SPI audit.
+		registry_.on<msap1::HealthRequest>(AcquisitionStatus::dma_error,
+			[this](const auto &) { return info_response(); });
+		registry_.on<msap1::HealthRefreshRequest>(
+			AcquisitionStatus::rpu_error, [this](const auto &) {
+				refresh_rpu_health();
+				return info_response();
+			});
+		registry_.on<msap1::StartRequest>(
+			AcquisitionStatus::configuration_error,
+			[this](const auto &) {
+				start();
+				return capture_response();
+			});
+		registry_.on<msap1::StopRequest>(AcquisitionStatus::dma_error,
+			[this](const auto &) {
+				stop();
+				return capture_response();
+			});
+		registry_.on<msap1::FrequencyGetRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const auto &) { return frequency_response(); });
+		registry_.on<msap1::SampleRateSetRequest>(
+			AcquisitionStatus::configuration_error,
+			[this](const msap1::SampleRateSetRequest &request) {
+				apply_sample_rate(request.sample_rate_hz);
+				return info_response();
+			});
+		registry_.on<msap1::DiagnosticRunRequest>(
+			AcquisitionStatus::configuration_error,
+			[this](const msap1::DiagnosticRunRequest &request) {
+				run_adc_diagnostic(request.flow);
+				return diagnostic_response();
+			});
+		registry_.on<msap1::WaveformStatusRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const auto &) { return waveform_response(); });
+		registry_.on<msap1::WaveformListRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const auto &) { return waveform_response(); });
+		registry_.on<msap1::WaveformTriggerRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const msap1::WaveformTriggerRequest &request) {
+				const auto pretrigger_ms =
+					request.pretrigger_ms ==
+						msap1::waveform_duration_unspecified
+					? product_settings_.waveform.default_pretrigger_ms
+					: request.pretrigger_ms;
+				const auto posttrigger_ms =
+					request.posttrigger_ms ==
+						msap1::waveform_duration_unspecified
+					? product_settings_.waveform.default_posttrigger_ms
+					: request.posttrigger_ms;
+				const auto session = waveform_.trigger(
+					pretrigger_ms, posttrigger_ms,
+					request.source);
+				log_message(waveform_log,
+					mnc::logging::Priority::notice,
+					"waveform capture triggered",
+					"waveform_triggered",
+					{{"MNC_WAVEFORM_SESSION",
+					  std::to_string(session.id)},
+					 {"MNC_PRETRIGGER_MS",
+					  std::to_string(pretrigger_ms)},
+					 {"MNC_POSTTRIGGER_MS",
+					  std::to_string(posttrigger_ms)}});
+				return waveform_response();
+			});
+		registry_.on<msap1::WaveformDeleteRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const msap1::WaveformDeleteRequest &request) {
+				waveform_.erase(request.session_id);
+				log_message(waveform_log,
+					mnc::logging::Priority::notice,
+					"waveform capture deleted",
+					"waveform_deleted",
+					{{"MNC_WAVEFORM_SESSION",
+					  std::to_string(request.session_id)}});
+				return waveform_response();
+			});
+		registry_.on<msap1::AdcSourceGetRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const auto &) { return adc_source_response(); });
+		registry_.on<msap1::SimulatorGetRequest>(
+			AcquisitionStatus::dma_error,
+			[this](const auto &) { return simulator_response(); });
+		registry_.on<msap1::ConfigurationApplyRequest>(
+			AcquisitionStatus::configuration_error,
+			[this](const msap1::ConfigurationApplyRequest &request) {
+				apply_product_settings(request.configuration_json);
+				return msap1::ApplyResponse{
+					msap1::AcquisitionStatus::ok,
+					configuration_.wire.generation};
+			});
 	}
 
 	void drain_ipc_requests()
@@ -1160,187 +1202,8 @@ private:
 			requests.swap(ipc_requests_);
 		}
 		for (auto &pending : requests)
-			handle_ipc_request(std::move(pending));
-	}
-
-	void handle_ipc_request(PendingIpcRequest pending)
-	{
-		msap1::AcquisitionRequest request{};
-		request.sequence = pending.frame.correlation_id;
-		try {
-			request = msap1::acquisition::ProtocolCodec::decode_request(
-				pending.frame);
-		} catch (const std::exception &error) {
-			msap1::AcquisitionResponse response{};
-			response.sequence = pending.frame.correlation_id;
-			response.status = msap1::AcquisitionStatus::bad_request;
 			pending.connection->post_send(
-				msap1::acquisition::ProtocolCodec::encode_response(
-				response, pending.frame.message_type));
-			log_message(lifecycle_log, mnc::logging::Priority::warning,
-				"rejected malformed acquisition IPC request: " +
-					std::string(error.what()),
-				"ipc_request_rejected");
-			return;
-		}
-		msap1::AcquisitionResponse response{};
-		response.sequence = request.sequence;
-		try {
-				switch (request.command) {
-				case msap1::AcquisitionCommand::info:
-					break;
-				case msap1::AcquisitionCommand::health:
-					// The public health path returns the daemon cache.
-					// Web polling must never trigger a 100-register SPI
-					// audit.
-					break;
-				case msap1::AcquisitionCommand::health_refresh:
-					refresh_rpu_health();
-					break;
-				case msap1::AcquisitionCommand::start:
-					start();
-					break;
-				case msap1::AcquisitionCommand::stop:
-					stop();
-					break;
-				case msap1::AcquisitionCommand::
-					frequency_configuration_get:
-					break;
-				case msap1::AcquisitionCommand::
-					frequency_configuration_set:
-					apply_frequency_configuration(request.frequency);
-					break;
-				case msap1::AcquisitionCommand::sample_rate_set:
-					apply_sample_rate(request.sample_rate_hz);
-					break;
-				case msap1::AcquisitionCommand::adc_diagnostic_run:
-					run_adc_diagnostic(request.diagnostic_flow);
-					break;
-				case msap1::AcquisitionCommand::waveform_status:
-				case msap1::AcquisitionCommand::waveform_list:
-					break;
-				case msap1::AcquisitionCommand::waveform_trigger: {
-					const auto pretrigger_ms =
-						request.waveform_pretrigger_ms ==
-							msap1::waveform_duration_unspecified
-						? product_settings_.waveform.default_pretrigger_ms
-						: request.waveform_pretrigger_ms;
-					const auto posttrigger_ms =
-						request.waveform_posttrigger_ms ==
-							msap1::waveform_duration_unspecified
-						? product_settings_.waveform.default_posttrigger_ms
-						: request.waveform_posttrigger_ms;
-					const auto session = waveform_.trigger(
-						pretrigger_ms, posttrigger_ms,
-						request.waveform_trigger_source);
-					log_message(waveform_log,
-						mnc::logging::Priority::notice,
-						"waveform capture triggered",
-						"waveform_triggered",
-						{{"MNC_WAVEFORM_SESSION",
-						  std::to_string(session.id)},
-						 {"MNC_PRETRIGGER_MS",
-						  std::to_string(pretrigger_ms)},
-						 {"MNC_POSTTRIGGER_MS",
-						  std::to_string(posttrigger_ms)}});
-					break;
-				}
-				case msap1::AcquisitionCommand::waveform_delete:
-					waveform_.erase(request.waveform_session_id);
-					log_message(waveform_log,
-						mnc::logging::Priority::notice,
-						"waveform capture deleted",
-						"waveform_deleted",
-						{{"MNC_WAVEFORM_SESSION",
-						  std::to_string(
-							  request.waveform_session_id)}});
-					break;
-				case msap1::AcquisitionCommand::adc_source_get:
-				case msap1::AcquisitionCommand::adc_simulator_get:
-					break;
-				case msap1::AcquisitionCommand::adc_source_set:
-					apply_adc_source(request.adc_source);
-					break;
-				case msap1::AcquisitionCommand::adc_simulator_set:
-					apply_simulator_configuration(request.simulator);
-					break;
-				case msap1::AcquisitionCommand::configuration_apply:
-					apply_product_settings(request.configuration_json);
-					break;
-				case msap1::AcquisitionCommand::meter_latest:
-				case msap1::AcquisitionCommand::meter_stream_read:
-					break;
-				case msap1::AcquisitionCommand::meter_stream_register:
-					record_stream_.register_consumer(
-						request.meter_consumer);
-					break;
-				case msap1::AcquisitionCommand::meter_stream_acknowledge:
-					record_stream_.acknowledge(
-						request.meter_consumer,
-						request.meter_cursor);
-					break;
-				case msap1::AcquisitionCommand::meter_subscribe:
-					meter_subscriptions_.push_back(
-						{pending.connection,
-						 request.meter_period});
-					break;
-				case msap1::AcquisitionCommand::meter_unsubscribe:
-					std::erase_if(meter_subscriptions_,
-						[&](const auto &subscription) {
-							return subscription.connection.lock() ==
-							       pending.connection;
-						});
-					break;
-				default:
-					response.status =
-						msap1::AcquisitionStatus::bad_request;
-					break;
-				}
-		} catch (const std::exception &error) {
-				log_message(lifecycle_log,
-					mnc::logging::Priority::error,
-					"acquisition command failed: " +
-						std::string(error.what()),
-					"command_failed",
-					{{"MNC_REQUEST_ID",
-					  std::to_string(request.sequence)},
-					 {"MNC_COMMAND",
-					  std::to_string(static_cast<std::uint32_t>(
-						  request.command))}});
-				if (request.command ==
-				    msap1::AcquisitionCommand::health_refresh)
-					response.status =
-						msap1::AcquisitionStatus::rpu_error;
-				else if (request.command ==
-					 msap1::AcquisitionCommand::start ||
-					 request.command ==
-					 msap1::AcquisitionCommand::
-						 frequency_configuration_set ||
-					 request.command ==
-					 msap1::AcquisitionCommand::sample_rate_set ||
-					 request.command ==
-					 msap1::AcquisitionCommand::adc_source_set ||
-					 request.command ==
-					 msap1::AcquisitionCommand::adc_simulator_set ||
-					 request.command ==
-					 msap1::AcquisitionCommand::configuration_apply ||
-					 request.command ==
-					 msap1::AcquisitionCommand::
-						 adc_diagnostic_run)
-					response.status =
-						msap1::AcquisitionStatus::configuration_error;
-				else
-					response.status =
-						msap1::AcquisitionStatus::dma_error;
-		}
-
-		const auto current = make_response(request);
-		const auto saved_status = response.status;
-		response = current;
-		response.status = saved_status;
-		pending.connection->post_send(
-			msap1::acquisition::ProtocolCodec::encode_response(
-			response, static_cast<std::uint32_t>(request.command)));
+				registry_.dispatch(pending.frame));
 	}
 
 	Options options_;
@@ -1359,7 +1222,7 @@ private:
 	EventSignal ipc_event_;
 	std::mutex ipc_mutex_;
 	std::deque<PendingIpcRequest> ipc_requests_;
-	std::vector<MeterSubscription> meter_subscriptions_;
+	msap1::AcquisitionCommandRegistry registry_;
 	bool running_ = false;
 	std::uint64_t meter_records_ = 0;
 	std::uint64_t dma_bytes_ = 0;

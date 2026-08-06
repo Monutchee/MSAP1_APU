@@ -1,7 +1,7 @@
 #ifndef MSAP1_METER_HEALTH_HPP
 #define MSAP1_METER_HEALTH_HPP
 
-#include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition_commands.hpp"
 
 #include <string>
 #include <vector>
@@ -38,7 +38,7 @@ struct MeterHealth {
 
 std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health);
-MeterHealth evaluate_meter_health(const AcquisitionResponse &response);
+MeterHealth evaluate_meter_health(const InfoResponse &response);
 
 } // namespace msap1
 

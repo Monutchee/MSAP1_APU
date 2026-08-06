@@ -123,8 +123,9 @@ msap1_library(msap1_waveform msap1::waveform
 )
 
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
-# dependency is intentional: acquisition_ipc.hpp exposes typed meter/waveform
-# DTOs while mnc::ipc remains unaware of their meaning.
+# dependencies are intentional: acquisition_ipc.hpp binds the typed command
+# structs to glaze BEVE payloads while mnc::ipc remains unaware of their
+# meaning.
 msap1_library(msap1_acquisition msap1::acquisition
     ${PROJECT_SOURCE_DIR}/src/acquisition_ipc.cpp
     ${PROJECT_SOURCE_DIR}/src/acquisition/meter_dma_reader.cpp
@@ -136,6 +137,7 @@ target_link_libraries(msap1_acquisition PUBLIC
     mnc::ipc
     msap1::meter
     msap1::waveform
+    glaze::glaze
 )
 target_link_libraries(msap1_acquisition PRIVATE
     mnc::rpmsg_chrdev
