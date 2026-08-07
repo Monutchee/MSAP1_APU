@@ -1,4 +1,4 @@
-#include "mnc/service_manager.hpp"
+#include "mnc/service/service_manager.hpp"
 
 #include <exception>
 #include <iostream>

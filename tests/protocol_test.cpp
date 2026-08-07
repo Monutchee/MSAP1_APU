@@ -1,7 +1,7 @@
-#include "msap1/meter_config.hpp"
-#include "msap1/meter_health.hpp"
-#include "msap1/meter_record.hpp"
-#include "msap1/protocol.hpp"
+#include "msap1/meter/meter_config.hpp"
+#include "msap1/meter/meter_health.hpp"
+#include "msap1/meter/meter_record.hpp"
+#include "msap1/acquisition/rpu/protocol.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -493,21 +493,23 @@ void rejects_bad_frames()
 
 void meter_health_evaluation()
 {
-	msap1::AcquisitionResponse response{};
-	response.running = 1;
-	response.has_meter_record = 1;
+	msap1::InfoResponse response{};
+	msap1_adc_health_payload rpu_health{};
+	response.running = true;
+	response.has_meter_record = true;
 	response.meter_record_age_ms = 0;
 	response.configuration_generation = 0x1234;
-	response.rpu_health.health_flags =
+	rpu_health.health_flags =
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
 		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH |
 		MSAP1_ADC_HEALTH_CAPTURE_ACTIVE | MSAP1_ADC_HEALTH_NO_OVERFLOW |
 		MSAP1_ADC_HEALTH_HEADERS_VALID | MSAP1_ADC_HEALTH_RATE_MATCH;
-	response.rpu_health.meter_health_flags =
+	rpu_health.meter_health_flags =
 		MSAP1_METER_HEALTH_CORES_PRESENT | MSAP1_METER_HEALTH_CONFIGURED |
 		MSAP1_METER_HEALTH_GENERATION_MATCH | MSAP1_METER_HEALTH_ENABLED |
 		MSAP1_METER_HEALTH_REMOVE_DC;
-	response.rpu_health.meter_generation = response.configuration_generation;
+	rpu_health.meter_generation = response.configuration_generation;
+	response.rpu_health = rpu_health;
 	const auto healthy = msap1::evaluate_meter_health(response);
 	require(healthy.healthy && healthy.acquisition_healthy && healthy.adc_healthy,
 		"healthy meter response was rejected");
@@ -535,7 +537,8 @@ void meter_health_evaluation()
 		"acquisition errors did not degrade meter health");
 
 	response.sequence_gaps = 0;
-	response.rpu_health.health_flags &= ~MSAP1_ADC_HEALTH_RATE_MATCH;
+	rpu_health.health_flags &= ~MSAP1_ADC_HEALTH_RATE_MATCH;
+	response.rpu_health = rpu_health;
 	const auto rate_mismatch = msap1::evaluate_meter_health(response);
 	require(!rate_mismatch.healthy && !rate_mismatch.adc_healthy &&
 		rate_mismatch.acquisition_healthy,
@@ -548,22 +551,24 @@ void meter_health_evaluation()
 			"does not match configured rate") != std::string::npos,
 		"ADC rate-mismatch reason omitted measured/configured context");
 
-	response.rpu_health.health_flags |= MSAP1_ADC_HEALTH_RATE_MATCH;
-	response.rpu_health.health_flags &=
+	rpu_health.health_flags |= MSAP1_ADC_HEALTH_RATE_MATCH;
+	rpu_health.health_flags &=
 		~(MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
 		  MSAP1_ADC_HEALTH_INIT_COMPLETE |
 		  MSAP1_ADC_HEALTH_CONFIG_MATCH);
-	response.rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_PROTOCOL_FAILED;
+	rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_PROTOCOL_FAILED;
+	response.rpu_health = rpu_health;
 	const auto spi_failure = msap1::evaluate_meter_health(response);
 	require(spi_failure.adc_degraded_reasons.size() == 1 &&
 			spi_failure.adc_degraded_reasons.front().code ==
 				"spi_unresponsive",
 		"invalid SPI snapshot produced secondary register-health reasons");
-	response.rpu_health.health_flags |=
+	rpu_health.health_flags |=
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE |
 		MSAP1_ADC_HEALTH_INIT_COMPLETE |
 		MSAP1_ADC_HEALTH_CONFIG_MATCH;
-	response.rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_OK;
+	rpu_health.spi_error = MSAP1_ADC_SPI_HEALTH_OK;
+	response.rpu_health = rpu_health;
 
 	response.latest_record.words[57] = 1u << 7;
 	const auto arithmetic_fault = msap1::evaluate_meter_health(response);

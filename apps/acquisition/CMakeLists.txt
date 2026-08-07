@@ -1,4 +1,16 @@
-add_executable(msap1-fpga-acquisition main.cpp)
+add_executable(msap1-fpga-acquisition
+    main.cpp
+    acquisition_service.cpp
+    support/options.cpp
+    config/runtime_config.cpp
+    pipeline/capture_coordinator.cpp
+    pipeline/health_monitor.cpp
+    pipeline/record_ingestor.cpp
+    ipc/ipc_channel.cpp
+    ipc/command_handlers.cpp
+)
+target_include_directories(msap1-fpga-acquisition PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(msap1-fpga-acquisition PRIVATE
     msap1::acquisition
     msap1::meter

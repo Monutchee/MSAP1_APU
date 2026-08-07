@@ -1,6 +1,6 @@
-#include "msap1/acquisition/meter_record_source.hpp"
-#include "msap1/acquisition/rpu_control.hpp"
-#include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition/dma/meter_record_source.hpp"
+#include "msap1/acquisition/rpu/rpu_control.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 
 #include <chrono>
 #include <stdexcept>
@@ -67,40 +67,70 @@ void device_interfaces_are_substitutable()
 		"wrong fake RPU health");
 }
 
-void product_codec_preserves_the_v14_contract()
+void typed_commands_round_trip_through_the_registry()
 {
-	msap1::AcquisitionRequest request;
-	request.command = msap1::AcquisitionCommand::meter_stream_read;
-	request.sequence = 0x1122334455667788ull;
-	request.meter_period = msap1::UpdatePeriod::s10;
-	request.meter_cursor = 91;
-	request.meter_limit = 7;
-	request.meter_consumer = "historian";
+	msap1::AcquisitionCommandRegistry registry;
+	registry.on<msap1::SampleRateSetRequest>(
+		msap1::AcquisitionStatus::configuration_error,
+		[](const msap1::SampleRateSetRequest &request) {
+			require(request.sample_rate_hz == 64000,
+				"wrong decoded sample rate");
+			msap1::InfoResponse response{};
+			response.running = true;
+			response.sample_rate_hz = request.sample_rate_hz;
+			msap1_adc_health_payload health{};
+			health.drdy_frequency_hz = 63999;
+			response.rpu_health = health;
+			return response;
+		});
 
-	auto frame = msap1::acquisition::ProtocolCodec::encode_request(request);
-	auto decoded = msap1::acquisition::ProtocolCodec::decode_request(frame);
-	require(decoded.version == msap1::acquisition_ipc_version,
-		"wrong IPC version");
-	require(decoded.command == request.command, "wrong command");
-	require(decoded.sequence == request.sequence, "wrong sequence");
-	require(decoded.meter_period == request.meter_period, "wrong period");
-	require(decoded.meter_cursor == request.meter_cursor, "wrong cursor");
-	require(decoded.meter_limit == request.meter_limit, "wrong limit");
-	require(decoded.meter_consumer == request.meter_consumer,
-		"wrong consumer");
+	msap1::SampleRateSetRequest request;
+	request.sample_rate_hz = 64000;
+	auto frame = msap1::encode_acquisition_request(request);
+	frame.correlation_id = 0x1122334455667788ull;
+	require(frame.message_type ==
+			msap1::acquisition_command_id<msap1::SampleRateSetRequest>,
+		"wrong request message type");
 
-	msap1::AcquisitionResponse response;
-	response.sequence = request.sequence;
-	response.status = msap1::AcquisitionStatus::ok;
-	response.sample_rate_hz = 64000;
-	frame = msap1::acquisition::ProtocolCodec::encode_response(
-		response, static_cast<std::uint32_t>(request.command));
-	auto decoded_response =
-		msap1::acquisition::ProtocolCodec::decode_response(frame);
-	require(decoded_response.sequence == request.sequence,
-		"wrong response sequence");
-	require(decoded_response.sample_rate_hz == 64000,
-		"wrong response sample rate");
+	const auto reply = registry.dispatch(frame);
+	require(reply.kind == mnc::ipc::FrameKind::response,
+		"wrong reply frame kind");
+	require(reply.message_type == frame.message_type,
+		"reply must echo the command identity");
+	require(reply.correlation_id == frame.correlation_id,
+		"reply must echo the correlation ID");
+	const auto response =
+		msap1::decode_acquisition_payload<msap1::InfoResponse>(reply);
+	require(response.status == msap1::AcquisitionStatus::ok, "wrong status");
+	require(response.running, "wrong running flag");
+	require(response.sample_rate_hz == 64000, "wrong response sample rate");
+	require(response.rpu_health.value().drdy_frequency_hz == 63999,
+		"wrong hardware-mirror payload round trip");
+}
+
+void malformed_and_unknown_requests_are_rejected()
+{
+	msap1::AcquisitionCommandRegistry registry;
+	registry.on<msap1::InfoRequest>(msap1::AcquisitionStatus::dma_error,
+		[](const msap1::InfoRequest &) {
+			return msap1::InfoResponse{};
+		});
+
+	auto malformed = msap1::encode_acquisition_request(msap1::InfoRequest{});
+	malformed.payload.resize(1);
+	const auto rejected = registry.dispatch(malformed);
+	require(rejected.kind == mnc::ipc::FrameKind::error,
+		"malformed request must produce an error frame");
+	const auto rejection =
+		msap1::decode_acquisition_payload<msap1::InfoResponse>(rejected);
+	require(rejection.status == msap1::AcquisitionStatus::bad_request,
+		"malformed request must report bad_request");
+
+	auto unknown = msap1::encode_acquisition_request(msap1::InfoRequest{});
+	unknown.message_type = 0xdeadbeefu;
+	const auto unknown_reply = registry.dispatch(unknown);
+	require(unknown_reply.kind == mnc::ipc::FrameKind::error,
+		"unknown command must produce an error frame");
 }
 
 } // namespace
@@ -108,6 +138,7 @@ void product_codec_preserves_the_v14_contract()
 int main()
 {
 	device_interfaces_are_substitutable();
-	product_codec_preserves_the_v14_contract();
+	typed_commands_round_trip_through_the_registry();
+	malformed_and_unknown_requests_are_rejected();
 	return 0;
 }

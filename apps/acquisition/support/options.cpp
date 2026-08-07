@@ -1,0 +1,58 @@
+#include "support/options.hpp"
+
+#include <cstdlib>
+#include <iostream>
+#include <stdexcept>
+
+namespace msap1::acquisition::daemon {
+
+namespace {
+
+void usage(const char *program)
+{
+	std::cerr
+		<< "Usage: " << program << " [options]\n"
+		<< "  --service NAME       RPMsg service (default: mncos-r5c0-ctrl)\n"
+		<< "  --rpmsg-device PATH  Use an existing /dev/rpmsgN endpoint\n"
+		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
+		<< "  --waveform-device PATH Waveform DMA device (default: /dev/msap1-waveform)\n"
+		<< "  --waveform-directory PATH Completed waveform storage\n"
+		<< "  --socket PATH        Control socket path\n"
+		<< "  --record-stream PATH Durable meter record database\n";
+}
+
+} // namespace
+
+Options parse_options(int argc, char **argv)
+{
+	Options options;
+	for (int index = 1; index < argc; ++index) {
+		const std::string option = argv[index];
+		if (option == "--help" || option == "-h") {
+			usage(argv[0]);
+			std::exit(0);
+		}
+		if (index + 1 >= argc)
+			throw std::invalid_argument(option + " requires a value");
+		const std::string value = argv[++index];
+		if (option == "--service")
+			options.service = value;
+		else if (option == "--rpmsg-device")
+			options.rpmsg_device = value;
+		else if (option == "--meter-device")
+			options.meter_device = value;
+		else if (option == "--waveform-device")
+			options.waveform_device = value;
+		else if (option == "--waveform-directory")
+			options.waveform_directory = value;
+		else if (option == "--socket")
+			options.socket_path = value;
+		else if (option == "--record-stream")
+			options.record_stream = value;
+		else
+			throw std::invalid_argument("unknown option '" + option + "'");
+	}
+	return options;
+}
+
+} // namespace msap1::acquisition::daemon

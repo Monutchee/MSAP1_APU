@@ -1,0 +1,40 @@
+#pragma once
+
+/**
+ * @file options.hpp
+ * @brief Command-line options of the acquisition daemon.
+ */
+
+#include "msap1/acquisition/ipc/acquisition_commands.hpp"
+
+#include <string>
+
+namespace msap1::acquisition::daemon {
+
+/** Runtime paths and endpoint names, overridable from the command line. */
+struct Options {
+	/** RPMsg control service announced by R5 core 0. */
+	std::string service = "mncos-r5c0-ctrl";
+	/** Pre-bound /dev/rpmsgN endpoint; discovered from service when empty. */
+	std::string rpmsg_device;
+	/** Meter record DMA character device. */
+	std::string meter_device = "/dev/msap1-meter";
+	/** Waveform block DMA character device. */
+	std::string waveform_device = "/dev/msap1-waveform";
+	/** Directory receiving completed .mncwf captures. */
+	std::string waveform_directory = "/data/mnc/waveform";
+	/** Unix control socket serving the acquisition command IPC. */
+	std::string socket_path = msap1::acquisition_socket_path;
+	/** Durable SQLite WAL stream for validated meter records. */
+	std::string record_stream = "/data/mnc/meter/record-stream.sqlite3";
+};
+
+/**
+ * @brief Parse argv into Options.
+ *
+ * Prints usage and exits for --help; throws std::invalid_argument for an
+ * unknown option or a missing value.
+ */
+Options parse_options(int argc, char **argv);
+
+} // namespace msap1::acquisition::daemon

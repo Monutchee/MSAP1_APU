@@ -15,8 +15,8 @@ The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
 The authoritative writer and public data definitions are:
 
 ```text
-src/waveform_capture.cpp
-include/msap1/waveform_capture.hpp
+common/msap1/waveform/waveform_capture.cpp
+common/msap1/waveform/waveform_capture.hpp
 ```
 
 Consumers in other repositories should link to this document instead of

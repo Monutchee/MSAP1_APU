@@ -1,4 +1,4 @@
-#include "msap1/waveform_capture.hpp"
+#include "msap1/waveform/waveform_capture.hpp"
 
 #include <algorithm>
 #include <array>
