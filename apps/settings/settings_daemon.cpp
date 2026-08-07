@@ -1,6 +1,6 @@
 #include "settings_daemon.hpp"
 
-#include "settings_apply.hpp"
+#include "apply/settings_apply.hpp"
 
 #include <filesystem>
 #include <stdexcept>

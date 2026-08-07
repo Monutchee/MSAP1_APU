@@ -3,10 +3,10 @@
  * @brief Entry point of msap1-settings, the persistent settings authority.
  *
  * The daemon is decomposed by responsibility:
- *  - settings_daemon.*  — service shell: socket server, worker thread, health
- *  - request_router.*   — decode -> authorize -> dispatch -> respond + events
- *  - access_policy.hpp  — the complete reviewable access-control policy
- *  - settings_apply.*   — hot-apply bridge to the acquisition daemon
+ *  - settings_daemon.*      — service shell: socket server, worker, health
+ *  - ipc/request_router.*   — decode -> authorize -> dispatch -> respond
+ *  - ipc/access_policy.hpp  — the complete reviewable access-control policy
+ *  - apply/settings_apply.* — hot-apply bridge to the acquisition daemon
  */
 
 #include "settings_daemon.hpp"

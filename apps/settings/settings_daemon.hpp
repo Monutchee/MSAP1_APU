@@ -8,7 +8,7 @@
 #include "mnc/ipc/ipc.hpp"
 #include "mnc/service/service.hpp"
 #include "msap1/settings/settings.hpp"
-#include "request_router.hpp"
+#include "ipc/request_router.hpp"
 
 #include <boost/asio/io_context.hpp>
 

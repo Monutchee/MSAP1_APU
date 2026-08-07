@@ -1,6 +1,6 @@
-#include "request_router.hpp"
+#include "ipc/request_router.hpp"
 
-#include "access_policy.hpp"
+#include "ipc/access_policy.hpp"
 
 #include <algorithm>
 #include <exception>
