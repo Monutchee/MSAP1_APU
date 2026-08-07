@@ -19,7 +19,7 @@
  * register_routes() wires the whole table into the WebEngine at startup.
  */
 
-#include "../app_context.hpp"
+#include "app_context.hpp"
 
 #include <array>
 #include <string>

@@ -5,8 +5,8 @@
  * @brief Shared service dependencies handed to every HTTP route handler.
  */
 
-#include "acquisition_gateway.hpp"
-#include "settings_gateway.hpp"
+#include "gateway/acquisition_gateway.hpp"
+#include "gateway/settings_gateway.hpp"
 
 namespace webengine {
 class NginxController;

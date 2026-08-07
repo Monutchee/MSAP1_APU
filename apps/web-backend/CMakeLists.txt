@@ -1,8 +1,8 @@
 add_executable(msap1-web-backend
     main.cpp
-    acquisition_gateway.cpp
-    settings_gateway.cpp
-    msap1_auth_provider.cpp
+    gateway/acquisition_gateway.cpp
+    gateway/settings_gateway.cpp
+    auth/msap1_auth_provider.cpp
     api/health_routes.cpp
     api/meter_routes.cpp
     api/adc_routes.cpp
@@ -10,6 +10,8 @@ add_executable(msap1-web-backend
     api/settings_routes.cpp
     api/developer_routes.cpp
 )
+target_include_directories(msap1-web-backend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(msap1-web-backend PRIVATE
     msap1::acquisition
@@ -30,7 +32,7 @@ install(TARGETS msap1-web-backend
 if(BUILD_TESTING)
     add_executable(systemd_notifier_test
         ${PROJECT_SOURCE_DIR}/tests/systemd_notifier_test.cpp
-        systemd_notifier.cpp
+        support/systemd_notifier.cpp
     )
     target_include_directories(systemd_notifier_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})

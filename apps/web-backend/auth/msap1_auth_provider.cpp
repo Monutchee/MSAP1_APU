@@ -1,4 +1,4 @@
-#include "msap1_auth_provider.hpp"
+#include "auth/msap1_auth_provider.hpp"
 
 #include "mnc/logging/logging.hpp"
 

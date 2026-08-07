@@ -10,7 +10,7 @@
 
 #include "api/routes.hpp"
 #include "app_context.hpp"
-#include "msap1_auth_provider.hpp"
+#include "auth/msap1_auth_provider.hpp"
 #include "mnc/logging/logging.hpp"
 #include "mnc/service/service.hpp"
 

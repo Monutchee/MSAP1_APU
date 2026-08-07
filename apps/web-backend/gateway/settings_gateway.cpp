@@ -1,4 +1,4 @@
-#include "settings_gateway.hpp"
+#include "gateway/settings_gateway.hpp"
 
 #include <stdexcept>
 #include <utility>
