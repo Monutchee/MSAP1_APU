@@ -1,16 +1,13 @@
 #pragma once
 
 #include "mnc/settings/settings.hpp"
-#include "msap1/meter/meter_config.hpp"
+#include "msap1/settings/definition/product_settings.hpp"
 
-#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace msap1::settings {
 
@@ -19,42 +16,6 @@ inline constexpr std::string_view socket_path =
 inline constexpr std::string_view persistent_root = "/data/mnc/settings";
 inline constexpr std::string_view factory_defaults_path =
 	"/usr/share/monutchee/msap1/settings/factory-defaults.json";
-
-struct RmsSettings {
-	std::uint32_t window_ms = 0;
-	bool remove_dc = false;
-};
-
-struct MeterConversionSettings {
-	std::string profile_id;
-	double adc_reference_volts = 0.0;
-	std::vector<CurrentChannelConfig> current_channels;
-	std::vector<VoltageChannelConfig> voltage_channels;
-};
-
-struct MeteringSettings {
-	std::uint32_t sample_rate_hz = 0;
-	RmsSettings rms;
-	FrequencyConfig frequency;
-	MeterConversionSettings conversion;
-};
-
-struct AdcSettings {
-	std::string source;
-	SimulatorConfig simulator;
-};
-
-struct WaveformSettings {
-	std::uint32_t default_pretrigger_ms = 0;
-	std::uint32_t default_posttrigger_ms = 0;
-};
-
-struct ProductSettings {
-	std::uint32_t schema_version = 1;
-	MeteringSettings metering;
-	AdcSettings adc;
-	WaveformSettings waveform;
-};
 
 struct ActiveSnapshot {
 	std::string content_hash;
@@ -73,9 +34,6 @@ class SettingsValidator final {
 public:
 	static void validate(const ProductSettings &settings);
 };
-
-[[nodiscard]] MeterConversionFile
-to_meter_configuration(const ProductSettings &settings);
 
 /** Coordinates runtime apply/verify/rollback without knowing device details. */
 class SettingsApplyCoordinator final {

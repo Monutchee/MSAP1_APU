@@ -84,20 +84,19 @@ std::string SettingsCodec::hash(std::string_view canonical_json)
 	return output.str();
 }
 
+void ProductSettings::validate() const
+{
+	if (schema_version != supported_schema_version)
+		throw std::runtime_error("unsupported settings schema version");
+	metering.validate();
+	waveform.validate();
+	(void)prepare_meter_configuration(to_meter_configuration(*this),
+		metering.sample_rate_hz);
+}
+
 void SettingsValidator::validate(const ProductSettings &settings)
 {
-	if (settings.schema_version != 1u)
-		throw std::runtime_error("unsupported settings schema version");
-	if (!supported_adc_sample_rate(settings.metering.sample_rate_hz))
-		throw std::runtime_error("unsupported persistent ADC sample rate");
-	if (settings.metering.rms.window_ms == 0u ||
-	    settings.metering.rms.window_ms > 10000u)
-		throw std::runtime_error("RMS window must be 1..10000 ms");
-	if (settings.waveform.default_pretrigger_ms > 120000u ||
-	    settings.waveform.default_posttrigger_ms > 120000u)
-		throw std::runtime_error("waveform defaults must not exceed 120 seconds");
-	(void)prepare_meter_configuration(to_meter_configuration(settings),
-		settings.metering.sample_rate_hz);
+	settings.validate();
 }
 
 MeterConversionFile to_meter_configuration(const ProductSettings &settings)
