@@ -148,7 +148,7 @@ webengine::Response get_developer_logs(AppContext &,
  * surface and its role policy.  Order is presentation only; the router
  * matches (method, path) exactly.
  */
-inline constexpr std::array<RouteEntry, 23> route_table{{
+inline constexpr auto route_table = std::to_array<RouteEntry>({
 	/* System (health_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/session",
 	 webengine::Role::Viewer, &get_session,
@@ -229,7 +229,7 @@ inline constexpr std::array<RouteEntry, 23> route_table{{
 	{webengine::http::verb::get, "/api/v1/developer/logs",
 	 webengine::Role::Admin, &get_developer_logs,
 	 "Bounded, cursor-paginated journal query"},
-}};
+});
 
 /**
  * @brief Register every route_table entry with the engine.
