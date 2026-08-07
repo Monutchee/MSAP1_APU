@@ -35,7 +35,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The project uses C++23, Boost.Asio, Glaze 7.9.0, OpenAMP-helper-APU, and
+The project uses C++23, Boost.Asio, Glaze 8.0.0, OpenAMP-helper-APU, and
 WebEngine.
 The reusable `mnc::logging` library writes and reads structured systemd
 journal entries; MSAP1-specific component/event policy remains in this
