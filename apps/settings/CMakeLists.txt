@@ -1,4 +1,9 @@
-add_executable(msap1-settings main.cpp)
+add_executable(msap1-settings
+    main.cpp
+    settings_daemon.cpp
+    request_router.cpp
+    settings_apply.cpp
+)
 target_link_libraries(msap1-settings PRIVATE
     msap1::settings
     msap1::acquisition
