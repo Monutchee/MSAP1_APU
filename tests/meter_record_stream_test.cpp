@@ -1,4 +1,4 @@
-#include "msap1/meter_record_stream.hpp"
+#include "msap1/meter/meter_record_stream.hpp"
 
 #include <chrono>
 #include <exception>

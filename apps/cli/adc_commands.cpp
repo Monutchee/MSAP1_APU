@@ -1,10 +1,10 @@
 #include "cli.hpp"
 #include "result_output.hpp"
 
-#include "msap1/acquisition_ipc.hpp"
-#include "msap1/meter_config.hpp"
-#include "msap1/settings.hpp"
-#include "msap1/settings_ipc.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "msap1/meter/meter_config.hpp"
+#include "msap1/settings/settings.hpp"
+#include "msap1/settings/settings_ipc.hpp"
 
 #include <algorithm>
 #include <chrono>

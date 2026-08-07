@@ -1,4 +1,4 @@
-#include "msap1/soc_temperature.hpp"
+#include "msap1/system/soc_temperature.hpp"
 
 #include <chrono>
 #include <filesystem>

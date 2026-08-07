@@ -13,7 +13,7 @@
  * reply status, and both the health and ADC modules name ADC sources.
  */
 
-#include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 
 #include <cstdint>
 #include <stdexcept>

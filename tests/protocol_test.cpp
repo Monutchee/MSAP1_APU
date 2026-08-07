@@ -1,7 +1,7 @@
-#include "msap1/meter_config.hpp"
-#include "msap1/meter_health.hpp"
-#include "msap1/meter_record.hpp"
-#include "msap1/protocol.hpp"
+#include "msap1/meter/meter_config.hpp"
+#include "msap1/meter/meter_health.hpp"
+#include "msap1/meter/meter_record.hpp"
+#include "msap1/acquisition/rpu/protocol.hpp"
 
 #include <cstdint>
 #include <cstring>

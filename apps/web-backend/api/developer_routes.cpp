@@ -7,8 +7,8 @@
 #include "response.hpp"
 #include "routes.hpp"
 
-#include "msap1/soc_temperature.hpp"
-#include "msap1/system_identity.hpp"
+#include "msap1/system/soc_temperature.hpp"
+#include "msap1/system/system_identity.hpp"
 #include "mnc/logging/journal_reader.hpp"
 
 #include <charconv>

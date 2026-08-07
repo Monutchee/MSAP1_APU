@@ -1,6 +1,6 @@
 #include "cli.hpp"
 
-#include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 
 #include <glaze/glaze.hpp>
 

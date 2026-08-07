@@ -1,7 +1,7 @@
 #pragma once
 
-#include "msap1/settings.hpp"
-#include "msap1/settings_ipc.hpp"
+#include "msap1/settings/settings.hpp"
+#include "msap1/settings/settings_ipc.hpp"
 
 #include <functional>
 #include <string>

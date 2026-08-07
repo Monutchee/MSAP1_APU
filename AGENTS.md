@@ -8,9 +8,13 @@
 - Read `README.md` before changing behavior. For ADC bring-up expectations and
   known limitations, read `tests/method/test_adc_rpmsg_procedure.md` instead of
   recording transient results here.
-- Public headers are under `include/msap1/`; shared implementation is under
-  `src/`, and each executable has its own directory under `apps/`.
-- Reusable Linux logging interfaces live under `include/mnc/logging` and use
+- Shared libraries live under `common/<namespace>/<library>/` (for example
+  `common/msap1/meter/`), with each library's headers and sources together and
+  larger libraries split into feature subdirectories (for example
+  `common/msap1/acquisition/{ipc,rpu,dma}/`). The include root is `common/`,
+  so includes name the library: `#include "msap1/meter/meter_record.hpp"`.
+  Each executable has its own directory under `apps/`.
+- Reusable Linux logging interfaces live under `common/mnc/logging` and use
   the `mnc::logging` namespace. Keep product-neutral journal writer/query
   mechanics there and MSAP1 component, event, and access policy in this
   repository's applications.
@@ -130,8 +134,8 @@
 
 ## Cross-repository ABI
 
-- `include/msap1/rpu_control_protocol.h` is the APU copy of the wire ABI defined
-  with `MSAP1_RPU/common/include/rpu_control_protocol.h`.
+- `common/msap1/acquisition/rpu/rpu_control_protocol.h` is the APU copy of the
+  wire ABI defined with `MSAP1_RPU/common/include/rpu_control_protocol.h`.
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.

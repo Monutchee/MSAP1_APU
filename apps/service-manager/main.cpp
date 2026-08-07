@@ -1,7 +1,7 @@
 #include "mnc/ipc/ipc.hpp"
-#include "mnc/service.hpp"
-#include "mnc/service_manager.hpp"
-#include "msap1/service_control.hpp"
+#include "mnc/service/service.hpp"
+#include "mnc/service/service_manager.hpp"
+#include "msap1/service/service_control.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>

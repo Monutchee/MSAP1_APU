@@ -1,8 +1,8 @@
 #include "cli.hpp"
 #include "result_output.hpp"
 
-#include "msap1/acquisition_ipc.hpp"
-#include "msap1/meter_health.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "msap1/meter/meter_health.hpp"
 
 #include <array>
 #include <chrono>

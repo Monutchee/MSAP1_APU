@@ -7,8 +7,8 @@
 #include "response.hpp"
 #include "routes.hpp"
 
-#include "msap1/settings.hpp"
-#include "msap1/settings_ipc.hpp"
+#include "msap1/settings/settings.hpp"
+#include "msap1/settings/settings_ipc.hpp"
 
 #include <exception>
 #include <stdexcept>

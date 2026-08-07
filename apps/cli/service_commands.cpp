@@ -1,7 +1,7 @@
 #include "cli.hpp"
 #include "result_output.hpp"
 
-#include "msap1/service_control.hpp"
+#include "msap1/service/service_control.hpp"
 
 #include <iomanip>
 #include <ostream>

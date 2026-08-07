@@ -8,7 +8,7 @@
 #include "response.hpp"
 #include "routes.hpp"
 
-#include "msap1/meter_health.hpp"
+#include "msap1/meter/meter_health.hpp"
 
 #include <array>
 #include <cmath>

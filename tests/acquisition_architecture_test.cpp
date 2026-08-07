@@ -1,6 +1,6 @@
-#include "msap1/acquisition/meter_record_source.hpp"
-#include "msap1/acquisition/rpu_control.hpp"
-#include "msap1/acquisition_ipc.hpp"
+#include "msap1/acquisition/dma/meter_record_source.hpp"
+#include "msap1/acquisition/rpu/rpu_control.hpp"
+#include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 
 #include <chrono>
 #include <stdexcept>
