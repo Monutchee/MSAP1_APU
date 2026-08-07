@@ -1,13 +1,13 @@
 add_library(mnc_cli STATIC
-    cli.cpp
-    meter_commands.cpp
-    adc_commands.cpp
-    waveform_commands.cpp
-    log_commands.cpp
-    machine_commands.cpp
-    system_commands.cpp
-    service_commands.cpp
-    settings_commands.cpp
+    core/cli.cpp
+    commands/meter_commands.cpp
+    commands/adc_commands.cpp
+    commands/waveform_commands.cpp
+    commands/log_commands.cpp
+    commands/machine_commands.cpp
+    commands/system_commands.cpp
+    commands/service_commands.cpp
+    commands/settings_commands.cpp
 )
 target_link_libraries(mnc_cli PUBLIC
     msap1::acquisition

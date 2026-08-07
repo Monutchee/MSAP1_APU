@@ -1,4 +1,4 @@
-#include "cli.hpp"
+#include "core/cli.hpp"
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 

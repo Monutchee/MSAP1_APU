@@ -1,5 +1,5 @@
-#include "cli.hpp"
-#include "result_output.hpp"
+#include "core/cli.hpp"
+#include "core/result_output.hpp"
 
 #include "mnc/logging/journal_reader.hpp"
 #include "mnc/logging/logging.hpp"

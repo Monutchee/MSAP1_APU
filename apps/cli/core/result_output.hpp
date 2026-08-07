@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cli.hpp"
+#include "core/cli.hpp"
 
 #include <glaze/glaze.hpp>
 
