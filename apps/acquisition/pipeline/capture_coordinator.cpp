@@ -4,6 +4,7 @@
 #include "ipc/command_handlers.hpp"
 #include "msap1/acquisition/rpu/protocol.hpp"
 #include "support/logs.hpp"
+#include "support/utc_clock.hpp"
 
 #include <chrono>
 #include <exception>
@@ -102,11 +103,12 @@ void CaptureCoordinator::service_poll_events()
 		ipc_.drain(registry_);
 }
 
-void CaptureCoordinator::refresh_time_sync()
+void CaptureCoordinator::refresh_time_sync(bool force)
 {
 	static constexpr auto time_sync_interval = 10s;
 	const auto now = Clock::now();
-	if (last_time_sync_ && now - *last_time_sync_ < time_sync_interval)
+	if (!force && last_time_sync_ &&
+	    now - *last_time_sync_ < time_sync_interval)
 		return;
 	/* Rate-limit even on failure: a broken correlation source must not
 	 * turn the poll loop into an ioctl storm, and a missing refresh is
@@ -125,16 +127,25 @@ void CaptureCoordinator::refresh_time_sync()
 	 * The correlation latch sits before the PL elasticity FIFO, so the
 	 * latched counter may lead the conversion stream by up to 16 frames;
 	 * add that bound (in nanoseconds at the active rate) to the
-	 * CLOCK_REALTIME bracket width.
+	 * CLOCK_REALTIME bracket width. The kernel's own clock error
+	 * estimate joins the same combined bound, and its discipline flag
+	 * decides whether this sync may claim Synchronized at all.
 	 */
 	const auto sample_rate = configuration_.wire.sample_rate_hz;
 	const std::uint64_t elasticity_ns = sample_rate == 0u
 		? 0u
 		: 16ull * 1'000'000'000ull / sample_rate;
+	const auto clock_status = read_utc_clock_status();
 	timebase_.record_sync(
-		{sync->sample_counter,
-		 static_cast<std::int64_t>(sync->realtime_nanoseconds),
-		 sync->bracket_nanoseconds + elasticity_ns},
+		{.sample_counter = sync->sample_counter,
+		 .utc_ns = static_cast<std::int64_t>(sync->realtime_nanoseconds),
+		 .uncertainty_ns = sync->bracket_nanoseconds + elasticity_ns +
+			 clock_status.estimated_uncertainty_ns,
+		 /* Bind the sync to the ACTIVE configuration so the timebase
+		  * can refuse to extrapolate across a rate change. */
+		 .sample_rate_hz = sample_rate,
+		 .configuration_generation = configuration_.wire.generation,
+		 .utc_synchronized = clock_status.synchronized},
 		now);
 }
 
@@ -225,6 +236,13 @@ void CaptureCoordinator::start(bool apply_configuration)
 	}
 	running_ = true;
 	health_.on_capture_started();
+	/*
+	 * start() is the restart step of every configuration apply
+	 * transaction, and a sync point is bound to the generation it was
+	 * latched under: refresh immediately so the no-UTC window after a
+	 * configuration change lasts one latch, not a full 10 s cadence.
+	 */
+	refresh_time_sync(/*force=*/true);
 	log_message(lifecycle_log, mnc::logging::Priority::notice,
 		"ADC capture, meter DMA, and waveform DMA started",
 		"capture_started",

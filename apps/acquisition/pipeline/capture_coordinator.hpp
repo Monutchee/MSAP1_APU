@@ -128,10 +128,16 @@ private:
 	 * @brief Refresh the measurement-timebase sync point (~10 s cadence).
 	 *
 	 * Correlates the PL 64-bit conversion sample counter with
-	 * CLOCK_REALTIME through the waveform correlation latch; missing the
+	 * CLOCK_REALTIME through the waveform correlation latch, binds the
+	 * sync to the ACTIVE configuration (generation + sample rate), and
+	 * folds in the kernel clock discipline state (adjtimex). Missing the
 	 * cadence long enough moves TimeQuality to Holdover on its own.
+	 *
+	 * @param force Bypass the cadence limit — used right after a
+	 *        successful (re)start so the no-UTC window that follows a
+	 *        configuration change stays short.
 	 */
-	void refresh_time_sync();
+	void refresh_time_sync(bool force = false);
 	/**
 	 * @brief Swap in a staged configuration as one transaction, rolling
 	 *        back to the previous operating point on failure.

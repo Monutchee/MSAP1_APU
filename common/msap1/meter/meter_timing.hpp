@@ -94,7 +94,31 @@ struct BlockTiming {
 	/* UTC of the first sample via the measurement timebase mapping;
 	 * absent while unsynchronized. */
 	std::optional<SystemTime> utc_start;
+	/* Error bound on utc_start, from the sync point the label came from.
+	 * Present exactly when utc_start is present. */
+	std::optional<std::uint64_t> utc_uncertainty_ns;
 };
+
+/**
+ * Whether a block may enter Class A aggregation (150/180-cycle, 10-min…).
+ *
+ * Only complete cycle-locked basic blocks aggregate: free-run fallback and
+ * partial blocks would silently dilute a cycle-defined interval with
+ * time-defined data. first_block_after_apply is conservatively ineligible —
+ * the current PL RTL cannot assert it together with cycle_locked anyway, so
+ * this term is defense in depth against a future RTL that could.
+ *
+ * Eligibility is an aggregation concern only: it must never feed back into
+ * MeasurementQuality, which describes the electrical measurement itself.
+ */
+[[nodiscard]] constexpr bool
+class_a_aggregation_eligible(const BlockTiming &timing)
+{
+	return timing.cycle_locked && !timing.free_run_fallback &&
+	       !timing.first_block_after_apply &&
+	       timing.cycle_count ==
+		       cycles_per_basic_block(timing.nominal_frequency);
+}
 
 } // namespace msap1::meter
 

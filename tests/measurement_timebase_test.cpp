@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 
 namespace {
@@ -13,6 +14,7 @@ using msap1::meter::MeasurementTimebase;
 using msap1::meter::MonotonicTime;
 using msap1::meter::TimeQuality;
 using msap1::meter::TimeSyncPoint;
+using msap1::meter::UtcEstimate;
 
 void require(bool condition, const char *message)
 {
@@ -27,12 +29,24 @@ constexpr MonotonicTime at(std::chrono::seconds offset)
 	return MonotonicTime{} + offset;
 }
 
-std::int64_t utc_nanoseconds(
-	const std::optional<std::chrono::system_clock::time_point> &time)
+/* Trusted sync point against generation 7 at 32 kSPS unless a scenario
+ * overrides a field explicitly. */
+TimeSyncPoint trusted_sync(std::uint64_t sample_counter, std::int64_t utc_ns,
+			   std::uint64_t uncertainty_ns)
 {
-	require(time.has_value(), "expected a UTC mapping to be available");
+	return {.sample_counter = sample_counter,
+		.utc_ns = utc_ns,
+		.uncertainty_ns = uncertainty_ns,
+		.sample_rate_hz = 32000,
+		.configuration_generation = 7,
+		.utc_synchronized = true};
+}
+
+std::int64_t utc_nanoseconds(const std::optional<UtcEstimate> &estimate)
+{
+	require(estimate.has_value(), "expected a UTC mapping to be available");
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
-		       time->time_since_epoch())
+		       estimate->utc.time_since_epoch())
 		.count();
 }
 
@@ -42,63 +56,150 @@ void quality_state_machine()
 
 	require(timebase.quality(at(0s)) == TimeQuality::Unsynchronized,
 		"timebase was not Unsynchronized at startup");
-	require(!timebase.utc_for_sample(0, 32000, at(0s)).has_value(),
+	require(!timebase.utc_for_sample(0, 7, at(0s)).has_value(),
 		"unsynchronized timebase produced a UTC mapping");
 
-	timebase.record_sync({320'000, 1'000'000'000'000'000'000ll, 1000},
+	timebase.record_sync(trusted_sync(320'000,
+					  1'000'000'000'000'000'000ll, 1000),
 			     at(10s));
 	require(timebase.quality(at(10s)) == TimeQuality::Synchronized,
-		"a fresh sync point did not synchronize the timebase");
+		"a fresh trusted sync point did not synchronize the timebase");
 	require(timebase.quality(at(40s)) == TimeQuality::Synchronized,
 		"quality degraded before the staleness threshold elapsed");
 	require(timebase.quality(at(41s)) == TimeQuality::Holdover,
-		"a stale sync point did not enter Holdover");
-	/* Holdover still labels samples — stale is not absent. */
-	require(timebase.utc_for_sample(320'000, 32000, at(41s)).has_value(),
+		"a stale trusted sync point did not enter Holdover");
+	/* Holdover still labels samples — stale is not absent — and the
+	 * estimate still carries the (last known) uncertainty bound. */
+	const auto holdover = timebase.utc_for_sample(320'000, 7, at(41s));
+	require(holdover.has_value(),
 		"Holdover dropped the UTC mapping entirely");
+	require(holdover->uncertainty_ns == 1000,
+		"Holdover estimate lost its uncertainty bound");
 
-	timebase.record_sync({1'600'000, 1'000'000'040'000'000'000ll, 1000},
+	timebase.record_sync(trusted_sync(1'600'000,
+					  1'000'000'040'000'000'000ll, 1000),
 			     at(50s));
 	require(timebase.quality(at(50s)) == TimeQuality::Synchronized,
-		"a new sync point did not recover from Holdover");
+		"a new trusted sync point did not recover from Holdover");
 }
 
-void linear_utc_mapping()
+void untrusted_sync_never_synchronizes()
+{
+	MeasurementTimebase timebase;
+
+	/* A perfectly fresh sync captured from an undisciplined system clock
+	 * is not UTC: quality must stay Unsynchronized and no label may be
+	 * produced, no matter how recent the sync is. */
+	auto untrusted = trusted_sync(64'000, 1'700'000'000'000'000'000ll, 500);
+	untrusted.utc_synchronized = false;
+	timebase.record_sync(untrusted, at(0s));
+	require(timebase.quality(at(0s)) == TimeQuality::Unsynchronized,
+		"an untrusted sync point claimed synchronization");
+	require(!timebase.utc_for_sample(64'000, 7, at(0s)).has_value(),
+		"an untrusted sync point produced a UTC mapping");
+
+	/* The clock becoming disciplined recovers through a trusted sync. */
+	timebase.record_sync(trusted_sync(96'000,
+					  1'700'000'001'000'000'000ll, 500),
+			     at(1s));
+	require(timebase.quality(at(1s)) == TimeQuality::Synchronized,
+		"a trusted sync did not recover from an untrusted one");
+	require(timebase.utc_for_sample(96'000, 7, at(1s)).has_value(),
+		"a trusted sync did not restore the UTC mapping");
+
+	/* Losing clock discipline downgrades immediately on the next sync:
+	 * an untrusted refresh replaces the trusted mapping. */
+	untrusted.sample_counter = 128'000;
+	timebase.record_sync(untrusted, at(2s));
+	require(timebase.quality(at(2s)) == TimeQuality::Unsynchronized,
+		"an untrusted refresh did not drop to Unsynchronized");
+	require(!timebase.utc_for_sample(128'000, 7, at(2s)).has_value(),
+		"an untrusted refresh kept producing UTC labels");
+
+	/* And a fresh trusted sync synchronizes again. */
+	timebase.record_sync(trusted_sync(160'000,
+					  1'700'000'003'000'000'000ll, 500),
+			     at(3s));
+	require(timebase.quality(at(3s)) == TimeQuality::Synchronized,
+		"a fresh trusted sync did not re-synchronize");
+}
+
+void linear_utc_mapping_uses_the_sync_rate()
 {
 	MeasurementTimebase timebase;
 	const std::int64_t sync_utc = 1'700'000'000'000'000'000ll;
-	timebase.record_sync({64'000, sync_utc, 500}, at(0s));
+	timebase.record_sync(trusted_sync(64'000, sync_utc, 500), at(0s));
 
 	/* Exactly at the sync point. */
-	require(utc_nanoseconds(timebase.utc_for_sample(64'000, 32000,
-							at(0s))) == sync_utc,
+	require(utc_nanoseconds(timebase.utc_for_sample(64'000, 7, at(0s))) ==
+			sync_utc,
 		"sync-point sample did not map to the sync UTC");
 	/* One second of samples after the sync point. */
-	require(utc_nanoseconds(timebase.utc_for_sample(96'000, 32000,
-							at(0s))) ==
+	require(utc_nanoseconds(timebase.utc_for_sample(96'000, 7, at(0s))) ==
 			sync_utc + 1'000'000'000ll,
 		"one second of samples did not map to one UTC second");
 	/* Sub-second offset: 800 samples at 32 kSPS = 25 ms. */
-	require(utc_nanoseconds(timebase.utc_for_sample(64'800, 32000,
-							at(0s))) ==
+	require(utc_nanoseconds(timebase.utc_for_sample(64'800, 7, at(0s))) ==
 			sync_utc + 25'000'000ll,
 		"fractional-second sample offset mapped incorrectly");
 	/* Samples BEFORE the sync point extrapolate backwards. */
-	require(utc_nanoseconds(timebase.utc_for_sample(32'000, 32000,
-							at(0s))) ==
+	require(utc_nanoseconds(timebase.utc_for_sample(32'000, 7, at(0s))) ==
 			sync_utc - 1'000'000'000ll,
 		"samples before the sync point mapped incorrectly");
+	/* The uncertainty bound rides along with every estimate. */
+	require(timebase.utc_for_sample(96'000, 7, at(0s))->uncertainty_ns ==
+			500,
+		"the sync uncertainty did not propagate into the estimate");
+
+	/* The slope comes from the SYNC POINT's rate, not from any caller
+	 * input: at the 16 kSPS the sync was latched under, the same 32'000
+	 * samples take two seconds. */
+	auto slower = trusted_sync(64'000, sync_utc, 500);
+	slower.sample_rate_hz = 16000;
+	timebase.record_sync(slower, at(1s));
+	require(utc_nanoseconds(timebase.utc_for_sample(96'000, 7, at(1s))) ==
+			sync_utc + 2'000'000'000ll,
+		"extrapolation did not use the sync point's own sample rate");
+}
+
+void generation_mismatch_suspends_the_mapping()
+{
+	MeasurementTimebase timebase;
+	const std::int64_t sync_utc = 1'700'000'000'000'000'000ll;
+	timebase.record_sync(trusted_sync(64'000, sync_utc, 500), at(0s));
+
+	require(timebase.utc_for_sample(64'000, 7, at(0s)).has_value(),
+		"same-generation mapping was refused");
+	/* The PL counter free-runs across configuration changes, so a block
+	 * from another generation may sit across a rate change: refuse to
+	 * extrapolate rather than label it with the wrong slope. */
+	require(!timebase.utc_for_sample(64'000, 8, at(0s)).has_value(),
+		"a generation mismatch did not suspend the UTC mapping");
+	/* Quality is a property of the sync itself, not of any generation:
+	 * the mapping is suspended, not the synchronization. */
+	require(timebase.quality(at(0s)) == TimeQuality::Synchronized,
+		"a generation mismatch changed the quality state");
+
+	/* The fresh post-apply sync restores the mapping for the new
+	 * generation (and retires the old one). */
+	auto next_generation = trusted_sync(128'000, sync_utc +
+					    2'000'000'000ll, 500);
+	next_generation.configuration_generation = 8;
+	timebase.record_sync(next_generation, at(1s));
+	require(timebase.utc_for_sample(128'000, 8, at(1s)).has_value(),
+		"a fresh sync did not restore the mapping after an apply");
+	require(!timebase.utc_for_sample(64'000, 7, at(1s)).has_value(),
+		"the retired generation kept its UTC mapping");
 }
 
 void utc_step_changes_mapping_only()
 {
 	MeasurementTimebase timebase;
 	const std::int64_t before_step = 1'700'000'000'000'000'000ll;
-	timebase.record_sync({64'000, before_step, 500}, at(0s));
+	timebase.record_sync(trusted_sync(64'000, before_step, 500), at(0s));
 	const auto sample_index = std::uint64_t{96'000};
-	const auto original =
-		utc_nanoseconds(timebase.utc_for_sample(sample_index, 32000,
-							at(1s)));
+	const auto original = utc_nanoseconds(
+		timebase.utc_for_sample(sample_index, 7, at(1s)));
 
 	/*
 	 * An NTP step moves UTC forward 5 s while the sample counter has
@@ -107,10 +208,9 @@ void utc_step_changes_mapping_only()
 	 */
 	const std::int64_t after_step = before_step + 1'000'000'000ll +
 		5'000'000'000ll;
-	timebase.record_sync({96'000, after_step, 500}, at(1s));
-	const auto remapped =
-		utc_nanoseconds(timebase.utc_for_sample(sample_index, 32000,
-							at(1s)));
+	timebase.record_sync(trusted_sync(96'000, after_step, 500), at(1s));
+	const auto remapped = utc_nanoseconds(
+		timebase.utc_for_sample(sample_index, 7, at(1s)));
 	require(remapped == original + 5'000'000'000ll,
 		"a UTC step did not shift the mapping by the step amount");
 	require(remapped == after_step,
@@ -125,7 +225,9 @@ int main()
 {
 	try {
 		quality_state_machine();
-		linear_utc_mapping();
+		untrusted_sync_never_synchronizes();
+		linear_utc_mapping_uses_the_sync_rate();
+		generation_mismatch_suspends_the_mapping();
 		utc_step_changes_mapping_only();
 		std::cout << "measurement timebase tests passed\n";
 		return 0;

@@ -18,10 +18,12 @@
  *     this MAPPING; no counter and no stored record is ever rewritten.
  *
  * MeasurementTimebase owns the mapping and its quality state machine:
- * startup -> Unsynchronized; a sync point -> Synchronized; last sync older
- * than the staleness threshold -> Holdover; a fresh sync -> Synchronized
- * again. One writer (the periodic sync refresher) and concurrent readers
- * (the record decode path) share it, so all state is mutex-protected.
+ * no sync point yet, or the newest sync was captured while the system
+ * clock itself was unsynchronized -> Unsynchronized; a fresh trusted sync
+ * -> Synchronized; last trusted sync older than the staleness threshold
+ * -> Holdover; a fresh trusted sync -> Synchronized again. One writer (the
+ * periodic sync refresher) and concurrent readers (the record decode path)
+ * share it, so all state is mutex-protected.
  */
 
 #include "msap1/meter/meter_timing.hpp"
@@ -43,8 +45,26 @@ struct TimeSyncPoint {
 	std::uint64_t sample_counter = 0;
 	/* CLOCK_REALTIME at the same instant, nanoseconds since the epoch. */
 	std::int64_t utc_ns = 0;
-	/* Total bound on the latch-to-clock error (bracket width plus the
-	 * PL elasticity-FIFO offset bound). */
+	/* Combined bound on the label error: bracket width, the PL
+	 * elasticity-FIFO offset bound, and the system clock's own estimated
+	 * error, folded in by the sync producer. */
+	std::uint64_t uncertainty_ns = 0;
+	/* ADC sample rate the counter was advancing at when latched. The
+	 * extrapolation slope always comes from here, never from a caller,
+	 * so a sync point can never be combined with the wrong rate. */
+	std::uint32_t sample_rate_hz = 0;
+	/* Configuration generation active at the latch instant. */
+	std::uint32_t configuration_generation = 0;
+	/* True when the system clock was disciplined (adjtimex !STA_UNSYNC)
+	 * at the latch instant. An untrusted sync never leaves
+	 * Unsynchronized: a free-running system clock is not UTC. */
+	bool utc_synchronized = false;
+};
+
+/** A UTC label for one sample together with its error bound. */
+struct UtcEstimate {
+	std::chrono::system_clock::time_point utc{};
+	/* Bound inherited from the sync point the label was derived from. */
 	std::uint64_t uncertainty_ns = 0;
 };
 
@@ -55,7 +75,11 @@ public:
 	explicit MeasurementTimebase(std::chrono::nanoseconds staleness_threshold =
 					     default_staleness_threshold);
 
-	/** Install a new sync point; quality returns to Synchronized. */
+	/**
+	 * Install a new sync point. A trusted sync (utc_synchronized) returns
+	 * quality to Synchronized; an untrusted one keeps/returns it to
+	 * Unsynchronized.
+	 */
 	void record_sync(const TimeSyncPoint &sync, MonotonicTime now);
 
 	/** Quality as of @p now: see the state machine described above. */
@@ -63,13 +87,24 @@ public:
 
 	/**
 	 * UTC of one measurement-domain sample by linear extrapolation from
-	 * the latest sync point at the given sample rate. Returns nullopt
-	 * while Unsynchronized (a Holdover mapping is still usable — stale,
-	 * not absent). UTC corrections arrive as new sync points and change
-	 * only this mapping, never any sample index.
+	 * the latest sync point, at THAT SYNC POINT'S sample rate. Returns
+	 * nullopt while Unsynchronized (no sync, or an untrusted system
+	 * clock) — a Holdover mapping is still returned, stale is not absent;
+	 * quality() and the estimate's uncertainty convey the reduced trust.
+	 *
+	 * Also returns nullopt when @p configuration_generation differs from
+	 * the sync point's: the PL counter free-runs across configuration
+	 * changes, so extrapolating across a sample-rate change with this
+	 * single-rate model would label samples wrongly. There is
+	 * deliberately no piecewise rate timeline — a fresh sync after a
+	 * configuration apply restores the mapping instead.
+	 *
+	 * UTC corrections arrive as new sync points and change only this
+	 * mapping, never any sample index.
 	 */
-	[[nodiscard]] std::optional<std::chrono::system_clock::time_point>
-	utc_for_sample(std::uint64_t sample_index, std::uint32_t sample_rate_hz,
+	[[nodiscard]] std::optional<UtcEstimate>
+	utc_for_sample(std::uint64_t sample_index,
+		       std::uint32_t configuration_generation,
 		       MonotonicTime now) const;
 
 private:

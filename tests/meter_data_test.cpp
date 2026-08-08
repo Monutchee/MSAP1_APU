@@ -20,6 +20,17 @@ void require(bool condition, const char *message)
 		throw std::runtime_error(message);
 }
 
+template<typename Callable>
+void require_throws(Callable &&callable, const char *message)
+{
+	try {
+		callable();
+	} catch (const std::invalid_argument &) {
+		return;
+	}
+	throw std::runtime_error(message);
+}
+
 void signed64(msap1::MeterRecord &record, std::size_t word,
 	      std::int64_t value)
 {
@@ -145,12 +156,106 @@ void decode_v2_block_timing()
 		"cycle-lock provenance flags were not decoded");
 	/* UTC state is stamped by the ingestor, never by the decoder. */
 	require(timing.time_quality == msap1::TimeQuality::Unsynchronized &&
-		!timing.utc_start.has_value(),
+		!timing.utc_start.has_value() &&
+		!timing.utc_uncertainty_ns.has_value(),
 		"decoder fabricated UTC state that only the timebase knows");
 	/* The actual block duration follows the actual sample count. */
 	require(update.fundamental->frequency.calculation_window.sample_count ==
 		6421,
 		"v2 calculation window did not use the actual sample count");
+}
+
+/*
+ * Malformed v2 timing must never silently become a valid basic measurement
+ * block: the decoder rejects shapes the PL cannot legitimately produce.
+ */
+void decode_v2_rejects_malformed_timing()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+
+	/* A cycle-locked block must close exactly the nominal's cycle count
+	 * (12 at 60 Hz); 11 is impossible without lost zero crossings. */
+	auto wrong_cycles = periodic_record_v2();
+	wrong_cycles.words[15] = 60u | (11u << 8) | (1u << 16);
+	require_throws([&] { (void)registry.decode(wrong_cycles); },
+		       "a locked block with a wrong cycle count decoded");
+
+	/* A block with zero samples has no measurement in it. */
+	auto empty_block = periodic_record_v2();
+	empty_block.words[6] = 0;
+	require_throws([&] { (void)registry.decode(empty_block); },
+		       "a zero-sample block decoded");
+
+	/* first_sample_index + sample_count must stay inside the 64-bit
+	 * conversion counter. */
+	auto overflowing = periodic_record_v2();
+	overflowing.words[60] = 0xffffffffu;
+	overflowing.words[61] = 0xffffffffu;
+	require_throws([&] { (void)registry.decode(overflowing); },
+		       "an overflowing sample range decoded");
+
+	/* Free-run fallback blocks are time-defined: any cycle count is
+	 * legitimate there, including zero on a dead grid. */
+	auto fallback = periodic_record_v2();
+	fallback.words[15] = 60u | (0u << 8) | (1u << 17);
+	const auto update = registry.decode(fallback);
+	require(update.timing.has_value() &&
+		update.timing->free_run_fallback &&
+		!update.timing->cycle_locked &&
+		update.timing->cycle_count == 0,
+		"a zero-cycle free-run fallback block did not decode");
+}
+
+void class_a_aggregation_eligibility()
+{
+	using msap1::meter::class_a_aggregation_eligible;
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+
+	/* Complete locked blocks aggregate: 12 cycles at 60 Hz... */
+	auto locked_60 = periodic_record_v2();
+	locked_60.words[15] = 60u | (12u << 8) | (1u << 16);
+	require(class_a_aggregation_eligible(
+			*registry.decode(locked_60).timing),
+		"a complete locked 60 Hz block was not eligible");
+
+	/* ...and 10 cycles at 50 Hz. */
+	auto locked_50 = periodic_record_v2();
+	locked_50.words[15] = 50u | (10u << 8) | (1u << 16);
+	require(class_a_aggregation_eligible(
+			*registry.decode(locked_50).timing),
+		"a complete locked 50 Hz block was not eligible");
+
+	/* Free-run fallback is time-defined data: never aggregated. */
+	auto fallback = periodic_record_v2();
+	fallback.words[15] = 60u | (12u << 8) | (1u << 17);
+	require(!class_a_aggregation_eligible(
+			*registry.decode(fallback).timing),
+		"a free-run fallback block was eligible");
+
+	/* The first block after an apply is conservatively ineligible even
+	 * when flagged locked (defense in depth: today's PL RTL cannot emit
+	 * first_block_after_apply together with cycle_locked). */
+	auto first_after_apply = periodic_record_v2();
+	first_after_apply.words[15] = 60u | (12u << 8) | (1u << 16) |
+		(1u << 18);
+	require(!class_a_aggregation_eligible(
+			*registry.decode(first_after_apply).timing),
+		"the first block after apply was eligible");
+
+	/* A locked block with the wrong cycle count no longer survives the
+	 * decoder, so the eligibility term is exercised on a hand-built
+	 * BlockTiming (e.g. one replayed from a stored stream). */
+	msap1::BlockTiming wrong_count{};
+	wrong_count.cycle_locked = true;
+	wrong_count.free_run_fallback = false;
+	wrong_count.first_block_after_apply = false;
+	wrong_count.cycle_count = 11;
+	wrong_count.nominal_frequency = msap1::NominalFrequency::Hz60;
+	require(!class_a_aggregation_eligible(wrong_count),
+		"a partial locked block was eligible");
+	wrong_count.cycle_count = 12;
+	require(class_a_aggregation_eligible(wrong_count),
+		"the hand-built complete locked block was not eligible");
 }
 
 void subscriptions_and_registry_extension()
@@ -223,6 +328,8 @@ int main()
 	try {
 		decode_and_period_independence();
 		decode_v2_block_timing();
+		decode_v2_rejects_malformed_timing();
+		class_a_aggregation_eligibility();
 		subscriptions_and_registry_extension();
 		std::cout << "meter data tests passed\n";
 		return 0;
