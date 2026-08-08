@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "metering": {
-    "sample_rate_hz": 32000,
+    "sample_rate_hz": 128000,
+    "nominal_frequency_hz": 60,
     "rms": {
       "window_ms": 200,
       "remove_dc": true

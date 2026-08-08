@@ -1,6 +1,7 @@
 #pragma once
 
 #include "msap1/meter/meter_record.hpp"
+#include "msap1/meter/meter_timing.hpp"
 
 #include <array>
 #include <chrono>
@@ -14,14 +15,12 @@
 
 namespace msap1 {
 
-enum class UpdatePeriod : std::uint8_t {
-	ms200 = 0,
-	s1,
-	s3,
-	s10,
-	min10,
-	h2,
-};
+/* The timing vocabulary lives in msap1::meter (meter_timing.hpp); pull the
+ * names used throughout the decoded-data model into this namespace. */
+using meter::BlockTiming;
+using meter::MeasurementPeriod;
+using meter::NominalFrequency;
+using meter::TimeQuality;
 
 enum class RecordKind : std::uint16_t {
 	fundamental = 1,
@@ -108,7 +107,7 @@ struct MeterValues {
 };
 
 struct MeterUpdate {
-	UpdatePeriod period = UpdatePeriod::ms200;
+	MeasurementPeriod period = MeasurementPeriod::Basic;
 	RecordKind kind = RecordKind::fundamental;
 	std::uint64_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
@@ -117,29 +116,31 @@ struct MeterUpdate {
 	std::optional<EnergyValues> energy;
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
+	/* Cycle-timing identity of the source block. Present for record
+	 * format v2; absent for v1 records, which predate cycle timing.
+	 * The Basic period has no fixed duration — the actual duration is
+	 * sample_count / sample_rate per block (see SampleWindow). */
+	std::optional<BlockTiming> timing;
 };
 
 struct MeterPeriodView {
-	UpdatePeriod period = UpdatePeriod::ms200;
+	MeasurementPeriod period = MeasurementPeriod::Basic;
 	std::uint64_t latest_sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	SystemTime updated_at{};
 	MeterValues values{};
+	std::optional<BlockTiming> timing{};
 };
-
-[[nodiscard]] std::chrono::milliseconds duration(UpdatePeriod period);
-[[nodiscard]] std::optional<UpdatePeriod>
-update_period(std::chrono::milliseconds duration);
 
 class MeterLatestStore {
 public:
 	void apply(const MeterUpdate &update);
 
 	[[nodiscard]] std::optional<MeterPeriodView>
-	latest(UpdatePeriod period) const;
+	latest(MeasurementPeriod period) const;
 
 private:
-	static constexpr std::size_t period_count = 6;
+	static constexpr std::size_t period_count = 4;
 	mutable std::mutex mutex_;
 	std::array<std::optional<MeterPeriodView>, period_count> views_{};
 };
@@ -168,9 +169,9 @@ public:
 	void apply(const MeterUpdate &update);
 
 	[[nodiscard]] std::optional<MeterPeriodView>
-	latest(UpdatePeriod period) const;
+	latest(MeasurementPeriod period) const;
 
-	[[nodiscard]] Subscription subscribe(UpdatePeriod period,
+	[[nodiscard]] Subscription subscribe(MeasurementPeriod period,
 					     UpdateCallback callback);
 
 private:
@@ -198,7 +199,19 @@ private:
 	std::map<std::uint32_t, Decoder> decoders_;
 };
 
+/** Decode a v1 (0x00010001) record: fundamental values, no block timing. */
 [[nodiscard]] MeterUpdate decode_periodic_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/**
+ * Decode a v2 (0x00010002) record: fundamental values plus the BlockTiming
+ * identity from words 6/15/60/61. TimeQuality and utc_start are NOT in the
+ * record — the PL does not know UTC state — so the decoder leaves them at
+ * Unsynchronized/absent and the caller (the ingestor) stamps them from the
+ * MeasurementTimebase after decoding.
+ */
+[[nodiscard]] MeterUpdate decode_periodic_meter_record_v2(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

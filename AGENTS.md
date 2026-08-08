@@ -118,7 +118,8 @@
   readback matches.
 - Temporary ADC rate diagnostics must flow through the acquisition daemon so
   DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
-  Daemon restart restores the 32 kSPS profile default.
+  Daemon restart restores the persisted profile rate (128 kSPS factory
+  default).
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
 - Linux consumes fixed 32,832-byte `WFM1` blocks from the independent waveform
@@ -141,6 +142,15 @@
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
 - The prototype wire version remains 2. Keep the coordinated APU/RPU copies
   byte-identical when adding configuration fields or acknowledgements.
+- `msap1_meter_config_payload` carries the trailing `nominal_frequency_hz`
+  field (50 or 60; 176 packed bytes total). It selects the cycles-per-block
+  rule (50→10, 60→12) and the derived PL free-run fallback window; it is
+  configuration, never inferred from measured frequency.
+- MTR1 record format `0x00010002` (v2) is the cycle-timing block format:
+  word 6 = actual sample count, word 15 = timing word, words 60–61 =
+  64-bit first-sample index. Keep the v1 (`0x00010001`) decoder registered
+  for stored streams. See `docs/TIMING_MODEL.md` for the timing model and
+  the PL/RPU/APU ownership split.
 
 ## Build and verification
 

@@ -14,6 +14,7 @@
  */
 
 #include "msap1/meter/meter_record.hpp"
+#include "msap1/meter/meter_timing.hpp"
 #include "msap1/acquisition/rpu/rpu_control_protocol.h"
 #include "msap1/waveform/waveform_capture.hpp"
 
@@ -31,7 +32,7 @@ namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
-inline constexpr std::uint16_t acquisition_ipc_version = 16;
+inline constexpr std::uint16_t acquisition_ipc_version = 17;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -137,6 +138,10 @@ struct InfoResponse {
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
+	/* UTC synchronization state of the measurement timebase. Reported
+	 * beside — never inside — the electrical health fields. */
+	msap1::meter::TimeQuality time_quality =
+		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};
 };

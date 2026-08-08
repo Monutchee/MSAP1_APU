@@ -525,6 +525,35 @@ std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
 	};
 }
 
+std::optional<WaveformTimeSync> WaveformCapture::time_sync() const noexcept
+{
+	if (fd_ < 0)
+		return std::nullopt;
+	/*
+	 * The kernel brackets the atomic PL latch with CLOCK_TAI reads; a
+	 * CLOCK_REALTIME bracket around the whole ioctl bounds the same latch
+	 * instant in the UTC domain, which is what the measurement timebase
+	 * maps to. The `frame_sequence` correlation field carries the PL
+	 * 64-bit conversion-domain sample counter.
+	 */
+	std::uint64_t realtime_before = 0;
+	std::uint64_t realtime_after = 0;
+	WaveformCorrelationIoctl sample{};
+	try {
+		realtime_before = realtime_now_nanoseconds();
+		if (::ioctl(fd_, waveform_correlate_ioctl, &sample) != 0)
+			return std::nullopt;
+		realtime_after = realtime_now_nanoseconds();
+	} catch (...) {
+		return std::nullopt;
+	}
+	return WaveformTimeSync{
+		sample.frame_sequence,
+		realtime_before + (realtime_after - realtime_before) / 2u,
+		realtime_after - realtime_before,
+	};
+}
+
 void WaveformCapture::update_transport_status() noexcept
 {
 	if (fd_ < 0)

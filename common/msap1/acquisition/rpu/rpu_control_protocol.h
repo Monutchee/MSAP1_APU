@@ -197,6 +197,13 @@ struct msap1_meter_config_payload {
 	int32_t simulator_peak_counts[8];
 	uint32_t simulator_phase_q32[8];
 	uint32_t simulator_phase_step_q32;
+	/*
+	 * Declared nominal grid frequency in hertz. Only 50 or 60 is valid. This
+	 * is configuration, not the measured frequency; it selects the Class A
+	 * basic measurement block length (50 Hz -> 10 cycles, 60 Hz -> 12 cycles)
+	 * that the RPU programs into the PL grid-cycle timing registers.
+	 */
+	uint32_t nominal_frequency_hz;
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {

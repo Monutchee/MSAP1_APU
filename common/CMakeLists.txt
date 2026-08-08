@@ -84,6 +84,7 @@ msap1_library(msap1_meter msap1::meter
     msap1/meter/meter_record_stream.cpp
     msap1/meter/meter_config.cpp
     msap1/meter/meter_health.cpp
+    msap1/meter/measurement_timebase.cpp
 )
 target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
@@ -256,14 +257,27 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME waveform_capture_test COMMAND waveform_capture_test)
 
+    # The ingestor continuity rules are daemon code; compile the pipeline
+    # source into the test rather than opening real devices.
     add_executable(acquisition_architecture_test
-        ${PROJECT_SOURCE_DIR}/tests/acquisition_architecture_test.cpp)
+        ${PROJECT_SOURCE_DIR}/tests/acquisition_architecture_test.cpp
+        ${PROJECT_SOURCE_DIR}/apps/acquisition/pipeline/record_ingestor.cpp)
+    target_include_directories(acquisition_architecture_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/acquisition)
     target_link_libraries(acquisition_architecture_test PRIVATE
-        msap1::acquisition)
+        msap1::acquisition
+        mnc::logging)
     target_compile_options(acquisition_architecture_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME acquisition_architecture_test
         COMMAND acquisition_architecture_test)
+
+    add_executable(measurement_timebase_test
+        ${PROJECT_SOURCE_DIR}/tests/measurement_timebase_test.cpp)
+    target_link_libraries(measurement_timebase_test PRIVATE msap1::meter)
+    target_compile_options(measurement_timebase_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME measurement_timebase_test COMMAND measurement_timebase_test)
 
     add_executable(settings_test
         ${PROJECT_SOURCE_DIR}/tests/settings_test.cpp)

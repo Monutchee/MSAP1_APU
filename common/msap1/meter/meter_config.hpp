@@ -70,7 +70,13 @@ struct MeterConversionFile {
 	std::uint32_t schema_version = 3;
 	std::string profile_id;
 	std::string adc_source = "physical";
+	/* Superseded: kept for schema compatibility; the PL window is now
+	 * derived from nominal_frequency_hz (see below), not window_ms. */
 	std::uint32_t rms_window_ms = 200;
+	/* Nominal grid frequency (50 or 60). Defaults to 60 so schema-v3
+	 * conversion files written before this field existed keep loading
+	 * without a schema bump (default-when-absent). */
+	std::uint32_t nominal_frequency_hz = 60;
 	bool remove_dc = true;
 	double adc_reference_volts = 1.0;
 	std::vector<CurrentChannelConfig> current_channels;
@@ -89,9 +95,9 @@ struct PreparedMeterConfiguration {
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path,
-	std::uint32_t sample_rate_hz = 32000);
+	std::uint32_t sample_rate_hz = 128000);
 PreparedMeterConfiguration prepare_meter_configuration(
-	MeterConversionFile source, std::uint32_t sample_rate_hz = 32000);
+	MeterConversionFile source, std::uint32_t sample_rate_hz = 128000);
 [[nodiscard]] MeterConversionFile decode_meter_configuration(
 	std::string_view json);
 [[nodiscard]] std::string encode_meter_configuration(

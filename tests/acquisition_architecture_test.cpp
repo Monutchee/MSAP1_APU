@@ -1,10 +1,16 @@
 #include "msap1/acquisition/dma/meter_record_source.hpp"
 #include "msap1/acquisition/rpu/rpu_control.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "pipeline/record_ingestor.hpp"
 
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+
+#include <unistd.h>
 
 namespace {
 
@@ -108,6 +114,138 @@ void typed_commands_round_trip_through_the_registry()
 		"wrong hardware-mirror payload round trip");
 }
 
+/* Record source double that hands the ingestor a scripted batch. */
+class ScriptedMeterSource final : public msap1::acquisition::MeterRecordSource {
+public:
+	void start() override {}
+	void stop() noexcept override {}
+	int native_handle() const noexcept override { return -1; }
+	std::string_view name() const noexcept override { return "scripted"; }
+	msap1::acquisition::MeterRecordBatch read_available() override
+	{
+		auto batch = next;
+		next = {};
+		return batch;
+	}
+	msap1::acquisition::MeterRecordBatch next;
+};
+
+/* Minimal valid v2 record for the continuity checks; channel words stay
+ * zero because validation never inspects the electrical payload. */
+msap1::MeterRecord v2_record(std::uint32_t sequence,
+			     std::uint64_t first_sample_index,
+			     std::uint32_t sample_count,
+			     std::uint32_t generation)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_periodic_format_v2;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000;
+	record.words[6] = sample_count;
+	record.words[15] = 60u | (12u << 8) | (1u << 16);
+	record.words[60] = static_cast<std::uint32_t>(first_sample_index);
+	record.words[61] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	return record;
+}
+
+void ingestor_validates_v2_sample_range_continuity()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	const auto database = std::filesystem::temp_directory_path() /
+		("msap1-ingestor-test-" + std::to_string(::getpid()) +
+		 ".sqlite3");
+	std::filesystem::remove(database);
+	{
+		ScriptedMeterSource source;
+		msap1::MeterRecordStream stream(database);
+		msap1::PreparedMeterConfiguration configuration{};
+		configuration.wire.generation = 0xfeedbeefu;
+		configuration.wire.sample_rate_hz = 32000;
+		configuration.wire.rms_window_samples = 6400;
+		const msap1::meter::MeasurementTimebase timebase;
+		MeterRecordIngestor ingest(source, stream, configuration,
+					   timebase);
+		ingest.begin_epoch();
+
+		const auto feed = [&](const msap1::MeterRecord &record) {
+			source.next = {};
+			source.next.records[0] = record;
+			source.next.count = 1;
+			source.next.bytes = sizeof(msap1::MeterRecord);
+			ingest.read_available();
+		};
+
+		/* Gapless cycle blocks of varying length are accepted: the
+		 * v1 window-equality check must not apply to v2 records. */
+		feed(v2_record(1, 640'000, 6400, 0xfeedbeefu));
+		feed(v2_record(2, 646'400, 6421, 0xfeedbeefu));
+		feed(v2_record(3, 652'821, 6379, 0xfeedbeefu));
+		require(ingest.meter_records() == 3 &&
+			ingest.sequence_gaps() == 0 &&
+			ingest.invalid_records() == 0,
+			"gapless variable-length v2 blocks were not accepted");
+
+		/* A first-sample discontinuity with continuous sequences is
+		 * lost data: counted as a gap, then resynced. */
+		feed(v2_record(4, 700'000, 6400, 0xfeedbeefu));
+		require(ingest.meter_records() == 4 &&
+			ingest.sequence_gaps() == 1,
+			"a first-sample-index gap was not detected");
+		feed(v2_record(5, 706'400, 6400, 0xfeedbeefu));
+		require(ingest.sequence_gaps() == 1,
+			"continuity did not resync after a sample-range gap");
+
+		/* A wrong generation is invalid, exactly as for v1. */
+		feed(v2_record(6, 712'800, 6400, 0x12345678u));
+		require(ingest.invalid_records() == 1,
+			"a stale-generation v2 record was accepted");
+	}
+	std::filesystem::remove(database);
+}
+
+void ingestor_handles_u32_sequence_wrap()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	const auto database = std::filesystem::temp_directory_path() /
+		("msap1-ingestor-wrap-test-" + std::to_string(::getpid()) +
+		 ".sqlite3");
+	std::filesystem::remove(database);
+	{
+		ScriptedMeterSource source;
+		msap1::MeterRecordStream stream(database);
+		msap1::PreparedMeterConfiguration configuration{};
+		configuration.wire.generation = 0xfeedbeefu;
+		configuration.wire.sample_rate_hz = 32000;
+		configuration.wire.rms_window_samples = 6400;
+		const msap1::meter::MeasurementTimebase timebase;
+		MeterRecordIngestor ingest(source, stream, configuration,
+					   timebase);
+		ingest.begin_epoch();
+
+		const auto feed = [&](const msap1::MeterRecord &record) {
+			source.next = {};
+			source.next.records[0] = record;
+			source.next.count = 1;
+			source.next.bytes = sizeof(msap1::MeterRecord);
+			ingest.read_available();
+		};
+
+		/* The 32-bit wire sequence wraps ~37 h @ 32 kSPS; the 64-bit
+		 * sample counter keeps counting straight through it. */
+		feed(v2_record(0xffffffffu, 10'000'000'000ull, 6400,
+			       0xfeedbeefu));
+		feed(v2_record(0u, 10'000'006'400ull, 6400, 0xfeedbeefu));
+		require(ingest.meter_records() == 2 &&
+			ingest.sequence_gaps() == 0 &&
+			ingest.invalid_records() == 0,
+			"uint32 sequence wraparound was mistaken for a gap");
+	}
+	std::filesystem::remove(database);
+}
+
 void malformed_and_unknown_requests_are_rejected()
 {
 	msap1::AcquisitionCommandRegistry registry;
@@ -139,6 +277,8 @@ int main()
 {
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
+	ingestor_validates_v2_sample_range_continuity();
+	ingestor_handles_u32_sequence_wrap();
 	malformed_and_unknown_requests_are_rejected();
 	return 0;
 }

@@ -219,3 +219,34 @@ report the resulting `active` state, repeated requests must be idempotent, and
 Then run for at least ten minutes. Expect no DMA errors, sequence gaps, corrupt
 records, PL header/FIFO errors, RPMsg timeouts, or heartbeat starvation. Confirm
 that no raw ADC samples or meter records travel over RPMsg.
+
+## 8. Basic measurement block timing (Class A foundation)
+
+Run with the PL raw ADC simulator selected so the grid waveform is
+deterministic. The simulator frequency is set through the settings document
+(`adc.simulator.frequency_hz`); the declared nominal grid frequency through
+`metering.nominal_frequency_hz`.
+
+1. Set `nominal_frequency_hz` to 60 and the simulator to 60 Hz. In
+   `GET /api/v1/meter/readings` confirm the `timing` object reports
+   `nominal_frequency_hz: 60`, `cycle_count: 12`, `cycle_locked: true`, and
+   that `block_sequence` increments by one per record.
+2. Poll several records and confirm sample-range continuity:
+   `first_sample_index(N+1) = first_sample_index(N) + sample_count(N)`.
+   The acquisition gap counter must not increase.
+3. Offset the simulator to 59.9 Hz and 60.1 Hz. `cycle_count` must remain 12
+   while `sample_count` moves above/below the nominal block length; blocks
+   must remain gapless.
+4. Set `nominal_frequency_hz` to 50 (simulator 50 Hz, then 49.9/50.1 Hz) and
+   repeat with `cycle_count: 10`.
+5. Attempt `nominal_frequency_hz: 55` through `PUT /api/v1/settings/active`;
+   the request must be rejected and the active configuration unchanged.
+6. Time quality: after boot with acquisition running, `time_quality` must
+   progress from `unsynchronized` to `synchronized` once the periodic
+   correlation sync runs. Stop `msap1-fpga-acquisition`'s sync source (or
+   suspend the daemon) for longer than the staleness threshold and confirm
+   `holdover`, then `synchronized` again after recovery. Meter channel
+   validity must not degrade in `holdover`.
+7. Disable the simulator output on CH6 (zero peak) while capturing: records
+   must keep flowing with `cycle_locked: false` and `free_run_fallback:
+   true`, still gapless; restoring CH6 must re-lock within one block.

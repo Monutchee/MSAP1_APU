@@ -5,7 +5,8 @@
  * @brief Meter-record ingest: DMA drain, validation, durability, statistics.
  */
 
-#include "msap1/acquisition/dma/meter_dma_reader.hpp"
+#include "msap1/acquisition/dma/meter_record_source.hpp"
+#include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
@@ -24,11 +25,15 @@ namespace msap1::acquisition::daemon {
  *
  *  1. Drain complete 256-byte records from the DMA reader.
  *  2. Validate each record against the ACTIVE configuration (generation,
- *     sample rate, RMS window) and track sequence continuity.
+ *     sample rate, and — for v1 records — the configured RMS window) and
+ *     track sequence plus v2 sample-range continuity.
  *  3. Commit the raw record to the SQLite WAL stream — durability is the
  *     publication boundary; a record is never visible to consumers before
  *     it is committed.
- *  4. Decode into the typed latest store and cache it as latest_record().
+ *  4. Decode into the typed latest store, stamp the decoded block's
+ *     TimeQuality/UTC from the measurement timebase, and cache it as
+ *     latest_record(). Time state never touches MeasurementQuality: a bad
+ *     clock must not invalidate a good electrical measurement.
  *
  * The ingest counters (records, bytes, gaps, invalid, read errors) feed the
  * InfoResponse health fields.
@@ -36,15 +41,17 @@ namespace msap1::acquisition::daemon {
 class MeterRecordIngestor final {
 public:
 	/**
-	 * @param meter         DMA reader owning /dev/msap1-meter.
+	 * @param meter         Record source (the DMA reader in production).
 	 * @param stream        Durable record stream (SQLite WAL).
 	 * @param configuration The coordinator's ACTIVE configuration; read
 	 *                      at validation time, so configuration swaps are
 	 *                      picked up without re-wiring.
+	 * @param timebase      UTC mapping authority for decoded timing.
 	 */
-	MeterRecordIngestor(msap1::acquisition::MeterDmaReader &meter,
+	MeterRecordIngestor(msap1::acquisition::MeterRecordSource &meter,
 			    msap1::MeterRecordStream &stream,
-			    const msap1::PreparedMeterConfiguration &configuration);
+			    const msap1::PreparedMeterConfiguration &configuration,
+			    const msap1::meter::MeasurementTimebase &timebase);
 
 	/** @brief Drain and process every complete record the DMA has ready. */
 	void read_available();
@@ -82,10 +89,13 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
+	[[nodiscard]] bool matches_configuration(
+		const msap1::MeterRecord &record) const;
 
-	msap1::acquisition::MeterDmaReader &meter_;
+	msap1::acquisition::MeterRecordSource &meter_;
 	msap1::MeterRecordStream &stream_;
 	const msap1::PreparedMeterConfiguration &configuration_;
+	const msap1::meter::MeasurementTimebase &timebase_;
 	msap1::MeterDecoderRegistry decoders_ =
 		msap1::MeterDecoderRegistry::with_builtin_decoders();
 	msap1::MeterData meter_data_;

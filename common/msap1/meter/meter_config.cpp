@@ -1,5 +1,7 @@
 #include "msap1/meter/meter_config.hpp"
 
+#include "msap1/meter/meter_timing.hpp"
+
 #include <glaze/glaze.hpp>
 
 #include <cmath>
@@ -162,10 +164,31 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	for (auto &gain : result.wire.adc_pga_gain)
 		gain = 1u;
 	result.wire.sample_rate_hz = sample_rate_hz;
-	const auto window = std::llround(
-		static_cast<double>(sample_rate_hz) *
-		static_cast<double>(result.source.rms_window_ms) / 1000.0);
-	if (window <= 0 || window > std::numeric_limits<std::uint32_t>::max())
+	/*
+	 * The basic measurement block is cycle-defined; the PL closes blocks
+	 * on complete grid cycles and uses rms_window_samples only as the
+	 * free-run FALLBACK window. Derive it from the nominal frequency
+	 * (one nominal block: 10 cycles @ 50 Hz, 12 @ 60 Hz) — the legacy
+	 * rms_window_ms no longer feeds this derivation (superseded, kept in
+	 * the schema for compatibility). The division is exact at every
+	 * supported sample rate for both nominals.
+	 */
+	if (result.source.nominal_frequency_hz != 50u &&
+	    result.source.nominal_frequency_hz != 60u)
+		throw std::runtime_error("nominal frequency must be 50 or 60 Hz");
+	result.wire.nominal_frequency_hz = result.source.nominal_frequency_hz;
+	const auto cycles = meter::cycles_per_basic_block(
+		result.source.nominal_frequency_hz == 50u
+			? meter::NominalFrequency::Hz50
+			: meter::NominalFrequency::Hz60);
+	const std::uint64_t window_numerator =
+		static_cast<std::uint64_t>(sample_rate_hz) * cycles;
+	if (window_numerator % result.source.nominal_frequency_hz != 0u)
+		throw std::runtime_error(
+			"fallback window is not an integer sample count");
+	const std::uint64_t window =
+		window_numerator / result.source.nominal_frequency_hz;
+	if (window == 0u || window > std::numeric_limits<std::uint32_t>::max())
 		throw std::runtime_error("RMS window sample count is out of range");
 	result.wire.rms_window_samples = static_cast<std::uint32_t>(window);
 	result.wire.flags = MSAP1_METER_CONFIG_ENABLE;

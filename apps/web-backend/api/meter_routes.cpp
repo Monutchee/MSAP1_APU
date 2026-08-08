@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -65,6 +66,21 @@ struct FrequencyConfigurationDto {
 	double hysteresis_volts = 1.0;
 };
 
+/**
+ * Cycle-timing identity of the latest basic measurement block, embedded in
+ * GET /api/v1/meter/readings for v2 records (omitted for stored v1 records).
+ */
+struct MeterTimingDto {
+	std::uint64_t block_sequence;
+	std::uint64_t first_sample_index;
+	std::uint32_t sample_count;
+	std::uint32_t cycle_count;
+	std::uint32_t nominal_frequency_hz;
+	bool cycle_locked;
+	bool free_run_fallback;
+	std::string time_quality;
+};
+
 /** Body of GET /api/v1/meter/readings. */
 struct MeterReadingsDto {
 	std::uint32_t sequence;
@@ -79,7 +95,23 @@ struct MeterReadingsDto {
 	std::uint32_t hub_drops;
 	FrequencyReadingDto frequency;
 	std::array<MeterChannelDto, 8> channels;
+	/* Absent (omitted from the JSON) when the record predates v2. */
+	std::optional<MeterTimingDto> timing;
 };
+
+/** JSON name for the acquisition daemon's measurement time quality. */
+const char *time_quality_name(msap1::meter::TimeQuality quality)
+{
+	switch (quality) {
+	case msap1::meter::TimeQuality::Synchronized:
+		return "synchronized";
+	case msap1::meter::TimeQuality::Holdover:
+		return "holdover";
+	case msap1::meter::TimeQuality::Unsynchronized:
+		break;
+	}
+	return "unsynchronized";
+}
 
 /** Project the newest cached meter record onto the readings DTO. */
 MeterReadingsDto readings(const msap1::InfoResponse &response)
@@ -109,7 +141,23 @@ MeterReadingsDto readings(const msap1::InfoResponse &response)
 		 frequency.measurement_sequence, frequency.mode,
 		 frequency.reference_channel, frequency.cycles_used},
 		{},
+		{},
 	};
+	/* v2 records carry the cycle-timing identity of the block; stored v1
+	 * records predate it, so the timing object is omitted entirely. */
+	if (record.record_format() == msap1::meter_periodic_format_v2) {
+		const auto timing = record.timing();
+		result.timing = MeterTimingDto{
+			record.sequence(),
+			record.first_sample_index(),
+			record.block_sample_count(),
+			timing.cycle_count,
+			timing.nominal_frequency_hz,
+			timing.cycle_locked,
+			timing.free_run_fallback,
+			time_quality_name(response.time_quality),
+		};
+	}
 	for (std::size_t index = 0; index < result.channels.size(); ++index) {
 		const auto reading = record.channel(index);
 		result.channels[index] = {

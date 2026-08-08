@@ -9,6 +9,7 @@
 #include "msap1/acquisition/dma/meter_dma_reader.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "msap1/acquisition/rpu/rpu_controller.hpp"
+#include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_record_stream.hpp"
 #include "msap1/settings/settings.hpp"
@@ -20,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace msap1::acquisition::daemon {
@@ -123,6 +125,14 @@ private:
 	/** @brief Send the wire configuration and verify the RPU readback. */
 	void configure_meter();
 	/**
+	 * @brief Refresh the measurement-timebase sync point (~10 s cadence).
+	 *
+	 * Correlates the PL 64-bit conversion sample counter with
+	 * CLOCK_REALTIME through the waveform correlation latch; missing the
+	 * cadence long enough moves TimeQuality to Holdover on its own.
+	 */
+	void refresh_time_sync();
+	/**
 	 * @brief Swap in a staged configuration as one transaction, rolling
 	 *        back to the previous operating point on failure.
 	 */
@@ -138,6 +148,11 @@ private:
 	msap1::WaveformCapture waveform_;
 	msap1::acquisition::RpuController rpu_;
 	msap1::MeterRecordStream record_stream_;
+	/* UTC mapping for decoded blocks; written by refresh_time_sync() and
+	 * read by the ingestor's decode path. Declared before ingest_, which
+	 * holds a reference to it. */
+	msap1::meter::MeasurementTimebase timebase_;
+	std::optional<Clock::time_point> last_time_sync_;
 	MeterRecordIngestor ingest_;
 	RpuHealthMonitor health_;
 	IpcChannel ipc_;

@@ -55,15 +55,31 @@ msap1::MeterRecord periodic_record()
 	return record;
 }
 
+/* Format-v2 variant: cycle-defined block with an actual sample count that
+ * differs from the configured window, plus the timing word and the 64-bit
+ * first-sample index in words 60/61. */
+msap1::MeterRecord periodic_record_v2()
+{
+	auto record = periodic_record();
+	record.words[1] = msap1::meter_periodic_format_v2;
+	record.words[6] = 6421;
+	record.words[15] = 60u | (12u << 8) | (1u << 16) | (1u << 18);
+	record.words[60] = 0x00000010u;
+	record.words[61] = 0x00000001u;
+	return record;
+}
+
 void decode_and_period_independence()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
 	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
 	const auto update = registry.decode(periodic_record(), timestamp);
-	require(update.period == msap1::UpdatePeriod::ms200 &&
+	require(update.period == msap1::MeasurementPeriod::Basic &&
 		update.kind == msap1::RecordKind::fundamental &&
 		update.sequence == 42 && update.fundamental.has_value(),
-		"MTR1 did not decode as a 200 ms fundamental update");
+		"MTR1 v1 did not decode as a basic fundamental update");
+	require(!update.timing.has_value(),
+		"a v1 record fabricated cycle-timing metadata");
 	const auto &values = *update.fundamental;
 	require(values.frequency.valid() && values.frequency.value == 60001 &&
 		values.frequency.measured_at == timestamp &&
@@ -80,26 +96,61 @@ void decode_and_period_independence()
 
 	msap1::MeterLatestStore store;
 	store.apply(update);
-	auto one_second = update;
-	one_second.period = msap1::UpdatePeriod::s1;
-	one_second.sequence = 100;
-	one_second.fundamental->frequency.value = 59990;
-	store.apply(one_second);
-	require(store.latest(msap1::UpdatePeriod::ms200)->values.fundamental
+	auto aggregate = update;
+	aggregate.period = msap1::MeasurementPeriod::Cycles150_180;
+	aggregate.sequence = 100;
+	aggregate.fundamental->frequency.value = 59990;
+	store.apply(aggregate);
+	require(store.latest(msap1::MeasurementPeriod::Basic)->values.fundamental
 			.frequency.value == 60001 &&
-		store.latest(msap1::UpdatePeriod::s1)->values.fundamental
-			.frequency.value == 59990,
-		"independent update periods inherited values from each other");
-	require(!store.latest(msap1::UpdatePeriod::s3),
+		store.latest(msap1::MeasurementPeriod::Cycles150_180)
+			->values.fundamental.frequency.value == 59990,
+		"independent measurement periods inherited values from each other");
+	require(!store.latest(msap1::MeasurementPeriod::Min10),
 		"missing period did not remain unavailable");
 
 	auto older = update;
 	older.sequence = 41;
 	older.fundamental->frequency.value = 1;
 	store.apply(older);
-	require(store.latest(msap1::UpdatePeriod::ms200)->values.fundamental
+	require(store.latest(msap1::MeasurementPeriod::Basic)->values.fundamental
 			.frequency.value == 60001,
 		"out-of-order update replaced newer state");
+}
+
+void decode_v2_block_timing()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{123s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(periodic_record_v2(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+		update.kind == msap1::RecordKind::fundamental &&
+		update.sequence == 42 && update.fundamental.has_value(),
+		"MTR1 v2 did not decode as a basic fundamental update");
+	require(update.timing.has_value(),
+		"a v2 record decoded without cycle-timing metadata");
+	const auto &timing = *update.timing;
+	require(timing.sequence == 42 &&
+		timing.configuration_generation == 0x12345678,
+		"v2 timing identity does not match the record header");
+	require(timing.first_sample_index == 0x100000010ull,
+		"64-bit first-sample index was not assembled from words 60/61");
+	require(timing.sample_count == 6421,
+		"v2 word 6 was not decoded as the actual block sample count");
+	require(timing.cycle_count == 12 &&
+		timing.nominal_frequency == msap1::NominalFrequency::Hz60,
+		"cycle count or nominal frequency was not decoded");
+	require(timing.cycle_locked && !timing.free_run_fallback &&
+		timing.first_block_after_apply,
+		"cycle-lock provenance flags were not decoded");
+	/* UTC state is stamped by the ingestor, never by the decoder. */
+	require(timing.time_quality == msap1::TimeQuality::Unsynchronized &&
+		!timing.utc_start.has_value(),
+		"decoder fabricated UTC state that only the timebase knows");
+	/* The actual block duration follows the actual sample count. */
+	require(update.fundamental->frequency.calculation_window.sample_count ==
+		6421,
+		"v2 calculation window did not use the actual sample count");
 }
 
 void subscriptions_and_registry_extension()
@@ -109,7 +160,7 @@ void subscriptions_and_registry_extension()
 	std::mutex notification_mutex;
 	std::condition_variable notification_condition;
 	{
-		auto subscription = data.subscribe(msap1::UpdatePeriod::ms200,
+		auto subscription = data.subscribe(msap1::MeasurementPeriod::Basic,
 			[&](const auto &view) {
 				require(view.latest_sequence == 42,
 					"subscription delivered wrong sequence");
@@ -134,7 +185,7 @@ void subscriptions_and_registry_extension()
 	/* A callback that is slower than acquisition must not delay apply(). The
 	 * subscriber receives latest-state notifications on its own worker and may
 	 * coalesce intermediate values. */
-	auto slow = data.subscribe(msap1::UpdatePeriod::ms200,
+	auto slow = data.subscribe(msap1::MeasurementPeriod::Basic,
 		[](const auto &) { std::this_thread::sleep_for(100ms); });
 	const auto started = std::chrono::steady_clock::now();
 	for (auto sequence = 43u; sequence != 53u; ++sequence) {
@@ -150,7 +201,7 @@ void subscriptions_and_registry_extension()
 	registry.register_decoder(future_format,
 		[](const msap1::MeterRecord &, msap1::SystemTime) {
 			msap1::MeterUpdate update{};
-			update.period = msap1::UpdatePeriod::s10;
+			update.period = msap1::MeasurementPeriod::Min10;
 			update.kind = msap1::RecordKind::demand;
 			update.sequence = 77;
 			update.configuration_generation = 9;
@@ -160,7 +211,7 @@ void subscriptions_and_registry_extension()
 	auto future = periodic_record();
 	future.words[1] = future_format;
 	const auto decoded = registry.decode(future);
-	require(decoded.period == msap1::UpdatePeriod::s10 &&
+	require(decoded.period == msap1::MeasurementPeriod::Min10 &&
 		decoded.kind == msap1::RecordKind::demand && decoded.demand,
 		"future decoder could not be registered independently");
 }
@@ -171,6 +222,7 @@ int main()
 {
 	try {
 		decode_and_period_independence();
+		decode_v2_block_timing();
 		subscriptions_and_registry_extension();
 		std::cout << "meter data tests passed\n";
 		return 0;
