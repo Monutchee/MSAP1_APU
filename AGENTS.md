@@ -118,7 +118,8 @@
   readback matches.
 - Temporary ADC rate diagnostics must flow through the acquisition daemon so
   DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
-  Daemon restart restores the 32 kSPS profile default.
+  Daemon restart restores the persisted profile rate (128 kSPS factory
+  default).
 - Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
   coherent result, and concurrent CLI/web readers never backpressure PL.
 - Linux consumes fixed 32,832-byte `WFM1` blocks from the independent waveform

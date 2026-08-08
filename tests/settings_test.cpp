@@ -48,7 +48,7 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
-		assert(initial.settings.metering.sample_rate_hz == 32000u);
+		assert(initial.settings.metering.sample_rate_hz == 128000u);
 		assert(!initial.content_hash.empty());
 		assert(std::filesystem::exists(tree.data / "active.json"));
 

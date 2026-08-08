@@ -73,8 +73,8 @@ reference-monitoring support, but is intentionally hidden from the CLI.
 The basic measurement block is cycle-defined — 10 grid cycles at a 50 Hz
 nominal, 12 at 60 Hz (see [docs/TIMING_MODEL.md](docs/TIMING_MODEL.md)) — so
 its actual length varies with grid frequency. The PL free-run fallback
-window derives from `metering.nominal_frequency_hz`; at 32 kSPS it is
-exactly 6,400 frames for both nominals. The daemon
+window derives from `metering.nominal_frequency_hz`; at the 128 kSPS factory
+default it is exactly 25,600 frames for both nominals (6,400 at 32 kSPS). The daemon
 opens DMA first, stops capture, programs and verifies each AD7771 channel PGA
 through the RPU, sends the derived PL coefficients, verifies the PL generation
 readback, then requests capture START. Shutdown requests STOP before closing
@@ -187,7 +187,8 @@ that index differently across boots and kernel versions.
 
 `mnc waveform trigger` records a manual event against the newest raw ADC
 sequence. The daemon retains 128 MiB of raw eight-channel frames (about
-131 seconds at 32 kSPS), so the resulting file can include samples that
+32 seconds at the 128 kSPS default, 131 seconds at 32 kSPS), so the
+resulting file can include samples that
 precede the trigger. Overlapping manual or future PQ-event windows are merged
 into one longest capture and retain every event marker. Each trigger refreshes
 an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the separate
@@ -228,7 +229,8 @@ or 128 kSPS through a coordinated DMA/capture stop, AD7771 SRC/PGA update, PL
 window update, and restart. It polls across one-second PL measurement windows
 until two consecutive DRDY readings agree, avoiding stale pre-change results.
 The complete profile remains unchanged and the selection is not persisted;
-restarting the acquisition daemon restores 32 kSPS.
+restarting the acquisition daemon restores the persisted profile rate
+(128 kSPS factory default).
 
 `mnc adc testflw --flow 1` is a destructive, self-restoring rate diagnostic.
 The daemon stops DMA/capture, asks R5c0 to pulse the PL-driven sensor-board

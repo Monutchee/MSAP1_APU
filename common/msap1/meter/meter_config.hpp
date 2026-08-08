@@ -95,9 +95,9 @@ struct PreparedMeterConfiguration {
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path,
-	std::uint32_t sample_rate_hz = 32000);
+	std::uint32_t sample_rate_hz = 128000);
 PreparedMeterConfiguration prepare_meter_configuration(
-	MeterConversionFile source, std::uint32_t sample_rate_hz = 32000);
+	MeterConversionFile source, std::uint32_t sample_rate_hz = 128000);
 [[nodiscard]] MeterConversionFile decode_meter_configuration(
 	std::string_view json);
 [[nodiscard]] std::string encode_meter_configuration(
