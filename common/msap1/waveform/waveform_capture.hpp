@@ -70,6 +70,21 @@ struct WaveformCorrelation {
 	std::uint64_t uncertainty_nanoseconds = 0;
 };
 
+/*
+ * One correlation of the PL conversion-domain sample counter with
+ * CLOCK_REALTIME, produced for the measurement timebase (UTC mapping).
+ * The PL latches the counter atomically inside the correlation ioctl; the
+ * CLOCK_REALTIME bracket around that ioctl bounds the latch instant, so the
+ * midpoint is the estimate and the bracket width is the uncertainty. The
+ * caller adds the PL elasticity-FIFO offset bound, which depends on the
+ * active sample rate.
+ */
+struct WaveformTimeSync {
+	std::uint64_t sample_counter = 0;
+	std::uint64_t realtime_nanoseconds = 0;
+	std::uint64_t bracket_nanoseconds = 0;
+};
+
 struct WaveformSessionSummary {
 	std::uint64_t id = 0;
 	std::uint64_t trigger_sequence = 0;
@@ -186,6 +201,14 @@ public:
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
 	std::vector<WaveformSessionSummary> sessions();
+
+	/**
+	 * Sample one PL-counter/CLOCK_REALTIME correlation for the UTC
+	 * measurement timebase. Available whenever the waveform device is
+	 * open (a capture session is not required); nullopt when the device
+	 * is closed or the correlation read fails.
+	 */
+	std::optional<WaveformTimeSync> time_sync() const noexcept;
 
 private:
 	struct Event;

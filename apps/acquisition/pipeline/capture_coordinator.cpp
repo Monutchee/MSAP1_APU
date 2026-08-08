@@ -28,7 +28,7 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 		    waveform_metadata(configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  record_stream_(options.record_stream),
-	  ingest_(meter_, record_stream_, configuration_),
+	  ingest_(meter_, record_stream_, configuration_, timebase_),
 	  health_(rpu_),
 	  ipc_(options.socket_path)
 {
@@ -55,8 +55,10 @@ void CaptureCoordinator::run()
 		 {"MNC_DEVICE", std::string(meter_.name())}});
 	while (!stop_requested_) {
 		service_poll_events();
-		if (running_)
+		if (running_) {
 			health_.periodic_audit();
+			refresh_time_sync();
+		}
 	}
 	log_message(lifecycle_log, mnc::logging::Priority::notice,
 		"meter acquisition service is stopping", "service_stopping");
@@ -98,6 +100,42 @@ void CaptureCoordinator::service_poll_events()
 		throw std::runtime_error("waveform DMA device disconnected");
 	if ((descriptors[2].revents & POLLIN) != 0)
 		ipc_.drain(registry_);
+}
+
+void CaptureCoordinator::refresh_time_sync()
+{
+	static constexpr auto time_sync_interval = 10s;
+	const auto now = Clock::now();
+	if (last_time_sync_ && now - *last_time_sync_ < time_sync_interval)
+		return;
+	/* Rate-limit even on failure: a broken correlation source must not
+	 * turn the poll loop into an ioctl storm, and a missing refresh is
+	 * exactly what the Holdover state exists to report. */
+	last_time_sync_ = now;
+	/*
+	 * The waveform device stays open for the whole capture lifetime, so
+	 * the correlation latch is readable here without any capture session.
+	 * Its frame_sequence field carries the PL 64-bit conversion-domain
+	 * sample counter (PL change, same ioctl ABI).
+	 */
+	const auto sync = waveform_.time_sync();
+	if (!sync)
+		return;
+	/*
+	 * The correlation latch sits before the PL elasticity FIFO, so the
+	 * latched counter may lead the conversion stream by up to 16 frames;
+	 * add that bound (in nanoseconds at the active rate) to the
+	 * CLOCK_REALTIME bracket width.
+	 */
+	const auto sample_rate = configuration_.wire.sample_rate_hz;
+	const std::uint64_t elasticity_ns = sample_rate == 0u
+		? 0u
+		: 16ull * 1'000'000'000ull / sample_rate;
+	timebase_.record_sync(
+		{sync->sample_counter,
+		 static_cast<std::int64_t>(sync->realtime_nanoseconds),
+		 sync->bracket_nanoseconds + elasticity_ns},
+		now);
 }
 
 void CaptureCoordinator::configure_meter()
@@ -415,6 +453,7 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.dma_read_errors = ingest_.dma_read_errors();
 	response.invalid_records = ingest_.invalid_records();
 	response.sequence_gaps = ingest_.sequence_gaps();
+	response.time_quality = timebase_.quality(Clock::now());
 	response.rpu_health = health_.cached();
 	if (ingest_.latest_record())
 		response.latest_record = *ingest_.latest_record();

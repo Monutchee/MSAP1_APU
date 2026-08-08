@@ -10,11 +10,11 @@
 namespace msap1 {
 namespace {
 
-std::size_t period_index(UpdatePeriod period)
+std::size_t period_index(MeasurementPeriod period)
 {
 	const auto index = static_cast<std::size_t>(period);
-	if (index >= 6)
-		throw std::invalid_argument("invalid meter update period");
+	if (index >= 4)
+		throw std::invalid_argument("invalid measurement period");
 	return index;
 }
 
@@ -28,37 +28,6 @@ Reading<Unit> reading(std::int64_t value, bool valid, std::uint64_t sequence,
 }
 
 } // namespace
-
-std::chrono::milliseconds duration(UpdatePeriod period)
-{
-	using namespace std::chrono_literals;
-	switch (period) {
-	case UpdatePeriod::ms200:
-		return 200ms;
-	case UpdatePeriod::s1:
-		return 1s;
-	case UpdatePeriod::s3:
-		return 3s;
-	case UpdatePeriod::s10:
-		return 10s;
-	case UpdatePeriod::min10:
-		return 10min;
-	case UpdatePeriod::h2:
-		return 2h;
-	}
-	throw std::invalid_argument("invalid meter update period");
-}
-
-std::optional<UpdatePeriod> update_period(std::chrono::milliseconds value)
-{
-	for (const auto period : {UpdatePeriod::ms200, UpdatePeriod::s1,
-				 UpdatePeriod::s3, UpdatePeriod::s10,
-				 UpdatePeriod::min10, UpdatePeriod::h2}) {
-		if (duration(period) == value)
-			return period;
-	}
-	return std::nullopt;
-}
 
 void MeterLatestStore::apply(const MeterUpdate &update)
 {
@@ -81,10 +50,12 @@ void MeterLatestStore::apply(const MeterUpdate &update)
 		slot->values.demand = *update.demand;
 	if (update.power_quality)
 		slot->values.power_quality = *update.power_quality;
+	if (update.timing)
+		slot->timing = update.timing;
 }
 
 std::optional<MeterPeriodView>
-MeterLatestStore::latest(UpdatePeriod period) const
+MeterLatestStore::latest(MeasurementPeriod period) const
 {
 	std::scoped_lock lock(mutex_);
 	return views_[period_index(period)];
@@ -92,7 +63,7 @@ MeterLatestStore::latest(UpdatePeriod period) const
 
 struct MeterData::State {
 	struct Subscriber {
-		Subscriber(UpdatePeriod requested_period,
+		Subscriber(MeasurementPeriod requested_period,
 			   UpdateCallback requested_callback)
 			: period(requested_period),
 			  callback(std::move(requested_callback)),
@@ -137,7 +108,7 @@ struct MeterData::State {
 			condition.notify_all();
 		}
 
-		UpdatePeriod period;
+		MeasurementPeriod period;
 
 	private:
 		void run(std::stop_token stop_token) noexcept
@@ -239,12 +210,12 @@ void MeterData::apply(const MeterUpdate &update)
 		subscriber->publish(*view);
 }
 
-std::optional<MeterPeriodView> MeterData::latest(UpdatePeriod period) const
+std::optional<MeterPeriodView> MeterData::latest(MeasurementPeriod period) const
 {
 	return state_->latest.latest(period);
 }
 
-MeterData::Subscription MeterData::subscribe(UpdatePeriod period,
+MeterData::Subscription MeterData::subscribe(MeasurementPeriod period,
 					      UpdateCallback callback)
 {
 	if (!callback)
@@ -256,21 +227,19 @@ MeterData::Subscription MeterData::subscribe(UpdatePeriod period,
 	return Subscription{state_, id};
 }
 
-MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
-					 SystemTime received_at)
+namespace {
+
+/**
+ * Channel and frequency decoding shared by the v1 and v2 record formats.
+ * Word 6 is the only input that differs in meaning: configured window
+ * samples (v1) versus actual block sample count (v2); either way it is the
+ * sample count the PL accumulated into these values.
+ */
+FundamentalValues decode_fundamental_values(const MeterRecord &record,
+					    std::uint64_t sequence,
+					    SystemTime received_at,
+					    SampleWindow window)
 {
-	if (!record.header_valid())
-		throw std::invalid_argument("invalid MTR1 record");
-	const auto sequence = static_cast<std::uint64_t>(record.sequence());
-	const SampleWindow window{
-		record.window_samples(),
-		record.sample_rate_hz() == 0
-			? std::chrono::nanoseconds{}
-			: std::chrono::nanoseconds{
-				  static_cast<std::int64_t>(record.window_samples()) *
-				  1'000'000'000ll /
-				  static_cast<std::int64_t>(record.sample_rate_hz())},
-	};
 	FundamentalValues fundamental{};
 	const auto frequency = record.frequency();
 	fundamental.frequency = {
@@ -312,17 +281,85 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 		reading<MicroVolts>(vc.rms_micro_units, vc.valid, sequence,
 				      received_at, window),
 	};
+	return fundamental;
+}
+
+/** Actual per-block duration: sample_count / sample_rate (no fixed period). */
+SampleWindow sample_window(std::uint32_t sample_count,
+			   std::uint32_t sample_rate_hz)
+{
 	return {
-		UpdatePeriod::ms200,
-		RecordKind::fundamental,
-		sequence,
-		record.configuration_generation(),
-		std::move(fundamental),
-		std::nullopt,
-		std::nullopt,
-		std::nullopt,
-		std::nullopt,
+		sample_count,
+		sample_rate_hz == 0
+			? std::chrono::nanoseconds{}
+			: std::chrono::nanoseconds{
+				  static_cast<std::int64_t>(sample_count) *
+				  1'000'000'000ll /
+				  static_cast<std::int64_t>(sample_rate_hz)},
 	};
+}
+
+} // namespace
+
+MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
+					 SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_periodic_format)
+		throw std::invalid_argument("invalid MTR1 v1 record");
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window =
+		sample_window(record.window_samples(), record.sample_rate_hz());
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Basic;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental =
+		decode_fundamental_values(record, sequence, received_at, window);
+	/* v1 records predate cycle timing: no BlockTiming is available. */
+	return update;
+}
+
+MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
+					    SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_periodic_format_v2)
+		throw std::invalid_argument("invalid MTR1 v2 record");
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	/* v2 word 6 is the ACTUAL sample count of this cycle-defined block. */
+	const auto window = sample_window(record.block_sample_count(),
+					  record.sample_rate_hz());
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Basic;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental =
+		decode_fundamental_values(record, sequence, received_at, window);
+
+	const auto timing_word = record.timing();
+	if (timing_word.nominal_frequency_hz != 50u &&
+	    timing_word.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in MTR1 v2 timing word");
+	BlockTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = record.first_sample_index();
+	timing.sample_count = record.block_sample_count();
+	timing.cycle_count = timing_word.cycle_count;
+	timing.nominal_frequency = timing_word.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+	timing.cycle_locked = timing_word.cycle_locked;
+	timing.free_run_fallback = timing_word.free_run_fallback;
+	timing.first_block_after_apply = timing_word.first_block_after_apply;
+	/* TimeQuality/utc_start are stamped by the caller: UTC state lives in
+	 * the APU MeasurementTimebase, never in the PL record. */
+	update.timing = timing;
+	return update;
 }
 
 void MeterDecoderRegistry::register_decoder(std::uint32_t record_format,
@@ -346,9 +383,15 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
+	/* v1 stays registered: stored streams may replay 0x00010001 records. */
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_periodic_format_v2,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_periodic_meter_record_v2(record,
+							       received_at);
 		});
 	return result;
 }

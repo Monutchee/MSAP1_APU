@@ -70,7 +70,11 @@ history.
 CH7/VCM remains available in the MTR1 record and internal API model for future
 reference-monitoring support, but is intentionally hidden from the CLI.
 
-At 32 kSPS the 200 ms RMS window contains exactly 6,400 frames. The daemon
+The basic measurement block is cycle-defined — 10 grid cycles at a 50 Hz
+nominal, 12 at 60 Hz (see [docs/TIMING_MODEL.md](docs/TIMING_MODEL.md)) — so
+its actual length varies with grid frequency. The PL free-run fallback
+window derives from `metering.nominal_frequency_hz`; at 32 kSPS it is
+exactly 6,400 frames for both nominals. The daemon
 opens DMA first, stops capture, programs and verifies each AD7771 channel PGA
 through the RPU, sends the derived PL coefficients, verifies the PL generation
 readback, then requests capture START. Shutdown requests STOP before closing
@@ -97,7 +101,8 @@ record is committed first to the SQLite WAL stream at:
 
 The durable stream has ordered cursors and independent consumer
 acknowledgements. `MeterData` separately publishes typed latest values for
-200 ms, 1 s, 3 s, 10 s, 10 min, and 2 h periods; unavailable values are never
+the Basic (cycle-defined block), 150/180-cycle, 10 min, and 2 h measurement
+periods; unavailable values are never
 represented as valid zero and values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 

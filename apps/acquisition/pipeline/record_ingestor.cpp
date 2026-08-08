@@ -9,10 +9,12 @@
 namespace msap1::acquisition::daemon {
 
 MeterRecordIngestor::MeterRecordIngestor(
-	msap1::acquisition::MeterDmaReader &meter,
+	msap1::acquisition::MeterRecordSource &meter,
 	msap1::MeterRecordStream &stream,
-	const msap1::PreparedMeterConfiguration &configuration)
-	: meter_(meter), stream_(stream), configuration_(configuration)
+	const msap1::PreparedMeterConfiguration &configuration,
+	const msap1::meter::MeasurementTimebase &timebase)
+	: meter_(meter), stream_(stream), configuration_(configuration),
+	  timebase_(timebase)
 {
 }
 
@@ -56,26 +58,42 @@ void MeterRecordIngestor::clear_latest()
 	last_record_time_.reset();
 }
 
-void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
+bool MeterRecordIngestor::matches_configuration(
+	const msap1::MeterRecord &record) const
 {
 	if (!record.header_valid() ||
 	    record.configuration_generation() !=
 		configuration_.wire.generation ||
-	    record.sample_rate_hz() != configuration_.wire.sample_rate_hz ||
-	    record.window_samples() !=
-		configuration_.wire.rms_window_samples) {
+	    record.sample_rate_hz() != configuration_.wire.sample_rate_hz)
+		return false;
+	/*
+	 * Only v1 records must echo the configured window: a v2 block is
+	 * cycle-defined, so its word-6 sample count legitimately varies with
+	 * grid frequency and matches the configured value only in free-run.
+	 */
+	if (record.record_format() == msap1::meter_periodic_format &&
+	    record.window_samples() != configuration_.wire.rms_window_samples)
+		return false;
+	return true;
+}
+
+void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
+{
+	if (!matches_configuration(record)) {
 		++invalid_records_;
 		return;
 	}
 
+	bool sequence_continuous = latest_record_.has_value();
 	if (latest_record_) {
 		const auto expected = latest_record_->sequence() + 1u;
 		const auto received = record.sequence();
 		const auto forward_distance = received - expected;
 		if (forward_distance != 0u &&
-		    forward_distance < (std::uint32_t{1} << 31u))
+		    forward_distance < (std::uint32_t{1} << 31u)) {
 			sequence_gaps_ += forward_distance;
-		else if (forward_distance != 0u) {
+			sequence_continuous = false;
+		} else if (forward_distance != 0u) {
 			/*
 			 * A stale/out-of-order record is invalid, not billions
 			 * of missing records. The half-range comparison keeps
@@ -85,12 +103,50 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			return;
 		}
 	}
+	/*
+	 * v2 sample-range continuity: blocks are gapless by construction on
+	 * the PL conversion-domain counter, so between consecutive sequences
+	 * first(N+1) must equal first(N) + count(N). A mismatch means lost
+	 * samples that the sequence numbers did not reveal; count it as a gap
+	 * and resync — this record still becomes the new continuity baseline,
+	 * exactly like sequence-gap handling.
+	 */
+	if (sequence_continuous &&
+	    record.record_format() == msap1::meter_periodic_format_v2 &&
+	    latest_record_->record_format() == msap1::meter_periodic_format_v2) {
+		const auto expected_first = latest_record_->first_sample_index() +
+			latest_record_->block_sample_count();
+		if (record.first_sample_index() != expected_first) {
+			++sequence_gaps_;
+			log_message(dma_log, mnc::logging::Priority::warning,
+				"meter record sample range is discontinuous: expected " +
+					std::to_string(expected_first) + ", got " +
+					std::to_string(record.first_sample_index()),
+				"meter_sample_range_gap",
+				{{"MNC_EXPECTED_SAMPLE_INDEX",
+				  std::to_string(expected_first)},
+				 {"MNC_FIRST_SAMPLE_INDEX",
+				  std::to_string(record.first_sample_index())}});
+		}
+	}
 	/* Durability is the publication boundary. A record is never made
 	 * visible to web/CLI/publisher consumers until SQLite has committed
 	 * the exact 256-byte PL record to the ordered WAL stream. */
 	const auto received_at = std::chrono::system_clock::now();
 	const auto cursor = stream_.append(record, received_at);
-	const auto update = decoders_.decode(record, received_at);
+	auto update = decoders_.decode(record, received_at);
+	if (update.timing) {
+		/*
+		 * Stamp UTC state at decode time — the PL cannot know it.
+		 * This touches only BlockTiming: TimeQuality must never mark
+		 * the electrical MeasurementQuality invalid.
+		 */
+		const auto now = Clock::now();
+		update.timing->time_quality = timebase_.quality(now);
+		update.timing->utc_start = timebase_.utc_for_sample(
+			update.timing->first_sample_index,
+			record.sample_rate_hz(), now);
+	}
 	meter_data_.apply(update);
 	latest_record_ = record;
 	last_record_time_ = Clock::now();

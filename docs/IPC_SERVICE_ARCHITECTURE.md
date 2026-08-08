@@ -33,20 +33,22 @@ expired.
 
 ## Typed multi-period meter data
 
-`MeterUpdate` is a sparse decoded PL update. A decoder declares its update
-period and supplies only the value groups present in that record. The initial
-`MTR1` decoder produces a 200 ms fundamental update; future power, energy,
-demand, and power-quality formats register their own decoders without changing
-the transport.
+`MeterUpdate` is a sparse decoded PL update. A decoder declares its
+measurement period and supplies only the value groups present in that record.
+The `MTR1` decoders produce Basic fundamental updates — cycle-defined blocks
+(10 cycles @ 50 Hz, 12 @ 60 Hz; see [TIMING_MODEL.md](TIMING_MODEL.md)), not
+fixed 200 ms intervals — and v2 records additionally carry `BlockTiming`.
+Future power, energy, demand, and power-quality formats register their own
+decoders without changing the transport.
 
-Canonical periods are `200 ms`, `1 s`, `3 s`, `10 s`, `10 min`, and `2 h`.
-Each `MeterLatestStore` slot is independent. For example, a new 200 ms
-frequency never overwrites or supplies a missing 1 s frequency.
+Canonical periods are `MeasurementPeriod::Basic`, `Cycles150_180`, `Min10`,
+and `Hour2`. The Basic period has no fixed duration: each reading's actual
+window is `sample_count / sample_rate` and travels in its `SampleWindow`.
+Each `MeterLatestStore` slot is independent. For example, a new Basic
+frequency never overwrites or supplies a missing aggregate frequency.
 
 ```cpp
-using namespace std::chrono_literals;
-
-const auto view = meter_data.latest(200ms);
+const auto view = meter_data.latest(msap1::MeasurementPeriod::Basic);
 if (view && view->values.fundamental.frequency.valid()) {
     const std::int64_t millihertz =
         view->values.fundamental.frequency.value;

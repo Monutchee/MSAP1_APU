@@ -106,6 +106,7 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 	result.profile_id = settings.metering.conversion.profile_id;
 	result.adc_source = settings.adc.source;
 	result.rms_window_ms = settings.metering.rms.window_ms;
+	result.nominal_frequency_hz = settings.metering.nominal_frequency_hz;
 	result.remove_dc = settings.metering.rms.remove_dc;
 	result.adc_reference_volts =
 		settings.metering.conversion.adc_reference_volts;

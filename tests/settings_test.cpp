@@ -67,6 +67,33 @@ void test_first_boot_and_direct_save()
 	assert(reloaded.active().settings.metering.frequency.maximum_hz == 80.0);
 }
 
+void test_nominal_frequency_validation()
+{
+	TestTree tree("nominal-frequency");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	/* The factory document must carry the explicit default. */
+	assert(handler.active().settings.metering.nominal_frequency_hz == 60u);
+
+	/* Both supported grids persist; anything else is rejected. */
+	auto settings = handler.active().settings;
+	settings.metering.nominal_frequency_hz = 50u;
+	assert(handler.save(settings).settings.metering.nominal_frequency_hz ==
+	       50u);
+	settings.metering.nominal_frequency_hz = 60u;
+	assert(handler.save(settings).settings.metering.nominal_frequency_hz ==
+	       60u);
+	settings.metering.nominal_frequency_hz = 55u;
+	[[maybe_unused]] bool rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	assert(rejected);
+	assert(handler.active().settings.metering.nominal_frequency_hz == 60u);
+}
+
 void test_failed_apply_preserves_active()
 {
 	TestTree tree("rollback");
@@ -196,6 +223,7 @@ void test_settings_ipc_round_trip()
 int main()
 {
 	test_first_boot_and_direct_save();
+	test_nominal_frequency_validation();
 	test_failed_apply_preserves_active();
 	test_empty_active_recovers_factory_defaults();
 	test_invalid_active_recovers_factory_defaults();

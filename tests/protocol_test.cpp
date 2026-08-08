@@ -3,6 +3,7 @@
 #include "msap1/meter/meter_record.hpp"
 #include "msap1/acquisition/rpu/protocol.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -186,6 +187,30 @@ void adc_diagnostic_round_trip()
 		"wrong ADC diagnostic SRC trace");
 }
 
+void meter_config_wire_layout()
+{
+	/* Coordinated APU/RPU ABI: nominal_frequency_hz is the appended
+	 * trailing field, growing the packed payload from 172 to 176 bytes
+	 * (frame 16+176 = 192 <= 256). Wire version stays 2. */
+	static_assert(sizeof(msap1_meter_config_payload) == 176,
+		      "meter config payload must be 176 packed bytes");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       nominal_frequency_hz) == 172,
+		      "nominal_frequency_hz must be the trailing field");
+
+	msap1_meter_config_payload payload{};
+	payload.nominal_frequency_hz = 50;
+	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
+		7, &payload, sizeof(payload));
+	const auto decoded = msap1::decode_message(wire.data(), wire.size());
+	require(decoded.payload.size() == sizeof(payload),
+		"meter config payload size changed on the wire");
+	std::uint32_t nominal = 0;
+	std::memcpy(&nominal, decoded.payload.data() + 172, sizeof(nominal));
+	require(nominal == 50,
+		"nominal frequency was not encoded at the trailing offset");
+}
+
 void meter_record_contract()
 {
 	msap1::MeterRecord record{};
@@ -276,8 +301,12 @@ void meter_configuration()
 	}
 	const auto configuration = msap1::load_meter_configuration(path, 32000);
 	std::filesystem::remove(path);
+	/* Fallback window derives from the nominal frequency: one nominal
+	 * basic block (12 cycles @ 60 Hz) at 32 kSPS is 6400 samples. */
 	require(configuration.wire.rms_window_samples == 6400,
-		"wrong 200 ms RMS window");
+		"wrong nominal basic-block fallback window");
+	require(configuration.wire.nominal_frequency_hz == 60,
+		"default nominal frequency was not encoded on the wire");
 	require(configuration.wire.valid_mask == 0x7f,
 		"wrong meter valid mask");
 	require((configuration.wire.flags & MSAP1_METER_CONFIG_ENABLE) != 0u,
@@ -313,6 +342,29 @@ void meter_configuration()
 		"frequency configuration is incorrect");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
+	/*
+	 * Nominal frequency drives the wire field, the fallback window, and
+	 * the generation fingerprint. At 32 kSPS both nominals produce 6400
+	 * samples (32000*10/50 and 32000*12/60) — a deliberate coincidence,
+	 * not an equivalence.
+	 */
+	auto nominal_50 = configuration.source;
+	nominal_50.nominal_frequency_hz = 50;
+	const auto fifty = msap1::prepare_meter_configuration(nominal_50, 32000);
+	require(fifty.wire.nominal_frequency_hz == 50 &&
+		fifty.wire.rms_window_samples == 6400,
+		"50 Hz nominal was rejected or produced a wrong window");
+	require(fifty.wire.generation != configuration.wire.generation,
+		"nominal frequency change did not change the generation");
+	auto nominal_invalid = configuration.source;
+	nominal_invalid.nominal_frequency_hz = 55;
+	require_throws(
+		[&] {
+			(void)msap1::prepare_meter_configuration(
+				nominal_invalid, 32000);
+		},
+		"nominal frequency 55 Hz was accepted");
+
 	const auto half_rate = msap1::prepare_meter_configuration(
 		configuration.source, 16000);
 	require(half_rate.wire.sample_rate_hz == 16000 &&
@@ -586,6 +638,7 @@ int main()
 		meter_ack_round_trip();
 		adc_health_round_trip();
 		adc_diagnostic_round_trip();
+		meter_config_wire_layout();
 		meter_record_contract();
 		meter_configuration();
 		disabled_mv_configuration();
