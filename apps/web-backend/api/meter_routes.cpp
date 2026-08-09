@@ -5,6 +5,7 @@
  */
 
 #include "health_dto.hpp"
+#include "meter_dto.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -99,19 +100,9 @@ struct MeterReadingsDto {
 	std::optional<MeterTimingDto> timing;
 };
 
-/** JSON name for the acquisition daemon's measurement time quality. */
-const char *time_quality_name(msap1::meter::TimeQuality quality)
-{
-	switch (quality) {
-	case msap1::meter::TimeQuality::Synchronized:
-		return "synchronized";
-	case msap1::meter::TimeQuality::Holdover:
-		return "holdover";
-	case msap1::meter::TimeQuality::Unsynchronized:
-		break;
-	}
-	return "unsynchronized";
-}
+/* time_quality_name(), the channel name table, the per-channel unit, and the
+ * micro-unit scaling are shared with the aggregate endpoint; they live in
+ * meter_dto.hpp so both documents describe channels identically. */
 
 /** Project the newest cached meter record onto the readings DTO. */
 MeterReadingsDto readings(const msap1::InfoResponse &response)
@@ -121,8 +112,6 @@ MeterReadingsDto readings(const msap1::InfoResponse &response)
 	const auto &record = response.latest_record;
 	if (!record.header_valid())
 		throw std::runtime_error("meter record header is invalid");
-	static constexpr std::array<const char *, 8> names{
-		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
 	const auto frequency = record.frequency();
 	MeterReadingsDto result{
 		record.sequence(), record.configuration_generation(),
@@ -161,13 +150,12 @@ MeterReadingsDto readings(const msap1::InfoResponse &response)
 	for (std::size_t index = 0; index < result.channels.size(); ++index) {
 		const auto reading = record.channel(index);
 		result.channels[index] = {
-			static_cast<std::uint32_t>(index), names[index],
-			index >= 4 && index <= 6 ? "V" : "A", reading.valid,
+			static_cast<std::uint32_t>(index),
+			meter_channel_names[index],
+			meter_channel_unit(index), reading.valid,
 			reading.mean_micro_units, reading.rms_count,
-			reading.valid
-				? static_cast<double>(reading.rms_micro_units) /
-					  1000000.0
-				: 0.0,
+			reading.valid ? meter_units(reading.rms_micro_units)
+				      : 0.0,
 		};
 	}
 	return result;
@@ -355,6 +343,46 @@ webengine::Response get_meter_readings(AppContext &app,
 			readings(response));
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/meter/readings", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+/**
+ * @brief GET /api/v1/meter/aggregate (Viewer)
+ *
+ * Returns the newest 150/180-cycle aggregate: 15 consecutive eligible basic
+ * blocks folded by the PL into one cycle-defined interval (150 cycles at a
+ * 50 Hz nominal, 180 at 60 Hz).
+ *
+ * The document always reports `available`.  There is legitimately no
+ * aggregate during the first ~3 s after a start, while capture is stopped,
+ * or whenever basic blocks were ineligible, so that case is a 200 with
+ * `{"available": false}` — not an error.
+ *
+ * The embedded frequency is INFORMATIVE ONLY: the standardized Class A
+ * frequency product is defined over its own 10 s interval, which is not
+ * implemented, so the object carries `informative` and deliberately no
+ * validity flag.
+ *
+ * @return 200 with the aggregate document, or 503 when the daemon is
+ *         unreachable, reports a failure status, or cached a malformed
+ *         aggregate record.
+ */
+webengine::Response get_meter_aggregate(AppContext &app,
+					const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.information();
+		require_acquisition_ok(response.status);
+		const auto aggregate = meter_aggregate_dto(response);
+		if (!aggregate)
+			return json_response(webengine::http::status::ok,
+				MeterAggregateUnavailableDto{});
+		return json_response(webengine::http::status::ok, *aggregate);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/aggregate", error);
 		return error_response(
 			webengine::http::status::service_unavailable,
 			error.what());

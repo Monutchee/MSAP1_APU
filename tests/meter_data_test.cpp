@@ -301,8 +301,10 @@ void subscriptions_and_registry_extension()
 	require(std::chrono::steady_clock::now() - started < 50ms,
 		"slow latest-state subscriber blocked meter ingestion");
 
+	/* 0x00020001 became the real MTR2 aggregate format, so the demo of
+	 * registering a future decoder uses the next unassigned word. */
 	msap1::MeterDecoderRegistry registry;
-	constexpr std::uint32_t future_format = 0x00020001;
+	constexpr std::uint32_t future_format = 0x00030001;
 	registry.register_decoder(future_format,
 		[](const msap1::MeterRecord &, msap1::SystemTime) {
 			msap1::MeterUpdate update{};

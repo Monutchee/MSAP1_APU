@@ -100,7 +100,7 @@
   use the typed settings IPC API rather than reading or writing product
   configuration files. Do not add drafts or revision history, reintroduce
   legacy `/etc` ADC profiles, or duplicate factory values in packaging recipes.
-- The ADC capture rate defaults to 32,000 frames/s. Persistent changes to the
+- The ADC capture rate defaults to 128,000 frames/s. Persistent changes to the
   ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
   waveform defaults must be saved through the settings authority and
   hot-applied by acquisition. `mnc adc rate --sps` remains an explicitly
@@ -151,6 +151,25 @@
   64-bit first-sample index. Keep the v1 (`0x00010001`) decoder registered
   for stored streams. See `docs/TIMING_MODEL.md` for the timing model and
   the PL/RPU/APU ownership split.
+- Record format `0x00020001` (MTR2) is the 150/180-cycle aggregate
+  fundamental record: exactly 15 consecutive eligible basic blocks folded
+  by the PL (the authoritative aggregator) into one 256-byte record that
+  interleaves with basic records on the meter DMA stream under an
+  independent sequence counter. The APU only decodes MTR2 — never compute
+  aggregates in APU production code — and aggregate data never travels
+  over RPMsg. The word layout is pinned in `docs/TIMING_MODEL.md`.
+- The newest aggregate is cached beside — never inside — the basic latest
+  record, travels in `InfoResponse` behind its own presence, age, and
+  time-quality fields (acquisition IPC version 19), and is published by
+  `GET /api/v1/meter/aggregate`. The aggregate's `time_quality` is the
+  provenance stamped at ingest (`aggregate_time_quality`), never
+  `InfoResponse::time_quality`, which is the daemon's live clock state at
+  reply time. `GET /api/v1/meter/readings` keeps
+  reporting basic records only. The aggregate frequency is informative
+  only: the standardized Class A frequency product is defined over its own
+  10 s interval, which is not implemented, so the decoder keeps that
+  reading's quality `unavailable` and the API publishes `informative`
+  rather than a validity flag.
 
 ## Build and verification
 

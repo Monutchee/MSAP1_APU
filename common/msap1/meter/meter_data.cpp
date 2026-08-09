@@ -53,6 +53,8 @@ void MeterLatestStore::apply(const MeterUpdate &update)
 		slot->values.power_quality = *update.power_quality;
 	if (update.timing)
 		slot->timing = update.timing;
+	if (update.aggregate_timing)
+		slot->aggregate_timing = update.aggregate_timing;
 }
 
 std::optional<MeterPeriodView>
@@ -285,6 +287,75 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
 	return fundamental;
 }
 
+/**
+ * Aggregate (MTR2) fundamental decoding. Channel order and micro-unit
+ * encoding are identical to MTR1; only the word layout differs — two words
+ * per channel at words 16..31, one mean-frequency word gated by status
+ * bit 2, and channel validity from the word-7 mask (the AND across the 15
+ * contributing blocks).
+ */
+/*
+ * An aggregate RMS reading is only trustworthy when the channel took part
+ * in every contributing basic block AND the aggregation arithmetic itself
+ * did not saturate. An arithmetic error therefore outranks the channel
+ * mask: publishing a saturated aggregate as MeasurementQuality::valid
+ * would hide the fault from every consumer.
+ */
+template<typename Unit>
+Reading<Unit> aggregate_reading(std::int64_t value, bool channel_valid,
+				bool arithmetic_error, std::uint64_t sequence,
+				SystemTime timestamp, SampleWindow window)
+{
+	const auto quality = arithmetic_error
+		? MeasurementQuality::arithmetic_error
+		: channel_valid ? MeasurementQuality::valid
+				: MeasurementQuality::unavailable;
+	return {value, quality, sequence, timestamp, window};
+}
+
+FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
+						      std::uint64_t sequence,
+						      SystemTime received_at,
+						      SampleWindow window)
+{
+	FundamentalValues fundamental{};
+	const auto status = record.aggregate_status();
+	/*
+	 * The MTR2 frequency field is informational only: it is the mean of
+	 * the 15 basic frequency estimates, not a standardized measurement.
+	 * IEC 61000-4-30 defines the frequency product over its own (10 s)
+	 * interval, which will be implemented with that interval in a later
+	 * milestone. The informative value is carried through for
+	 * diagnostics, but it must never be advertised as a valid Class A
+	 * frequency result, so its quality stays unavailable regardless of
+	 * the record's frequency-valid flag. That flag remains visible to
+	 * diagnostics through AggregateTiming::frequency_valid.
+	 */
+	fundamental.frequency = {
+		static_cast<std::int64_t>(record.aggregate_frequency_millihz()),
+		MeasurementQuality::unavailable, sequence, received_at, window};
+
+	const auto valid_mask = record.valid_mask();
+	const auto current = [&](std::size_t channel) {
+		return aggregate_reading<MicroAmperes>(
+			record.aggregate_rms_micro_units(channel),
+			(valid_mask & (1u << channel)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
+	};
+	const auto voltage = [&](std::size_t channel) {
+		return aggregate_reading<MicroVolts>(
+			record.aggregate_rms_micro_units(channel),
+			(valid_mask & (1u << channel)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
+	};
+	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va, debug. */
+	fundamental.current = {current(0), current(1), current(2), current(3)};
+	fundamental.voltage_ln = {voltage(6), voltage(5), voltage(4)};
+	return fundamental;
+}
+
 /** Actual per-block duration: sample_count / sample_rate (no fixed period). */
 SampleWindow sample_window(std::uint32_t sample_count,
 			   std::uint32_t sample_rate_hz)
@@ -387,6 +458,97 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 	return update;
 }
 
+MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
+					  SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_aggregate_format)
+		throw std::invalid_argument("invalid MTR2 aggregate record");
+	/*
+	 * Validate the aggregation identity before building anything,
+	 * mirroring the hardened v2 rules: the PL emits only complete
+	 * 15-block aggregates whose cycle count follows the nominal, so any
+	 * other shape is corruption or a future RTL regression and must
+	 * never silently decode into a valid aggregate.
+	 */
+	/*
+	 * The producer marks every emitted aggregate complete because only
+	 * complete 15-block intervals are ever published. A record that says
+	 * otherwise is corruption or an RTL regression, never a partial
+	 * result to be salvaged.
+	 */
+	if (!record.aggregate_status().complete)
+		throw std::invalid_argument(
+			"MTR2 aggregate is not marked complete");
+	const auto composition = record.aggregate_composition();
+	if (composition.nominal_frequency_hz != 50u &&
+	    composition.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in MTR2 composition word");
+	const auto nominal = composition.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+	if (composition.basic_block_count != meter::basic_blocks_per_aggregate)
+		throw std::invalid_argument(
+			"MTR2 aggregate is not built from exactly 15 basic blocks");
+	if (composition.cycle_count != cycles_per_aggregate(nominal))
+		throw std::invalid_argument(
+			"MTR2 aggregate cycle count does not match its nominal");
+	/*
+	 * The first/last basic sequences must describe exactly 15 consecutive
+	 * basic blocks. Both accessors return uint32_t, so the subtraction is
+	 * modular and a span that wraps 0xFFFFFFFF is accepted unchanged.
+	 */
+	const auto basic_span =
+		static_cast<std::uint32_t>(record.last_basic_sequence() -
+					   record.first_basic_sequence());
+	if (basic_span != meter::basic_blocks_per_aggregate - 1u)
+		throw std::invalid_argument(
+			"MTR2 basic sequence span is not 15 consecutive blocks");
+	const auto sample_count = record.aggregate_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"MTR2 aggregate has a zero sample count");
+	const auto first_sample_index = record.aggregate_first_sample_index();
+	if (first_sample_index >
+	    std::numeric_limits<std::uint64_t>::max() - sample_count)
+		throw std::invalid_argument(
+			"MTR2 sample range overflows the 64-bit counter");
+
+	const auto sequence =
+		static_cast<std::uint64_t>(record.aggregate_sequence());
+	/* The aggregate has no fixed duration either: ~3 s nominally, but
+	 * defined as 150/180 cycles, so the window follows the actual total
+	 * sample count. */
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Cycles150_180;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = decode_aggregate_fundamental_values(
+		record, sequence, received_at, window);
+
+	const auto status = record.aggregate_status();
+	meter::AggregateTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample_index;
+	timing.sample_count = sample_count;
+	timing.first_basic_sequence = record.first_basic_sequence();
+	timing.last_basic_sequence = record.last_basic_sequence();
+	timing.basic_block_count = composition.basic_block_count;
+	timing.cycle_count = composition.cycle_count;
+	timing.nominal_frequency = nominal;
+	timing.arithmetic_error = status.arithmetic_error;
+	timing.frequency_valid = status.frequency_valid;
+	/* TimeQuality/utc_start/utc_uncertainty_ns are stamped by the caller:
+	 * UTC state lives in the APU MeasurementTimebase, never in the PL
+	 * record. */
+	update.aggregate_timing = timing;
+	return update;
+}
+
 void MeterDecoderRegistry::register_decoder(std::uint32_t record_format,
 					      Decoder decoder)
 {
@@ -417,6 +579,13 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record_v2(record,
 							       received_at);
+		});
+	/* MTR2 aggregates interleave with basic records on the same DMA
+	 * stream; the registry routes them by the format word. */
+	result.register_decoder(meter_aggregate_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_meter_record(record,
+							     received_at);
 		});
 	return result;
 }

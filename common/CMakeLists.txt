@@ -210,6 +210,34 @@ if(BUILD_TESTING)
     target_compile_options(meter_data_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME meter_data_test COMMAND meter_data_test)
 
+    # The reference aggregator under tests/support is deliberately test-only:
+    # the PL is the authoritative aggregator and production code never
+    # computes aggregates, so only this test target sees tests/ includes.
+    add_executable(aggregate_decode_test
+        ${PROJECT_SOURCE_DIR}/tests/aggregate_decode_test.cpp)
+    target_link_libraries(aggregate_decode_test PRIVATE msap1::meter)
+    target_include_directories(aggregate_decode_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests)
+    target_compile_options(aggregate_decode_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME aggregate_decode_test COMMAND aggregate_decode_test)
+
+    # GET /api/v1/meter/aggregate is pinned by its JSON payload, and the
+    # projection that renders it is deliberately WebEngine-free, so the
+    # contract is tested without linking the HTTP stack.
+    add_executable(meter_aggregate_route_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_aggregate_route_test.cpp)
+    target_link_libraries(meter_aggregate_route_test PRIVATE
+        msap1::acquisition
+        glaze::glaze
+    )
+    target_include_directories(meter_aggregate_route_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/web-backend/api)
+    target_compile_options(meter_aggregate_route_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_aggregate_route_test
+        COMMAND meter_aggregate_route_test)
+
     add_executable(meter_record_stream_test
         ${PROJECT_SOURCE_DIR}/tests/meter_record_stream_test.cpp)
     target_link_libraries(meter_record_stream_test PRIVATE msap1::meter)

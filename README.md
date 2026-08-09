@@ -115,6 +115,9 @@ The authenticated external API is:
   software build date)
 - `GET /api/v1/meter/health`
 - `GET /api/v1/meter/readings`
+- `GET /api/v1/meter/aggregate` (newest 150/180-cycle aggregate; always 200
+  while acquisition answers, with `{"available": false}` until the first
+  aggregate exists)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`
@@ -136,6 +139,20 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+
+`GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
+`GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate the PL
+folded from 15 basic blocks. The two never mix: the readings document always
+comes from a basic record. The aggregate's `frequency` object is
+**informative only** — the standardized Class A frequency product is defined
+over its own 10 s interval, which is not implemented — so it carries
+`"informative": true` and deliberately no validity flag, and consumers must
+never present it as a Class A frequency measurement. The aggregate's
+`time_quality` (`"unsynchronized"`, `"synchronized"`, or `"holdover"`) is the
+UTC synchronization state captured when that aggregate was measured, not the
+daemon's state when the request arrived: an aggregate measured while
+synchronized keeps reporting `"synchronized"` even if the clock has since
+dropped into holdover.
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
