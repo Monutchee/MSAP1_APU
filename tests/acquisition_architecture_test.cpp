@@ -5,12 +5,10 @@
 
 #include <chrono>
 #include <cstdint>
-#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#include <unistd.h>
 
 namespace {
 
@@ -123,6 +121,50 @@ void typed_commands_round_trip_through_the_registry()
 		response.aggregate_time_quality ==
 			msap1::meter::TimeQuality::Synchronized,
 		"the two time-quality fields did not round trip separately");
+
+	/* IPC v20 carries reusable period/attribute selection and typed values,
+	 * including the optional attribute index reserved for harmonics. */
+	registry.on<msap1::MeterSnapshotRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::MeterSnapshotRequest &request) {
+			require(request.selection.period ==
+				mnc::meter::MeasurementPeriod::Cycles150_180,
+				"wrong decoded meter period");
+			require(request.selection.attributes.size() == 2 &&
+				request.selection.attributes[1].index == 5,
+				"wrong decoded meter attribute selection");
+			msap1::MeterSnapshotResponse response{};
+			response.has_snapshot = true;
+			response.snapshot.period = request.selection.period;
+			response.snapshot.sequence = 0x1'0000'0002ull;
+			response.snapshot.values.push_back({
+				.attribute = request.selection.attributes.front(),
+				.unit = mnc::meter::MeterUnit::MicroVolts,
+				.quality = mnc::meter::ReadingQuality::Valid,
+				.value = 120'000'000,
+			});
+			return response;
+		});
+
+	msap1::MeterSnapshotRequest snapshot_request{};
+	snapshot_request.selection.period =
+		mnc::meter::MeasurementPeriod::Cycles150_180;
+	snapshot_request.selection.attributes = {
+		{mnc::meter::MeterAttributeId::VanRms, std::nullopt},
+		{mnc::meter::MeterAttributeId::Frequency, 5},
+	};
+	auto snapshot_frame =
+		msap1::encode_acquisition_request(snapshot_request);
+	snapshot_frame.correlation_id = 0xaabbccdd;
+	const auto snapshot_reply = registry.dispatch(snapshot_frame);
+	const auto snapshot_response =
+		msap1::decode_acquisition_payload<msap1::MeterSnapshotResponse>(
+			snapshot_reply);
+	require(snapshot_response.has_snapshot &&
+		snapshot_response.snapshot.sequence == 0x1'0000'0002ull &&
+		snapshot_response.snapshot.values.size() == 1 &&
+		snapshot_response.snapshot.values[0].value == 120'000'000,
+		"typed meter snapshot did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */
@@ -165,20 +207,14 @@ msap1::MeterRecord v2_record(std::uint32_t sequence,
 void ingestor_validates_v2_sample_range_continuity()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
-	const auto database = std::filesystem::temp_directory_path() /
-		("msap1-ingestor-test-" + std::to_string(::getpid()) +
-		 ".sqlite3");
-	std::filesystem::remove(database);
 	{
 		ScriptedMeterSource source;
-		msap1::MeterRecordStream stream(database);
 		msap1::PreparedMeterConfiguration configuration{};
 		configuration.wire.generation = 0xfeedbeefu;
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		const msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, stream, configuration,
-					   timebase);
+		MeterRecordIngestor ingest(source, configuration, timebase);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {
@@ -214,7 +250,6 @@ void ingestor_validates_v2_sample_range_continuity()
 		require(ingest.invalid_records() == 1,
 			"a stale-generation v2 record was accepted");
 	}
-	std::filesystem::remove(database);
 }
 
 /* Minimal valid MTR2 aggregate for the interleaving checks: 15 blocks of
@@ -253,13 +288,8 @@ msap1::MeterRecord aggregate_record(std::uint32_t sequence,
 void ingestor_tracks_interleaved_aggregate_stream()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
-	const auto database = std::filesystem::temp_directory_path() /
-		("msap1-ingestor-aggregate-test-" +
-		 std::to_string(::getpid()) + ".sqlite3");
-	std::filesystem::remove(database);
 	{
 		ScriptedMeterSource source;
-		msap1::MeterRecordStream stream(database);
 		msap1::PreparedMeterConfiguration configuration{};
 		configuration.wire.generation = 0xfeedbeefu;
 		configuration.wire.sample_rate_hz = 32000;
@@ -275,8 +305,7 @@ void ingestor_tracks_interleaved_aggregate_stream()
 			 .configuration_generation = 0xfeedbeefu,
 			 .utc_synchronized = true},
 			std::chrono::steady_clock::now());
-		MeterRecordIngestor ingest(source, stream, configuration,
-					   timebase);
+		MeterRecordIngestor ingest(source, configuration, timebase);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {
@@ -394,11 +423,6 @@ void ingestor_tracks_interleaved_aggregate_stream()
 				msap1::meter::TimeQuality::Synchronized,
 			"a cross-generation sync point mislabeled an aggregate");
 
-		/* Both formats reached the durable WAL stream: 4 basic + 4
-		 * aggregate records were accepted. */
-		require(stream.read_after(0, 32).size() == 8,
-			"accepted records did not all reach the WAL stream");
-
 		/* A configuration swap is a boundary for BOTH caches: an
 		 * aggregate from the old generation must never outlive the
 		 * basic record it was folded from. begin_epoch() clears the
@@ -420,7 +444,6 @@ void ingestor_tracks_interleaved_aggregate_stream()
 				msap1::acquisition_age_unavailable,
 			"begin_epoch() did not reset the aggregate cache");
 	}
-	std::filesystem::remove(database);
 }
 
 /*
@@ -434,20 +457,14 @@ void ingestor_pins_aggregate_time_quality_at_ingest()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
 	using msap1::meter::TimeQuality;
-	const auto database = std::filesystem::temp_directory_path() /
-		("msap1-ingestor-quality-test-" + std::to_string(::getpid()) +
-		 ".sqlite3");
-	std::filesystem::remove(database);
 	{
 		ScriptedMeterSource source;
-		msap1::MeterRecordStream stream(database);
 		msap1::PreparedMeterConfiguration configuration{};
 		configuration.wire.generation = 0xfeedbeefu;
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, stream, configuration,
-					   timebase);
+		MeterRecordIngestor ingest(source, configuration, timebase);
 		ingest.begin_epoch();
 
 		const auto feed = [&](std::uint32_t sequence) {
@@ -528,26 +545,19 @@ void ingestor_pins_aggregate_time_quality_at_ingest()
 				TimeQuality::Unsynchronized,
 			"begin_epoch() left a stale aggregate time quality");
 	}
-	std::filesystem::remove(database);
 }
 
 void ingestor_handles_u32_sequence_wrap()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
-	const auto database = std::filesystem::temp_directory_path() /
-		("msap1-ingestor-wrap-test-" + std::to_string(::getpid()) +
-		 ".sqlite3");
-	std::filesystem::remove(database);
 	{
 		ScriptedMeterSource source;
-		msap1::MeterRecordStream stream(database);
 		msap1::PreparedMeterConfiguration configuration{};
 		configuration.wire.generation = 0xfeedbeefu;
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		const msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, stream, configuration,
-					   timebase);
+		MeterRecordIngestor ingest(source, configuration, timebase);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {
@@ -568,7 +578,6 @@ void ingestor_handles_u32_sequence_wrap()
 			ingest.invalid_records() == 0,
 			"uint32 sequence wraparound was mistaken for a gap");
 	}
-	std::filesystem::remove(database);
 }
 
 void malformed_and_unknown_requests_are_rejected()

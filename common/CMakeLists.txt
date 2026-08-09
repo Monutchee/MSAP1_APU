@@ -77,18 +77,34 @@ function(msap1_library target alias)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
 endfunction()
 
-# Product data types and durable meter storage deliberately have no dependency
-# on IPC, WebEngine, or command-line presentation code.
+# Product-neutral latest-state meter access.  This library deliberately makes
+# no durability promise: slow subscribers receive the newest snapshot only.
+add_library(mnc_meter_data_provider STATIC
+    mnc/MeterDataProvider/attributes/meter_attribute_catalog.cpp
+)
+add_library(mnc::meter-data-provider ALIAS mnc_meter_data_provider)
+target_include_directories(mnc_meter_data_provider PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_meter_data_provider PUBLIC cxx_std_23)
+target_compile_options(mnc_meter_data_provider PRIVATE
+    -Wall -Wextra -Wpedantic)
+
+# Product data types and latest-state publication deliberately have no
+# dependency on IPC, WebEngine, persistence, or command-line presentation.
 msap1_library(msap1_meter msap1::meter
     msap1/meter/meter_data.cpp
-    msap1/meter/meter_record_stream.cpp
+    msap1/meter/MeterDataProvider/msap1_meter_data_provider.cpp
     msap1/meter/meter_config.cpp
     msap1/meter/meter_health.cpp
     msap1/meter/measurement_timebase.cpp
 )
+target_link_libraries(msap1_meter PUBLIC
+    mnc::meter-data-provider
+)
 target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
-    ${CMAKE_DL_LIBS}
 )
 
 add_library(mnc_settings STATIC
@@ -238,12 +254,12 @@ if(BUILD_TESTING)
     add_test(NAME meter_aggregate_route_test
         COMMAND meter_aggregate_route_test)
 
-    add_executable(meter_record_stream_test
-        ${PROJECT_SOURCE_DIR}/tests/meter_record_stream_test.cpp)
-    target_link_libraries(meter_record_stream_test PRIVATE msap1::meter)
-    target_compile_options(meter_record_stream_test PRIVATE
+    add_executable(meter_data_provider_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_data_provider_test.cpp)
+    target_link_libraries(meter_data_provider_test PRIVATE msap1::meter)
+    target_compile_options(meter_data_provider_test PRIVATE
         -Wall -Wextra -Wpedantic)
-    add_test(NAME meter_record_stream_test COMMAND meter_record_stream_test)
+    add_test(NAME meter_data_provider_test COMMAND meter_data_provider_test)
 
     add_executable(service_manager_test
         ${PROJECT_SOURCE_DIR}/tests/service_manager_test.cpp)

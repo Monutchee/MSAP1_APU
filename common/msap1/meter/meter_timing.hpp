@@ -11,6 +11,8 @@
  * docs/TIMING_MODEL.md for the full model.
  */
 
+#include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -34,12 +36,7 @@ enum class NominalFrequency : std::uint8_t {
  * Aggregation tier of a decoded meter update. Only Basic is produced today;
  * the longer tiers are reserved for future aggregate record formats.
  */
-enum class MeasurementPeriod : std::uint8_t {
-	Basic = 0,
-	Cycles150_180,
-	Min10,
-	Hour2,
-};
+using MeasurementPeriod = mnc::meter::MeasurementPeriod;
 
 /**
  * UTC synchronization state of the measurement timebase. Time quality is a

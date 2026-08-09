@@ -25,8 +25,6 @@ struct Options {
 	std::string waveform_directory = "/data/mnc/waveform";
 	/** Unix control socket serving the acquisition command IPC. */
 	std::string socket_path = msap1::acquisition_socket_path;
-	/** Durable SQLite WAL stream for validated meter records. */
-	std::string record_stream = "/data/mnc/meter/record-stream.sqlite3";
 };
 
 /**

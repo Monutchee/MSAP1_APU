@@ -28,8 +28,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  waveform_(options.waveform_device, options.waveform_directory,
 		    waveform_metadata(configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
-	  record_stream_(options.record_stream),
-	  ingest_(meter_, record_stream_, configuration_, timebase_),
+	  ingest_(meter_, configuration_, timebase_),
+	  meter_provider_(ingest_.meter_data()),
 	  health_(rpu_),
 	  ipc_(options.socket_path)
 {
@@ -486,6 +486,65 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	if (ingest_.latest_aggregate_record())
 		response.latest_aggregate_record =
 			*ingest_.latest_aggregate_record();
+	return response;
+}
+
+msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
+	const msap1::MeterSnapshotRequest &request) const
+{
+	msap1::MeterSnapshotResponse response{};
+	response.running = running_;
+	if (const auto snapshot = meter_provider_.latest(request.selection)) {
+		response.has_snapshot = true;
+		response.snapshot = *snapshot;
+	}
+
+	/* MTR1 transport diagnostics are meaningful only for the current basic
+	 * record. They deliberately remain outside the generic provider model. */
+	if (request.selection.period != mnc::meter::MeasurementPeriod::Basic ||
+	    !ingest_.latest_record())
+		return response;
+	const auto &record = *ingest_.latest_record();
+	response.diagnostics.sample_rate_hz = record.sample_rate_hz();
+	response.diagnostics.rms_window_samples = record.window_samples();
+	response.diagnostics.status = record.status();
+	response.diagnostics.capture_frames = record.capture_frames();
+	response.diagnostics.header_errors = record.header_errors();
+	response.diagnostics.fifo_overflows = record.fifo_overflows();
+	response.diagnostics.packetizer_drops = record.packetizer_drops();
+	response.diagnostics.hub_drops = record.hub_drops();
+	for (std::size_t index = 0; index < response.diagnostics.channels.size();
+	     ++index) {
+		const auto channel = record.channel(index);
+		response.diagnostics.channels[index] = {
+			channel.mean_micro_units, channel.rms_count};
+	}
+	const auto frequency = record.frequency();
+	response.diagnostics.frequency = {
+		frequency.enabled,
+		frequency.reference_valid,
+		frequency.out_of_range,
+		frequency.timed_out,
+		frequency.arithmetic_error,
+		frequency.period_q16_samples,
+		frequency.measurement_sequence,
+		frequency.mode,
+		frequency.reference_channel,
+		frequency.cycles_used,
+	};
+	if (record.record_format() == msap1::meter_periodic_format_v2) {
+		const auto timing = record.timing();
+		response.diagnostics.timing = msap1::MeterBlockTimingIpc{
+			record.sequence(),
+			record.first_sample_index(),
+			record.block_sample_count(),
+			timing.cycle_count,
+			timing.nominal_frequency_hz,
+			timing.cycle_locked,
+			timing.free_run_fallback,
+			timebase_.quality(Clock::now()),
+		};
+	}
 	return response;
 }
 

@@ -84,7 +84,7 @@ struct MeterTimingDto {
 
 /** Body of GET /api/v1/meter/readings. */
 struct MeterReadingsDto {
-	std::uint32_t sequence;
+	std::uint64_t sequence;
 	std::uint32_t configuration_generation;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t rms_window_samples;
@@ -105,58 +105,82 @@ struct MeterReadingsDto {
  * meter_dto.hpp so both documents describe channels identically. */
 
 /** Project the newest cached meter record onto the readings DTO. */
-MeterReadingsDto readings(const msap1::InfoResponse &response)
+MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 {
-	if (!response.running || !response.has_meter_record)
+	if (!response.running || !response.has_snapshot)
 		throw std::runtime_error("no meter result is available");
-	const auto &record = response.latest_record;
-	if (!record.header_valid())
-		throw std::runtime_error("meter record header is invalid");
-	const auto frequency = record.frequency();
+	const auto &snapshot = response.snapshot;
+	const auto &diagnostics = response.diagnostics;
 	MeterReadingsDto result{
-		record.sequence(), record.configuration_generation(),
-		record.sample_rate_hz(), record.window_samples(),
-		record.status(),
-		record.capture_frames(), record.header_errors(),
-		record.fifo_overflows(), record.packetizer_drops(),
-		record.hub_drops(),
-		{frequency.enabled, frequency.valid, frequency.reference_valid,
-		 frequency.out_of_range, frequency.timed_out,
-		 frequency.arithmetic_error,
-		 frequency.valid
-			 ? static_cast<double>(frequency.millihz) / 1000.0
-			 : 0.0,
-		 frequency.millihz, frequency.period_q16_samples,
-		 frequency.measurement_sequence, frequency.mode,
-		 frequency.reference_channel, frequency.cycles_used},
+		snapshot.sequence, snapshot.configuration_generation,
+		diagnostics.sample_rate_hz, diagnostics.rms_window_samples,
+		diagnostics.status,
+		diagnostics.capture_frames, diagnostics.header_errors,
+		diagnostics.fifo_overflows, diagnostics.packetizer_drops,
+		diagnostics.hub_drops,
+		{diagnostics.frequency.enabled, false,
+		 diagnostics.frequency.reference_valid,
+		 diagnostics.frequency.out_of_range,
+		 diagnostics.frequency.timed_out,
+		 diagnostics.frequency.arithmetic_error,
+		 0.0, 0, diagnostics.frequency.period_q16_samples,
+		 diagnostics.frequency.measurement_sequence,
+		 diagnostics.frequency.mode,
+		 diagnostics.frequency.reference_channel,
+		 diagnostics.frequency.cycles_used},
 		{},
 		{},
 	};
-	/* v2 records carry the cycle-timing identity of the block; stored v1
-	 * records predate it, so the timing object is omitted entirely. */
-	if (record.record_format() == msap1::meter_periodic_format_v2) {
-		const auto timing = record.timing();
+	if (diagnostics.timing) {
+		const auto &timing = *diagnostics.timing;
 		result.timing = MeterTimingDto{
-			record.sequence(),
-			record.first_sample_index(),
-			record.block_sample_count(),
+			timing.block_sequence,
+			timing.first_sample_index,
+			timing.sample_count,
 			timing.cycle_count,
 			timing.nominal_frequency_hz,
 			timing.cycle_locked,
 			timing.free_run_fallback,
-			time_quality_name(response.time_quality),
+			time_quality_name(timing.time_quality),
 		};
 	}
-	for (std::size_t index = 0; index < result.channels.size(); ++index) {
-		const auto reading = record.channel(index);
+	for (std::size_t index = 0; index < result.channels.size(); ++index)
 		result.channels[index] = {
 			static_cast<std::uint32_t>(index),
-			meter_channel_names[index],
-			meter_channel_unit(index), reading.valid,
-			reading.mean_micro_units, reading.rms_count,
-			reading.valid ? meter_units(reading.rms_micro_units)
-				      : 0.0,
+			meter_channel_names[index], meter_channel_unit(index), false,
+			diagnostics.channels[index].mean_micro_units,
+			diagnostics.channels[index].rms_count, 0.0,
 		};
+
+	using Id = mnc::meter::MeterAttributeId;
+	auto channel_index = [](Id id) -> std::optional<std::size_t> {
+		switch (id) {
+		case Id::IaRms: return 0;
+		case Id::IbRms: return 1;
+		case Id::IcRms: return 2;
+		case Id::InRms: return 3;
+		case Id::VcnRms: return 4;
+		case Id::VbnRms: return 5;
+		case Id::VanRms: return 6;
+		default: return std::nullopt;
+		}
+	};
+	for (const auto &reading : snapshot.values) {
+		const bool valid = reading.quality ==
+			mnc::meter::ReadingQuality::Valid;
+		if (reading.attribute.id == Id::Frequency) {
+			result.frequency.valid = valid;
+			result.frequency.millihz = valid
+				? static_cast<std::uint32_t>(reading.value) : 0u;
+			result.frequency.hz = valid
+				? static_cast<double>(reading.value) / 1000.0 : 0.0;
+			continue;
+		}
+		if (const auto index = channel_index(reading.attribute.id)) {
+			result.channels[*index].valid = valid;
+			result.channels[*index].rms = valid
+				? meter_units(reading.value) : 0.0;
+		}
 	}
 	return result;
 }
@@ -337,7 +361,7 @@ webengine::Response get_meter_readings(AppContext &app,
 				       const webengine::RequestContext &)
 {
 	try {
-		const auto response = app.acquisition.information();
+		const auto response = app.acquisition.meter_snapshot();
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
 			readings(response));

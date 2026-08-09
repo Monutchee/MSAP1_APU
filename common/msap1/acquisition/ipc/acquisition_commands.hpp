@@ -15,6 +15,7 @@
 
 #include "msap1/meter/meter_record.hpp"
 #include "msap1/meter/meter_timing.hpp"
+#include "mnc/MeterDataProvider/snapshot/meter_snapshot.hpp"
 #include "msap1/acquisition/rpu/rpu_control_protocol.h"
 #include "msap1/waveform/waveform_capture.hpp"
 
@@ -22,6 +23,7 @@
 #include <bit>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -36,8 +38,10 @@ inline constexpr const char *acquisition_socket_path =
  * beside the basic latest record.
  * 19: InfoResponse carries the time quality stamped onto that aggregate at
  * ingest, so its provenance no longer follows the daemon's current clock
- * state. */
-inline constexpr std::uint16_t acquisition_ipc_version = 19;
+ * state.
+ * 20: Normal meter reads use a product-neutral typed snapshot request;
+ * raw MeterRecord remains confined to the legacy diagnostic info reply. */
+inline constexpr std::uint16_t acquisition_ipc_version = 20;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -172,6 +176,66 @@ struct InfoResponse {
 	MeterRecord latest_aggregate_record{};
 };
 
+/** Per-channel diagnostics that are specific to today's MTR1 record. */
+struct MeterChannelDiagnostics {
+	std::int64_t mean_micro_units = 0;
+	std::uint32_t rms_count = 0;
+};
+
+/** Frequency status/counters that accompany the typed frequency reading. */
+struct MeterFrequencyDiagnostics {
+	bool enabled = false;
+	bool reference_valid = false;
+	bool out_of_range = false;
+	bool timed_out = false;
+	bool arithmetic_error = false;
+	std::uint32_t period_q16_samples = 0;
+	std::uint32_t measurement_sequence = 0;
+	std::uint32_t mode = 0;
+	std::uint32_t reference_channel = 0;
+	std::uint32_t cycles_used = 0;
+};
+
+/** Optional cycle-timing identity supplied by MTR1 format v2. */
+struct MeterBlockTimingIpc {
+	std::uint64_t block_sequence = 0;
+	std::uint64_t first_sample_index = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t cycle_count = 0;
+	std::uint32_t nominal_frequency_hz = 0;
+	bool cycle_locked = false;
+	bool free_run_fallback = false;
+	msap1::meter::TimeQuality time_quality =
+		msap1::meter::TimeQuality::Unsynchronized;
+};
+
+/**
+ * Product diagnostics intentionally kept outside mnc::meter::MeterSnapshot.
+ * The snapshot is the reusable measurement API; these counters describe the
+ * current MSAP1 PL transport and may evolve independently.
+ */
+struct MeterSnapshotDiagnostics {
+	std::uint32_t sample_rate_hz = 0;
+	std::uint32_t rms_window_samples = 0;
+	std::uint32_t status = 0;
+	std::uint32_t capture_frames = 0;
+	std::uint32_t header_errors = 0;
+	std::uint32_t fifo_overflows = 0;
+	std::uint32_t packetizer_drops = 0;
+	std::uint32_t hub_drops = 0;
+	std::array<MeterChannelDiagnostics, 8> channels{};
+	MeterFrequencyDiagnostics frequency{};
+	std::optional<MeterBlockTimingIpc> timing;
+};
+
+struct MeterSnapshotResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	bool has_snapshot = false;
+	mnc::meter::MeterSnapshot snapshot{};
+	MeterSnapshotDiagnostics diagnostics{};
+};
+
 struct CaptureResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	bool running = false;
@@ -227,6 +291,14 @@ struct InfoRequest {
 	static constexpr std::string_view command = "info";
 	using Response = InfoResponse;
 	std::uint16_t version = acquisition_ipc_version;
+};
+
+/** Latest-state meter projection. This path is lossy by design. */
+struct MeterSnapshotRequest {
+	static constexpr std::string_view command = "meter-snapshot";
+	using Response = MeterSnapshotResponse;
+	std::uint16_t version = acquisition_ipc_version;
+	mnc::meter::MeterSnapshotRequest selection{};
 };
 
 /** Returns the daemon's cached health.  Web polling must never trigger a
@@ -327,7 +399,7 @@ struct ConfigurationApplyRequest {
 
 /** Every command; keeps the compile-time hash-collision check exhaustive. */
 using AcquisitionCommandList = std::tuple<
-	InfoRequest, HealthRequest, HealthRefreshRequest, StartRequest,
+	InfoRequest, MeterSnapshotRequest, HealthRequest, HealthRefreshRequest, StartRequest,
 	StopRequest, FrequencyGetRequest, SampleRateSetRequest,
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,

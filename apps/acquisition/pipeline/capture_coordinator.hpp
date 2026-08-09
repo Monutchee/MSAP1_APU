@@ -11,7 +11,7 @@
 #include "msap1/acquisition/rpu/rpu_controller.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/meter_config.hpp"
-#include "msap1/meter/meter_record_stream.hpp"
+#include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
 #include "msap1/settings/settings.hpp"
 #include "msap1/waveform/waveform_capture.hpp"
 #include "ipc/ipc_channel.hpp"
@@ -105,6 +105,8 @@ public:
 	[[nodiscard]] msap1::WaveformResponse waveform_response();
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
+	[[nodiscard]] msap1::MeterSnapshotResponse meter_snapshot_response(
+		const msap1::MeterSnapshotRequest &request) const;
 
 	/* ── State the waveform command handlers need ───────────────────── */
 
@@ -153,13 +155,13 @@ private:
 	msap1::acquisition::MeterDmaReader meter_;
 	msap1::WaveformCapture waveform_;
 	msap1::acquisition::RpuController rpu_;
-	msap1::MeterRecordStream record_stream_;
 	/* UTC mapping for decoded blocks; written by refresh_time_sync() and
 	 * read by the ingestor's decode path. Declared before ingest_, which
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
 	MeterRecordIngestor ingest_;
+	msap1::meter::Msap1MeterDataProvider meter_provider_;
 	RpuHealthMonitor health_;
 	IpcChannel ipc_;
 	msap1::AcquisitionCommandRegistry registry_;

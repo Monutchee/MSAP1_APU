@@ -1,10 +1,20 @@
 #include "gateway/acquisition_gateway.hpp"
 
+#include <utility>
+
 namespace msap1::web {
 
 InfoResponse AcquisitionGateway::information(int timeout_ms)
 {
 	return client_.request(InfoRequest{}, timeout_ms);
+}
+
+MeterSnapshotResponse AcquisitionGateway::meter_snapshot(
+	mnc::meter::MeterSnapshotRequest selection, int timeout_ms)
+{
+	MeterSnapshotRequest request;
+	request.selection = std::move(selection);
+	return client_.request(request, timeout_ms);
 }
 
 WaveformResponse AcquisitionGateway::waveform_status(int timeout_ms)
