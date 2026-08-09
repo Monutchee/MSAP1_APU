@@ -71,6 +71,7 @@ struct AggregateSpec {
 	std::uint32_t sample_count = 384'015;
 	std::uint32_t valid_mask = 0x7f;
 	bool arithmetic_error = false;
+	bool complete = true;
 	bool frequency_valid = true;
 	std::uint32_t first_basic_sequence = 100;
 	std::uint32_t last_basic_sequence = 114;
@@ -93,9 +94,10 @@ msap1::MeterRecord aggregate_record(const AggregateSpec &spec)
 	record.words[5] = spec.sample_rate_hz;
 	record.words[6] = spec.sample_count;
 	record.words[7] = spec.valid_mask;
-	/* bit1 (complete) is always set: the PL never emits partials. */
+	/* bit1 (complete) is set on every record the PL emits; tests clear it
+	 * only to prove the decoder refuses a self-declared partial. */
 	record.words[8] = (spec.arithmetic_error ? (1u << 0) : 0u) |
-			  (1u << 1) |
+			  (spec.complete ? (1u << 1) : 0u) |
 			  (spec.frequency_valid ? (1u << 2) : 0u);
 	record.words[9] = spec.first_basic_sequence;
 	record.words[10] = spec.last_basic_sequence;
@@ -240,9 +242,15 @@ void decode_reference_built_record_60hz()
 	require(values.current.neutral.valid() &&
 		values.current.neutral.value == 0,
 		"a valid zero aggregate current was confused with unavailable");
-	require(values.frequency.valid() &&
+	/* The mean is informative only: the standardized Class A frequency
+	 * product belongs to its own interval and is not implemented yet, so
+	 * this reading must never advertise itself as valid. The value is
+	 * still carried for diagnostics. */
+	require(!values.frequency.valid() &&
+		values.frequency.quality ==
+			msap1::MeasurementQuality::unavailable &&
 		values.frequency.value == expected.frequency_millihz,
-		"the aggregate mean frequency was not decoded as valid");
+		"the informative mean frequency was advertised as valid");
 	require(values.frequency.measured_at == timestamp &&
 		values.frequency.calculation_window.sample_count == 384'015 &&
 		values.frequency.calculation_window.duration ==
@@ -337,8 +345,47 @@ void decode_flags_arithmetic_error()
 	require(update.aggregate_timing->arithmetic_error,
 		"the arithmetic error flag was not decoded");
 	require(update.fundamental->frequency.quality ==
+			msap1::MeasurementQuality::unavailable,
+		"the informative frequency must stay unavailable");
+}
+
+/*
+ * Quality priority for aggregate RMS readings: a saturated aggregation
+ * outranks the channel mask, because a saturated value published as valid
+ * would hide the fault from every consumer.
+ */
+void decode_applies_rms_quality_priority()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+
+	AggregateSpec healthy{};
+	healthy.rms_micro_units[6] = 229'000'000;
+	const auto good = registry.decode(aggregate_record(healthy));
+	require(good.fundamental->voltage_ln.phase_a.quality ==
+			msap1::MeasurementQuality::valid,
+		"a healthy aggregate channel was not valid");
+
+	auto saturated = healthy;
+	saturated.arithmetic_error = true;
+	const auto bad = registry.decode(aggregate_record(saturated));
+	require(bad.fundamental->voltage_ln.phase_a.quality ==
 			msap1::MeasurementQuality::arithmetic_error,
-		"an arithmetic error did not degrade the frequency quality");
+		"an arithmetic error did not degrade the voltage quality");
+	require(bad.fundamental->current.phase_a.quality ==
+			msap1::MeasurementQuality::arithmetic_error,
+		"an arithmetic error did not degrade the current quality");
+
+	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va: clearing bit 6
+	 * removes Va only. */
+	auto masked = healthy;
+	masked.valid_mask = 0x7f & ~(1u << 6);
+	const auto partial = registry.decode(aggregate_record(masked));
+	require(partial.fundamental->voltage_ln.phase_a.quality ==
+			msap1::MeasurementQuality::unavailable,
+		"a masked-out channel was not unavailable");
+	require(partial.fundamental->voltage_ln.phase_b.quality ==
+			msap1::MeasurementQuality::valid,
+		"masking one channel disturbed another");
 }
 
 /*
@@ -382,6 +429,42 @@ void decode_rejects_malformed_aggregates()
 		(void)registry.decode(aggregate_record(empty));
 	}, "a zero-sample aggregate decoded");
 
+	/* Only complete 15-block intervals are ever published, so a record
+	 * that declares itself incomplete is corruption, not a partial to be
+	 * salvaged. */
+	auto incomplete = AggregateSpec{};
+	incomplete.complete = false;
+	require_throws([&] {
+		(void)registry.decode(aggregate_record(incomplete));
+	}, "an aggregate marked incomplete decoded");
+
+	/* The basic sequence span must describe exactly 15 consecutive
+	 * blocks: 100..114 is 15 blocks, 100..115 is 16. */
+	auto wide_span = AggregateSpec{};
+	wide_span.last_basic_sequence = 115;
+	require_throws([&] {
+		(void)registry.decode(aggregate_record(wide_span));
+	}, "a 16-block basic sequence span decoded");
+
+	auto narrow_span = AggregateSpec{};
+	narrow_span.last_basic_sequence = 113;
+	require_throws([&] {
+		(void)registry.decode(aggregate_record(narrow_span));
+	}, "a 14-block basic sequence span decoded");
+
+	/* The span is modular: 0xFFFFFFF8..0x00000006 is 15 consecutive
+	 * blocks across the uint32 wrap and must be accepted unchanged. */
+	auto wrapped = AggregateSpec{};
+	wrapped.first_basic_sequence = 0xFFFFFFF8u;
+	wrapped.last_basic_sequence = 0x00000006u;
+	const auto wrapped_update = registry.decode(aggregate_record(wrapped));
+	require(wrapped_update.aggregate_timing.has_value() &&
+		wrapped_update.aggregate_timing->first_basic_sequence ==
+			0xFFFFFFF8u &&
+		wrapped_update.aggregate_timing->last_basic_sequence ==
+			0x00000006u,
+		"a wrapped basic sequence span was rejected");
+
 	/* first_sample_index + sample_count must stay inside the 64-bit
 	 * conversion counter. */
 	auto overflowing = AggregateSpec{};
@@ -402,6 +485,7 @@ int main()
 		decode_reference_built_record_60hz();
 		decode_reference_built_record_50hz();
 		decode_flags_arithmetic_error();
+		decode_applies_rms_quality_priority();
 		decode_rejects_malformed_aggregates();
 		std::cout << "aggregate decode tests passed\n";
 		return 0;

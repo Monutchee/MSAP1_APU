@@ -294,6 +294,25 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
  * bit 2, and channel validity from the word-7 mask (the AND across the 15
  * contributing blocks).
  */
+/*
+ * An aggregate RMS reading is only trustworthy when the channel took part
+ * in every contributing basic block AND the aggregation arithmetic itself
+ * did not saturate. An arithmetic error therefore outranks the channel
+ * mask: publishing a saturated aggregate as MeasurementQuality::valid
+ * would hide the fault from every consumer.
+ */
+template<typename Unit>
+Reading<Unit> aggregate_reading(std::int64_t value, bool channel_valid,
+				bool arithmetic_error, std::uint64_t sequence,
+				SystemTime timestamp, SampleWindow window)
+{
+	const auto quality = arithmetic_error
+		? MeasurementQuality::arithmetic_error
+		: channel_valid ? MeasurementQuality::valid
+				: MeasurementQuality::unavailable;
+	return {value, quality, sequence, timestamp, window};
+}
+
 FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 						      std::uint64_t sequence,
 						      SystemTime received_at,
@@ -301,31 +320,35 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 {
 	FundamentalValues fundamental{};
 	const auto status = record.aggregate_status();
-	/* Quality mapping is analogous to the basic decoder, reduced to the
-	 * flags the aggregate record carries: a valid mean, an arithmetic
-	 * overflow, or (when any of the 15 basic readings was missing)
-	 * simply unavailable. */
+	/*
+	 * The MTR2 frequency field is informational only: it is the mean of
+	 * the 15 basic frequency estimates, not a standardized measurement.
+	 * IEC 61000-4-30 defines the frequency product over its own (10 s)
+	 * interval, which will be implemented with that interval in a later
+	 * milestone. The informative value is carried through for
+	 * diagnostics, but it must never be advertised as a valid Class A
+	 * frequency result, so its quality stays unavailable regardless of
+	 * the record's frequency-valid flag. That flag remains visible to
+	 * diagnostics through AggregateTiming::frequency_valid.
+	 */
 	fundamental.frequency = {
 		static_cast<std::int64_t>(record.aggregate_frequency_millihz()),
-		status.frequency_valid
-			? MeasurementQuality::valid
-			: status.arithmetic_error
-				? MeasurementQuality::arithmetic_error
-				: MeasurementQuality::unavailable,
-		sequence, received_at, window};
+		MeasurementQuality::unavailable, sequence, received_at, window};
 
 	const auto valid_mask = record.valid_mask();
 	const auto current = [&](std::size_t channel) {
-		return reading<MicroAmperes>(
+		return aggregate_reading<MicroAmperes>(
 			record.aggregate_rms_micro_units(channel),
-			(valid_mask & (1u << channel)) != 0u, sequence,
-			received_at, window);
+			(valid_mask & (1u << channel)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
 	};
 	const auto voltage = [&](std::size_t channel) {
-		return reading<MicroVolts>(
+		return aggregate_reading<MicroVolts>(
 			record.aggregate_rms_micro_units(channel),
-			(valid_mask & (1u << channel)) != 0u, sequence,
-			received_at, window);
+			(valid_mask & (1u << channel)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
 	};
 	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va, debug. */
 	fundamental.current = {current(0), current(1), current(2), current(3)};
@@ -448,6 +471,15 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	 * other shape is corruption or a future RTL regression and must
 	 * never silently decode into a valid aggregate.
 	 */
+	/*
+	 * The producer marks every emitted aggregate complete because only
+	 * complete 15-block intervals are ever published. A record that says
+	 * otherwise is corruption or an RTL regression, never a partial
+	 * result to be salvaged.
+	 */
+	if (!record.aggregate_status().complete)
+		throw std::invalid_argument(
+			"MTR2 aggregate is not marked complete");
 	const auto composition = record.aggregate_composition();
 	if (composition.nominal_frequency_hz != 50u &&
 	    composition.nominal_frequency_hz != 60u)
@@ -462,6 +494,17 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	if (composition.cycle_count != cycles_per_aggregate(nominal))
 		throw std::invalid_argument(
 			"MTR2 aggregate cycle count does not match its nominal");
+	/*
+	 * The first/last basic sequences must describe exactly 15 consecutive
+	 * basic blocks. Both accessors return uint32_t, so the subtraction is
+	 * modular and a span that wraps 0xFFFFFFFF is accepted unchanged.
+	 */
+	const auto basic_span =
+		static_cast<std::uint32_t>(record.last_basic_sequence() -
+					   record.first_basic_sequence());
+	if (basic_span != meter::basic_blocks_per_aggregate - 1u)
+		throw std::invalid_argument(
+			"MTR2 basic sequence span is not 15 consecutive blocks");
 	const auto sample_count = record.aggregate_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(

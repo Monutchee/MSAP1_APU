@@ -44,8 +44,13 @@ with grid frequency.
   slightly: `X_agg = floor(sqrt(floor(sum(X_i^2)/15)))`, computed in the PL
   Q16 internal domain and then converted to micro-units. Frequency
   aggregates as the arithmetic mean `floor(sum(f_i)/15)` of the 15 basic
-  values, valid only when all 15 were valid; it is informative — the
-  standardized frequency interval is the 10 s tier, which is out of scope.
+  values, valid only when all 15 were valid. That mean is **informative
+  only** — the standardized Class A frequency product is defined over its
+  own (10 s) interval and is not implemented yet — so the APU carries the
+  value and the PL's validity flag for diagnostics
+  (`AggregateTiming::frequency_valid`) but never advertises the
+  `Cycles150_180` frequency reading as a valid measurement: its quality is
+  always `unavailable`.
 - The **APU only decodes**. MTR2 aggregate records arrive interleaved with
   basic records on the same 256-byte meter DMA stream, on an independent
   sequence counter starting at 1, so the ingestor tracks continuity per
@@ -122,3 +127,13 @@ first-sample index (words 12–13, same conversion domain as MTR1 v2 words
 16–31, MTR1 channel order), and the mean frequency in millihertz
 (word 32). Decoding produces `MeasurementPeriod::Cycles150_180` updates
 carrying `AggregateTiming`; basic decoding is unchanged.
+
+The aggregate decoder validates the record's self-declared identity before
+building anything: it must be marked complete, carry a 50/60 Hz nominal,
+exactly 15 basic blocks whose cycle count matches that nominal, a
+first/last basic sequence span of exactly 15 consecutive blocks (modular,
+so a span wrapping 0xFFFFFFFF is accepted), a non-zero sample count, and a
+sample range that stays inside the 64-bit counter. Aggregate RMS quality
+follows a strict priority — an aggregation arithmetic error outranks the
+channel valid mask, so a saturated value can never be published as
+`valid`.
