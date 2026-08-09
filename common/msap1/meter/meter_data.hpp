@@ -17,6 +17,7 @@ namespace msap1 {
 
 /* The timing vocabulary lives in msap1::meter (meter_timing.hpp); pull the
  * names used throughout the decoded-data model into this namespace. */
+using meter::AggregateTiming;
 using meter::BlockTiming;
 using meter::MeasurementPeriod;
 using meter::NominalFrequency;
@@ -121,6 +122,10 @@ struct MeterUpdate {
 	 * The Basic period has no fixed duration — the actual duration is
 	 * sample_count / sample_rate per block (see SampleWindow). */
 	std::optional<BlockTiming> timing;
+	/* Aggregation identity of the source record. Present exactly for
+	 * 150/180-cycle aggregate (MTR2) records; basic updates leave it
+	 * absent, and aggregate updates leave `timing` absent. */
+	std::optional<AggregateTiming> aggregate_timing;
 };
 
 struct MeterPeriodView {
@@ -130,6 +135,7 @@ struct MeterPeriodView {
 	SystemTime updated_at{};
 	MeterValues values{};
 	std::optional<BlockTiming> timing{};
+	std::optional<AggregateTiming> aggregate_timing{};
 };
 
 class MeterLatestStore {
@@ -212,6 +218,18 @@ private:
  * MeasurementTimebase after decoding.
  */
 [[nodiscard]] MeterUpdate decode_periodic_meter_record_v2(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/**
+ * Decode an MTR2 aggregate (0x00020001) record: 150/180-cycle fundamental
+ * values plus the AggregateTiming identity. The PL is the authoritative
+ * aggregator — this only DECODES what the PL computed; the APU never
+ * recomputes aggregate values. As for v2, TimeQuality and utc_start are not
+ * in the record: the caller (the ingestor) stamps them from the
+ * MeasurementTimebase after decoding.
+ */
+[[nodiscard]] MeterUpdate decode_aggregate_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

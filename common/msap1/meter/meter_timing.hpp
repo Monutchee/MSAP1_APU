@@ -66,6 +66,21 @@ cycles_per_basic_block(NominalFrequency nominal)
 }
 
 /**
+ * Basic blocks folded into one 150/180-cycle aggregate. The first Class A
+ * aggregation tier is defined as exactly 15 consecutive eligible basic
+ * blocks — cycle-defined like the basic block itself, never a 3-second
+ * timer.
+ */
+inline constexpr std::uint32_t basic_blocks_per_aggregate = 15u;
+
+/** Cycles per 150/180-cycle aggregate: 50 Hz -> 150, 60 Hz -> 180. */
+[[nodiscard]] constexpr std::uint32_t
+cycles_per_aggregate(NominalFrequency nominal)
+{
+	return basic_blocks_per_aggregate * cycles_per_basic_block(nominal);
+}
+
+/**
  * Timing identity of one decoded basic measurement block.
  *
  * The PL contributes the block boundaries, cycle-lock provenance flags, and
@@ -119,6 +134,51 @@ class_a_aggregation_eligible(const BlockTiming &timing)
 	       timing.cycle_count ==
 		       cycles_per_basic_block(timing.nominal_frequency);
 }
+
+/**
+ * Timing identity of one decoded 150/180-cycle aggregate record.
+ *
+ * The PL is the authoritative aggregator: it folds exactly 15 consecutive
+ * ELIGIBLE basic blocks (same generation, same nominal, sample-range
+ * continuous — all enforced in the PL) into one aggregate and emits only
+ * complete aggregates. The APU never recomputes any of that; it decodes the
+ * record and, exactly as for BlockTiming, stamps the UTC mapping and its
+ * quality at decode time.
+ */
+struct AggregateTiming {
+	/* Wire sequence is uint32, stored widened. Aggregates count on their
+	 * OWN sequence stream (starting at 1), independent of the basic
+	 * block sequence stream. */
+	std::uint64_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	/* First sample of the first contributing basic block on the PL
+	 * 64-bit free-running conversion counter — the same domain as
+	 * BlockTiming::first_sample_index. */
+	std::uint64_t first_sample_index = 0;
+	/* Total samples across the 15 contributing basic blocks. */
+	std::uint32_t sample_count = 0;
+	/* BASIC-stream sequence range folded into this aggregate
+	 * (inclusive), for correlation with the basic record stream. */
+	std::uint32_t first_basic_sequence = 0;
+	std::uint32_t last_basic_sequence = 0;
+	/* Contributing basic blocks: 15 on every emitted record. */
+	std::uint16_t basic_block_count = 0;
+	/* Total complete cycles: 150 at a 50 Hz nominal, 180 at 60 Hz. */
+	std::uint16_t cycle_count = 0;
+	NominalFrequency nominal_frequency = NominalFrequency::Hz60;
+	bool arithmetic_error = false;
+	/* Mean-frequency validity: set only when all 15 basic frequency
+	 * readings were valid (informative — the standardized frequency
+	 * interval is the 10 s tier, not this one). */
+	bool frequency_valid = false;
+	TimeQuality time_quality = TimeQuality::Unsynchronized;
+	/* UTC of the first sample via the measurement timebase mapping;
+	 * absent while unsynchronized. */
+	std::optional<SystemTime> utc_start;
+	/* Error bound on utc_start, from the sync point the label came from.
+	 * Present exactly when utc_start is present. */
+	std::optional<std::uint64_t> utc_uncertainty_ns;
+};
 
 } // namespace msap1::meter
 

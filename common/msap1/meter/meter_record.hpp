@@ -19,6 +19,13 @@ inline constexpr std::uint32_t meter_periodic_format = 0x00010001u;
  * cycle-timing word, and words 60/61 the 64-bit first-sample index. Stored
  * streams may still contain v1 records, so both formats stay decodable. */
 inline constexpr std::uint32_t meter_periodic_format_v2 = 0x00010002u;
+/* Aggregate fundamental record, version 1 ("MTR2"): 15 consecutive eligible
+ * basic blocks folded by the PL into one 150-cycle (50 Hz nominal) or
+ * 180-cycle (60 Hz) aggregate. Same 256-byte container and magic as the
+ * basic records — it interleaves with them on the meter DMA stream — but
+ * with its OWN wire layout (see the aggregate accessors below) and its own
+ * independent sequence counter starting at 1. */
+inline constexpr std::uint32_t meter_aggregate_format = 0x00020001u;
 
 struct MeterChannelReading {
 	bool valid = false;
@@ -37,6 +44,29 @@ struct MeterTimingWord {
 	bool cycle_locked = false;
 	bool free_run_fallback = false;
 	bool first_block_after_apply = false;
+};
+
+/** Decoded aggregate record word 8: record-level status flags. */
+struct MeterAggregateStatus {
+	/* Set when any internal aggregate computation overflowed. */
+	bool arithmetic_error = false;
+	/* Always set on emitted records: the PL emits only complete
+	 * 15-block aggregates, never partial ones. */
+	bool complete = false;
+	/* Set only when all 15 basic frequency readings were valid. */
+	bool frequency_valid = false;
+};
+
+/** Decoded aggregate record word 11: aggregation composition. */
+struct MeterAggregateComposition {
+	/* Contributing basic blocks (15 on every emitted record). */
+	std::uint8_t basic_block_count = 0;
+	/* Configured nominal frequency in Hz (50 or 60) — configuration
+	 * echoed by the PL, never a measurement. */
+	std::uint8_t nominal_frequency_hz = 0;
+	/* Total complete cycles across the contributing blocks: 150 at a
+	 * 50 Hz nominal, 180 at 60 Hz. */
+	std::uint16_t cycle_count = 0;
 };
 
 struct MeterFrequencyReading {
@@ -83,7 +113,8 @@ struct MeterRecord {
 	{
 		return word(0) == meter_record_magic &&
 		       (record_format() == meter_periodic_format ||
-			record_format() == meter_periodic_format_v2) &&
+			record_format() == meter_periodic_format_v2 ||
+			record_format() == meter_aggregate_format) &&
 		       word(2) == meter_record_size;
 	}
 
@@ -155,6 +186,58 @@ struct MeterRecord {
 			static_cast<std::uint8_t>((frequency_status >> 16) & 0xffu),
 		};
 	}
+
+	/* ---- aggregate (MTR2, 0x00020001) fields ------------------------ */
+
+	/* Aggregate records count on their OWN sequence stream (starting at
+	 * 1): word 3 is never continuous with the basic record sequence. */
+	std::uint32_t aggregate_sequence() const { return word(3); }
+	/* Word 6: sum of the 15 contributing basic block sample counts
+	 * (~384k at 128 kSPS, comfortably inside uint32). */
+	std::uint32_t aggregate_sample_count() const { return word(6); }
+	MeterAggregateStatus aggregate_status() const
+	{
+		const auto status_word = word(8);
+		return {
+			(status_word & (1u << 0)) != 0u,
+			(status_word & (1u << 1)) != 0u,
+			(status_word & (1u << 2)) != 0u,
+		};
+	}
+	/* Words 9/10: BASIC-stream sequence range folded into this
+	 * aggregate (inclusive), for cross-stream correlation. */
+	std::uint32_t first_basic_sequence() const { return word(9); }
+	std::uint32_t last_basic_sequence() const { return word(10); }
+	MeterAggregateComposition aggregate_composition() const
+	{
+		const auto composition_word = word(11);
+		return {
+			static_cast<std::uint8_t>(composition_word & 0xffu),
+			static_cast<std::uint8_t>((composition_word >> 8) &
+						  0xffu),
+			static_cast<std::uint16_t>(composition_word >> 16),
+		};
+	}
+	/* First sample of the FIRST contributing basic block on the PL
+	 * 64-bit free-running conversion-domain counter — the same domain
+	 * as the MTR1 v2 first-sample index (words 60/61 there). */
+	std::uint64_t aggregate_first_sample_index() const
+	{
+		return unsigned64(12);
+	}
+	/* Words 16..31: aggregate RMS in signed 64-bit micro-units, two
+	 * words (lo, hi) per channel. Channel order is identical to MTR1:
+	 * Ia, Ib, Ic, In, Vc, Vb, Va, ch7 = 0. Validity comes from the
+	 * word-7 mask (the AND across the 15 contributing blocks). */
+	std::int64_t aggregate_rms_micro_units(std::size_t index) const
+	{
+		if (index >= meter_channel_count)
+			throw std::out_of_range("meter channel index");
+		return signed64(16u + index * 2u);
+	}
+	/* Word 32: mean fundamental frequency in millihertz; 0 whenever
+	 * aggregate_status().frequency_valid is clear. */
+	std::uint32_t aggregate_frequency_millihz() const { return word(32); }
 };
 
 static_assert(sizeof(MeterRecord) == meter_record_size,

@@ -206,6 +206,179 @@ void ingestor_validates_v2_sample_range_continuity()
 	std::filesystem::remove(database);
 }
 
+/* Minimal valid MTR2 aggregate for the interleaving checks: 15 blocks of
+ * 6400 samples at 32 kSPS, 60 Hz nominal -> 180 cycles. Channel words stay
+ * zero because continuity validation never inspects the electrical
+ * payload. */
+msap1::MeterRecord aggregate_record(std::uint32_t sequence,
+				    std::uint64_t first_sample_index,
+				    std::uint32_t generation)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_aggregate_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000;
+	record.words[6] = 96'000;
+	record.words[7] = 0x7f;
+	record.words[8] = (1u << 1) | (1u << 2);
+	record.words[9] = sequence * 15u - 14u;
+	record.words[10] = sequence * 15u;
+	record.words[11] = 15u | (60u << 8) | (180u << 16);
+	record.words[12] = static_cast<std::uint32_t>(first_sample_index);
+	record.words[13] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	record.words[32] = 60'000;
+	return record;
+}
+
+/*
+ * The DMA stream interleaves basic MTR1 and aggregate MTR2 records with
+ * INDEPENDENT sequence counters. Continuity must be tracked per format,
+ * latest_record() must remain the newest BASIC record, and aggregate
+ * timing must be UTC-stamped from the timebase exactly like basic timing.
+ */
+void ingestor_tracks_interleaved_aggregate_stream()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	const auto database = std::filesystem::temp_directory_path() /
+		("msap1-ingestor-aggregate-test-" +
+		 std::to_string(::getpid()) + ".sqlite3");
+	std::filesystem::remove(database);
+	{
+		ScriptedMeterSource source;
+		msap1::MeterRecordStream stream(database);
+		msap1::PreparedMeterConfiguration configuration{};
+		configuration.wire.generation = 0xfeedbeefu;
+		configuration.wire.sample_rate_hz = 32000;
+		configuration.wire.rms_window_samples = 6400;
+		msap1::meter::MeasurementTimebase timebase;
+		/* Trusted sync against the ACTIVE generation: sample 640'000
+		 * corresponds exactly to utc_ns below. */
+		timebase.record_sync(
+			{.sample_counter = 640'000,
+			 .utc_ns = 1'700'000'000'000'000'000ll,
+			 .uncertainty_ns = 250,
+			 .sample_rate_hz = 32000,
+			 .configuration_generation = 0xfeedbeefu,
+			 .utc_synchronized = true},
+			std::chrono::steady_clock::now());
+		MeterRecordIngestor ingest(source, stream, configuration,
+					   timebase);
+		ingest.begin_epoch();
+
+		const auto feed = [&](const msap1::MeterRecord &record) {
+			source.next = {};
+			source.next.records[0] = record;
+			source.next.count = 1;
+			source.next.bytes = sizeof(msap1::MeterRecord);
+			ingest.read_available();
+		};
+
+		/* Aggregates interleave mid-stream without disturbing the
+		 * basic sequence/sample-range chain, and vice versa. */
+		feed(v2_record(1, 640'000, 6400, 0xfeedbeefu));
+		feed(v2_record(2, 646'400, 6400, 0xfeedbeefu));
+		feed(aggregate_record(1, 640'000, 0xfeedbeefu));
+		feed(v2_record(3, 652'800, 6400, 0xfeedbeefu));
+		feed(aggregate_record(2, 640'000, 0xfeedbeefu));
+		require(ingest.meter_records() == 5 &&
+			ingest.sequence_gaps() == 0 &&
+			ingest.aggregate_sequence_gaps() == 0 &&
+			ingest.invalid_records() == 0,
+			"interleaved records were mistaken for gaps");
+
+		/* A missing aggregate is a gap on the AGGREGATE counter only;
+		 * the basic counters must not move. */
+		feed(aggregate_record(4, 640'000, 0xfeedbeefu));
+		feed(v2_record(4, 659'200, 6400, 0xfeedbeefu));
+		require(ingest.aggregate_sequence_gaps() == 1 &&
+			ingest.sequence_gaps() == 0 &&
+			ingest.meter_records() == 7,
+			"an aggregate sequence gap was not isolated per format");
+
+		/* The raw readings cache must remain the newest BASIC record
+		 * even though an aggregate arrived after it. */
+		require(ingest.latest_record().has_value() &&
+			ingest.latest_record()->record_format() ==
+				msap1::meter_periodic_format_v2 &&
+			ingest.latest_record()->sequence() == 4,
+			"latest_record() did not stay on the basic stream");
+
+		/* Aggregate publication goes through the typed store under its
+		 * own period, UTC-stamped from the timebase exactly like a
+		 * basic block (same generation-keyed sample mapping). */
+		const auto aggregate_view = ingest.latest_decoded(
+			msap1::MeasurementPeriod::Cycles150_180);
+		require(aggregate_view.has_value() &&
+			aggregate_view->latest_sequence == 4 &&
+			aggregate_view->aggregate_timing.has_value(),
+			"the aggregate period view was not published");
+		const auto &timing = *aggregate_view->aggregate_timing;
+		require(timing.time_quality ==
+				msap1::meter::TimeQuality::Synchronized &&
+			timing.utc_start.has_value() &&
+			timing.utc_uncertainty_ns == 250,
+			"aggregate timing was not UTC-stamped like basic timing");
+		require(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				timing.utc_start->time_since_epoch())
+					.count() == 1'700'000'000'000'000'000ll,
+			"the aggregate UTC label was not mapped from its first sample");
+		require(timing.cycle_count == 180 &&
+			timing.basic_block_count == 15 &&
+			timing.sample_count == 96'000,
+			"the aggregate identity was not decoded into the view");
+		const auto basic_view = ingest.latest_decoded(
+			msap1::MeasurementPeriod::Basic);
+		require(basic_view.has_value() &&
+			basic_view->latest_sequence == 4 &&
+			basic_view->timing.has_value() &&
+			basic_view->timing->utc_start.has_value(),
+			"basic decoding/stamping changed with aggregates present");
+
+		/* Stale/out-of-order aggregates are invalid, not gaps... */
+		feed(aggregate_record(2, 640'000, 0xfeedbeefu));
+		require(ingest.invalid_records() == 1 &&
+			ingest.aggregate_sequence_gaps() == 1,
+			"a stale aggregate was not rejected");
+		/* ...and a wrong generation is invalid, exactly as for basic
+		 * records. */
+		feed(aggregate_record(5, 640'000, 0x12345678u));
+		require(ingest.invalid_records() == 2,
+			"a stale-generation aggregate was accepted");
+
+		/* A sync point from another generation must refuse the sample
+		 * mapping (no UTC label) while quality stays Synchronized. */
+		timebase.record_sync(
+			{.sample_counter = 640'000,
+			 .utc_ns = 1'700'000'100'000'000'000ll,
+			 .uncertainty_ns = 250,
+			 .sample_rate_hz = 32000,
+			 .configuration_generation = 0x12345678u,
+			 .utc_synchronized = true},
+			std::chrono::steady_clock::now());
+		feed(aggregate_record(5, 640'000, 0xfeedbeefu));
+		const auto unmapped = ingest.latest_decoded(
+			msap1::MeasurementPeriod::Cycles150_180);
+		require(unmapped.has_value() &&
+			unmapped->latest_sequence == 5 &&
+			unmapped->aggregate_timing.has_value() &&
+			!unmapped->aggregate_timing->utc_start.has_value() &&
+			!unmapped->aggregate_timing->utc_uncertainty_ns
+				 .has_value() &&
+			unmapped->aggregate_timing->time_quality ==
+				msap1::meter::TimeQuality::Synchronized,
+			"a cross-generation sync point mislabeled an aggregate");
+
+		/* Both formats reached the durable WAL stream: 4 basic + 4
+		 * aggregate records were accepted. */
+		require(stream.read_after(0, 32).size() == 8,
+			"accepted records did not all reach the WAL stream");
+	}
+	std::filesystem::remove(database);
+}
+
 void ingestor_handles_u32_sequence_wrap()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
@@ -278,6 +451,7 @@ int main()
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
 	ingestor_validates_v2_sample_range_continuity();
+	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_handles_u32_sequence_wrap();
 	malformed_and_unknown_requests_are_rejected();
 	return 0;

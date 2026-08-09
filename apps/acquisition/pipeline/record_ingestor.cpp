@@ -7,6 +7,33 @@
 #include <string>
 
 namespace msap1::acquisition::daemon {
+namespace {
+
+/*
+ * Stamp UTC state at decode time — the PL cannot know it. This touches only
+ * the timing identity: TimeQuality must never mark the electrical
+ * MeasurementQuality invalid. The record's own configuration generation
+ * keys the mapping, so a sync point from another generation can never
+ * mislabel the record. BlockTiming and AggregateTiming share these fields
+ * by design, so basic and aggregate records are stamped identically.
+ */
+template<typename Timing>
+void stamp_time_state(Timing &timing,
+		      const msap1::meter::MeasurementTimebase &timebase)
+{
+	const auto now = Clock::now();
+	timing.time_quality = timebase.quality(now);
+	const auto estimate = timebase.utc_for_sample(
+		timing.first_sample_index, timing.configuration_generation, now);
+	/* Timestamp and its error bound travel together: both set or both
+	 * absent. */
+	if (estimate) {
+		timing.utc_start = estimate->utc;
+		timing.utc_uncertainty_ns = estimate->uncertainty_ns;
+	}
+}
+
+} // namespace
 
 MeterRecordIngestor::MeterRecordIngestor(
 	msap1::acquisition::MeterRecordSource &meter,
@@ -48,13 +75,19 @@ void MeterRecordIngestor::read_available()
 void MeterRecordIngestor::begin_epoch()
 {
 	latest_record_.reset();
+	last_aggregate_sequence_.reset();
 	last_record_time_.reset();
 	sequence_gaps_ = 0;
+	aggregate_sequence_gaps_ = 0;
 }
 
 void MeterRecordIngestor::clear_latest()
 {
+	/* A configuration swap is a deliberate boundary for BOTH record
+	 * streams: the PL may reset either sequence while reconfiguring, and
+	 * that must not be counted as packet loss. */
 	latest_record_.reset();
+	last_aggregate_sequence_.reset();
 	last_record_time_.reset();
 }
 
@@ -77,13 +110,15 @@ bool MeterRecordIngestor::matches_configuration(
 	return true;
 }
 
-void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
+/*
+ * Basic (MTR1) continuity: wire-sequence tracking against the newest
+ * accepted basic record, plus — for consecutive v2 sequences — sample-range
+ * continuity on the PL conversion-domain counter. Interleaved aggregate
+ * records never participate: they neither advance nor break this baseline.
+ */
+bool MeterRecordIngestor::track_basic_continuity(
+	const msap1::MeterRecord &record)
 {
-	if (!matches_configuration(record)) {
-		++invalid_records_;
-		return;
-	}
-
 	bool sequence_continuous = latest_record_.has_value();
 	if (latest_record_) {
 		const auto expected = latest_record_->sequence() + 1u;
@@ -100,7 +135,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			 * normal uint32 sequence wraparound valid.
 			 */
 			++invalid_records_;
-			return;
+			return false;
 		}
 	}
 	/*
@@ -129,6 +164,60 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 				  std::to_string(record.first_sample_index())}});
 		}
 	}
+	return true;
+}
+
+/*
+ * Aggregate (MTR2) continuity: wire-sequence tracking only, on the
+ * aggregate stream's own counter. A gap is counted, logged, and resynced.
+ * There is deliberately NO sample-range check against the previous
+ * aggregate: the PL enforces continuity of the 15 blocks INSIDE one
+ * aggregate, but consecutive aggregates may legitimately be separated by
+ * aggregation restarts (ineligible blocks, lock loss), which the sequence
+ * gap already reports.
+ */
+bool MeterRecordIngestor::track_aggregate_continuity(
+	const msap1::MeterRecord &record)
+{
+	if (!last_aggregate_sequence_)
+		return true;
+	const auto expected = *last_aggregate_sequence_ + 1u;
+	const auto received = record.aggregate_sequence();
+	const auto forward_distance = received - expected;
+	if (forward_distance == 0u)
+		return true;
+	if (forward_distance < (std::uint32_t{1} << 31u)) {
+		aggregate_sequence_gaps_ += forward_distance;
+		log_message(dma_log, mnc::logging::Priority::warning,
+			"aggregate record sequence gap: expected " +
+				std::to_string(expected) + ", got " +
+				std::to_string(received),
+			"meter_aggregate_sequence_gap",
+			{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
+			 {"MNC_SEQUENCE", std::to_string(received)}});
+		return true;
+	}
+	/* Stale/out-of-order, same half-range rule as the basic stream. */
+	++invalid_records_;
+	return false;
+}
+
+void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
+{
+	if (!matches_configuration(record)) {
+		++invalid_records_;
+		return;
+	}
+
+	/*
+	 * The stream interleaves two record formats with INDEPENDENT
+	 * sequence counters, so continuity is tracked per format.
+	 */
+	const bool aggregate =
+		record.record_format() == msap1::meter_aggregate_format;
+	if (aggregate ? !track_aggregate_continuity(record)
+		      : !track_basic_continuity(record))
+		return;
 	/*
 	 * Decode-validate BEFORE durability: a record whose timing fields are
 	 * malformed (zero-sample block, overflowing sample range, impossible
@@ -154,29 +243,19 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	 * visible to web/CLI/publisher consumers until SQLite has committed
 	 * the exact 256-byte PL record to the ordered WAL stream. */
 	const auto cursor = stream_.append(record, received_at);
-	if (update.timing) {
-		/*
-		 * Stamp UTC state at decode time — the PL cannot know it.
-		 * This touches only BlockTiming: TimeQuality must never mark
-		 * the electrical MeasurementQuality invalid. The block's own
-		 * configuration generation keys the mapping, so a sync point
-		 * from another generation can never mislabel this block.
-		 */
-		const auto now = Clock::now();
-		update.timing->time_quality = timebase_.quality(now);
-		const auto estimate = timebase_.utc_for_sample(
-			update.timing->first_sample_index,
-			update.timing->configuration_generation, now);
-		/* Timestamp and its error bound travel together: both set or
-		 * both absent. */
-		if (estimate) {
-			update.timing->utc_start = estimate->utc;
-			update.timing->utc_uncertainty_ns =
-				estimate->uncertainty_ns;
-		}
-	}
+	if (update.timing)
+		stamp_time_state(*update.timing, timebase_);
+	if (update.aggregate_timing)
+		stamp_time_state(*update.aggregate_timing, timebase_);
 	meter_data_.apply(update);
-	latest_record_ = record;
+	if (aggregate) {
+		last_aggregate_sequence_ = record.aggregate_sequence();
+	} else {
+		/* Only basic records refresh the instantaneous-readings
+		 * cache; aggregates are published through the typed store
+		 * under MeasurementPeriod::Cycles150_180. */
+		latest_record_ = record;
+	}
 	last_record_time_ = Clock::now();
 	++meter_records_;
 	(void)cursor;

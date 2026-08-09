@@ -19,24 +19,33 @@
 namespace msap1::acquisition::daemon {
 
 /**
- * @brief Consumes MTR1 records from the meter DMA and publishes them.
+ * @brief Consumes meter records from the meter DMA and publishes them.
  *
+ * The DMA stream interleaves basic MTR1 records with 150/180-cycle
+ * aggregate MTR2 records, each on an INDEPENDENT sequence counter.
  * Responsibilities, in the order a record flows through:
  *
  *  1. Drain complete 256-byte records from the DMA reader.
  *  2. Validate each record against the ACTIVE configuration (generation,
  *     sample rate, and — for v1 records — the configured RMS window) and
- *     track sequence plus v2 sample-range continuity.
+ *     track continuity PER FORMAT: basic records keep sequence plus v2
+ *     sample-range continuity; aggregate records get sequence continuity
+ *     only (the PL already enforces sample-range continuity of the 15
+ *     blocks inside an aggregate, and consecutive aggregates may
+ *     legitimately be separated by aggregation resets).
  *  3. Commit the raw record to the SQLite WAL stream — durability is the
  *     publication boundary; a record is never visible to consumers before
  *     it is committed.
- *  4. Decode into the typed latest store, stamp the decoded block's
- *     TimeQuality/UTC from the measurement timebase, and cache it as
- *     latest_record(). Time state never touches MeasurementQuality: a bad
- *     clock must not invalidate a good electrical measurement.
+ *  4. Decode into the typed latest store and stamp the decoded timing's
+ *     TimeQuality/UTC from the measurement timebase (identically for
+ *     BlockTiming and AggregateTiming). Only BASIC records are cached as
+ *     latest_record(), the instantaneous-readings source. Time state never
+ *     touches MeasurementQuality: a bad clock must not invalidate a good
+ *     electrical measurement.
  *
  * The ingest counters (records, bytes, gaps, invalid, read errors) feed the
- * InfoResponse health fields.
+ * InfoResponse health fields; aggregate sequence gaps are tracked in their
+ * own counter so the existing basic-gap health semantics stay unchanged.
  */
 class MeterRecordIngestor final {
 public:
@@ -65,16 +74,29 @@ public:
 	 */
 	void begin_epoch();
 
-	/** @brief Forget the cached record after a configuration swap. */
+	/** @brief Forget cached records/baselines after a configuration swap. */
 	void clear_latest();
 
 	/** @brief Count one DMA transport failure (POLLERR/disconnect path). */
 	void note_dma_failure() { ++dma_read_errors_; }
 
+	/**
+	 * @brief Newest accepted BASIC record (raw wire form).
+	 *
+	 * Deliberately never an aggregate: this cache feeds the CLI/REST
+	 * instantaneous readings, which must not flip between ~200 ms basic
+	 * and ~3 s aggregate quantities as records interleave.
+	 */
 	[[nodiscard]] const std::optional<msap1::MeterRecord> &
 	latest_record() const
 	{
 		return latest_record_;
+	}
+	/** @brief Latest decoded typed view for one measurement period. */
+	[[nodiscard]] std::optional<msap1::MeterPeriodView>
+	latest_decoded(msap1::MeasurementPeriod period) const
+	{
+		return meter_data_.latest(period);
 	}
 	/** @brief Milliseconds since the last accepted record. */
 	[[nodiscard]] std::uint32_t record_age_ms() const
@@ -85,12 +107,22 @@ public:
 	[[nodiscard]] std::uint64_t dma_bytes() const { return dma_bytes_; }
 	[[nodiscard]] std::uint64_t dma_read_errors() const { return dma_read_errors_; }
 	[[nodiscard]] std::uint64_t invalid_records() const { return invalid_records_; }
+	/** @brief Missing BASIC records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t sequence_gaps() const { return sequence_gaps_; }
+	/** @brief Missing AGGREGATE records detected by sequence tracking. */
+	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
+	{
+		return aggregate_sequence_gaps_;
+	}
 
 private:
 	void accept(const msap1::MeterRecord &record);
 	[[nodiscard]] bool matches_configuration(
 		const msap1::MeterRecord &record) const;
+	[[nodiscard]] bool track_basic_continuity(
+		const msap1::MeterRecord &record);
+	[[nodiscard]] bool track_aggregate_continuity(
+		const msap1::MeterRecord &record);
 
 	msap1::acquisition::MeterRecordSource &meter_;
 	msap1::MeterRecordStream &stream_;
@@ -104,7 +136,13 @@ private:
 	std::uint64_t dma_read_errors_ = 0;
 	std::uint64_t invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
+	std::uint64_t aggregate_sequence_gaps_ = 0;
+	/* Continuity baselines are per format: the newest accepted basic
+	 * record (also the readings cache) and the newest accepted aggregate
+	 * sequence. An aggregate between two basic blocks must never look
+	 * like a basic gap, and vice versa. */
 	std::optional<msap1::MeterRecord> latest_record_;
+	std::optional<std::uint32_t> last_aggregate_sequence_;
 	std::optional<Clock::time_point> last_record_time_;
 };
 

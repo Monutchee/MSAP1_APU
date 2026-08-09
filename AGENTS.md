@@ -100,7 +100,7 @@
   use the typed settings IPC API rather than reading or writing product
   configuration files. Do not add drafts or revision history, reintroduce
   legacy `/etc` ADC profiles, or duplicate factory values in packaging recipes.
-- The ADC capture rate defaults to 32,000 frames/s. Persistent changes to the
+- The ADC capture rate defaults to 128,000 frames/s. Persistent changes to the
   ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
   waveform defaults must be saved through the settings authority and
   hot-applied by acquisition. `mnc adc rate --sps` remains an explicitly
@@ -151,6 +151,13 @@
   64-bit first-sample index. Keep the v1 (`0x00010001`) decoder registered
   for stored streams. See `docs/TIMING_MODEL.md` for the timing model and
   the PL/RPU/APU ownership split.
+- Record format `0x00020001` (MTR2) is the 150/180-cycle aggregate
+  fundamental record: exactly 15 consecutive eligible basic blocks folded
+  by the PL (the authoritative aggregator) into one 256-byte record that
+  interleaves with basic records on the meter DMA stream under an
+  independent sequence counter. The APU only decodes MTR2 — never compute
+  aggregates in APU production code — and aggregate data never travels
+  over RPMsg. The word layout is pinned in `docs/TIMING_MODEL.md`.
 
 ## Build and verification
 
