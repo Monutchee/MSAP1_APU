@@ -77,6 +77,8 @@ void MeterRecordIngestor::begin_epoch()
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
 	latest_aggregate_record_.reset();
+	latest_aggregate_time_quality_ =
+		msap1::meter::TimeQuality::Unsynchronized;
 	last_record_time_.reset();
 	last_aggregate_record_time_.reset();
 	sequence_gaps_ = 0;
@@ -91,6 +93,8 @@ void MeterRecordIngestor::clear_latest()
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
 	latest_aggregate_record_.reset();
+	latest_aggregate_time_quality_ =
+		msap1::meter::TimeQuality::Unsynchronized;
 	last_record_time_.reset();
 	last_aggregate_record_time_.reset();
 }
@@ -258,6 +262,18 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		 * latest_record_: same raw wire form, own stream, own
 		 * freshness clock. It never touches the basic caches. */
 		latest_aggregate_record_ = record;
+		/* Timing provenance is captured HERE, with the record, from
+		 * the quality just stamped onto this aggregate's decoded
+		 * timing. The raw PL record carries no UTC state, so anything
+		 * that re-decodes the cached bytes later cannot recover it —
+		 * and must never substitute the timebase's current quality,
+		 * which describes a different moment. Unsynchronized is the
+		 * conservative label if a future decoder ever omits the
+		 * timing: never claim a synchronization that was not stamped. */
+		latest_aggregate_time_quality_ =
+			update.aggregate_timing
+				? update.aggregate_timing->time_quality
+				: msap1::meter::TimeQuality::Unsynchronized;
 		last_aggregate_record_time_ = Clock::now();
 	} else {
 		/* Only basic records refresh the instantaneous-readings

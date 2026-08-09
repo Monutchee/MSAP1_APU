@@ -246,7 +246,10 @@ deterministic. The simulator frequency is set through the settings document
    correlation sync runs. Stop `msap1-fpga-acquisition`'s sync source (or
    suspend the daemon) for longer than the staleness threshold and confirm
    `holdover`, then `synchronized` again after recovery. Meter channel
-   validity must not degrade in `holdover`.
+   validity must not degrade in `holdover`. `GET /api/v1/meter/aggregate`
+   reports the quality captured when its aggregate was measured, so during
+   these transitions it lags `/meter/readings` by up to one ~3 s aggregate
+   instead of flipping with the live clock state; that is correct.
 7. Disable the simulator output on CH6 (zero peak) while capturing: records
    must keep flowing with `cycle_locked: false` and `free_run_fallback:
    true`, still gapless; restoring CH6 must re-lock within one block.

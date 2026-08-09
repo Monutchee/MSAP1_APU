@@ -84,6 +84,13 @@ void typed_commands_round_trip_through_the_registry()
 			msap1::InfoResponse response{};
 			response.running = true;
 			response.sample_rate_hz = request.sample_rate_hz;
+			/* Deliberately different: the daemon's live clock
+			 * state and the cached aggregate's ingest-time
+			 * provenance are distinct wire fields. */
+			response.time_quality =
+				msap1::meter::TimeQuality::Holdover;
+			response.aggregate_time_quality =
+				msap1::meter::TimeQuality::Synchronized;
 			msap1_adc_health_payload health{};
 			health.drdy_frequency_hz = 63999;
 			response.rpu_health = health;
@@ -112,6 +119,10 @@ void typed_commands_round_trip_through_the_registry()
 	require(response.sample_rate_hz == 64000, "wrong response sample rate");
 	require(response.rpu_health.value().drdy_frequency_hz == 63999,
 		"wrong hardware-mirror payload round trip");
+	require(response.time_quality == msap1::meter::TimeQuality::Holdover &&
+		response.aggregate_time_quality ==
+			msap1::meter::TimeQuality::Synchronized,
+		"the two time-quality fields did not round trip separately");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */
@@ -412,6 +423,114 @@ void ingestor_tracks_interleaved_aggregate_stream()
 	std::filesystem::remove(database);
 }
 
+/*
+ * Timing provenance belongs to the MEASUREMENT, not to whenever a consumer
+ * reads it back. The quality cached beside an aggregate is the one stamped
+ * onto its decoded timing at ingest, so it must stay put when the timebase
+ * later changes state — in either direction — and only move when a new
+ * aggregate is ingested.
+ */
+void ingestor_pins_aggregate_time_quality_at_ingest()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	using msap1::meter::TimeQuality;
+	const auto database = std::filesystem::temp_directory_path() /
+		("msap1-ingestor-quality-test-" + std::to_string(::getpid()) +
+		 ".sqlite3");
+	std::filesystem::remove(database);
+	{
+		ScriptedMeterSource source;
+		msap1::MeterRecordStream stream(database);
+		msap1::PreparedMeterConfiguration configuration{};
+		configuration.wire.generation = 0xfeedbeefu;
+		configuration.wire.sample_rate_hz = 32000;
+		configuration.wire.rms_window_samples = 6400;
+		msap1::meter::MeasurementTimebase timebase;
+		MeterRecordIngestor ingest(source, stream, configuration,
+					   timebase);
+		ingest.begin_epoch();
+
+		const auto feed = [&](std::uint32_t sequence) {
+			source.next = {};
+			source.next.records[0] = aggregate_record(
+				sequence,
+				640'000 + (sequence - 1) * 96'000,
+				0xfeedbeefu);
+			source.next.count = 1;
+			source.next.bytes = sizeof(msap1::MeterRecord);
+			ingest.read_available();
+		};
+		/* A trusted sync disciplines the mapping; an untrusted one
+		 * drops it back to Unsynchronized immediately, which is how
+		 * this test moves the daemon's live quality without waiting
+		 * out the holdover staleness threshold. */
+		const auto sync = [&](bool utc_synchronized) {
+			timebase.record_sync(
+				{.sample_counter = 640'000,
+				 .utc_ns = 1'700'000'000'000'000'000ll,
+				 .uncertainty_ns = 250,
+				 .sample_rate_hz = 32000,
+				 .configuration_generation = 0xfeedbeefu,
+				 .utc_synchronized = utc_synchronized},
+				std::chrono::steady_clock::now());
+		};
+
+		sync(true);
+		feed(1);
+		require(ingest.latest_aggregate_time_quality() ==
+			TimeQuality::Synchronized,
+			"the ingest-time quality was not captured");
+
+		/* The clock loses discipline AFTER the measurement: the
+		 * finished aggregate keeps the label it was measured with. */
+		sync(false);
+		require(timebase.quality(std::chrono::steady_clock::now()) ==
+				TimeQuality::Unsynchronized &&
+			ingest.latest_aggregate_time_quality() ==
+				TimeQuality::Synchronized,
+			"the cached quality followed the daemon's later state");
+
+		/* Only a new aggregate moves it. */
+		feed(2);
+		require(ingest.latest_aggregate_time_quality() ==
+			TimeQuality::Unsynchronized,
+			"a newly ingested aggregate did not restamp the quality");
+
+		/* The other direction is just as wrong: regaining sync must
+		 * not retroactively bless an unsynchronized measurement. */
+		sync(true);
+		require(timebase.quality(std::chrono::steady_clock::now()) ==
+				TimeQuality::Synchronized &&
+			ingest.latest_aggregate_time_quality() ==
+				TimeQuality::Unsynchronized,
+			"regained sync relabelled an older aggregate");
+		feed(3);
+		require(ingest.latest_aggregate_time_quality() ==
+			TimeQuality::Synchronized,
+			"the quality did not follow the newest aggregate");
+
+		/* Provenance is reset with the cache it describes, at both
+		 * deliberate boundaries, and never survives as a claim about
+		 * a record that is gone. Unsynchronized is the conservative
+		 * reset value. */
+		ingest.clear_latest();
+		require(!ingest.latest_aggregate_record().has_value() &&
+			ingest.latest_aggregate_time_quality() ==
+				TimeQuality::Unsynchronized,
+			"clear_latest() left a stale aggregate time quality");
+		feed(4);
+		require(ingest.latest_aggregate_time_quality() ==
+			TimeQuality::Synchronized,
+			"the quality did not refill after a configuration swap");
+		ingest.begin_epoch();
+		require(!ingest.latest_aggregate_record().has_value() &&
+			ingest.latest_aggregate_time_quality() ==
+				TimeQuality::Unsynchronized,
+			"begin_epoch() left a stale aggregate time quality");
+	}
+	std::filesystem::remove(database);
+}
+
 void ingestor_handles_u32_sequence_wrap()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
@@ -485,6 +604,7 @@ int main()
 	typed_commands_round_trip_through_the_registry();
 	ingestor_validates_v2_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();
+	ingestor_pins_aggregate_time_quality_at_ingest();
 	ingestor_handles_u32_sequence_wrap();
 	malformed_and_unknown_requests_are_rejected();
 	return 0;

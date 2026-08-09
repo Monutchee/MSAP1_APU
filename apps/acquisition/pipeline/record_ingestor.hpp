@@ -40,9 +40,11 @@ namespace msap1::acquisition::daemon {
  *     TimeQuality/UTC from the measurement timebase (identically for
  *     BlockTiming and AggregateTiming). Only BASIC records are cached as
  *     latest_record(), the instantaneous-readings source; AGGREGATE records
- *     are cached separately as latest_aggregate_record(). Time state never
- *     touches MeasurementQuality: a bad clock must not invalidate a good
- *     electrical measurement.
+ *     are cached separately as latest_aggregate_record(), together with the
+ *     TimeQuality stamped onto that aggregate — provenance belongs to the
+ *     measurement, not to whenever a consumer reads it back. Time state
+ *     never touches MeasurementQuality: a bad clock must not invalidate a
+ *     good electrical measurement.
  *
  * The ingest counters (records, bytes, gaps, invalid, read errors) feed the
  * InfoResponse health fields; aggregate sequence gaps are tracked in their
@@ -104,6 +106,21 @@ public:
 	latest_aggregate_record() const
 	{
 		return latest_aggregate_record_;
+	}
+	/**
+	 * @brief UTC synchronization state stamped onto the cached aggregate.
+	 *
+	 * The quality that applied WHEN latest_aggregate_record() was
+	 * ingested, not the timebase's current one: an aggregate measured
+	 * while synchronized stays labelled synchronized even if the clock
+	 * later drops into holdover. Meaningful only while
+	 * latest_aggregate_record() holds a value; it is reset with that
+	 * cache at every deliberate boundary.
+	 */
+	[[nodiscard]] msap1::meter::TimeQuality
+	latest_aggregate_time_quality() const
+	{
+		return latest_aggregate_time_quality_;
 	}
 	/** @brief Latest decoded typed view for one measurement period. */
 	[[nodiscard]] std::optional<msap1::MeterPeriodView>
@@ -173,6 +190,14 @@ private:
 	 * unchanged by aggregate publication. */
 	std::optional<msap1::MeterRecord> latest_aggregate_record_;
 	std::optional<Clock::time_point> last_aggregate_record_time_;
+	/* Measurement-time provenance of latest_aggregate_record_: the
+	 * quality stamped onto its decoded AggregateTiming, captured at
+	 * decode. Kept beside the record so a consumer polling minutes later
+	 * cannot relabel a finished measurement with the clock's current
+	 * state. Reset with the cache, so a value is only ever read while an
+	 * aggregate is present. */
+	msap1::meter::TimeQuality latest_aggregate_time_quality_ =
+		msap1::meter::TimeQuality::Unsynchronized;
 };
 
 } // namespace msap1::acquisition::daemon

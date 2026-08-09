@@ -102,6 +102,9 @@ struct MeterAggregateDto {
 	std::uint32_t cycle_count;
 	std::uint32_t nominal_frequency_hz;
 	bool arithmetic_error;
+	/* Provenance of THIS measurement: the UTC synchronization state that
+	 * applied when the aggregate was ingested, never the daemon's state
+	 * at request time. "unsynchronized" | "synchronized" | "holdover". */
 	std::string time_quality;
 	std::uint32_t age_ms;
 	std::array<MeterAggregateChannelDto, msap1::meter_channel_count>
@@ -187,7 +190,17 @@ meter_aggregate_dto(const msap1::InfoResponse &response)
 		timing.cycle_count,
 		static_cast<std::uint32_t>(timing.nominal_frequency),
 		timing.arithmetic_error,
-		time_quality_name(response.time_quality),
+		/* Measurement-time provenance, NOT the daemon's live clock
+		 * state: this is the quality stamped when THIS aggregate was
+		 * ingested, carried across IPC beside the cached record.
+		 * response.time_quality describes the moment of the HTTP
+		 * request instead, so an aggregate measured while
+		 * synchronized but read back during holdover would be
+		 * mislabelled by it. Do not swap this back. The decoded
+		 * timing above cannot supply it either — the raw PL record
+		 * holds no UTC state, so the registry decoder leaves
+		 * timing.time_quality at its default. */
+		time_quality_name(response.aggregate_time_quality),
 		response.aggregate_record_age_ms,
 		{},
 		{static_cast<std::uint32_t>(fundamental.frequency.value), true},

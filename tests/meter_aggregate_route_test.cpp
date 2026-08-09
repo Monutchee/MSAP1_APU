@@ -88,7 +88,12 @@ msap1::InfoResponse contract_response()
 	response.configuration_generation = 3'545'159'487u;
 	response.meter_record_age_ms = 40;
 	response.aggregate_record_age_ms = 1200;
-	response.time_quality = msap1::meter::TimeQuality::Synchronized;
+	/* The daemon's CURRENT clock state, deliberately different from the
+	 * aggregate's own provenance below: the payload must be built from
+	 * the measurement's quality, so every test in this file fails if a
+	 * refactor ever points the field back at this live value. */
+	response.time_quality = msap1::meter::TimeQuality::Holdover;
+	response.aggregate_time_quality = msap1::meter::TimeQuality::Synchronized;
 	response.latest_aggregate_record = contract_aggregate_record();
 	return response;
 }
@@ -205,6 +210,50 @@ void the_frequency_is_informative_only()
 }
 
 /*
+ * time_quality is the provenance of the MEASUREMENT, not of the HTTP
+ * request. The daemon's live synchronization state may have moved many
+ * times since the aggregate was ingested — an aggregate measured while
+ * synchronized and read back during holdover must still report
+ * "synchronized", and vice versa. The field name and its three values are
+ * a committed frontend contract; only the source of the value is at stake.
+ */
+void the_time_quality_is_the_aggregates_not_the_daemons()
+{
+	using msap1::meter::TimeQuality;
+	const auto rendered = [](TimeQuality aggregate, TimeQuality daemon) {
+		auto response = contract_response();
+		response.aggregate_time_quality = aggregate;
+		response.time_quality = daemon;
+		const auto dto = meter_aggregate_dto(response);
+		require(dto.has_value(), "the aggregate was not rendered");
+		return dto->time_quality;
+	};
+
+	/* Measured synchronized, read back after the clock degraded. */
+	require(rendered(TimeQuality::Synchronized, TimeQuality::Holdover) ==
+			"synchronized" &&
+		rendered(TimeQuality::Synchronized,
+			 TimeQuality::Unsynchronized) == "synchronized",
+		"a synchronized aggregate was relabelled by the live clock");
+	/* Measured during holdover or without UTC, read back after the clock
+	 * recovered: recovery must not bless an older measurement. */
+	require(rendered(TimeQuality::Holdover, TimeQuality::Synchronized) ==
+			"holdover" &&
+		rendered(TimeQuality::Unsynchronized,
+			 TimeQuality::Synchronized) == "unsynchronized",
+		"a degraded aggregate was blessed by the live clock");
+
+	/* The three pinned JSON spellings, exactly as the frontend expects. */
+	auto response = contract_response();
+	response.aggregate_time_quality = TimeQuality::Holdover;
+	const auto holdover = meter_aggregate_dto(response);
+	require(holdover.has_value(), "the aggregate was not rendered");
+	require(json(*holdover).find(R"("time_quality":"holdover")") !=
+		std::string::npos,
+		"the holdover spelling changed in the JSON body");
+}
+
+/*
  * Aggregation quality rules survive the projection: an arithmetic error
  * outranks the per-channel valid mask, so a saturated aggregate can never be
  * published as a valid reading.
@@ -249,6 +298,7 @@ int main()
 		absence_renders_the_unavailable_shape();
 		a_decoded_aggregate_matches_the_pinned_payload();
 		the_frequency_is_informative_only();
+		the_time_quality_is_the_aggregates_not_the_daemons();
 		an_arithmetic_error_invalidates_every_channel();
 		a_malformed_cached_record_is_rejected();
 	} catch (const std::exception &error) {

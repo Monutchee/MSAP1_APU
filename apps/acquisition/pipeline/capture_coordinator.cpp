@@ -475,6 +475,11 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.invalid_records = ingest_.invalid_records();
 	response.sequence_gaps = ingest_.sequence_gaps();
 	response.time_quality = timebase_.quality(Clock::now());
+	/* Provenance of the cached aggregate, captured at ingest — NOT
+	 * timebase_.quality() above, which is the clock's state at this
+	 * reply, potentially seconds to minutes after the measurement. */
+	response.aggregate_time_quality =
+		ingest_.latest_aggregate_time_quality();
 	response.rpu_health = health_.cached();
 	if (ingest_.latest_record())
 		response.latest_record = *ingest_.latest_record();

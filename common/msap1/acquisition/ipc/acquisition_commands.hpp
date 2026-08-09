@@ -33,8 +33,11 @@ namespace msap1 {
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
 /* 18: InfoResponse carries the newest 150/180-cycle aggregate (MTR2) record
- * beside the basic latest record. */
-inline constexpr std::uint16_t acquisition_ipc_version = 18;
+ * beside the basic latest record.
+ * 19: InfoResponse carries the time quality stamped onto that aggregate at
+ * ingest, so its provenance no longer follows the daemon's current clock
+ * state. */
+inline constexpr std::uint16_t acquisition_ipc_version = 19;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -147,9 +150,19 @@ struct InfoResponse {
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
-	/* UTC synchronization state of the measurement timebase. Reported
-	 * beside — never inside — the electrical health fields. */
+	/* UTC synchronization state of the measurement timebase RIGHT NOW,
+	 * at the moment this reply was built. Reported beside — never inside
+	 * — the electrical health fields. It describes the daemon's live
+	 * clock state, so it is never the provenance of a past measurement:
+	 * use aggregate_time_quality for the cached aggregate. */
 	msap1::meter::TimeQuality time_quality =
+		msap1::meter::TimeQuality::Unsynchronized;
+	/* UTC synchronization state that applied when latest_aggregate_record
+	 * was INGESTED, stamped onto its decoded AggregateTiming at decode
+	 * time. Meaningful only when has_aggregate_record is set. Carried on
+	 * the wire because the raw 256-byte PL record holds no UTC state:
+	 * re-decoding the cached bytes cannot recover it. */
+	msap1::meter::TimeQuality aggregate_time_quality =
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};

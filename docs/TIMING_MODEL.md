@@ -71,13 +71,25 @@ The two record streams stay separate all the way to the API:
   instantaneous-readings source) and the newest aggregate
   (`latest_aggregate_record`) independently, with independent freshness
   clocks — the aggregate cadence is ~15x the basic one, so a stale
-  aggregate must never borrow the basic record's age. Both caches are
-  cleared together at the two deliberate boundaries, `begin_epoch()` and
-  `clear_latest()`.
+  aggregate must never borrow the basic record's age. The aggregate cache
+  also holds the `TimeQuality` stamped onto that aggregate's decoded
+  timing at ingest, because the raw 256-byte PL record carries no UTC
+  state: re-decoding the cached bytes later cannot recover it. All of it
+  is cleared together at the two deliberate boundaries, `begin_epoch()`
+  and `clear_latest()`.
 - `InfoResponse` carries both, each behind its own presence flag
   (`has_meter_record` / `has_aggregate_record`) and its own age field
   (`meter_record_age_ms` / `aggregate_record_age_ms`). Acquisition IPC
-  version 18 introduced the aggregate fields.
+  version 18 introduced the aggregate fields; version 19 added
+  `aggregate_time_quality`.
+- `InfoResponse::time_quality` and `InfoResponse::aggregate_time_quality`
+  answer different questions and are never interchangeable.
+  `time_quality` is the timebase's state **when the reply was built** — a
+  live daemon health field. `aggregate_time_quality` is the state that
+  applied **when the aggregate was ingested** — the provenance of that
+  measurement. An aggregate measured while synchronized and read back
+  during holdover must still report `synchronized`, and regaining sync
+  must never retroactively bless an older measurement.
 - `GET /api/v1/meter/aggregate` (viewer role, like `/meter/readings`)
   decodes the cached MTR2 record through the shared
   `MeterDecoderRegistry` — so the endpoint inherits the decoder's identity
@@ -86,6 +98,12 @@ The two record streams stay separate all the way to the API:
   `{"available": false}` whenever no aggregate exists (the first ~3 s after
   a start, ineligible basic blocks, or capture stopped); that is a normal
   state, not an error.
+- The endpoint's `time_quality` field (`"unsynchronized"` |
+  `"synchronized"` | `"holdover"`) is rendered from
+  `InfoResponse::aggregate_time_quality`, so it describes the measurement,
+  not the moment of the HTTP request. The registry decode above cannot
+  supply it — the PL record holds no UTC state, so the decoded
+  `AggregateTiming::time_quality` stays at its default on that path.
 - The endpoint's `frequency` object is **informative only** and carries
   `"informative": true` with deliberately no validity flag, matching the
   decoder's `unavailable` quality for the `Cycles150_180` frequency

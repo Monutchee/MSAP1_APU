@@ -159,9 +159,12 @@
   aggregates in APU production code — and aggregate data never travels
   over RPMsg. The word layout is pinned in `docs/TIMING_MODEL.md`.
 - The newest aggregate is cached beside — never inside — the basic latest
-  record, travels in `InfoResponse` behind its own presence and age fields
-  (acquisition IPC version 18), and is published by
-  `GET /api/v1/meter/aggregate`. `GET /api/v1/meter/readings` keeps
+  record, travels in `InfoResponse` behind its own presence, age, and
+  time-quality fields (acquisition IPC version 19), and is published by
+  `GET /api/v1/meter/aggregate`. The aggregate's `time_quality` is the
+  provenance stamped at ingest (`aggregate_time_quality`), never
+  `InfoResponse::time_quality`, which is the daemon's live clock state at
+  reply time. `GET /api/v1/meter/readings` keeps
   reporting basic records only. The aggregate frequency is informative
   only: the standardized Class A frequency product is defined over its own
   10 s interval, which is not implemented, so the decoder keeps that
