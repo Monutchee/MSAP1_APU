@@ -129,23 +129,51 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 				  std::to_string(record.first_sample_index())}});
 		}
 	}
+	/*
+	 * Decode-validate BEFORE durability: a record whose timing fields are
+	 * malformed (zero-sample block, overflowing sample range, impossible
+	 * cycle count) is invalid exactly like a failed configuration match —
+	 * counted, logged, and never committed, published, or allowed to
+	 * become the continuity baseline. Only validated records enter the
+	 * WAL stream.
+	 */
+	const auto received_at = std::chrono::system_clock::now();
+	msap1::MeterUpdate update;
+	try {
+		update = decoders_.decode(record, received_at);
+	} catch (const std::exception &error) {
+		++invalid_records_;
+		log_message(dma_log, mnc::logging::Priority::warning,
+			"meter record rejected by decoder: " +
+				std::string(error.what()),
+			"meter_record_decode_rejected",
+			{{"MNC_SEQUENCE", std::to_string(record.sequence())}});
+		return;
+	}
 	/* Durability is the publication boundary. A record is never made
 	 * visible to web/CLI/publisher consumers until SQLite has committed
 	 * the exact 256-byte PL record to the ordered WAL stream. */
-	const auto received_at = std::chrono::system_clock::now();
 	const auto cursor = stream_.append(record, received_at);
-	auto update = decoders_.decode(record, received_at);
 	if (update.timing) {
 		/*
 		 * Stamp UTC state at decode time — the PL cannot know it.
 		 * This touches only BlockTiming: TimeQuality must never mark
-		 * the electrical MeasurementQuality invalid.
+		 * the electrical MeasurementQuality invalid. The block's own
+		 * configuration generation keys the mapping, so a sync point
+		 * from another generation can never mislabel this block.
 		 */
 		const auto now = Clock::now();
 		update.timing->time_quality = timebase_.quality(now);
-		update.timing->utc_start = timebase_.utc_for_sample(
+		const auto estimate = timebase_.utc_for_sample(
 			update.timing->first_sample_index,
-			record.sample_rate_hz(), now);
+			update.timing->configuration_generation, now);
+		/* Timestamp and its error bound travel together: both set or
+		 * both absent. */
+		if (estimate) {
+			update.timing->utc_start = estimate->utc;
+			update.timing->utc_uncertainty_ns =
+				estimate->uncertainty_ns;
+		}
 	}
 	meter_data_.apply(update);
 	latest_record_ = record;

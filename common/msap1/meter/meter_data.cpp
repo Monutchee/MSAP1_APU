@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -327,10 +328,40 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 	if (!record.header_valid() ||
 	    record.record_format() != meter_periodic_format_v2)
 		throw std::invalid_argument("invalid MTR1 v2 record");
+	/*
+	 * Validate the timing identity before building anything: malformed
+	 * timing must never silently become a valid basic measurement block.
+	 * The PL cannot emit these shapes today; this is defense in depth
+	 * against a corrupted record or a future RTL regression.
+	 */
+	const auto timing_word = record.timing();
+	if (timing_word.nominal_frequency_hz != 50u &&
+	    timing_word.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in MTR1 v2 timing word");
+	const auto nominal = timing_word.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"MTR1 v2 block has a zero sample count");
+	const auto first_sample_index = record.first_sample_index();
+	if (first_sample_index >
+	    std::numeric_limits<std::uint64_t>::max() - sample_count)
+		throw std::invalid_argument(
+			"MTR1 v2 sample range overflows the 64-bit counter");
+	/* A locked block is cycle-defined by construction: exactly the
+	 * nominal's cycles-per-block. Fallback blocks are time-defined and
+	 * may close any cycle count, including 0 or a partial tail. */
+	if (timing_word.cycle_locked && !timing_word.free_run_fallback &&
+	    timing_word.cycle_count != cycles_per_basic_block(nominal))
+		throw std::invalid_argument(
+			"MTR1 v2 cycle-locked block has an impossible cycle count");
+
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	/* v2 word 6 is the ACTUAL sample count of this cycle-defined block. */
-	const auto window = sample_window(record.block_sample_count(),
-					  record.sample_rate_hz());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
 	MeterUpdate update{};
 	update.period = MeasurementPeriod::Basic;
 	update.kind = RecordKind::fundamental;
@@ -339,25 +370,19 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 	update.fundamental =
 		decode_fundamental_values(record, sequence, received_at, window);
 
-	const auto timing_word = record.timing();
-	if (timing_word.nominal_frequency_hz != 50u &&
-	    timing_word.nominal_frequency_hz != 60u)
-		throw std::invalid_argument(
-			"invalid nominal frequency in MTR1 v2 timing word");
 	BlockTiming timing{};
 	timing.sequence = sequence;
 	timing.configuration_generation = record.configuration_generation();
-	timing.first_sample_index = record.first_sample_index();
-	timing.sample_count = record.block_sample_count();
+	timing.first_sample_index = first_sample_index;
+	timing.sample_count = sample_count;
 	timing.cycle_count = timing_word.cycle_count;
-	timing.nominal_frequency = timing_word.nominal_frequency_hz == 50u
-		? NominalFrequency::Hz50
-		: NominalFrequency::Hz60;
+	timing.nominal_frequency = nominal;
 	timing.cycle_locked = timing_word.cycle_locked;
 	timing.free_run_fallback = timing_word.free_run_fallback;
 	timing.first_block_after_apply = timing_word.first_block_after_apply;
-	/* TimeQuality/utc_start are stamped by the caller: UTC state lives in
-	 * the APU MeasurementTimebase, never in the PL record. */
+	/* TimeQuality/utc_start/utc_uncertainty_ns are stamped by the caller:
+	 * UTC state lives in the APU MeasurementTimebase, never in the PL
+	 * record. */
 	update.timing = timing;
 	return update;
 }
