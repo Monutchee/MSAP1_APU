@@ -24,6 +24,10 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.info_response();
 		});
+	registry.on<msap1::MeterSnapshotRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const msap1::MeterSnapshotRequest &request) {
+			return coordinator.meter_snapshot_response(request);
+		});
 	// The public health path returns the daemon cache. Web polling
 	// must never trigger a 100-register SPI audit.
 	registry.on<msap1::HealthRequest>(AcquisitionStatus::dma_error,

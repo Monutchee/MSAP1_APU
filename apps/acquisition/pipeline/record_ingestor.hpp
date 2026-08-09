@@ -2,7 +2,7 @@
 
 /**
  * @file record_ingestor.hpp
- * @brief Meter-record ingest: DMA drain, validation, durability, statistics.
+ * @brief Meter-record ingest: DMA drain, validation, publication, statistics.
  */
 
 #include "msap1/acquisition/dma/meter_record_source.hpp"
@@ -10,7 +10,6 @@
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
-#include "msap1/meter/meter_record_stream.hpp"
 #include "support/time.hpp"
 
 #include <cstdint>
@@ -33,10 +32,7 @@ namespace msap1::acquisition::daemon {
  *     only (the PL already enforces sample-range continuity of the 15
  *     blocks inside an aggregate, and consecutive aggregates may
  *     legitimately be separated by aggregation resets).
- *  3. Commit the raw record to the SQLite WAL stream — durability is the
- *     publication boundary; a record is never visible to consumers before
- *     it is committed.
- *  4. Decode into the typed latest store and stamp the decoded timing's
+ *  3. Decode into the typed latest store and stamp the decoded timing's
  *     TimeQuality/UTC from the measurement timebase (identically for
  *     BlockTiming and AggregateTiming). Only BASIC records are cached as
  *     latest_record(), the instantaneous-readings source; AGGREGATE records
@@ -54,14 +50,12 @@ class MeterRecordIngestor final {
 public:
 	/**
 	 * @param meter         Record source (the DMA reader in production).
-	 * @param stream        Durable record stream (SQLite WAL).
 	 * @param configuration The coordinator's ACTIVE configuration; read
 	 *                      at validation time, so configuration swaps are
 	 *                      picked up without re-wiring.
 	 * @param timebase      UTC mapping authority for decoded timing.
 	 */
 	MeterRecordIngestor(msap1::acquisition::MeterRecordSource &meter,
-			    msap1::MeterRecordStream &stream,
 			    const msap1::PreparedMeterConfiguration &configuration,
 			    const msap1::meter::MeasurementTimebase &timebase);
 
@@ -128,6 +122,11 @@ public:
 	{
 		return meter_data_.latest(period);
 	}
+	/** Typed latest-state source used by the product snapshot provider. */
+	[[nodiscard]] msap1::MeterData &meter_data() noexcept
+	{
+		return meter_data_;
+	}
 	/** @brief Milliseconds since the last accepted record. */
 	[[nodiscard]] std::uint32_t record_age_ms() const
 	{
@@ -166,7 +165,6 @@ private:
 		const msap1::MeterRecord &record);
 
 	msap1::acquisition::MeterRecordSource &meter_;
-	msap1::MeterRecordStream &stream_;
 	const msap1::PreparedMeterConfiguration &configuration_;
 	const msap1::meter::MeasurementTimebase &timebase_;
 	msap1::MeterDecoderRegistry decoders_ =

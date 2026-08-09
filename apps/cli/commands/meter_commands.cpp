@@ -616,86 +616,6 @@ int run_meter_health(const Options &options, std::ostream &output)
 			     MeterHealthJsonGenerator{});
 }
 
-void print_record(const MeterRecord &record, std::ostream &output)
-{
-	static constexpr std::array<const char *, 8> names{
-		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
-	// CH7/VCM remains present in MTR1 and MeterRecord for future reference
-	// monitoring, but it is not a user-facing meter channel yet.
-	static constexpr std::size_t displayed_channel_count = 7;
-	output << "\033[2J\033[HMSAP1 meter results"
-	       << "  sequence=" << record.sequence() << "  generation=0x" << std::hex
-	       << record.configuration_generation() << std::dec
-	       << "  window=" << record.window_samples() << " samples\n\n";
-	for (std::size_t index = 0; index < displayed_channel_count; ++index) {
-		const auto channel = record.channel(index);
-		output << "CH" << index << ' ' << std::setw(3) << names[index]
-		       << "  RMS=";
-		if (channel.valid)
-			output << std::fixed << std::setprecision(3)
-			       << static_cast<double>(channel.rms_micro_units) / 1000000.0
-			       << (index >= 4 && index <= 6 ? " V" : " A");
-		else
-			output << "invalid";
-		output << "  mean=" << channel.mean_micro_units
-		       << " micro-units  rms_count=" << channel.rms_count << '\n';
-	}
-	const auto frequency = record.frequency();
-	output << "\nFrequency=";
-	if (frequency.valid)
-		output << std::fixed << std::setprecision(3)
-		       << static_cast<double>(frequency.millihz) / 1000.0
-		       << " Hz (" << static_cast<unsigned>(frequency.cycles_used)
-		       << " cycles)";
-	else if (!frequency.enabled)
-		output << "disabled";
-	else if (frequency.out_of_range)
-		output << "unavailable (out of range)";
-	else if (frequency.timed_out)
-		output << "unavailable (no signal)";
-	else
-		output << "unavailable (measuring)";
-	output << "\nPL capture=" << record.capture_frames()
-	       << " header_errors=" << record.header_errors()
-	       << " fifo_overflows=" << record.fifo_overflows()
-	       << " packetizer_drops=" << record.packetizer_drops()
-	       << " hub_drops=" << record.hub_drops() << "\nCtrl-C to stop.\n"
-	       << std::flush;
-}
-
-int run_meter_view(const Options &options, std::ostream &output)
-{
-	AcquisitionClient client(options.socket_path);
-	const auto started = Clock::now();
-	std::optional<std::uint32_t> last_sequence;
-	std::uint64_t displayed = 0;
-	while (!stop_requested) {
-		if (options.duration_seconds &&
-		    std::chrono::duration<double>(Clock::now() - started).count() >=
-			    *options.duration_seconds)
-			break;
-		if (options.result_limit && displayed >= *options.result_limit)
-			break;
-		const auto response =
-			client.request(InfoRequest{}, options.timeout_ms);
-		require_daemon_ok(response.status);
-		if (!response.running)
-			throw std::runtime_error(
-				"FPGA acquisition is stopped; run 'mnc adc start'");
-		if (response.has_meter_record &&
-		    (!last_sequence || response.latest_record.sequence() != *last_sequence)) {
-			if (!response.latest_record.header_valid())
-				throw std::runtime_error(
-					"daemon returned an invalid meter record");
-			print_record(response.latest_record, output);
-			last_sequence = response.latest_record.sequence();
-			++displayed;
-		}
-		std::this_thread::sleep_for(50ms);
-	}
-	return 0;
-}
-
 struct MeterChannelDto {
 	std::uint32_t channel = 0;
 	std::string name;
@@ -719,7 +639,7 @@ struct MeterFrequencyDto {
 };
 
 struct MeterSnapshot {
-	std::uint32_t sequence = 0;
+	std::uint64_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t window_samples = 0;
@@ -732,48 +652,148 @@ struct MeterSnapshot {
 	MeterFrequencyDto frequency;
 };
 
-MeterSnapshot meter_snapshot(const MeterRecord &record)
+MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 {
 	static constexpr std::array<const char *, 8> names{
 		"ILA", "ILB", "ILC", "ILN", "VLC", "VLB", "VLA", "VCM"};
+	if (!response.has_snapshot)
+		throw std::runtime_error("no meter snapshot is available");
+	const auto &snapshot = response.snapshot;
+	const auto &diagnostics = response.diagnostics;
 	MeterSnapshot result{
-		.sequence = record.sequence(),
-		.configuration_generation = record.configuration_generation(),
-		.sample_rate_hz = record.sample_rate_hz(),
-		.window_samples = record.window_samples(),
-		.capture_frames = record.capture_frames(),
-		.header_errors = record.header_errors(),
-		.fifo_overflows = record.fifo_overflows(),
-		.packetizer_drops = record.packetizer_drops(),
-		.hub_drops = record.hub_drops(),
+		.sequence = snapshot.sequence,
+		.configuration_generation = snapshot.configuration_generation,
+		.sample_rate_hz = diagnostics.sample_rate_hz,
+		.window_samples = diagnostics.rms_window_samples,
+		.capture_frames = diagnostics.capture_frames,
+		.header_errors = diagnostics.header_errors,
+		.fifo_overflows = diagnostics.fifo_overflows,
+		.packetizer_drops = diagnostics.packetizer_drops,
+		.hub_drops = diagnostics.hub_drops,
 		.channels = {},
 		.frequency = {},
 	};
 	for (std::size_t index = 0; index < 7; ++index) {
-		const auto channel = record.channel(index);
 		result.channels.push_back({
 			.channel = static_cast<std::uint32_t>(index),
 			.name = names[index],
 			.quantity = index < 4 ? "current" : "voltage",
-			.valid = channel.valid,
-			.mean_micro_units = channel.mean_micro_units,
-			.rms_count = channel.rms_count,
-			.rms_micro_units = channel.rms_micro_units,
+			.valid = false,
+			.mean_micro_units = diagnostics.channels[index].mean_micro_units,
+			.rms_count = diagnostics.channels[index].rms_count,
+			.rms_micro_units = 0,
 		});
 	}
-	const auto frequency = record.frequency();
 	result.frequency = {
-		.enabled = frequency.enabled,
-		.valid = frequency.valid,
-		.out_of_range = frequency.out_of_range,
-		.timed_out = frequency.timed_out,
-		.arithmetic_error = frequency.arithmetic_error,
-		.millihz = frequency.millihz,
-		.period_q16_samples = frequency.period_q16_samples,
-		.measurement_sequence = frequency.measurement_sequence,
-		.cycles_used = frequency.cycles_used,
+		.enabled = diagnostics.frequency.enabled,
+		.valid = false,
+		.out_of_range = diagnostics.frequency.out_of_range,
+		.timed_out = diagnostics.frequency.timed_out,
+		.arithmetic_error = diagnostics.frequency.arithmetic_error,
+		.millihz = 0,
+		.period_q16_samples = diagnostics.frequency.period_q16_samples,
+		.measurement_sequence = diagnostics.frequency.measurement_sequence,
+		.cycles_used = diagnostics.frequency.cycles_used,
 	};
+	using Id = mnc::meter::MeterAttributeId;
+	auto channel_index = [](Id id) -> std::optional<std::size_t> {
+		switch (id) {
+		case Id::IaRms: return 0;
+		case Id::IbRms: return 1;
+		case Id::IcRms: return 2;
+		case Id::InRms: return 3;
+		case Id::VcnRms: return 4;
+		case Id::VbnRms: return 5;
+		case Id::VanRms: return 6;
+		default: return std::nullopt;
+		}
+	};
+	for (const auto &reading : snapshot.values) {
+		const bool valid = reading.quality ==
+			mnc::meter::ReadingQuality::Valid;
+		if (reading.attribute.id == Id::Frequency) {
+			result.frequency.valid = valid;
+			result.frequency.millihz = valid
+				? static_cast<std::uint32_t>(reading.value) : 0u;
+			continue;
+		}
+		if (const auto index = channel_index(reading.attribute.id)) {
+			result.channels[*index].valid = valid;
+			result.channels[*index].rms_micro_units = valid
+				? reading.value : 0;
+		}
+	}
 	return result;
+}
+
+void print_snapshot(const MeterSnapshot &snapshot, std::ostream &output)
+{
+	output << "\033[2J\033[HMSAP1 meter results"
+	       << "  sequence=" << snapshot.sequence << "  generation=0x"
+	       << std::hex << snapshot.configuration_generation << std::dec
+	       << "  window=" << snapshot.window_samples << " samples\n\n";
+	for (const auto &channel : snapshot.channels) {
+		output << "CH" << channel.channel << ' ' << std::setw(3)
+		       << channel.name << "  RMS=";
+		if (channel.valid)
+			output << std::fixed << std::setprecision(3)
+			       << static_cast<double>(channel.rms_micro_units) / 1000000.0
+			       << (channel.quantity == "voltage" ? " V" : " A");
+		else
+			output << "invalid";
+		output << "  mean=" << channel.mean_micro_units
+		       << " micro-units  rms_count=" << channel.rms_count << '\n';
+	}
+	output << "\nFrequency=";
+	if (snapshot.frequency.valid)
+		output << std::fixed << std::setprecision(3)
+		       << static_cast<double>(snapshot.frequency.millihz) / 1000.0
+		       << " Hz (" << snapshot.frequency.cycles_used << " cycles)";
+	else if (!snapshot.frequency.enabled)
+		output << "disabled";
+	else if (snapshot.frequency.out_of_range)
+		output << "unavailable (out of range)";
+	else if (snapshot.frequency.timed_out)
+		output << "unavailable (no signal)";
+	else
+		output << "unavailable (measuring)";
+	output << "\nPL capture=" << snapshot.capture_frames
+	       << " header_errors=" << snapshot.header_errors
+	       << " fifo_overflows=" << snapshot.fifo_overflows
+	       << " packetizer_drops=" << snapshot.packetizer_drops
+	       << " hub_drops=" << snapshot.hub_drops
+	       << "\nCtrl-C to stop.\n" << std::flush;
+}
+
+int run_meter_view(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto started = Clock::now();
+	std::optional<std::uint64_t> last_sequence;
+	std::uint64_t displayed = 0;
+	while (!stop_requested) {
+		if (options.duration_seconds &&
+		    std::chrono::duration<double>(Clock::now() - started).count() >=
+			    *options.duration_seconds)
+			break;
+		if (options.result_limit && displayed >= *options.result_limit)
+			break;
+		const auto response = client.request(
+			msap1::MeterSnapshotRequest{}, options.timeout_ms);
+		require_daemon_ok(response.status);
+		if (!response.running)
+			throw std::runtime_error(
+				"FPGA acquisition is stopped; run 'mnc adc start'");
+		if (response.has_snapshot &&
+		    (!last_sequence || response.snapshot.sequence != *last_sequence)) {
+			const auto snapshot = meter_snapshot(response);
+			print_snapshot(snapshot, output);
+			last_sequence = snapshot.sequence;
+			++displayed;
+		}
+		std::this_thread::sleep_for(50ms);
+	}
+	return 0;
 }
 
 class SnapshotTextGenerator final : public ResultGenerator<MeterSnapshot> {
@@ -822,14 +842,10 @@ public:
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	const auto response =
-		client.request(InfoRequest{}, options.timeout_ms);
+	const auto response = client.request(
+		msap1::MeterSnapshotRequest{}, options.timeout_ms);
 	require_daemon_ok(response.status);
-	if (!response.has_meter_record)
-		throw std::runtime_error("no meter record is available");
-	if (!response.latest_record.header_valid())
-		throw std::runtime_error("daemon returned an invalid meter record");
-	const auto result = meter_snapshot(response.latest_record);
+	const auto result = meter_snapshot(response);
 	return render_result(options, result, output, SnapshotTextGenerator{},
 			     SnapshotJsonGenerator{});
 }

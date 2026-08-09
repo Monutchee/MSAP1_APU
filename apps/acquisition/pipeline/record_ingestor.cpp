@@ -37,10 +37,9 @@ void stamp_time_state(Timing &timing,
 
 MeterRecordIngestor::MeterRecordIngestor(
 	msap1::acquisition::MeterRecordSource &meter,
-	msap1::MeterRecordStream &stream,
 	const msap1::PreparedMeterConfiguration &configuration,
 	const msap1::meter::MeasurementTimebase &timebase)
-	: meter_(meter), stream_(stream), configuration_(configuration),
+	: meter_(meter), configuration_(configuration),
 	  timebase_(timebase)
 {
 }
@@ -227,10 +226,10 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		      : !track_basic_continuity(record))
 		return;
 	/*
-	 * Decode-validate BEFORE durability: a record whose timing fields are
+	 * Decode-validate before publication: a record whose timing fields are
 	 * malformed (zero-sample block, overflowing sample range, impossible
 	 * cycle count) is invalid exactly like a failed configuration match —
-	 * counted, logged, and never committed, published, or allowed to
+	 * counted, logged, and never published or allowed to
 	 * become the continuity baseline. Only validated records enter the
 	 * WAL stream.
 	 */
@@ -247,10 +246,6 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			{{"MNC_SEQUENCE", std::to_string(record.sequence())}});
 		return;
 	}
-	/* Durability is the publication boundary. A record is never made
-	 * visible to web/CLI/publisher consumers until SQLite has committed
-	 * the exact 256-byte PL record to the ordered WAL stream. */
-	const auto cursor = stream_.append(record, received_at);
 	if (update.timing)
 		stamp_time_state(*update.timing, timebase_);
 	if (update.aggregate_timing)
@@ -283,7 +278,6 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 	last_record_time_ = Clock::now();
 	++meter_records_;
-	(void)cursor;
 }
 
 } // namespace msap1::acquisition::daemon

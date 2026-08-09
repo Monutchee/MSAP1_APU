@@ -12,7 +12,7 @@ The runtime data paths are:
 ```text
 AD7771 capture -> PL conversion -> PL RMS + VLA frequency -> AXI DMA
     -> /dev/msap1-meter -> msap1-fpga-acquisition
-    -> durable MeterRecordStream -> typed MeterData
+    -> typed decoder -> latest-period MeterDataProvider
     -> CLI, authenticated JSON API, and future publishers
 
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
@@ -91,20 +91,18 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 15 replaced the old
-native-structure `SOCK_SEQPACKET` protocol atomically. Every validated PL
-record is committed first to the SQLite WAL stream at:
-
-```text
-/data/mnc/meter/record-stream.sqlite3
-```
-
-The durable stream has ordered cursors and independent consumer
-acknowledgements. `MeterData` separately publishes typed latest values for
-the Basic (cycle-defined block), 150/180-cycle, 10 min, and 2 h measurement
-periods; unavailable values are never
-represented as valid zero and values never inherit between periods. See
+little-endian product payloads. Acquisition IPC version 20 adds typed meter
+snapshot selection by period and attribute set. `MeterDataProvider` currently
+publishes typed latest values for the Basic (10/12-cycle) and 150/180-cycle
+measurement periods. The generic period vocabulary reserves 10 min and 2 h
+for future PL products, but provider capabilities do not advertise them until
+measurements exist. Unavailable values are never represented as valid zero and
+values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
+Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
+Modbus, and telemetry publishers. Durable historian delivery is a separate
+future pipeline described in
+[FUTURE_DURABLE_METER_PIPELINE.md](common/mnc/MeterDataProvider/FUTURE_DURABLE_METER_PIPELINE.md).
 
 The authenticated external API is:
 

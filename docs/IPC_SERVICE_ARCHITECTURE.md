@@ -1,35 +1,26 @@
 # IPC, meter data, and service architecture
 
-## Data flow and durability boundary
+## Latest-state data flow
 
 ```mermaid
 flowchart LR
     PL["PL meter DMA records"] --> DAEMON["msap1-fpga-acquisition"]
-    DAEMON --> STREAM["MeterRecordStream\nSQLite WAL"]
-    STREAM --> DECODER["typed sparse decoder registry"]
+    DAEMON --> DECODER["typed sparse decoder registry"]
     DECODER --> STORE["MeterLatestStore\nindependent period views"]
-    STORE --> API["MeterData"]
+    STORE --> API["MeterDataProvider\ntyped snapshot and latest subscription"]
     API --> IPC["mnc::ipc\nBoost.Asio Unix stream"]
     IPC --> WEB["web backend"]
     IPC --> CLI["mnc CLI"]
     IPC --> PUB["future publishers"]
-    STREAM --> HIST["future historian"]
 ```
 
-`MeterRecordStream::append()` is the publication boundary. The acquisition
-daemon does not expose a record to the decoder, latest store, IPC clients, or
-future publishers until SQLite has committed it. The database uses WAL mode
-and `synchronous=FULL` at:
-
-```text
-/data/mnc/meter/record-stream.sqlite3
-```
-
-A database failure is fatal to acquisition because continuing would silently
-lose accepted PL data. Durable consumers register a name, read forward from a
-cursor, and acknowledge independently. Records can be pruned only after all
-registered durable consumers have acknowledged them and the safety window has
-expired.
+The acquisition daemon validates and decodes each PL record, updates the
+independent latest-period stores, and publishes a typed snapshot. This path is
+deliberately a latest-value service: a slow subscriber may miss intermediate
+updates and can never backpressure DMA acquisition. It makes no durability or
+historian guarantee. A future lossless pipeline is kept separate so database
+latency cannot affect live metering; see
+[`FUTURE_DURABLE_METER_PIPELINE.md`](../common/mnc/MeterDataProvider/FUTURE_DURABLE_METER_PIPELINE.md).
 
 ## Typed multi-period meter data
 
@@ -62,9 +53,10 @@ does not calculate meter values.
 
 Each latest-state subscription owns a small worker with a single pending
 view. If its consumer is slow, a newer view replaces the unread one. This is
-intentional for Web and publishing services: they cannot block acquisition or
-the durable stream. Consumers that must observe every record use
-`MeterRecordStream` with their own durable cursor instead.
+intentional for Web and telemetry publishing services: they cannot block
+acquisition. Consumers that must observe every record will use the future
+`MeterRecordPublisher -> DurableMeterSpool -> DatabaseWriter` pipeline rather
+than this latest-state API.
 
 ## `mnc::ipc` transport
 
@@ -143,7 +135,7 @@ mnc::ipc                 framed Unix-stream transport only
 mnc::logging             structured journal writer and reader
 mnc::service             process lifecycle and systemd integration
 
-msap1::meter             record values, decoders, durable stream, latest store
+msap1::meter             record values, decoders, latest store and provider
 msap1::waveform          waveform DMA/session/file ownership
 msap1::acquisition       product protocol, meter DMA and RPU adapters
 msap1::system            temperature and image identity
@@ -168,8 +160,8 @@ classDiagram
         -MeterRecordSource meter
         -RpuControl rpu
         -WaveformCapture waveform
-        -MeterRecordStream stream
         -MeterData latest
+        -Msap1MeterDataProvider provider
     }
     class MeterRecordSource {
         <<interface>>
@@ -239,7 +231,7 @@ flowchart TD
 
 - `mnc::ipc` never interprets MSAP1 message types or meter payloads.
 - `msap1::meter` never links WebEngine or CLI formatting.
-- HTTP handlers never open DMA, RPMsg, SPI, `/dev/mem`, or SQLite resources.
-- CLI commands never access DMA or durable storage directly.
+- HTTP handlers never open DMA, RPMsg, SPI, or `/dev/mem` resources.
+- CLI commands never access DMA or acquisition internals directly.
 - Acquisition-owned adapters are the only owners of hardware descriptors.
-- Lossy latest-state subscribers never block the durable stream.
+- Lossy latest-state subscribers never block acquisition.

@@ -19,6 +19,9 @@ public:
 	AcquisitionGateway() = default;
 
 	[[nodiscard]] InfoResponse information(int timeout_ms = 1000);
+	[[nodiscard]] MeterSnapshotResponse meter_snapshot(
+		mnc::meter::MeterSnapshotRequest selection = {},
+		int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse waveform_status(int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse trigger_waveform(
 		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,

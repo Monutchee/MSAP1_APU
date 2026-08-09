@@ -74,10 +74,11 @@
   little-endian serialization; never transmit native C++ structure padding.
   Do not open the DMA device, RPMsg endpoint, `/dev/spidev*`, `/dev/mem`, or
   UIO from another process.
-- Every validated PL meter record is committed to the SQLite WAL stream at
-  `/data/mnc/meter/record-stream.sqlite3` before it enters the typed latest
-  store or is published to lossy consumers. A storage failure is critical and
-  must stop acquisition instead of silently losing accepted records.
+- Normal Web, CLI, Modbus, and telemetry consumers read typed latest snapshots
+  through `MeterDataProvider`. Latest subscriptions are intentionally lossy,
+  must not block acquisition, and must preserve the distinction between a
+  valid zero and an unavailable attribute. Do not claim historian durability
+  until the separate publisher/spool/writer pipeline is implemented.
 - `mnc::Service` provides lifecycle, readiness, watchdog, reload, and shutdown
   behavior for product daemons. `msap1-service-manager` orders/adopts settings,
   acquisition, and web systemd units through sd-bus; systemd remains the only
