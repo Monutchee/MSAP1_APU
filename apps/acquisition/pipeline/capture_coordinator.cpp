@@ -459,10 +459,13 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	msap1::InfoResponse response{};
 	response.running = running_;
 	response.has_meter_record = ingest_.latest_record().has_value();
+	response.has_aggregate_record =
+		ingest_.latest_aggregate_record().has_value();
 	response.health_probe_pending = health_.probe_pending();
 	response.sample_rate_hz = configuration_.wire.sample_rate_hz;
 	response.configuration_generation = configuration_.wire.generation;
 	response.meter_record_age_ms = ingest_.record_age_ms();
+	response.aggregate_record_age_ms = ingest_.aggregate_record_age_ms();
 	response.rpu_health_age_ms = health_.health_age_ms();
 	response.health_probe_failures = health_.probe_failures();
 	response.adc_source = configuration_.wire.adc_source;
@@ -475,6 +478,9 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.rpu_health = health_.cached();
 	if (ingest_.latest_record())
 		response.latest_record = *ingest_.latest_record();
+	if (ingest_.latest_aggregate_record())
+		response.latest_aggregate_record =
+			*ingest_.latest_aggregate_record();
 	return response;
 }
 

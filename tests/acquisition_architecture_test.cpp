@@ -306,6 +306,18 @@ void ingestor_tracks_interleaved_aggregate_stream()
 			ingest.latest_record()->sequence() == 4,
 			"latest_record() did not stay on the basic stream");
 
+		/* The aggregate cache is the newest AGGREGATE record and is
+		 * not disturbed by the basic record that arrived after it. */
+		require(ingest.latest_aggregate_record().has_value() &&
+			ingest.latest_aggregate_record()->record_format() ==
+				msap1::meter_aggregate_format &&
+			ingest.latest_aggregate_record()
+					->aggregate_sequence() == 4,
+			"latest_aggregate_record() did not cache the newest aggregate");
+		require(ingest.aggregate_record_age_ms() !=
+				msap1::acquisition_age_unavailable,
+			"aggregate freshness was not tracked");
+
 		/* Aggregate publication goes through the typed store under its
 		 * own period, UTC-stamped from the timebase exactly like a
 		 * basic block (same generation-keyed sample mapping). */
@@ -375,6 +387,27 @@ void ingestor_tracks_interleaved_aggregate_stream()
 		 * aggregate records were accepted. */
 		require(stream.read_after(0, 32).size() == 8,
 			"accepted records did not all reach the WAL stream");
+
+		/* A configuration swap is a boundary for BOTH caches: an
+		 * aggregate from the old generation must never outlive the
+		 * basic record it was folded from. begin_epoch() clears the
+		 * same state at a deliberate capture restart. */
+		require(ingest.latest_aggregate_record().has_value(),
+			"the aggregate cache was empty before the reset check");
+		ingest.clear_latest();
+		require(!ingest.latest_record().has_value() &&
+			!ingest.latest_aggregate_record().has_value() &&
+			ingest.aggregate_record_age_ms() ==
+				msap1::acquisition_age_unavailable,
+			"clear_latest() did not reset the aggregate cache");
+		feed(aggregate_record(9, 640'000, 0xfeedbeefu));
+		require(ingest.latest_aggregate_record().has_value(),
+			"the aggregate cache did not refill after a swap");
+		ingest.begin_epoch();
+		require(!ingest.latest_aggregate_record().has_value() &&
+			ingest.aggregate_record_age_ms() ==
+				msap1::acquisition_age_unavailable,
+			"begin_epoch() did not reset the aggregate cache");
 	}
 	std::filesystem::remove(database);
 }

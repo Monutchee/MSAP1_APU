@@ -76,7 +76,9 @@ void MeterRecordIngestor::begin_epoch()
 {
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
+	latest_aggregate_record_.reset();
 	last_record_time_.reset();
+	last_aggregate_record_time_.reset();
 	sequence_gaps_ = 0;
 	aggregate_sequence_gaps_ = 0;
 }
@@ -88,7 +90,9 @@ void MeterRecordIngestor::clear_latest()
 	 * that must not be counted as packet loss. */
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
+	latest_aggregate_record_.reset();
 	last_record_time_.reset();
+	last_aggregate_record_time_.reset();
 }
 
 bool MeterRecordIngestor::matches_configuration(
@@ -250,6 +254,11 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	meter_data_.apply(update);
 	if (aggregate) {
 		last_aggregate_sequence_ = record.aggregate_sequence();
+		/* The aggregate cache is the 150/180-cycle counterpart of
+		 * latest_record_: same raw wire form, own stream, own
+		 * freshness clock. It never touches the basic caches. */
+		latest_aggregate_record_ = record;
+		last_aggregate_record_time_ = Clock::now();
 	} else {
 		/* Only basic records refresh the instantaneous-readings
 		 * cache; aggregates are published through the typed store

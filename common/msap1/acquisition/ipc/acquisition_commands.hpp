@@ -32,7 +32,9 @@ namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
-inline constexpr std::uint16_t acquisition_ipc_version = 17;
+/* 18: InfoResponse carries the newest 150/180-cycle aggregate (MTR2) record
+ * beside the basic latest record. */
+inline constexpr std::uint16_t acquisition_ipc_version = 18;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -126,10 +128,17 @@ struct InfoResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	bool running = false;
 	bool has_meter_record = false;
+	/* Absence of the aggregate is carried exactly like the basic record's:
+	 * a presence flag beside a default-constructed record, never a
+	 * sentinel inside the record itself. */
+	bool has_aggregate_record = false;
 	bool health_probe_pending = false;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t meter_record_age_ms = acquisition_age_unavailable;
+	/* Freshness of latest_aggregate_record only. The aggregate cadence is
+	 * ~15x the basic one, so it must never borrow meter_record_age_ms. */
+	std::uint32_t aggregate_record_age_ms = acquisition_age_unavailable;
 	std::uint32_t rpu_health_age_ms = acquisition_age_unavailable;
 	std::uint32_t health_probe_failures = 0;
 	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
@@ -144,6 +153,10 @@ struct InfoResponse {
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};
+	/* Newest 150/180-cycle aggregate (MTR2, 0x00020001). Meaningful only
+	 * when has_aggregate_record is set; the basic latest_record above is
+	 * unaffected by, and never replaced with, an aggregate. */
+	MeterRecord latest_aggregate_record{};
 };
 
 struct CaptureResponse {

@@ -39,7 +39,8 @@ namespace msap1::acquisition::daemon {
  *  4. Decode into the typed latest store and stamp the decoded timing's
  *     TimeQuality/UTC from the measurement timebase (identically for
  *     BlockTiming and AggregateTiming). Only BASIC records are cached as
- *     latest_record(), the instantaneous-readings source. Time state never
+ *     latest_record(), the instantaneous-readings source; AGGREGATE records
+ *     are cached separately as latest_aggregate_record(). Time state never
  *     touches MeasurementQuality: a bad clock must not invalidate a good
  *     electrical measurement.
  *
@@ -92,6 +93,18 @@ public:
 	{
 		return latest_record_;
 	}
+	/**
+	 * @brief Newest accepted AGGREGATE (MTR2) record (raw wire form).
+	 *
+	 * The 150/180-cycle counterpart of latest_record(): a separate cache
+	 * on its own record stream, so exposing aggregates never changes what
+	 * the instantaneous-readings path sees.
+	 */
+	[[nodiscard]] const std::optional<msap1::MeterRecord> &
+	latest_aggregate_record() const
+	{
+		return latest_aggregate_record_;
+	}
 	/** @brief Latest decoded typed view for one measurement period. */
 	[[nodiscard]] std::optional<msap1::MeterPeriodView>
 	latest_decoded(msap1::MeasurementPeriod period) const
@@ -102,6 +115,17 @@ public:
 	[[nodiscard]] std::uint32_t record_age_ms() const
 	{
 		return age_milliseconds(last_record_time_);
+	}
+	/**
+	 * @brief Milliseconds since the last accepted AGGREGATE record.
+	 *
+	 * Tracked separately because the two streams have very different
+	 * cadences: reporting the ~200 ms basic freshness for a ~3 s aggregate
+	 * would make a stale aggregate look fresh.
+	 */
+	[[nodiscard]] std::uint32_t aggregate_record_age_ms() const
+	{
+		return age_milliseconds(last_aggregate_record_time_);
 	}
 	[[nodiscard]] std::uint64_t meter_records() const { return meter_records_; }
 	[[nodiscard]] std::uint64_t dma_bytes() const { return dma_bytes_; }
@@ -144,6 +168,11 @@ private:
 	std::optional<msap1::MeterRecord> latest_record_;
 	std::optional<std::uint32_t> last_aggregate_sequence_;
 	std::optional<Clock::time_point> last_record_time_;
+	/* Newest accepted aggregate and its arrival time. Held beside — never
+	 * inside — the basic caches above so /meter/readings semantics are
+	 * unchanged by aggregate publication. */
+	std::optional<msap1::MeterRecord> latest_aggregate_record_;
+	std::optional<Clock::time_point> last_aggregate_record_time_;
 };
 
 } // namespace msap1::acquisition::daemon

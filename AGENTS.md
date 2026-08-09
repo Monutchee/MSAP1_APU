@@ -158,6 +158,15 @@
   independent sequence counter. The APU only decodes MTR2 — never compute
   aggregates in APU production code — and aggregate data never travels
   over RPMsg. The word layout is pinned in `docs/TIMING_MODEL.md`.
+- The newest aggregate is cached beside — never inside — the basic latest
+  record, travels in `InfoResponse` behind its own presence and age fields
+  (acquisition IPC version 18), and is published by
+  `GET /api/v1/meter/aggregate`. `GET /api/v1/meter/readings` keeps
+  reporting basic records only. The aggregate frequency is informative
+  only: the standardized Class A frequency product is defined over its own
+  10 s interval, which is not implemented, so the decoder keeps that
+  reading's quality `unavailable` and the API publishes `informative`
+  rather than a validity flag.
 
 ## Build and verification
 

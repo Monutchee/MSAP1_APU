@@ -63,6 +63,36 @@ with grid frequency.
   sequence range — and the APU stamps TimeQuality/UTC at decode time
   exactly as for `BlockTiming`.
 
+### Exposing the aggregate
+
+The two record streams stay separate all the way to the API:
+
+- The ingestor caches the newest basic record (`latest_record`, the
+  instantaneous-readings source) and the newest aggregate
+  (`latest_aggregate_record`) independently, with independent freshness
+  clocks — the aggregate cadence is ~15x the basic one, so a stale
+  aggregate must never borrow the basic record's age. Both caches are
+  cleared together at the two deliberate boundaries, `begin_epoch()` and
+  `clear_latest()`.
+- `InfoResponse` carries both, each behind its own presence flag
+  (`has_meter_record` / `has_aggregate_record`) and its own age field
+  (`meter_record_age_ms` / `aggregate_record_age_ms`). Acquisition IPC
+  version 18 introduced the aggregate fields.
+- `GET /api/v1/meter/aggregate` (viewer role, like `/meter/readings`)
+  decodes the cached MTR2 record through the shared
+  `MeterDecoderRegistry` — so the endpoint inherits the decoder's identity
+  validation and aggregate RMS quality rules — and renders it with the same
+  channel order, naming, and units as `/meter/readings`. It answers 200 with
+  `{"available": false}` whenever no aggregate exists (the first ~3 s after
+  a start, ineligible basic blocks, or capture stopped); that is a normal
+  state, not an error.
+- The endpoint's `frequency` object is **informative only** and carries
+  `"informative": true` with deliberately no validity flag, matching the
+  decoder's `unavailable` quality for the `Cycles150_180` frequency
+  reading. The PL's own `frequency_valid` flag stays a diagnostics-level
+  detail in `AggregateTiming` and is not published as an API validity
+  signal.
+
 ## Two time domains
 
 1. **Measurement time** — the PL 64-bit free-running conversion-domain
