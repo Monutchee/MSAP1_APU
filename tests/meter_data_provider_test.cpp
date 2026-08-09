@@ -1,8 +1,11 @@
 #include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace {
@@ -80,6 +83,153 @@ void empty_selection_means_all_supported_values()
 		"empty selection did not expand to period capabilities");
 }
 
+msap1::BlockTiming block_timing(msap1::TimeQuality quality)
+{
+	msap1::BlockTiming timing{};
+	timing.sequence = 77;
+	timing.configuration_generation = 9;
+	timing.first_sample_index = 123'456;
+	timing.sample_count = 7'680;
+	timing.cycle_count = 12;
+	timing.nominal_frequency = msap1::NominalFrequency::Hz60;
+	timing.cycle_locked = true;
+	timing.time_quality = quality;
+	timing.utc_start = std::chrono::system_clock::time_point{
+		std::chrono::nanoseconds{1'700'000'000'000'000'000ll}};
+	timing.utc_uncertainty_ns = 250;
+	return timing;
+}
+
+void preserves_measurement_time_provenance()
+{
+	using mnc::meter::MeterAttributeId;
+	using mnc::meter::MeterAttributeKey;
+	using mnc::meter::TimeQuality;
+
+	msap1::MeterData data;
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Basic;
+	update.sequence = 77;
+	update.configuration_generation = 9;
+	update.fundamental.emplace();
+	update.fundamental->voltage_ln.phase_a =
+		voltage(120'000'000, msap1::MeasurementQuality::valid, 77);
+	update.timing = block_timing(msap1::TimeQuality::Synchronized);
+	data.apply(update);
+
+	msap1::meter::Msap1MeterDataProvider provider(data);
+	mnc::meter::MeterSnapshotRequest request{};
+	request.attributes = {{MeterAttributeId::VanRms, std::nullopt}};
+	const auto latest = provider.latest(request);
+	require(latest && latest->timing, "snapshot timing was not projected");
+	require(latest->timing->quality == TimeQuality::Synchronized &&
+			latest->timing->first_sample_index == 123'456 &&
+			latest->timing->sample_count == 7'680 &&
+			latest->timing->cycle_count == 12 &&
+			latest->timing->nominal_frequency_hz == 60 &&
+			latest->timing->utc_start_nanoseconds.has_value() &&
+			latest->timing->utc_uncertainty_nanoseconds == 250,
+		"measurement timing provenance was changed during projection");
+
+	/* Time quality is independent of electrical quality, including a valid
+	 * zero reading. */
+	require(latest->values.front().quality ==
+			mnc::meter::ReadingQuality::Valid,
+		"electrical quality was coupled to time quality");
+
+	/* A later holdover state belongs to future ingested blocks; it must not
+	 * rewrite this already-published synchronized snapshot. */
+	update.sequence = 78;
+	update.timing = block_timing(msap1::TimeQuality::Holdover);
+	update.timing->utc_start.reset();
+	update.timing->utc_uncertainty_ns.reset();
+	data.apply(update);
+	const auto holdover = provider.latest(request);
+	require(holdover && holdover->timing &&
+		holdover->timing->quality == TimeQuality::Holdover &&
+		!holdover->timing->utc_start_nanoseconds,
+		"holdover provenance was not retained for the new block");
+}
+
+void latest_and_subscription_share_timing_projection()
+{
+	msap1::MeterData data;
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Basic;
+	update.sequence = 11;
+	update.fundamental.emplace();
+	update.timing = block_timing(msap1::TimeQuality::Unsynchronized);
+	data.apply(update);
+
+	msap1::meter::Msap1MeterDataProvider provider(data);
+	mnc::meter::MeterSnapshotRequest request{};
+	request.attributes = {{mnc::meter::MeterAttributeId::Frequency,
+		std::nullopt}};
+	const auto expected = provider.latest(request);
+	require(expected && expected->timing &&
+		expected->timing->quality ==
+			mnc::meter::TimeQuality::Unsynchronized &&
+		expected->timing->first_sample_index == 123'456,
+		"unsynchronized sample-domain timing was lost");
+
+	std::mutex mutex;
+	std::condition_variable condition;
+	std::optional<mnc::meter::MeterSnapshot> received;
+	const auto subscription = provider.subscribe_latest(
+		request, [&](const mnc::meter::MeterSnapshot &snapshot) {
+			{
+				std::scoped_lock lock(mutex);
+				received = snapshot;
+			}
+			condition.notify_one();
+		});
+	(void)subscription;
+	update.sequence = 12;
+	data.apply(update);
+	{
+		std::unique_lock lock(mutex);
+		require(condition.wait_for(lock, std::chrono::seconds(1), [&] {
+			return received.has_value();
+		}), "latest subscription did not receive the update");
+	}
+	require(received->timing && expected->timing &&
+		received->timing->quality == expected->timing->quality &&
+		received->timing->first_sample_index ==
+			expected->timing->first_sample_index,
+		"latest and subscription timing projections differ");
+}
+
+void subscription_does_not_capture_provider_lifetime()
+{
+	msap1::MeterData data;
+	mnc::meter::MeterSnapshotRequest request{};
+	request.attributes = {{mnc::meter::MeterAttributeId::VanRms,
+		std::nullopt}};
+	std::mutex mutex;
+	std::condition_variable condition;
+	bool received = false;
+	mnc::meter::LatestSubscription subscription;
+	{
+		auto provider = std::make_unique<
+			msap1::meter::Msap1MeterDataProvider>(data);
+		subscription = provider->subscribe_latest(
+			request, [&](const mnc::meter::MeterSnapshot &) {
+				std::scoped_lock lock(mutex);
+				received = true;
+				condition.notify_one();
+			});
+	} /* provider is gone; MeterData owns the subscription worker. */
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Basic;
+	update.sequence = 1;
+	update.fundamental.emplace();
+	data.apply(update);
+	std::unique_lock lock(mutex);
+	require(condition.wait_for(lock, std::chrono::seconds(1), [&] {
+		return received;
+	}), "subscription retained a dangling provider reference");
+}
+
 } // namespace
 
 int main()
@@ -87,6 +237,9 @@ int main()
 	try {
 		projects_selected_values_and_unavailable_attributes();
 		empty_selection_means_all_supported_values();
+		preserves_measurement_time_provenance();
+		latest_and_subscription_share_timing_projection();
+		subscription_does_not_capture_provider_lifetime();
 		std::cout << "meter data provider tests passed\n";
 		return 0;
 	} catch (const std::exception &error) {

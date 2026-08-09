@@ -137,6 +137,15 @@ void typed_commands_round_trip_through_the_registry()
 			response.has_snapshot = true;
 			response.snapshot.period = request.selection.period;
 			response.snapshot.sequence = 0x1'0000'0002ull;
+			response.snapshot.timing = mnc::meter::MeterSnapshotTiming{
+				.quality = mnc::meter::TimeQuality::Synchronized,
+				.utc_start_nanoseconds = 1'700'000'000'000'000'000ll,
+				.utc_uncertainty_nanoseconds = 250,
+				.first_sample_index = 123456,
+				.sample_count = 7680,
+				.cycle_count = 12,
+				.nominal_frequency_hz = 60,
+			};
 			response.snapshot.values.push_back({
 				.attribute = request.selection.attributes.front(),
 				.unit = mnc::meter::MeterUnit::MicroVolts,
@@ -162,6 +171,11 @@ void typed_commands_round_trip_through_the_registry()
 			snapshot_reply);
 	require(snapshot_response.has_snapshot &&
 		snapshot_response.snapshot.sequence == 0x1'0000'0002ull &&
+		snapshot_response.snapshot.timing &&
+		snapshot_response.snapshot.timing->quality ==
+			mnc::meter::TimeQuality::Synchronized &&
+		snapshot_response.snapshot.timing->first_sample_index == 123456 &&
+		snapshot_response.snapshot.timing->cycle_count == 12 &&
 		snapshot_response.snapshot.values.size() == 1 &&
 		snapshot_response.snapshot.values[0].value == 120'000'000,
 		"typed meter snapshot did not round trip");

@@ -197,6 +197,14 @@ struct MeterFrequencyDiagnostics {
 };
 
 /** Optional cycle-timing identity supplied by MTR1 format v2. */
+/**
+ * Compatibility timing carried beside the v20 snapshot response.
+ *
+ * New consumers should use MeterSnapshot::timing, which is stamped once by
+ * record ingestion and therefore cannot change merely because a request is
+ * served later.  This compact MSAP1 field remains for existing diagnostics
+ * and is populated from that same stored provenance.
+ */
 struct MeterBlockTimingIpc {
 	std::uint64_t block_sequence = 0;
 	std::uint64_t first_sample_index = 0;

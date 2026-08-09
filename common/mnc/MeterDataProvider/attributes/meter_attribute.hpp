@@ -8,7 +8,8 @@
 namespace mnc::meter {
 
 enum class MeasurementPeriod : std::uint8_t {
-	/** Current PL fundamental block (nominally 200 ms today). */
+	/** Current PL fundamental block: 10 or 12 complete nominal cycles
+	 * (approximately 200 ms at 50/60 Hz), not a timer-defined interval. */
 	Basic = 0,
 	/** IEC-style 150/180-cycle aggregate supplied by the PL. */
 	Cycles150_180,

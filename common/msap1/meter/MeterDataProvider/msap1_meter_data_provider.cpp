@@ -14,6 +14,39 @@ using mnc::meter::MeterAttributeValue;
 using mnc::meter::MeterUnit;
 using mnc::meter::ReadingQuality;
 
+mnc::meter::TimeQuality time_quality(msap1::TimeQuality value)
+{
+	switch (value) {
+	case msap1::TimeQuality::Synchronized:
+		return mnc::meter::TimeQuality::Synchronized;
+	case msap1::TimeQuality::Holdover:
+		return mnc::meter::TimeQuality::Holdover;
+	case msap1::TimeQuality::Unsynchronized:
+		break;
+	}
+	return mnc::meter::TimeQuality::Unsynchronized;
+}
+
+template<typename Timing>
+std::optional<mnc::meter::MeterSnapshotTiming> snapshot_timing(
+	const Timing &timing)
+{
+	mnc::meter::MeterSnapshotTiming result{};
+	result.quality = time_quality(timing.time_quality);
+	result.first_sample_index = timing.first_sample_index;
+	result.sample_count = timing.sample_count;
+	result.cycle_count = timing.cycle_count;
+	result.nominal_frequency_hz =
+		static_cast<std::uint32_t>(timing.nominal_frequency);
+	if (timing.utc_start) {
+		result.utc_start_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				timing.utc_start->time_since_epoch()).count();
+		result.utc_uncertainty_nanoseconds = timing.utc_uncertainty_ns;
+	}
+	return result;
+}
+
 ReadingQuality quality(msap1::MeasurementQuality value)
 {
 	switch (value) {
@@ -90,7 +123,7 @@ Msap1MeterDataProvider::capabilities() const
 
 mnc::meter::MeterSnapshot Msap1MeterDataProvider::project(
 	const msap1::MeterPeriodView &view,
-	const mnc::meter::MeterSnapshotRequest &request) const
+	const mnc::meter::MeterSnapshotRequest &request)
 {
 	MeterAttributeSet selection(request.attributes);
 	if (selection.empty())
@@ -103,6 +136,13 @@ mnc::meter::MeterSnapshot Msap1MeterDataProvider::project(
 	result.updated_at_nanoseconds =
 		std::chrono::duration_cast<std::chrono::nanoseconds>(
 			view.updated_at.time_since_epoch()).count();
+	/* Timing is copied from the immutable view populated by the record
+	 * ingestor. It is measurement provenance, never reconstructed from the
+	 * current clock at request time. */
+	if (view.timing)
+		result.timing = snapshot_timing(*view.timing);
+	else if (view.aggregate_timing)
+		result.timing = snapshot_timing(*view.aggregate_timing);
 
 	for (const auto attribute : selection.values()) {
 		/* Indexed attributes are reserved for future families such as
@@ -174,7 +214,7 @@ mnc::meter::LatestSubscription Msap1MeterDataProvider::subscribe_latest(
 	};
 	auto owner = std::make_shared<Owner>(Owner{data_.subscribe(
 		request.period,
-		[this, request, callback = std::move(callback)](
+		[request, callback = std::move(callback)](
 			const msap1::MeterPeriodView &view) {
 			callback(project(view, request));
 		})});

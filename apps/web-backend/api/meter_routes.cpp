@@ -80,6 +80,8 @@ struct MeterTimingDto {
 	bool cycle_locked;
 	bool free_run_fallback;
 	std::string time_quality;
+	std::optional<std::int64_t> utc_start_nanoseconds;
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
 /** Body of GET /api/v1/meter/readings. */
@@ -131,17 +133,36 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 		{},
 		{},
 	};
-	if (diagnostics.timing) {
-		const auto &timing = *diagnostics.timing;
+	/* Prefer the timing carried by the typed snapshot. The diagnostics timing
+	 * is retained as a compatibility fallback and supplies product-specific
+	 * cycle-lock flags for format-v2 records. Both are populated from the same
+	 * ingestion-time provenance, never from the HTTP request clock. */
+	if (snapshot.timing || diagnostics.timing) {
+		const auto *compat = diagnostics.timing
+			? &*diagnostics.timing : nullptr;
+		const auto *timing = snapshot.timing ? &*snapshot.timing : nullptr;
 		result.timing = MeterTimingDto{
-			timing.block_sequence,
-			timing.first_sample_index,
-			timing.sample_count,
-			timing.cycle_count,
-			timing.nominal_frequency_hz,
-			timing.cycle_locked,
-			timing.free_run_fallback,
-			time_quality_name(timing.time_quality),
+			timing ? snapshot.sequence
+			       : (compat ? compat->block_sequence : snapshot.sequence),
+			timing && timing->first_sample_index
+				? *timing->first_sample_index
+				: (compat ? compat->first_sample_index : 0),
+			timing && timing->sample_count
+				? *timing->sample_count
+				: (compat ? compat->sample_count : 0),
+			timing && timing->cycle_count
+				? *timing->cycle_count
+				: (compat ? compat->cycle_count : 0),
+			timing && timing->nominal_frequency_hz
+				? *timing->nominal_frequency_hz
+				: (compat ? compat->nominal_frequency_hz : 0),
+			compat ? compat->cycle_locked : false,
+			compat ? compat->free_run_fallback : false,
+			timing ? time_quality_name(timing->quality)
+			       : (compat ? time_quality_name(compat->time_quality)
+					  : "unsynchronized"),
+			timing ? timing->utc_start_nanoseconds : std::nullopt,
+			timing ? timing->utc_uncertainty_nanoseconds : std::nullopt,
 		};
 	}
 	for (std::size_t index = 0; index < result.channels.size(); ++index)

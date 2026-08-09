@@ -65,6 +65,21 @@ time_quality_name(msap1::meter::TimeQuality quality)
 	return "unsynchronized";
 }
 
+/** JSON name for generic snapshot timing provenance. */
+[[nodiscard]] inline const char *
+time_quality_name(mnc::meter::TimeQuality quality)
+{
+	switch (quality) {
+	case mnc::meter::TimeQuality::Synchronized:
+		return "synchronized";
+	case mnc::meter::TimeQuality::Holdover:
+		return "holdover";
+	case mnc::meter::TimeQuality::Unsynchronized:
+		break;
+	}
+	return "unsynchronized";
+}
+
 /** One channel of GET /api/v1/meter/aggregate. */
 struct MeterAggregateChannelDto {
 	std::uint32_t index;

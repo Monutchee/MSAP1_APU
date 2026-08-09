@@ -19,9 +19,9 @@ public:
 		Callback callback) override;
 
 private:
-	[[nodiscard]] mnc::meter::MeterSnapshot project(
+	[[nodiscard]] static mnc::meter::MeterSnapshot project(
 		const msap1::MeterPeriodView &view,
-		const mnc::meter::MeterSnapshotRequest &request) const;
+		const mnc::meter::MeterSnapshotRequest &request);
 
 	msap1::MeterData &data_;
 };
