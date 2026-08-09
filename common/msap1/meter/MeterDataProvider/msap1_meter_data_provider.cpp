@@ -116,8 +116,6 @@ Msap1MeterDataProvider::capabilities() const
 		{MeasurementPeriod::Basic, supported(MeasurementPeriod::Basic)},
 		{MeasurementPeriod::Cycles150_180,
 		 supported(MeasurementPeriod::Cycles150_180)},
-		{MeasurementPeriod::Min10, {}},
-		{MeasurementPeriod::Hour2, {}},
 	};
 }
 
@@ -145,6 +143,11 @@ mnc::meter::MeterSnapshot Msap1MeterDataProvider::project(
 		result.timing = snapshot_timing(*view.aggregate_timing);
 
 	for (const auto attribute : selection.values()) {
+		/* Validate the canonical identity before interpreting provider
+		 * support. Known catalog entries that this provider cannot produce
+		 * become Unavailable; malformed enum values remain programmer or
+		 * protocol errors and must not disappear silently. */
+		(void)mnc::meter::describe(attribute);
 		/* Indexed attributes are reserved for future families such as
 		 * harmonic order.  The current PL records provide fundamentals
 		 * only, so an indexed key must not alias the unindexed reading. */

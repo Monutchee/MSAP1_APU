@@ -135,7 +135,7 @@ mnc::ipc                 framed Unix-stream transport only
 mnc::logging             structured journal writer and reader
 mnc::service             process lifecycle and systemd integration
 
-msap1::meter             record values, decoders, durable stream, latest store
+msap1::meter             record values, decoders, latest store and provider
 msap1::waveform          waveform DMA/session/file ownership
 msap1::acquisition       product protocol, meter DMA and RPU adapters
 msap1::system            temperature and image identity

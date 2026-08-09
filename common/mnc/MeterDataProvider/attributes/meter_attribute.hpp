@@ -3,15 +3,22 @@
 #include <cstdint>
 #include <compare>
 #include <optional>
-#include <string>
+#include <string_view>
 
 namespace mnc::meter {
 
 enum class MeasurementPeriod : std::uint8_t {
-	/** Current PL fundamental block: 10 or 12 complete nominal cycles
-	 * (approximately 200 ms at 50/60 Hz), not a timer-defined interval. */
+	/**
+	 * Fundamental cycle-defined measurement block:
+	 * 10 complete cycles at 50 Hz nominal,
+	 * 12 complete cycles at 60 Hz nominal.
+	 */
 	Basic = 0,
-	/** IEC-style 150/180-cycle aggregate supplied by the PL. */
+	/**
+	 * Aggregate of 15 consecutive eligible Basic blocks:
+	 * 150 cycles at 50 Hz nominal,
+	 * 180 cycles at 60 Hz nominal.
+	 */
 	Cycles150_180,
 	/** Reserved for a future PL ten-minute product. */
 	Min10,
@@ -19,6 +26,13 @@ enum class MeasurementPeriod : std::uint8_t {
 	Hour2,
 };
 
+/**
+ * Stable protocol-independent logical measurement identity.
+ *
+ * Protocol adapters map these IDs to their own addressing, such as Web JSON
+ * keys, MQTT topics, or Modbus registers.  The enum value is not itself a
+ * wire address, topic, route, or register number.
+ */
 enum class MeterAttributeId : std::uint16_t {
 	Frequency = 0,
 	VanRms,
@@ -33,6 +47,14 @@ enum class MeterAttributeId : std::uint16_t {
 	InRms,
 };
 
+/**
+ * Generic logical attribute key.
+ *
+ * `id` is the canonical C++ identity.  `index` is reserved for indexed
+ * measurement families such as harmonic order; scalar measurements must use
+ * std::nullopt.  The descriptor's textual key is the stable external name,
+ * while each protocol adapter remains responsible for its own addressing.
+ */
 struct MeterAttributeKey {
 	MeterAttributeId id = MeterAttributeId::Frequency;
 	std::optional<std::uint16_t> index;
@@ -40,13 +62,20 @@ struct MeterAttributeKey {
 	auto operator<=>(const MeterAttributeKey &) const = default;
 };
 
+/**
+ * Convenience families from the generic attribute catalog.
+ *
+ * Group membership describes logical relationships, not measurements a
+ * particular provider currently supplies.  Consult provider capabilities for
+ * runtime availability.
+ */
 enum class MeterAttributeGroup : std::uint8_t {
 	Frequency,
 	VoltageLnRms,
 	VoltageLlRms,
 	CurrentRms,
 	Fundamental,
-	AllAvailable,
+	AllDefined,
 };
 
 enum class MeterUnit : std::uint8_t {
@@ -66,7 +95,8 @@ enum class ReadingQuality : std::uint8_t {
 
 struct MeterAttributeDescriptor {
 	MeterAttributeKey attribute;
-	std::string key;
+	/** Stable external textual identity; backed by static catalog storage. */
+	std::string_view key;
 	MeterUnit unit = MeterUnit::MicroVolts;
 };
 

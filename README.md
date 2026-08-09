@@ -92,11 +92,12 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
 little-endian product payloads. Acquisition IPC version 20 adds typed meter
-snapshot selection by period and attribute set. `MeterDataProvider` publishes
-typed latest values for
-the Basic (cycle-defined block), 150/180-cycle, 10 min, and 2 h measurement
-periods; unavailable values are never
-represented as valid zero and values never inherit between periods. See
+snapshot selection by period and attribute set. `MeterDataProvider` currently
+publishes typed latest values for the Basic (10/12-cycle) and 150/180-cycle
+measurement periods. The generic period vocabulary reserves 10 min and 2 h
+for future PL products, but provider capabilities do not advertise them until
+measurements exist. Unavailable values are never represented as valid zero and
+values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
 Modbus, and telemetry publishers. Durable historian delivery is a separate

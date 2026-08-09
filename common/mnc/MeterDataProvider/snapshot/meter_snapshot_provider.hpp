@@ -27,6 +27,7 @@ public:
 	using Callback = std::function<void(const MeterSnapshot &)>;
 	virtual ~MeterSnapshotProvider() = default;
 
+	/** Return only currently supported period/attribute combinations. */
 	[[nodiscard]] virtual std::vector<MeterCapabilities>
 	capabilities() const = 0;
 	[[nodiscard]] virtual std::optional<MeterSnapshot>

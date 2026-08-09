@@ -7,6 +7,13 @@
 
 namespace mnc::meter {
 
+/**
+ * Ordered, duplicate-free attribute selection.
+ *
+ * Insertion order is preserved.  This makes explicit request projection
+ * deterministic while still requiring consumers to identify values by
+ * MeterAttributeKey rather than by vector position.
+ */
 class MeterAttributeSet {
 public:
 	MeterAttributeSet() = default;

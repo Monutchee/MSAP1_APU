@@ -24,6 +24,47 @@ msap1::Reading<msap1::MicroVolts> voltage(
 		{6400, std::chrono::milliseconds(200)}};
 }
 
+void describes_protocol_independent_attributes()
+{
+	using mnc::meter::MeterAttributeId;
+	using mnc::meter::MeterAttributeKey;
+	using mnc::meter::MeterUnit;
+
+	const auto voltage = mnc::meter::describe(
+		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt});
+	const auto frequency = mnc::meter::describe(
+		MeterAttributeKey{MeterAttributeId::Frequency, std::nullopt});
+	require(voltage.key == "voltage.ln.a.rms" &&
+			voltage.unit == MeterUnit::MicroVolts,
+		"phase-A voltage descriptor changed");
+	require(frequency.key == "frequency" &&
+			frequency.unit == MeterUnit::MilliHertz,
+		"frequency descriptor changed");
+
+	const auto defined = mnc::meter::attributes_in(
+		mnc::meter::MeterAttributeGroup::AllDefined);
+	require(defined.size() == 11 &&
+			defined.front().id == MeterAttributeId::Frequency,
+		"AllDefined no longer describes the canonical catalog");
+}
+
+void capabilities_advertise_only_supported_periods()
+{
+	msap1::MeterData data;
+	msap1::meter::Msap1MeterDataProvider provider(data);
+	const auto capabilities = provider.capabilities();
+	require(capabilities.size() == 2,
+		"provider advertised vocabulary-only future periods");
+	require(capabilities[0].period ==
+			mnc::meter::MeasurementPeriod::Basic &&
+			!capabilities[0].attributes.empty(),
+		"basic period capability is missing");
+	require(capabilities[1].period ==
+			mnc::meter::MeasurementPeriod::Cycles150_180 &&
+			!capabilities[1].attributes.empty(),
+		"150/180-cycle capability is missing");
+}
+
 void projects_selected_values_and_unavailable_attributes()
 {
 	using mnc::meter::MeterAttributeId;
@@ -65,6 +106,58 @@ void projects_selected_values_and_unavailable_attributes()
 		"unsupported line-line voltage was not explicit");
 	require(snapshot->values[3].quality == ReadingQuality::Unavailable,
 		"future indexed attribute aliased the fundamental reading");
+}
+
+void preserves_explicit_order_after_deduplication()
+{
+	using mnc::meter::MeterAttributeId;
+	using mnc::meter::MeterAttributeKey;
+
+	msap1::MeterData data;
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Basic;
+	update.sequence = 9;
+	update.fundamental.emplace();
+	data.apply(update);
+
+	msap1::meter::Msap1MeterDataProvider provider(data);
+	mnc::meter::MeterSnapshotRequest request{};
+	request.attributes = {
+		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::IaRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::Frequency, std::nullopt},
+	};
+	const auto snapshot = provider.latest(request);
+	require(snapshot && snapshot->values.size() == 3,
+		"explicit selection was not deduplicated");
+	require(snapshot->values[0].attribute.id == MeterAttributeId::VanRms &&
+			snapshot->values[1].attribute.id == MeterAttributeId::IaRms &&
+			snapshot->values[2].attribute.id ==
+				MeterAttributeId::Frequency,
+		"explicit selection order was not preserved");
+}
+
+void rejects_unknown_attribute_identity()
+{
+	msap1::MeterData data;
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Basic;
+	update.sequence = 1;
+	update.fundamental.emplace();
+	data.apply(update);
+
+	msap1::meter::Msap1MeterDataProvider provider(data);
+	mnc::meter::MeterSnapshotRequest request{};
+	request.attributes = {{
+		static_cast<mnc::meter::MeterAttributeId>(0xffffu), std::nullopt}};
+	bool rejected = false;
+	try {
+		(void)provider.latest(request);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "unknown attribute identity was silently ignored");
 }
 
 void empty_selection_means_all_supported_values()
@@ -235,7 +328,11 @@ void subscription_does_not_capture_provider_lifetime()
 int main()
 {
 	try {
+		describes_protocol_independent_attributes();
+		capabilities_advertise_only_supported_periods();
 		projects_selected_values_and_unavailable_attributes();
+		preserves_explicit_order_after_deduplication();
+		rejects_unknown_attribute_identity();
 		empty_selection_means_all_supported_values();
 		preserves_measurement_time_provenance();
 		latest_and_subscription_share_timing_projection();

@@ -57,7 +57,7 @@ std::vector<MeterAttributeKey> attributes_in(MeterAttributeGroup group)
 		return {key(Id::IaRms), key(Id::IbRms), key(Id::IcRms),
 			key(Id::InRms)};
 	case MeterAttributeGroup::Fundamental:
-	case MeterAttributeGroup::AllAvailable:
+	case MeterAttributeGroup::AllDefined:
 		return {key(Id::Frequency), key(Id::VanRms), key(Id::VbnRms),
 			key(Id::VcnRms), key(Id::VabRms), key(Id::VbcRms),
 			key(Id::VcaRms), key(Id::IaRms), key(Id::IbRms),

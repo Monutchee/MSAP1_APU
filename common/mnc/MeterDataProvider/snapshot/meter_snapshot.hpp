@@ -62,9 +62,20 @@ struct MeterSnapshot {
 
 struct MeterSnapshotRequest {
 	MeasurementPeriod period = MeasurementPeriod::Basic;
+	/**
+	 * Explicit selections retain request order after deduplication.  An empty
+	 * selection expands to the provider's canonical capability order.
+	 * Known-but-unsupported keys are returned with Unavailable quality;
+	 * malformed or unknown identities are rejected.
+	 */
 	std::vector<MeterAttributeKey> attributes;
 };
 
+/**
+ * One measurement period that the provider actually supports and its
+ * canonical attribute order.  Providers do not advertise vocabulary-only
+ * future periods with empty attribute lists.
+ */
 struct MeterCapabilities {
 	MeasurementPeriod period = MeasurementPeriod::Basic;
 	std::vector<MeterAttributeKey> attributes;
