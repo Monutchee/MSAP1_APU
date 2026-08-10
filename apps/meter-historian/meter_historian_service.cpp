@@ -168,8 +168,12 @@ void MeterHistorianService::consume()
 			 * consumed after the target projection is ready. */
 			std::scoped_lock migration(migration_mutex_);
 			for (const auto &record : records) {
-				ingest(record);
-				post_event(ipc::Event::record_committed, record.cursor);
+				/* A skipped record still advances the cursor via
+				 * the acknowledgement below; only a committed one
+				 * is announced to subscribers. */
+				if (ingest(record))
+					post_event(ipc::Event::record_committed,
+						   record.cursor);
 			}
 			/* The per-record database commit is the durability boundary. A single
 			 * page acknowledgement avoids one IPC round trip per record while
@@ -207,19 +211,55 @@ bool MeterHistorianService::rebuilds_volatile_period(
 	});
 }
 
-void MeterHistorianService::ingest(
+bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
-	if (envelope.payload.size() != sizeof(msap1::MeterRecord))
-		throw std::runtime_error("historian record size mismatch");
-	msap1::MeterRecord raw{};
-	std::memcpy(&raw, envelope.payload.data(), sizeof(raw));
-	const auto update = msap1::MeterDecoderRegistry::with_builtin_decoders()
-		.decode(raw, std::chrono::system_clock::time_point(
-			std::chrono::nanoseconds(envelope.ingested_at_nanoseconds)));
+	/*
+	 * A record that cannot be decoded is a POISON PILL, and the spool is
+	 * durable: the record survives every restart, so retrying it wedges the
+	 * consumer permanently and no history is ever rebuilt. One malformed
+	 * record must cost exactly one record.
+	 *
+	 * This is not hypothetical. Records captured before the PL provenance
+	 * fix carry a zero first-sample index, which the decoder now correctly
+	 * rejects; replaying that spool previously restarted this service in a
+	 * loop and left the whole History page unavailable.
+	 *
+	 * The distinction that matters: decode failures describe the RECORD and
+	 * are skipped, while a store_->append() failure is systemic (database,
+	 * disk, storage policy) and must propagate so the batch is retried
+	 * instead of silently dropping good measurements.
+	 */
+	msap1::MeterUpdate update;
+	try {
+		if (envelope.payload.size() != sizeof(msap1::MeterRecord))
+			throw std::invalid_argument(
+				"historian record size mismatch");
+		msap1::MeterRecord raw{};
+		std::memcpy(&raw, envelope.payload.data(), sizeof(raw));
+		update = msap1::MeterDecoderRegistry::with_builtin_decoders()
+			.decode(raw, std::chrono::system_clock::time_point(
+				std::chrono::nanoseconds(
+					envelope.ingested_at_nanoseconds)));
+	} catch (const std::invalid_argument &error) {
+		const auto skipped = ++undecodable_records_;
+		/* Rate limited: a spool retained across a long fault window can
+		 * hold thousands of these, and flooding the journal would bury
+		 * the cause. The counter is the complete tally. */
+		if (skipped == 1 || skipped % 100 == 0)
+			(void)logger().write(mnc::logging::Priority::warning,
+				"skipped an undecodable spooled record at cursor " +
+					std::to_string(envelope.cursor) + ": " +
+					error.what() + " (" +
+					std::to_string(skipped) +
+					" skipped so far)",
+				"historian_record_skipped");
+		return false;
+	}
 	store_->append(update, envelope.cursor,
 		envelope.timing.utc_start_nanoseconds.value_or(
 			envelope.ingested_at_nanoseconds));
+	return true;
 }
 
 void MeterHistorianService::backfill()
@@ -248,7 +288,7 @@ void MeterHistorianService::backfill()
 				 * Replaying only the selected volatile datasets avoids rewriting
 				 * every persistent record during each process restart. */
 				if (rebuilds_volatile_period(record))
-					ingest(record);
+					(void)ingest(record);
 			}
 			/* One acknowledgement per fetched page is safe because every row
 			 * has committed before advancing the temporary replay cursor. */
@@ -289,9 +329,17 @@ mnc::ServiceHealth MeterHistorianService::health() const
 		return {false, "historian IPC worker failed"};
 	if (!consumer_healthy_)
 		return {false, "historian stream consumer is retrying"};
+	/* Skipped records are not a failure -- the service is serving history --
+	 * but they are data loss and must never be silent. */
+	const auto skipped = undecodable_records_.load();
+	const auto suffix = skipped == 0
+		? std::string{}
+		: "; " + std::to_string(skipped) +
+			  " undecodable spooled record(s) skipped";
 	if (backfilling_)
-		return {true, "historian ready; volatile history rebuild in progress"};
-	return {true, "historian ready"};
+		return {true, "historian ready; volatile history rebuild in progress" +
+				      suffix};
+	return {true, "historian ready" + suffix};
 }
 
 void MeterHistorianService::handle(
