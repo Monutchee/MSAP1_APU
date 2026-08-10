@@ -354,6 +354,59 @@ void MeterHistorianService::handle(
 			subscribe(connection);
 			output.u32(0);
 			break;
+		case ipc::Command::clear_datasets: {
+			const auto count = input.u32();
+			if (count == 0 || count > supported_periods.size())
+				throw std::invalid_argument(
+					"historian clear requires one to four datasets");
+			std::vector<mnc::meter_stream::DatabaseDataset> datasets;
+			datasets.reserve(count);
+			for (std::uint32_t index = 0; index < count; ++index)
+				datasets.push_back(
+					static_cast<mnc::meter_stream::DatabaseDataset>(
+						input.u8()));
+			input.require_finished();
+
+			std::scoped_lock maintenance(migration_mutex_);
+			migrating_ = true;
+			post_event(ipc::Event::maintenance_started);
+			try {
+				const auto cursor = stream_.status().newest_cursor;
+				store_->clear_datasets(datasets, cursor);
+				migrating_ = false;
+				post_event(ipc::Event::maintenance_completed, cursor);
+				(void)logger().write(mnc::logging::Priority::notice,
+					"selected historian datasets cleared",
+					"historian_datasets_cleared");
+			} catch (...) {
+				migrating_ = false;
+				post_event(ipc::Event::maintenance_failed);
+				throw;
+			}
+			output.u32(0);
+			break;
+		}
+		case ipc::Command::recreate_database: {
+			input.require_finished();
+			std::scoped_lock maintenance(migration_mutex_);
+			migrating_ = true;
+			post_event(ipc::Event::maintenance_started);
+			try {
+				const auto cursor = stream_.status().newest_cursor;
+				store_->recreate_database(cursor);
+				migrating_ = false;
+				post_event(ipc::Event::maintenance_completed, cursor);
+				(void)logger().write(mnc::logging::Priority::warning,
+					"historian database deleted and recreated",
+					"historian_database_recreated");
+			} catch (...) {
+				migrating_ = false;
+				post_event(ipc::Event::maintenance_failed);
+				throw;
+			}
+			output.u32(0);
+			break;
+		}
 		default:
 			throw std::invalid_argument("unsupported historian command");
 		}

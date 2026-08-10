@@ -58,6 +58,12 @@ struct DatabaseStatusDto {
 	HistorianStatusDto historian;
 };
 
+struct DatabaseMaintenanceRequestDto {
+	std::string action;
+	std::vector<std::string> datasets;
+	bool confirmed = false;
+};
+
 std::string database_dataset_name(mnc::meter_stream::DatabaseDataset value)
 {
 	using D = mnc::meter_stream::DatabaseDataset;
@@ -75,6 +81,18 @@ std::string backend_name(mnc::meter_stream::StorageBackend value)
 {
 	return value == mnc::meter_stream::StorageBackend::memory
 		? "memory" : "persistent";
+}
+
+mnc::meter_stream::DatabaseDataset historian_dataset(
+	std::string_view value)
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	if (value == "basic") return D::basic;
+	if (value == "cycles_150_180") return D::cycles_150_180;
+	if (value == "minutes_10") return D::minutes_10;
+	if (value == "hours_2") return D::hours_2;
+	throw std::invalid_argument("unknown historian dataset: " +
+		std::string(value));
 }
 
 DatabaseStatusDto database_status(AppContext &app)
@@ -152,6 +170,49 @@ webengine::Response put_developer_database(
 			error.what());
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/developer/database", error);
+		return error_response(webengine::http::status::conflict,
+			error.what());
+	}
+}
+
+webengine::Response post_developer_database_maintenance(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	try {
+		DatabaseMaintenanceRequestDto request;
+		if (glz::read_json(request, context.request.body()))
+			return error_response(webengine::http::status::bad_request,
+				"invalid database maintenance JSON");
+		if (!request.confirmed)
+			return error_response(webengine::http::status::bad_request,
+				"database maintenance requires explicit confirmation");
+
+		if (request.action == "clear_datasets") {
+			if (request.datasets.empty())
+				throw std::invalid_argument(
+					"at least one historian dataset is required");
+			std::vector<mnc::meter_stream::DatabaseDataset> datasets;
+			datasets.reserve(request.datasets.size());
+			for (const auto &dataset : request.datasets)
+				datasets.push_back(historian_dataset(dataset));
+			app.database.clear_history(datasets);
+		} else if (request.action == "recreate_historian") {
+			if (!request.datasets.empty())
+				throw std::invalid_argument(
+					"recreate_historian does not accept datasets");
+			app.database.recreate_history_database();
+		} else {
+			throw std::invalid_argument(
+				"unsupported database maintenance action");
+		}
+
+		return json_response(webengine::http::status::ok,
+			database_status(app));
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/developer/database/maintenance", error);
 		return error_response(webengine::http::status::conflict,
 			error.what());
 	}

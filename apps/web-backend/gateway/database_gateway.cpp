@@ -24,4 +24,15 @@ DatabaseGateway::query(const history::HistoryQuery &query) const
 	return historian_.query(query);
 }
 
+void DatabaseGateway::clear_history(
+	std::span<const mnc::meter_stream::DatabaseDataset> datasets) const
+{
+	historian_.clear_datasets(datasets);
+}
+
+void DatabaseGateway::recreate_history_database() const
+{
+	historian_.recreate_database();
+}
+
 } // namespace msap1::web

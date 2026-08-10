@@ -149,6 +149,8 @@ webengine::Response get_developer_database(AppContext &,
 					   const webengine::RequestContext &);
 webengine::Response put_developer_database(AppContext &,
 					   const webengine::RequestContext &);
+webengine::Response post_developer_database_maintenance(AppContext &,
+						const webengine::RequestContext &);
 
 /* ── history_routes.cpp — authenticated historical meter queries ─────── */
 webengine::Response get_history_capabilities(AppContext &,
@@ -255,6 +257,10 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::put, "/api/v1/developer/database",
 	 webengine::Role::Admin, &put_developer_database,
 	 "Persist and hot-apply database storage policies"},
+	{webengine::http::verb::post,
+	 "/api/v1/developer/database/maintenance",
+	 webengine::Role::Admin, &post_developer_database_maintenance,
+	 "Clear historian datasets or recreate historian storage"},
 
 	/* Historical meter data (history_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/meter/history/capabilities",

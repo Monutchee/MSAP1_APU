@@ -5,6 +5,7 @@
 
 #include <string>
 #include <memory>
+#include <span>
 #include <string_view>
 
 namespace msap1::history::ipc {
@@ -28,6 +29,8 @@ enum class Command : std::uint32_t {
 	get_storage_policy,
 	apply_storage_policy,
 	subscribe_historian_events,
+	clear_datasets,
+	recreate_database,
 };
 
 /** Server-pushed notifications emitted after a subscription is accepted. */
@@ -36,6 +39,9 @@ enum class Event : std::uint32_t {
 	migration_started,
 	migration_completed,
 	migration_failed,
+	maintenance_started,
+	maintenance_completed,
+	maintenance_failed,
 };
 
 class HistorianClient final {
@@ -48,6 +54,9 @@ public:
 	policies() const;
 	void apply_policies(
 		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies) const;
+	void clear_datasets(
+		std::span<const mnc::meter_stream::DatabaseDataset> datasets) const;
+	void recreate_database() const;
 
 private:
 	[[nodiscard]] mnc::ipc::Frame request(Command command,

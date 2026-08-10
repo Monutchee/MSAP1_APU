@@ -79,6 +79,19 @@ public:
 	void prepare_policy_migration(
 		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies);
 	void apply_policies(std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies);
+	/**
+	 * Remove the selected historical projections from both volatile and
+	 * persistent storage.  The replay floor prevents retained spool records
+	 * at or below @p through_stream_cursor from resurrecting deleted data.
+	 */
+	void clear_datasets(
+		std::span<const mnc::meter_stream::DatabaseDataset> datasets,
+		std::uint64_t through_stream_cursor);
+	/**
+	 * Replace the complete historian database with a fresh schema while
+	 * preserving storage policy and the live stream acknowledgement point.
+	 */
+	void recreate_database(std::uint64_t through_stream_cursor);
 
 private:
 	class Impl;

@@ -164,4 +164,25 @@ void HistorianClient::apply_policies(
 	reader.require_finished();
 }
 
+void HistorianClient::clear_datasets(
+	std::span<const mnc::meter_stream::DatabaseDataset> datasets) const
+{
+	ByteWriter writer;
+	writer.u32(static_cast<std::uint32_t>(datasets.size()));
+	for (const auto dataset : datasets)
+		writer.u8(static_cast<std::uint8_t>(dataset));
+	auto response = request(Command::clear_datasets, writer.take(), 120000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	reader.require_finished();
+}
+
+void HistorianClient::recreate_database() const
+{
+	auto response = request(Command::recreate_database, {}, 120000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	reader.require_finished();
+}
+
 } // namespace msap1::history::ipc

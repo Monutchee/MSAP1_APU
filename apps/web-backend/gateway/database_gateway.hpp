@@ -3,6 +3,8 @@
 #include "msap1/meter/history/historian_ipc.hpp"
 #include "msap1/meter/stream/meter_stream_ipc.hpp"
 
+#include <span>
+
 namespace msap1::web {
 
 /** Typed application boundary for stream and historian service IPC. */
@@ -14,6 +16,9 @@ public:
 	historian_capabilities() const;
 	[[nodiscard]] std::vector<history::HistoryPoint>
 	query(const history::HistoryQuery &query) const;
+	void clear_history(
+		std::span<const mnc::meter_stream::DatabaseDataset> datasets) const;
+	void recreate_history_database() const;
 
 private:
 	mutable meter_stream::MeterStreamClient stream_;

@@ -206,6 +206,77 @@ void historian_preserves_quality_and_storage_routing()
 	remove_database(path);
 }
 
+void historian_maintenance_preserves_explicit_clear_boundary()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-maintenance-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::memory, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+	};
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		auto basic = fundamental_update();
+		history.append(basic, 1, 2'000'000'000);
+		auto aggregate = fundamental_update();
+		aggregate.period = msap1::MeasurementPeriod::Cycles150_180;
+		aggregate.sequence = 45;
+		history.append(aggregate, 2, 2'100'000'000);
+
+		const std::array clear_basic{D::basic};
+		history.clear_datasets(clear_basic, 2);
+		msap1::history::HistoryQuery basic_query{
+			.period = msap1::MeasurementPeriod::Basic,
+			.attributes = {},
+			.start_nanoseconds = 0,
+			.end_nanoseconds = 4'000'000'000,
+			.limit = 64,
+		};
+		require(history.query(basic_query).empty(),
+			"cleared basic projection still returned data");
+		/* Replaying a retained record below the persisted floor must not
+		 * resurrect data that an administrator explicitly deleted. */
+		history.append(basic, 1, 2'000'000'000);
+		require(history.query(basic_query).empty(),
+			"spool replay resurrected cleared basic data");
+		history.append(basic, 3, 3'000'000'000);
+		require(!history.query(basic_query).empty(),
+			"new data above the clear boundary was discarded");
+
+		history.recreate_database(3);
+		require(history.query(basic_query).empty(),
+			"database recreation retained volatile history");
+		history.append(aggregate, 2, 2'100'000'000);
+		msap1::history::HistoryQuery aggregate_query = basic_query;
+		aggregate_query.period = msap1::MeasurementPeriod::Cycles150_180;
+		require(history.query(aggregate_query).empty(),
+			"database recreation replay floor was not applied");
+	}
+	{
+		/* Reopen the database to prove that the administrative clear boundary
+		 * is persistent metadata, not merely an in-process filter. */
+		msap1::history::MeterHistoryStore history(path, policies);
+		auto aggregate = fundamental_update();
+		aggregate.period = msap1::MeasurementPeriod::Cycles150_180;
+		aggregate.sequence = 45;
+		history.append(aggregate, 2, 2'100'000'000);
+		msap1::history::HistoryQuery query{
+			.period = msap1::MeasurementPeriod::Cycles150_180,
+			.attributes = {},
+			.start_nanoseconds = 0,
+			.end_nanoseconds = 4'000'000'000,
+			.limit = 64,
+		};
+		require(history.query(query).empty(),
+			"database recreation floor was lost after reopen");
+	}
+	remove_database(path);
+}
+
 } // namespace
 
 int main()
@@ -214,4 +285,5 @@ int main()
 	spool_backend_switch_replaces_stale_target();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
+	historian_maintenance_preserves_explicit_clear_boundary();
 }

@@ -11,6 +11,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace msap1::history {
 namespace {
@@ -129,6 +130,7 @@ void add_reading(std::vector<std::pair<MeterAttributeId, const Reading<Unit> *>>
 void initialize(Database &database, bool persistent)
 {
 	if (persistent) database.execute("PRAGMA journal_mode=WAL");
+	database.execute("PRAGMA foreign_keys=ON");
 	database.execute("PRAGMA synchronous=FULL");
 	database.execute(R"SQL(
 CREATE TABLE IF NOT EXISTS measurement_blocks(
@@ -153,7 +155,49 @@ CREATE TABLE IF NOT EXISTS measurement_values(
  source_sequence INTEGER NOT NULL,
  PRIMARY KEY(block_id, attribute_id)
 );
+CREATE TABLE IF NOT EXISTS historian_metadata(
+ dataset INTEGER PRIMARY KEY,
+ clear_through_cursor INTEGER NOT NULL
+);
 )SQL");
+}
+
+void remove_database_family(const std::filesystem::path &path)
+{
+	for (const auto &candidate : {path,
+		std::filesystem::path(path.string() + "-wal"),
+		std::filesystem::path(path.string() + "-shm")}) {
+		std::error_code error;
+		const bool removed = std::filesystem::remove(candidate, error);
+		if (error && !removed)
+			throw std::runtime_error("remove historian database file " +
+				candidate.string() + ": " + error.message());
+	}
+}
+
+void remove_database_sidecars(const std::filesystem::path &path)
+{
+	for (const auto &candidate : {
+		std::filesystem::path(path.string() + "-wal"),
+		std::filesystem::path(path.string() + "-shm")}) {
+		std::error_code error;
+		(void)std::filesystem::remove(candidate, error);
+		if (error)
+			throw std::runtime_error("remove historian database sidecar " +
+				candidate.string() + ": " + error.message());
+	}
+}
+
+void write_clear_floor(Database &database,
+	mnc::meter_stream::DatabaseDataset dataset, std::uint64_t cursor)
+{
+	auto statement = database.prepare(R"SQL(
+INSERT INTO historian_metadata(dataset,clear_through_cursor) VALUES(?,?)
+ON CONFLICT(dataset) DO UPDATE SET clear_through_cursor=excluded.clear_through_cursor
+)SQL");
+	statement.bind(1, static_cast<std::int32_t>(dataset));
+	statement.bind(2, cursor);
+	statement.execute();
 }
 
 } // namespace
@@ -167,6 +211,13 @@ public:
 	{
 		initialize(memory, false);
 		initialize(persistent, true);
+		auto floors = persistent.prepare(
+			"SELECT dataset,clear_through_cursor FROM historian_metadata");
+		while (floors.step()) {
+			clear_floors[static_cast<mnc::meter_stream::DatabaseDataset>(
+				floors.integer(0))] = static_cast<std::uint64_t>(
+				floors.integer(1));
+		}
 		/* The stream owns the durable consumer cursor, but exposing the
 		 * newest committed historian cursor immediately after restart keeps
 		 * lag/status truthful before the next record arrives.  Volatile rows
@@ -191,6 +242,7 @@ public:
 	mnc::meter_stream::DatabasePolicyManager manager;
 	mutable std::mutex mutex;
 	std::uint64_t acknowledged_cursor = 0;
+	std::map<mnc::meter_stream::DatabaseDataset, std::uint64_t> clear_floors;
 };
 
 MeterHistoryStore::MeterHistoryStore(std::filesystem::path path,
@@ -205,6 +257,13 @@ void MeterHistoryStore::append(const MeterUpdate &update,
 	std::uint64_t stream_cursor, std::int64_t measured_at_ns)
 {
 	std::scoped_lock lock(impl_->mutex);
+	const auto dataset = dataset_for(update.period);
+	if (const auto floor = impl_->clear_floors.find(dataset);
+	    floor != impl_->clear_floors.end() && stream_cursor <= floor->second) {
+		impl_->acknowledged_cursor = std::max(
+			impl_->acknowledged_cursor, stream_cursor);
+		return;
+	}
 	auto &database = impl_->database(update.period);
 	Transaction transaction(database);
 	auto block = database.prepare(R"SQL(
@@ -251,7 +310,6 @@ VALUES(?,?,?,?,?)
 	/* Retention is enforced only after the block is safely committed.  The
 	 * stream spool remains the authoritative replay source, so pruning a
 	 * volatile/basic projection cannot lose the accepted producer record. */
-	const auto dataset = dataset_for(update.period);
 	const auto policy = impl_->manager.policy(dataset);
 	if (policy.retention.maximum_age) {
 		const auto cutoff = measured_at_ns -
@@ -388,6 +446,98 @@ void MeterHistoryStore::apply_policies(
 	/* The service serializes this routing switch with live ingest, then
 	 * backfills the newly selected targets from the durable spool. */
 	impl_->manager.apply(std::move(policies));
+}
+
+void MeterHistoryStore::clear_datasets(
+	std::span<const mnc::meter_stream::DatabaseDataset> datasets,
+	std::uint64_t through_stream_cursor)
+{
+	std::set<mnc::meter_stream::DatabaseDataset> unique;
+	for (const auto dataset : datasets) {
+		(void)period_for(dataset);
+		if (!unique.insert(dataset).second)
+			throw std::invalid_argument("duplicate historian dataset clear request");
+	}
+	if (unique.empty())
+		throw std::invalid_argument("historian dataset clear request is empty");
+
+	std::scoped_lock lock(impl_->mutex);
+	{
+		Transaction transaction(impl_->memory);
+		for (const auto dataset : unique) {
+			auto remove = impl_->memory.prepare(
+				"DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period_for(dataset)));
+			remove.execute();
+		}
+		transaction.commit();
+	}
+	{
+		Transaction transaction(impl_->persistent);
+		for (const auto dataset : unique) {
+			auto remove = impl_->persistent.prepare(
+				"DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period_for(dataset)));
+			remove.execute();
+			write_clear_floor(impl_->persistent, dataset,
+				through_stream_cursor);
+		}
+		transaction.commit();
+	}
+	for (const auto dataset : unique)
+		impl_->clear_floors[dataset] = through_stream_cursor;
+	/* Reclaim the pages occupied by explicitly deleted history while the
+	 * historian is already in its serialized maintenance window. */
+	impl_->persistent.execute("VACUUM");
+	impl_->persistent.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+}
+
+void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
+{
+	const std::array datasets{
+		mnc::meter_stream::DatabaseDataset::basic,
+		mnc::meter_stream::DatabaseDataset::cycles_150_180,
+		mnc::meter_stream::DatabaseDataset::minutes_10,
+		mnc::meter_stream::DatabaseDataset::hours_2,
+	};
+	std::scoped_lock lock(impl_->mutex);
+
+	const auto replacement_path = std::filesystem::path(
+		impl_->persistent_path.string() + ".fresh");
+	remove_database_family(replacement_path);
+	{
+		Database replacement(replacement_path);
+		initialize(replacement, true);
+		Transaction transaction(replacement);
+		for (const auto dataset : datasets)
+			write_clear_floor(replacement, dataset, through_stream_cursor);
+		transaction.commit();
+		replacement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+	}
+
+	impl_->persistent.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+	impl_->persistent = Database(":memory:");
+	try {
+		/* Both databases were checkpointed and closed above. Remove only
+		 * their now-obsolete WAL/SHM files before atomically replacing the
+		 * main database; never delete sidecars after the new DB is live. */
+		remove_database_sidecars(impl_->persistent_path);
+		remove_database_sidecars(replacement_path);
+		std::filesystem::rename(replacement_path, impl_->persistent_path);
+	} catch (...) {
+		impl_->persistent = Database(impl_->persistent_path);
+		initialize(impl_->persistent, true);
+		remove_database_family(replacement_path);
+		throw;
+	}
+
+	impl_->persistent = Database(impl_->persistent_path);
+	initialize(impl_->persistent, true);
+	impl_->memory = Database(":memory:");
+	initialize(impl_->memory, false);
+	impl_->clear_floors.clear();
+	for (const auto dataset : datasets)
+		impl_->clear_floors[dataset] = through_stream_cursor;
 }
 
 } // namespace msap1::history
