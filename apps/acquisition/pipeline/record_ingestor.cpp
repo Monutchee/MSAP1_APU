@@ -38,9 +38,10 @@ void stamp_time_state(Timing &timing,
 MeterRecordIngestor::MeterRecordIngestor(
 	msap1::acquisition::MeterRecordSource &meter,
 	const msap1::PreparedMeterConfiguration &configuration,
-	const msap1::meter::MeasurementTimebase &timebase)
+	const msap1::meter::MeasurementTimebase &timebase,
+	mnc::meter_stream::MeterRecordPublisher &publisher)
 	: meter_(meter), configuration_(configuration),
-	  timebase_(timebase)
+	  timebase_(timebase), publisher_(publisher)
 {
 }
 
@@ -250,6 +251,50 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		stamp_time_state(*update.timing, timebase_);
 	if (update.aggregate_timing)
 		stamp_time_state(*update.aggregate_timing, timebase_);
+
+	/* Durability barrier: latest-state publication is allowed only after the
+	 * exact validated PL record has an ordered committed stream cursor. */
+	mnc::meter_stream::MeterStreamRecord stream_record;
+	stream_record.record_format = record.record_format();
+	stream_record.record_kind = static_cast<std::uint16_t>(update.kind);
+	stream_record.measurement_period = static_cast<std::uint8_t>(update.period);
+	stream_record.source_sequence = update.sequence;
+	stream_record.configuration_generation = update.configuration_generation;
+	stream_record.ingested_at_nanoseconds =
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			received_at.time_since_epoch()).count();
+	if (update.timing) {
+		stream_record.timing.first_sample_index =
+			update.timing->first_sample_index;
+		stream_record.timing.sample_count = update.timing->sample_count;
+		stream_record.timing.cycle_count = update.timing->cycle_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(update.timing->time_quality);
+		if (update.timing->utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					update.timing->utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			update.timing->utc_uncertainty_ns;
+	} else if (update.aggregate_timing) {
+		stream_record.timing.first_sample_index =
+			update.aggregate_timing->first_sample_index;
+		stream_record.timing.sample_count =
+			update.aggregate_timing->sample_count;
+		stream_record.timing.cycle_count =
+			update.aggregate_timing->cycle_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(update.aggregate_timing->time_quality);
+		if (update.aggregate_timing->utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					update.aggregate_timing->utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			update.aggregate_timing->utc_uncertainty_ns;
+	}
+	const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+	stream_record.payload.assign(bytes, bytes + sizeof(record));
+	(void)publisher_.publish(stream_record);
 	meter_data_.apply(update);
 	if (aggregate) {
 		last_aggregate_sequence_ = record.aggregate_sequence();

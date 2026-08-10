@@ -1,0 +1,98 @@
+#pragma once
+
+#include "mnc/MeterDataStreamer/database_policy.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace msap1::settings {
+
+/** JSON representation of one dataset's storage and retention policy. */
+struct DatasetStorageSettings {
+	std::string backend = "persistent";
+	/** Zero means forever. */
+	std::uint64_t maximum_age_seconds = 0;
+	/** Zero means no explicit size cap. */
+	std::uint64_t maximum_bytes = 0;
+	/** Required before selecting a volatile raw-record spool. */
+	bool volatile_spool_acknowledged = false;
+
+	void validate(bool spool) const
+	{
+		if (backend != "memory" && backend != "persistent")
+			throw std::runtime_error("database backend must be memory or persistent");
+		if (spool && backend == "memory" && !volatile_spool_acknowledged)
+			throw std::runtime_error(
+				"volatile spool requires an explicit warning acknowledgement");
+	}
+};
+
+/**
+ * Complete database policy. Defaults are product-safe and are also stated in
+ * factory-defaults.json. Keeping member defaults makes older settings
+ * documents acquire this section without losing unrelated configuration.
+ */
+struct DatabaseSettings {
+	DatasetStorageSettings spool{
+		.backend = "persistent", .maximum_age_seconds = 24u * 60u * 60u};
+	DatasetStorageSettings basic{
+		.backend = "memory", .maximum_age_seconds = 24u * 60u * 60u,
+		.maximum_bytes = 512ull * 1024ull * 1024ull};
+	DatasetStorageSettings cycles_150_180{};
+	DatasetStorageSettings minutes_10{};
+	DatasetStorageSettings hours_2{};
+
+	void validate() const
+	{
+		spool.validate(true);
+		basic.validate(false);
+		cycles_150_180.validate(false);
+		minutes_10.validate(false);
+		hours_2.validate(false);
+	}
+
+	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
+	policies() const
+	{
+		using namespace mnc::meter_stream;
+		auto convert = [](DatabaseDataset dataset,
+				  const DatasetStorageSettings &source) {
+			DatabaseStoragePolicy result;
+			result.dataset = dataset;
+			result.backend = source.backend == "memory"
+				? StorageBackend::memory : StorageBackend::persistent;
+			if (source.maximum_age_seconds != 0)
+				result.retention.maximum_age =
+					std::chrono::seconds(source.maximum_age_seconds);
+			if (source.maximum_bytes != 0)
+				result.retention.maximum_bytes = source.maximum_bytes;
+			return result;
+		};
+		return {
+			convert(DatabaseDataset::raw_record_spool, spool),
+			convert(DatabaseDataset::basic, basic),
+			convert(DatabaseDataset::cycles_150_180, cycles_150_180),
+			convert(DatabaseDataset::minutes_10, minutes_10),
+			convert(DatabaseDataset::hours_2, hours_2),
+		};
+	}
+
+	[[nodiscard]] mnc::meter_stream::DatabaseStoragePolicy
+	spool_policy() const
+	{
+		return policies().front();
+	}
+
+	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
+	historian_policies() const
+	{
+		auto result = policies();
+		result.erase(result.begin());
+		return result;
+	}
+};
+
+} // namespace msap1::settings

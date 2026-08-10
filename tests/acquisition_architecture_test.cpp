@@ -53,6 +53,19 @@ public:
 	}
 };
 
+class FakeRecordPublisher final
+	: public mnc::meter_stream::MeterRecordPublisher {
+public:
+	std::uint64_t publish(
+		const mnc::meter_stream::MeterStreamRecord &record) override
+	{
+		records.push_back(record);
+		return records.size();
+	}
+
+	std::vector<mnc::meter_stream::MeterStreamRecord> records;
+};
+
 void device_interfaces_are_substitutable()
 {
 	FakeMeterSource meter;
@@ -228,7 +241,9 @@ void ingestor_validates_v2_sample_range_continuity()
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		const msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, configuration, timebase);
+		FakeRecordPublisher publisher;
+		MeterRecordIngestor ingest(source, configuration, timebase,
+			publisher);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {
@@ -319,7 +334,9 @@ void ingestor_tracks_interleaved_aggregate_stream()
 			 .configuration_generation = 0xfeedbeefu,
 			 .utc_synchronized = true},
 			std::chrono::steady_clock::now());
-		MeterRecordIngestor ingest(source, configuration, timebase);
+		FakeRecordPublisher publisher;
+		MeterRecordIngestor ingest(source, configuration, timebase,
+			publisher);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {
@@ -478,7 +495,9 @@ void ingestor_pins_aggregate_time_quality_at_ingest()
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, configuration, timebase);
+		FakeRecordPublisher publisher;
+		MeterRecordIngestor ingest(source, configuration, timebase,
+			publisher);
 		ingest.begin_epoch();
 
 		const auto feed = [&](std::uint32_t sequence) {
@@ -571,7 +590,9 @@ void ingestor_handles_u32_sequence_wrap()
 		configuration.wire.sample_rate_hz = 32000;
 		configuration.wire.rms_window_samples = 6400;
 		const msap1::meter::MeasurementTimebase timebase;
-		MeterRecordIngestor ingest(source, configuration, timebase);
+		FakeRecordPublisher publisher;
+		MeterRecordIngestor ingest(source, configuration, timebase,
+			publisher);
 		ingest.begin_epoch();
 
 		const auto feed = [&](const msap1::MeterRecord &record) {

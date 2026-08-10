@@ -1,6 +1,7 @@
 #pragma once
 
 #include "msap1/settings/definition/adc_settings.hpp"
+#include "msap1/settings/definition/database_settings.hpp"
 #include "msap1/settings/definition/metering_settings.hpp"
 #include "msap1/settings/definition/waveform_settings.hpp"
 
@@ -17,6 +18,7 @@ struct ProductSettings {
 	MeteringSettings metering;
 	AdcSettings adc;
 	WaveformSettings waveform;
+	DatabaseSettings database;
 
 	/** Per-domain constraints plus the cross-domain meter configuration
 	 *  check; the complete rule set for a persistable document. */

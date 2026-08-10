@@ -100,9 +100,9 @@ measurements exist. Unavailable values are never represented as valid zero and
 values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
-Modbus, and telemetry publishers. Durable historian delivery is a separate
-future pipeline described in
-[FUTURE_DURABLE_METER_PIPELINE.md](common/mnc/MeterDataProvider/FUTURE_DURABLE_METER_PIPELINE.md).
+Modbus, and telemetry publishers. Durable historian delivery is implemented
+by `msap1-meter-stream` and `msap1-meter-historian`; see
+[Meter data streaming and historian architecture](common/mnc/MeterDataStreamer/README.md).
 
 The authenticated external API is:
 
@@ -116,6 +116,11 @@ The authenticated external API is:
 - `GET /api/v1/meter/aggregate` (newest 150/180-cycle aggregate; always 200
   while acquisition answers, with `{"available": false}` until the first
   aggregate exists)
+- `GET /api/v1/meter/history/capabilities`
+- `POST /api/v1/meter/history/query`
+- `GET /api/v1/meter/history/health`
+- `GET /api/v1/developer/database` (administrator only)
+- `PUT /api/v1/developer/database` (administrator only)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`

@@ -5,6 +5,41 @@ option(MNC_LOGGING_REQUIRE_SYSTEMD
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
+find_library(SQLITE3_LIBRARY NAMES sqlite3)
+if(NOT SQLITE3_LIBRARY)
+    # Some development hosts install only the versioned runtime SONAME.
+    # Yocto provides the regular development symlink through DEPENDS=sqlite3.
+    find_file(SQLITE3_LIBRARY NAMES libsqlite3.so.0
+        PATHS /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu)
+endif()
+if(NOT SQLITE3_LIBRARY)
+    message(FATAL_ERROR "SQLite runtime/development library was not found")
+endif()
+
+add_library(mnc_sqlite STATIC
+    mnc/storage/sqlite/sqlite_database.cpp
+)
+add_library(mnc::sqlite ALIAS mnc_sqlite)
+target_include_directories(mnc_sqlite PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_sqlite PUBLIC cxx_std_23)
+target_compile_options(mnc_sqlite PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_sqlite PUBLIC ${SQLITE3_LIBRARY})
+
+add_library(mnc_meter_data_streamer STATIC
+    mnc/MeterDataStreamer/meter_stream.cpp
+)
+add_library(mnc::meter-data-streamer ALIAS mnc_meter_data_streamer)
+target_include_directories(mnc_meter_data_streamer PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_meter_data_streamer PUBLIC cxx_std_23)
+target_compile_options(mnc_meter_data_streamer PRIVATE
+    -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_meter_data_streamer PUBLIC mnc::sqlite)
 
 add_library(mnc_ipc STATIC
     mnc/ipc/ipc.cpp
@@ -105,6 +140,17 @@ target_link_libraries(msap1_meter PUBLIC
 )
 target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
+)
+
+msap1_library(msap1_meter_stream msap1::meter-stream
+    msap1/meter/stream/meter_stream_ipc.cpp
+    msap1/meter/history/meter_history.cpp
+    msap1/meter/history/historian_ipc.cpp
+)
+target_link_libraries(msap1_meter_stream PUBLIC
+    msap1::meter
+    mnc::meter-data-streamer
+    mnc::ipc
 )
 
 add_library(mnc_settings STATIC
@@ -260,6 +306,14 @@ if(BUILD_TESTING)
     target_compile_options(meter_data_provider_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME meter_data_provider_test COMMAND meter_data_provider_test)
+
+    add_executable(meter_stream_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_stream_test.cpp)
+    target_link_libraries(meter_stream_test PRIVATE
+        msap1::meter-stream mnc::meter-data-streamer)
+    target_compile_options(meter_stream_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_stream_test COMMAND meter_stream_test)
 
     add_executable(service_manager_test
         ${PROJECT_SOURCE_DIR}/tests/service_manager_test.cpp)

@@ -6,6 +6,7 @@
  */
 
 #include "gateway/acquisition_gateway.hpp"
+#include "gateway/database_gateway.hpp"
 #include "gateway/settings_gateway.hpp"
 
 namespace webengine {
@@ -28,6 +29,8 @@ struct AppContext {
 	AcquisitionGateway &acquisition;
 	/** Typed IPC boundary to the persistent settings authority. */
 	SettingsGateway &settings;
+	/** Typed IPC boundary to durable stream and historian services. */
+	DatabaseGateway &database;
 	/** Supervised nginx front end; consulted by the system health API. */
 	webengine::NginxController &nginx;
 };

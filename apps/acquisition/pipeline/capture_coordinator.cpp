@@ -28,7 +28,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  waveform_(options.waveform_device, options.waveform_directory,
 		    waveform_metadata(configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
-	  ingest_(meter_, configuration_, timebase_),
+	  meter_stream_(),
+	  ingest_(meter_, configuration_, timebase_, meter_stream_),
 	  meter_provider_(ingest_.meter_data()),
 	  health_(rpu_),
 	  ipc_(options.socket_path)

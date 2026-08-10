@@ -144,6 +144,20 @@ webengine::Response get_developer_about(AppContext &,
 webengine::Response get_developer_logs(AppContext &,
 				       const webengine::RequestContext &);
 
+/* ── database_routes.cpp — administrator storage policy and status ────── */
+webengine::Response get_developer_database(AppContext &,
+					   const webengine::RequestContext &);
+webengine::Response put_developer_database(AppContext &,
+					   const webengine::RequestContext &);
+
+/* ── history_routes.cpp — authenticated historical meter queries ─────── */
+webengine::Response get_history_capabilities(AppContext &,
+					      const webengine::RequestContext &);
+webengine::Response post_history_query(AppContext &,
+				       const webengine::RequestContext &);
+webengine::Response get_history_health(AppContext &,
+				       const webengine::RequestContext &);
+
 /**
  * @brief Every route of the external JSON API, grouped by module.
  *
@@ -235,6 +249,23 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/developer/logs",
 	 webengine::Role::Admin, &get_developer_logs,
 	 "Bounded, cursor-paginated journal query"},
+	{webengine::http::verb::get, "/api/v1/developer/database",
+	 webengine::Role::Admin, &get_developer_database,
+	 "Database policies and live stream/historian status"},
+	{webengine::http::verb::put, "/api/v1/developer/database",
+	 webengine::Role::Admin, &put_developer_database,
+	 "Persist and hot-apply database storage policies"},
+
+	/* Historical meter data (history_routes.cpp) */
+	{webengine::http::verb::get, "/api/v1/meter/history/capabilities",
+	 webengine::Role::Viewer, &get_history_capabilities,
+	 "Historian periods, attributes, and query bounds"},
+	{webengine::http::verb::post, "/api/v1/meter/history/query",
+	 webengine::Role::Viewer, &post_history_query,
+	 "Bounded historical meter-data query"},
+	{webengine::http::verb::get, "/api/v1/meter/history/health",
+	 webengine::Role::Viewer, &get_history_health,
+	 "Historian service health"},
 });
 
 /**

@@ -10,6 +10,7 @@
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
+#include "mnc/MeterDataStreamer/meter_stream.hpp"
 #include "support/time.hpp"
 
 #include <cstdint>
@@ -57,7 +58,8 @@ public:
 	 */
 	MeterRecordIngestor(msap1::acquisition::MeterRecordSource &meter,
 			    const msap1::PreparedMeterConfiguration &configuration,
-			    const msap1::meter::MeasurementTimebase &timebase);
+			    const msap1::meter::MeasurementTimebase &timebase,
+			    mnc::meter_stream::MeterRecordPublisher &publisher);
 
 	/** @brief Drain and process every complete record the DMA has ready. */
 	void read_available();
@@ -167,6 +169,7 @@ private:
 	msap1::acquisition::MeterRecordSource &meter_;
 	const msap1::PreparedMeterConfiguration &configuration_;
 	const msap1::meter::MeasurementTimebase &timebase_;
+	mnc::meter_stream::MeterRecordPublisher &publisher_;
 	msap1::MeterDecoderRegistry decoders_ =
 		msap1::MeterDecoderRegistry::with_builtin_decoders();
 	msap1::MeterData meter_data_;

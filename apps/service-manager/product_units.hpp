@@ -16,7 +16,8 @@ namespace msap1::service_manager::daemon {
  * Order matters: each service lists the services that must be running
  * before it starts, and start_registered() honors those edges:
  *
- *   settings  ->  fpga-acquisition  ->  web-backend
+ *   settings  ->  meter-stream  ->  fpga-acquisition  ->  web-backend
+ *                         \----->  meter-historian  ----/
  *
  * (Acquisition needs the settings authority to hand it the active
  * configuration; the web backend needs acquisition for live data.)
@@ -28,10 +29,15 @@ inline void register_product_units(mnc::ServiceManager &manager)
 {
 	manager.register_service({"settings",
 		"msap1-settings.service", {}});
+	manager.register_service({"meter-stream",
+		"msap1-meter-stream.service", {"settings"}});
 	manager.register_service({"fpga-acquisition",
-		"msap1-fpga-acquisition.service", {"settings"}});
+		"msap1-fpga-acquisition.service", {"settings", "meter-stream"}});
+	manager.register_service({"meter-historian",
+		"msap1-meter-historian.service", {"meter-stream"}});
 	manager.register_service({"web-backend",
-		"msap1-web-backend.service", {"fpga-acquisition"}});
+		"msap1-web-backend.service",
+		{"fpga-acquisition", "meter-historian"}});
 }
 
 } // namespace msap1::service_manager::daemon

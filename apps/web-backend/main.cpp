@@ -126,7 +126,8 @@ int run_web_backend()
 		 * gateways) must outlive the engine that serves the routes. */
 		msap1::web::AcquisitionGateway acquisition;
 		msap1::web::SettingsGateway settings;
-		msap1::web::AppContext context{acquisition, settings, nginx};
+		msap1::web::DatabaseGateway database;
+		msap1::web::AppContext context{acquisition, settings, database, nginx};
 
 		webengine::WebEngine engine(auth);
 		ActiveEngineRegistration active_engine(engine);

@@ -18,7 +18,7 @@ SettingsDaemon::SettingsDaemon()
 			   msap1::settings::factory_defaults_path),
 		   msap1::settings::SettingsApplyCoordinator{
 			   [](const auto &settings) {
-				   apply_to_acquisition(settings);
+				   apply_to_runtime(settings);
 			   }}),
 	  router_(handler_),
 	  server_(context_.get_executor(),

@@ -90,6 +90,7 @@ void ProductSettings::validate() const
 		throw std::runtime_error("unsupported settings schema version");
 	metering.validate();
 	waveform.validate();
+	database.validate();
 	(void)prepare_meter_configuration(to_meter_configuration(*this),
 		metering.sample_rate_hz);
 }

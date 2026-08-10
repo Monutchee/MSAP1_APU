@@ -6,11 +6,13 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/system/system_error.hpp>
 
 #include <algorithm>
@@ -21,8 +23,10 @@
 #include <filesystem>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 
 #include <sys/socket.h>
@@ -588,6 +592,80 @@ Frame BlockingClient::request(Frame request, int timeout_ms) const
 	if (!response)
 		throw std::runtime_error("IPC request timed out");
 	return std::move(*response);
+}
+
+struct PersistentBlockingClient::Impl {
+	Impl(std::string path, ConnectionLimits limits)
+		: work(boost::asio::make_work_guard(context)),
+		  client(std::make_shared<RequestClient>(
+			  context.get_executor(), std::move(path), limits)),
+		  worker([this] { context.run(); })
+	{
+	}
+
+	~Impl()
+	{
+		client->close();
+		work.reset();
+		context.stop();
+		if (worker.joinable())
+			worker.join();
+	}
+
+	boost::asio::io_context context;
+	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work;
+	std::shared_ptr<RequestClient> client;
+	std::mutex connect_mutex;
+	std::thread worker;
+};
+
+PersistentBlockingClient::PersistentBlockingClient(
+	std::string path, ConnectionLimits limits)
+	: impl_(std::make_unique<Impl>(std::move(path), limits))
+{
+}
+
+PersistentBlockingClient::~PersistentBlockingClient() = default;
+PersistentBlockingClient::PersistentBlockingClient(
+	PersistentBlockingClient &&) noexcept = default;
+PersistentBlockingClient &PersistentBlockingClient::operator=(
+	PersistentBlockingClient &&) noexcept = default;
+
+Frame PersistentBlockingClient::request(Frame frame, int timeout_ms) const
+{
+	if (!impl_)
+		throw std::runtime_error("persistent IPC client has been moved from");
+	try {
+		if (!impl_->client->is_open()) {
+			std::scoped_lock connect_lock(impl_->connect_mutex);
+			if (!impl_->client->is_open())
+				boost::asio::co_spawn(impl_->context,
+					impl_->client->connect(), boost::asio::use_future)
+					.get();
+		}
+		return boost::asio::co_spawn(
+			impl_->context,
+			impl_->client->request(
+				std::move(frame), std::chrono::milliseconds(timeout_ms)),
+			boost::asio::use_future)
+			.get();
+	} catch (...) {
+		/* Never retry a side-effecting frame whose response was lost. Closing
+		 * makes the next independent product request reconnect cleanly. */
+		impl_->client->close();
+		throw;
+	}
+}
+
+void PersistentBlockingClient::close() noexcept
+{
+	if (impl_)
+		impl_->client->close();
+}
+
+bool PersistentBlockingClient::is_open() const noexcept
+{
+	return impl_ && impl_->client->is_open();
 }
 
 } // namespace mnc::ipc
