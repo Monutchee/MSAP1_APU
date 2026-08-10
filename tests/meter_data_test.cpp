@@ -194,6 +194,26 @@ void decode_v2_rejects_malformed_timing()
 	require_throws([&] { (void)registry.decode(overflowing); },
 		       "an overflowing sample range decoded");
 
+	/* A zero first-sample index is unreachable: the PL conversion stage
+	 * issues index 1 for the first accepted frame and never resets the
+	 * counter. Observed on hardware as a disturbed provenance field, and it
+	 * must not decode — accepting it anchors the block's UTC label at the
+	 * start of capture while still reporting a small uncertainty bound. */
+	auto zero_index = periodic_record_v2();
+	zero_index.words[60] = 0;
+	zero_index.words[61] = 0;
+	require_throws([&] { (void)registry.decode(zero_index); },
+		       "a zero first-sample index decoded");
+
+	/* Only exact zero is impossible; index 1 is the genuine first block. */
+	auto first_ever = periodic_record_v2();
+	first_ever.words[60] = 1;
+	first_ever.words[61] = 0;
+	const auto first_update = registry.decode(first_ever);
+	require(first_update.timing.has_value() &&
+		first_update.timing->first_sample_index == 1u,
+		"the first block of a capture was rejected");
+
 	/* Free-run fallback blocks are time-defined: any cycle count is
 	 * legitimate there, including zero on a dead grid. */
 	auto fallback = periodic_record_v2();

@@ -162,6 +162,54 @@ void linear_utc_mapping_uses_the_sync_rate()
 		"extrapolation did not use the sync point's own sample rate");
 }
 
+/*
+ * Numbers taken from the observed hardware fault: a board ~2.7 h into capture
+ * at 128 kSPS, so the sync point sits at ~1.22e9 samples. A record whose
+ * first-sample index was disturbed to 0 previously extrapolated back to the
+ * start of capture — 9375 s, over two and a half hours — and was returned as a
+ * confident label carrying the sync's small uncertainty bound, with a
+ * Synchronized quality state. Nothing downstream could tell it apart from a
+ * good timestamp. The decoder now rejects a zero index outright; this is the
+ * second line of defence for any other implausible index.
+ */
+void absurd_backward_extrapolation_is_refused()
+{
+	MeasurementTimebase timebase;
+	const std::int64_t sync_utc = 1'700'000'000'000'000'000ll;
+	auto sync = trusted_sync(1'223'209'912ull, sync_utc, 3120);
+	sync.sample_rate_hz = 128'000;
+	timebase.record_sync(sync, at(0s));
+
+	require(!timebase.utc_for_sample(0, 7, at(0s)).has_value(),
+		"a zero sample index was still given a UTC label");
+
+	const std::uint64_t limit =
+		128'000ull *
+		MeasurementTimebase::max_backward_extrapolation_seconds;
+	/* Exactly at the bound is still labelled; one sample past it is not. */
+	require(timebase.utc_for_sample(1'223'209'912ull - limit, 7, at(0s))
+			.has_value(),
+		"a sample exactly at the backward bound was refused");
+	require(!timebase.utc_for_sample(1'223'209'912ull - limit - 1, 7,
+					 at(0s))
+			 .has_value(),
+		"a sample one past the backward bound was labelled");
+	/* A record in flight when the sync landed is a normal case and must
+	 * keep its label: one 200 ms block behind is well inside the bound. */
+	require(timebase.utc_for_sample(1'223'209'912ull - 25'600, 7, at(0s))
+			.has_value(),
+		"an in-flight record just behind the sync point was refused");
+	/* Forward distance stays deliberately unbounded: during Holdover a
+	 * record legitimately runs far ahead of the last sync, and quality()
+	 * plus the uncertainty bound carry that reduced trust instead. */
+	require(timebase.utc_for_sample(1'223'209'912ull + limit * 100, 7,
+					at(0s))
+			.has_value(),
+		"a far-forward sample was refused; forward must stay unbounded");
+	require(timebase.quality(at(0s)) == TimeQuality::Synchronized,
+		"refusing a backward extrapolation changed the quality state");
+}
+
 void generation_mismatch_suspends_the_mapping()
 {
 	MeasurementTimebase timebase;
@@ -227,6 +275,7 @@ int main()
 		quality_state_machine();
 		untrusted_sync_never_synchronizes();
 		linear_utc_mapping_uses_the_sync_rate();
+		absurd_backward_extrapolation_is_refused();
 		generation_mismatch_suspends_the_mapping();
 		utc_step_changes_mapping_only();
 		std::cout << "measurement timebase tests passed\n";

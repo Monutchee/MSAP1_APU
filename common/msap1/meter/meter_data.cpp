@@ -418,6 +418,22 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 		throw std::invalid_argument(
 			"MTR1 v2 block has a zero sample count");
 	const auto first_sample_index = record.first_sample_index();
+	/*
+	 * Zero is not a reachable index. The PL conversion stage issues index 1
+	 * for the FIRST accepted frame, and the counter is free-running and
+	 * monotonic: never reset by a configuration apply, never stepped for
+	 * time synchronization. So no real block can begin at 0.
+	 *
+	 * This is not defense in depth against a hypothetical regression — it
+	 * is an observed hardware fault. Accepting a zero anchors the block's
+	 * UTC label at the start of capture, which is hours wrong, and does so
+	 * while carrying the sync point's small uncertainty bound and a
+	 * Synchronized quality label. Nothing downstream can distinguish that
+	 * from a good timestamp, so it must be rejected here.
+	 */
+	if (first_sample_index == 0u)
+		throw std::invalid_argument(
+			"MTR1 v2 block has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
@@ -510,6 +526,13 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 		throw std::invalid_argument(
 			"MTR2 aggregate has a zero sample count");
 	const auto first_sample_index = record.aggregate_first_sample_index();
+	/* Same unreachable-zero rule as the basic block: the aggregate's first
+	 * sample is the first sample of its first contributing block, on the
+	 * same free-running counter, so 0 means disturbed provenance. An
+	 * aggregate seeded on a block whose index was zeroed inherits it. */
+	if (first_sample_index == 0u)
+		throw std::invalid_argument(
+			"MTR2 aggregate has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(

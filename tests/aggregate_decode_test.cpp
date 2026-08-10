@@ -473,6 +473,16 @@ void decode_rejects_malformed_aggregates()
 	require_throws([&] {
 		(void)registry.decode(aggregate_record(overflowing));
 	}, "an overflowing aggregate sample range decoded");
+
+	/* Zero is unreachable on the free-running conversion counter, the same
+	 * as for a basic block. An aggregate seeded on a block whose index was
+	 * zeroed inherits the zero, so it must be rejected rather than
+	 * published with a UTC label anchored at the start of capture. */
+	auto zero_index = AggregateSpec{};
+	zero_index.first_sample_index = 0;
+	require_throws([&] {
+		(void)registry.decode(aggregate_record(zero_index));
+	}, "a zero aggregate first-sample index decoded");
 }
 
 } // namespace
