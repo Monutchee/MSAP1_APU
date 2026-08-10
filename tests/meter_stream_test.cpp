@@ -206,6 +206,123 @@ void historian_preserves_quality_and_storage_routing()
 	remove_database(path);
 }
 
+/*
+ * Retention accounting. The per-period logical size is tracked incrementally so
+ * append() no longer rescans the whole projection, and these are the ways that
+ * accounting can go wrong: double-counting an idempotent replay, losing track
+ * across a maintenance operation that empties the tables, and simply failing to
+ * enforce either cap.
+ */
+void historian_enforces_retention_without_rescanning()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-retention-test");
+	remove_database(path);
+	msap1::history::HistoryQuery query;
+	query.period = msap1::MeasurementPeriod::Basic;
+	query.start_nanoseconds = 0;
+	query.end_nanoseconds = 1'000'000'000'000ll;
+	query.limit = 50000;
+
+	/* One block is 96 bytes plus 40 per reading, and every append writes all
+	 * eight attributes: 416 bytes. A 900-byte cap therefore holds exactly two
+	 * blocks, so from the third append onward the oldest must be evicted and
+	 * exactly two must remain. A cap that evicted the whole selection batch
+	 * instead of just the surplus would leave zero. */
+	{
+		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+			{D::basic, B::memory, {std::nullopt, 900ull}},
+			{D::cycles_150_180, B::persistent, {}},
+			{D::minutes_10, B::persistent, {}},
+			{D::hours_2, B::persistent, {}},
+		};
+		msap1::history::MeterHistoryStore history(path, policies);
+		for (std::uint64_t cursor = 1; cursor <= 12; ++cursor)
+			history.append(fundamental_update(), cursor,
+				static_cast<std::int64_t>(cursor) * 1'000'000'000ll);
+		const auto status = history.status();
+		const auto basic = std::ranges::find_if(status.datasets,
+			[](const auto &item) { return item.dataset == D::basic; });
+		require(basic != status.datasets.end() && basic->block_count == 2,
+			"the byte cap did not hold exactly the two blocks it allows");
+		/* Whatever survived must be the NEWEST, not the oldest. */
+		const auto points = history.query(query);
+		require(!points.empty(), "the byte cap evicted everything");
+		std::int64_t newest = 0;
+		for (const auto &point : points)
+			newest = std::max(newest, point.measured_at_nanoseconds);
+		require(newest == 12'000'000'000ll,
+			"the byte cap evicted the newest block instead of the oldest");
+	}
+	remove_database(path);
+
+	/* An idempotent replay must not be counted twice. Re-appending the same
+	 * stream cursors leaves the row set unchanged, so a cap that is not
+	 * exceeded must not start evicting. */
+	{
+		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+			{D::basic, B::memory, {std::nullopt, 100ull << 20}},
+			{D::cycles_150_180, B::persistent, {}},
+			{D::minutes_10, B::persistent, {}},
+			{D::hours_2, B::persistent, {}},
+		};
+		msap1::history::MeterHistoryStore history(path, policies);
+		for (std::uint64_t cursor = 1; cursor <= 5; ++cursor)
+			history.append(fundamental_update(), cursor,
+				static_cast<std::int64_t>(cursor) * 1'000'000'000ll);
+		const auto before = history.query(query).size();
+		for (std::uint64_t cursor = 1; cursor <= 5; ++cursor)
+			history.append(fundamental_update(), cursor,
+				static_cast<std::int64_t>(cursor) * 1'000'000'000ll);
+		require(history.query(query).size() == before,
+			"replaying committed cursors changed the projection");
+	}
+	remove_database(path);
+
+	/* The age cap must evict by measured time, keeping only what is inside the
+	 * window relative to the newest block. */
+	{
+		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+			{D::basic, B::memory, {std::chrono::seconds(5), std::nullopt}},
+			{D::cycles_150_180, B::persistent, {}},
+			{D::minutes_10, B::persistent, {}},
+			{D::hours_2, B::persistent, {}},
+		};
+		msap1::history::MeterHistoryStore history(path, policies);
+		for (std::uint64_t cursor = 1; cursor <= 20; ++cursor)
+			history.append(fundamental_update(), cursor,
+				static_cast<std::int64_t>(cursor) * 1'000'000'000ll);
+		for (const auto &point : history.query(query))
+			require(point.measured_at_nanoseconds >= 15'000'000'000ll,
+				"a block older than the age window survived");
+		require(!history.query(query).empty(),
+			"the age cap evicted blocks inside its own window");
+	}
+	remove_database(path);
+
+	/* After a recreate the tables are empty. A size still cached from before
+	 * would make the byte cap evict from an empty projection, so the first
+	 * append afterwards must survive. */
+	{
+		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+			{D::basic, B::persistent, {std::nullopt, 900ull}},
+			{D::cycles_150_180, B::persistent, {}},
+			{D::minutes_10, B::persistent, {}},
+			{D::hours_2, B::persistent, {}},
+		};
+		msap1::history::MeterHistoryStore history(path, policies);
+		for (std::uint64_t cursor = 1; cursor <= 6; ++cursor)
+			history.append(fundamental_update(), cursor,
+				static_cast<std::int64_t>(cursor) * 1'000'000'000ll);
+		history.recreate_database(100);
+		history.append(fundamental_update(), 101, 200'000'000'000ll);
+		require(!history.query(query).empty(),
+			"a stale cached size evicted the first block after a recreate");
+	}
+	remove_database(path);
+}
+
 void historian_maintenance_preserves_explicit_clear_boundary()
 {
 	using D = mnc::meter_stream::DatabaseDataset;
@@ -285,5 +402,6 @@ int main()
 	spool_backend_switch_replaces_stale_target();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
+	historian_enforces_retention_without_rescanning();
 	historian_maintenance_preserves_explicit_clear_boundary();
 }

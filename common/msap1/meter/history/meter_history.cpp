@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -105,6 +106,60 @@ FROM measurement_blocks b WHERE b.period=?
 	usage.bind(1, period_value(period));
 	(void)usage.step();
 	return static_cast<std::uint64_t>(usage.integer(0));
+}
+
+/*
+ * Delete up to a bounded batch of the oldest blocks in @p period, restricted to
+ * those strictly older than @p cutoff when one is given, and return the logical
+ * bytes removed.
+ *
+ * Reading each block's own contribution as it goes is what lets the cached
+ * period size stay exact without ever rescanning the table: a bare
+ * DELETE ... WHERE measured_at_ns<? is cheaper per row but leaves the size
+ * unknown, and recovering it means calling logical_period_bytes() again, which
+ * is the O(total rows) cost the cache exists to remove.
+ *
+ * The correlated COUNT here is bounded by the batch, not by the table, and the
+ * measurement_blocks_time index on (period, measured_at_ns) keeps the selection
+ * proportional to the rows actually removed. Callers loop until this reports
+ * zero, so one call can never stall on a large backlog.
+ */
+std::uint64_t delete_oldest_blocks(Database &database, MeasurementPeriod period,
+	std::optional<std::int64_t> cutoff, std::uint64_t needed)
+{
+	const std::string sql = std::string(R"SQL(
+SELECT b.id, 96 +
+ (SELECT COUNT(*) * 40 FROM measurement_values v WHERE v.block_id=b.id)
+FROM measurement_blocks b WHERE b.period=?)SQL") +
+		(cutoff ? " AND b.measured_at_ns<?" : "") +
+		" ORDER BY b.measured_at_ns LIMIT 256";
+	auto oldest = database.prepare(sql);
+	oldest.bind(1, period_value(period));
+	if (cutoff)
+		oldest.bind(2, *cutoff);
+	std::vector<std::pair<std::int64_t, std::uint64_t>> victims;
+	while (oldest.step())
+		victims.emplace_back(oldest.integer(0),
+			static_cast<std::uint64_t>(oldest.integer(1)));
+	if (victims.empty())
+		return 0;
+	/* measurement_values has ON DELETE CASCADE with foreign_keys=ON, so
+	 * removing the block removes its readings. */
+	auto remove = database.prepare("DELETE FROM measurement_blocks WHERE id=?");
+	std::uint64_t removed = 0;
+	for (const auto &[id, bytes] : victims) {
+		remove.bind(1, id);
+		remove.execute();
+		remove.reset();
+		removed += bytes;
+		/* Stop the moment enough has gone. The byte cap asks for exactly the
+		 * surplus, so a batch selected for efficiency must not evict history
+		 * the policy still allows -- deleting the whole batch would empty a
+		 * projection whose surplus was a single block. */
+		if (removed >= needed)
+			break;
+	}
+	return removed;
 }
 
 std::uint64_t sqlite_family_size(const std::filesystem::path &path)
@@ -243,6 +298,36 @@ public:
 	mutable std::mutex mutex;
 	std::uint64_t acknowledged_cursor = 0;
 	std::map<mnc::meter_stream::DatabaseDataset, std::uint64_t> clear_floors;
+
+	/*
+	 * Cached logical size per period. logical_period_bytes() scans every block
+	 * in the period with a correlated per-block COUNT, so calling it once per
+	 * append made append() O(total rows): measured on hardware as a projection
+	 * replay that ran at 11.4 records/s and decayed to 9.3 as the table grew.
+	 * The size is seeded from that query once and then maintained
+	 * incrementally, so every retention decision is O(1) plus the cost of the
+	 * rows actually removed.
+	 */
+	std::map<MeasurementPeriod, std::uint64_t> logical_bytes;
+
+	/* Seed on first use, then hand back the running total by reference so
+	 * callers can adjust it in place. */
+	std::uint64_t &tracked_bytes(Database &database, MeasurementPeriod period)
+	{
+		auto found = logical_bytes.find(period);
+		if (found == logical_bytes.end())
+			found = logical_bytes.emplace(
+				period, logical_period_bytes(database, period)).first;
+		return found->second;
+	}
+
+	/*
+	 * Drop the cache so it reseeds from the database. Required after any row
+	 * change this class did not account for itself: dataset clearing, historian
+	 * recreation, and backend migration all rewrite or discard whole tables.
+	 * Reseeding is a scan, so it must stay off the per-append path.
+	 */
+	void forget_tracked_bytes() { logical_bytes.clear(); }
 };
 
 MeterHistoryStore::MeterHistoryStore(std::filesystem::path path,
@@ -265,6 +350,13 @@ void MeterHistoryStore::append(const MeterUpdate &update,
 		return;
 	}
 	auto &database = impl_->database(update.period);
+	/*
+	 * Seed the running size BEFORE this append's insert. Seeding is a scan, so
+	 * doing it after the commit would count the row just written and then count
+	 * it again below, leaving the total permanently one block high -- which
+	 * makes the byte cap evict history the policy still allows.
+	 */
+	auto &tracked = impl_->tracked_bytes(database, update.period);
 	Transaction transaction(database);
 	auto block = database.prepare(R"SQL(
 INSERT OR IGNORE INTO measurement_blocks(stream_cursor,period,record_kind,
@@ -289,6 +381,7 @@ VALUES(?,?,?,?,?,?,?,?,?)
 	 * volatile projection rebuilds. Its immutable stream cursor means the
 	 * existing values are already authoritative; avoid needless writes/WAL
 	 * growth on that idempotent replay path. */
+	std::uint64_t appended_values = 0;
 	if (inserted && update.fundamental) {
 		const auto &f = *update.fundamental;
 		auto value = database.prepare(R"SQL(
@@ -299,6 +392,9 @@ VALUES(?,?,?,?,?)
 			value.bind(1, block_id); value.bind(2, static_cast<std::int32_t>(id));
 			value.bind(3, reading.value); value.bind(4, static_cast<std::int32_t>(reading.quality));
 			value.bind(5, reading.source_sequence); value.execute(); value.reset();
+			/* Counted rather than assumed, so the size accounting below
+			 * cannot drift if an attribute is added or removed here. */
+			++appended_values;
 		};
 		put(MeterAttributeId::Frequency, f.frequency);
 		put(MeterAttributeId::VanRms, f.voltage_ln.phase_a);
@@ -316,37 +412,40 @@ VALUES(?,?,?,?,?)
 	 * stream spool remains the authoritative replay source, so pruning a
 	 * volatile/basic projection cannot lose the accepted producer record. */
 	const auto policy = impl_->manager.policy(dataset);
+	/*
+	 * The running size is seeded once per period and then maintained here, so
+	 * neither cap costs a table scan. Only a genuine insert adds bytes: the
+	 * INSERT OR IGNORE replay path leaves the row set untouched and writes no
+	 * readings, so it must not adjust the total.
+	 */
+	if (inserted)
+		tracked += 96u + appended_values * 40u;
 	if (policy.retention.maximum_age) {
 		const auto cutoff = measured_at_ns -
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
 				*policy.retention.maximum_age).count();
-		auto remove = database.prepare(
-			"DELETE FROM measurement_blocks WHERE period=? AND measured_at_ns<?");
-		remove.bind(1, period_value(update.period));
-		remove.bind(2, cutoff);
-		remove.execute();
+		/* Batched so a long-expired backlog drains across calls rather than
+		 * stalling one append; at steady state this removes a single block. */
+		for (;;) {
+			/* Every expired block goes, so there is no byte target. */
+			const auto removed = delete_oldest_blocks(database,
+				update.period, cutoff,
+				std::numeric_limits<std::uint64_t>::max());
+			if (removed == 0)
+				break;
+			tracked -= std::min(tracked, removed);
+		}
 	}
 	if (policy.retention.maximum_bytes) {
-		auto used = logical_period_bytes(database, update.period);
-		while (used > *policy.retention.maximum_bytes) {
-			auto oldest = database.prepare(R"SQL(
-SELECT b.id, 96 +
- (SELECT COUNT(*) * 40 FROM measurement_values v WHERE v.block_id=b.id)
-FROM measurement_blocks b WHERE b.period=? ORDER BY measured_at_ns LIMIT 256
-)SQL");
-			oldest.bind(1, period_value(update.period));
-			std::vector<std::pair<std::int64_t, std::uint64_t>> ids;
-			while (oldest.step())
-				ids.emplace_back(oldest.integer(0),
-					static_cast<std::uint64_t>(oldest.integer(1)));
-			if (ids.empty()) break;
-			auto remove = database.prepare("DELETE FROM measurement_blocks WHERE id=?");
-			for (const auto &[id, bytes] : ids) {
-				remove.bind(1, id); remove.execute(); remove.reset();
-				used -= std::min(used, bytes);
-				if (used <= *policy.retention.maximum_bytes)
-					break;
-			}
+		while (tracked > *policy.retention.maximum_bytes) {
+			/* Ask for exactly the surplus so nothing the policy still
+			 * permits is evicted. */
+			const auto removed = delete_oldest_blocks(database,
+				update.period, std::nullopt,
+				tracked - *policy.retention.maximum_bytes);
+			if (removed == 0)
+				break;
+			tracked -= std::min(tracked, removed);
 		}
 	}
 }
@@ -441,6 +540,10 @@ void MeterHistoryStore::prepare_policy_migration(
 		remove.bind(1, period_value(period_for(policy.dataset)));
 		remove.execute();
 	}
+	/* Rows were discarded outside append(), so the cached sizes no longer
+	 * describe the tables. Reseeding is a scan, which is why it happens here
+	 * in a maintenance window and never on the append path. */
+	impl_->forget_tracked_bytes();
 }
 
 void MeterHistoryStore::apply_policies(
@@ -451,6 +554,9 @@ void MeterHistoryStore::apply_policies(
 	/* The service serializes this routing switch with live ingest, then
 	 * backfills the newly selected targets from the durable spool. */
 	impl_->manager.apply(std::move(policies));
+	/* Routing may now send a period to the other database entirely, so a size
+	 * cached against the previous target is meaningless. */
+	impl_->forget_tracked_bytes();
 }
 
 void MeterHistoryStore::clear_datasets(
@@ -495,6 +601,8 @@ void MeterHistoryStore::clear_datasets(
 	 * historian is already in its serialized maintenance window. */
 	impl_->persistent.execute("VACUUM");
 	impl_->persistent.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+	/* Whole datasets were removed outside append(); reseed on next use. */
+	impl_->forget_tracked_bytes();
 }
 
 void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
@@ -543,6 +651,9 @@ void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
 	impl_->clear_floors.clear();
 	for (const auto dataset : datasets)
 		impl_->clear_floors[dataset] = through_stream_cursor;
+	/* Both databases were replaced by empty ones. A stale non-zero size here
+	 * would make the byte cap delete from a table that has nothing in it. */
+	impl_->forget_tracked_bytes();
 }
 
 } // namespace msap1::history
