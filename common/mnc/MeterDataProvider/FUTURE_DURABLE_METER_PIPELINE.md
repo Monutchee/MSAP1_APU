@@ -1,26 +1,30 @@
-# Future durable meter pipeline
+# Durable meter pipeline status
 
-`MeterSnapshotProvider` deliberately provides current-state access only. Its
-subscriptions may coalesce updates, and therefore do not guarantee that every
-PL record reaches a consumer. This is correct for Web, Modbus, MQTT, and other
-latest-value integrations, but it is not a historian interface.
+The lossless pipeline proposed by the original version of this document is
+now implemented. `MeterSnapshotProvider` remains a current-state interface;
+its subscriptions may coalesce updates and are still appropriate for Web,
+Modbus, MQTT, and other latest-value consumers.
 
-A future lossless implementation should introduce three separate roles:
+The separate durable path is:
 
 ```mermaid
 flowchart LR
     DMA["Validated PL meter record"] --> PUB["MeterRecordPublisher"]
-    PUB --> SPOOL["DurableMeterSpool"]
-    SPOOL --> DB["DatabaseWriter"]
-    SPOOL --> OTHER["Other acknowledged consumers"]
+    PUB --> SPOOL["msap1-meter-stream / DurableMeterSpool"]
+    SPOOL --> HIST["msap1-meter-historian"]
+    SPOOL --> OTHER["Future acknowledged consumers"]
+    HIST --> DB["Typed historical projections"]
 ```
 
-- `MeterRecordPublisher` publishes every validated record in source order.
-- `DurableMeterSpool` persists records and independent consumer cursors before
-  acknowledging publication.
-- `DatabaseWriter` owns the historian database schema and acknowledges its
-  spool cursor only after a successful database transaction.
+- Acquisition publishes every accepted record in source order and waits for
+  the committed stream cursor before updating the lossy latest snapshot.
+- `DurableMeterSpool` persists the exact PL record and an independent ACK
+  cursor for each durable consumer.
+- The historian decodes records, commits the measurement block and values,
+  and acknowledges only after its transaction succeeds.
+- Future database writers can register another independent spool consumer;
+  they must not read from `MeterSnapshotProvider` when no-loss delivery is
+  required.
 
-The spool storage engine and database belong to that future service boundary.
-They must not be hidden inside the current snapshot provider or acquisition
-ingest path.
+The complete implementation and extension rules are documented in
+[`../MeterDataStreamer/README.md`](../MeterDataStreamer/README.md).

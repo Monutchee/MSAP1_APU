@@ -1,6 +1,7 @@
 add_executable(msap1-web-backend
     main.cpp
     gateway/acquisition_gateway.cpp
+    gateway/database_gateway.cpp
     gateway/settings_gateway.cpp
     auth/msap1_auth_provider.cpp
     api/health_routes.cpp
@@ -9,6 +10,8 @@ add_executable(msap1-web-backend
     api/waveform_routes.cpp
     api/settings_routes.cpp
     api/developer_routes.cpp
+    api/database_routes.cpp
+    api/history_routes.cpp
 )
 target_include_directories(msap1-web-backend PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
@@ -17,6 +20,7 @@ target_link_libraries(msap1-web-backend PRIVATE
     msap1::acquisition
     msap1::meter
     msap1::settings
+    msap1::meter-stream
     msap1::system
     mnc::logging
     mnc::service

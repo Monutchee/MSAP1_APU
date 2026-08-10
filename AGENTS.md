@@ -77,8 +77,11 @@
 - Normal Web, CLI, Modbus, and telemetry consumers read typed latest snapshots
   through `MeterDataProvider`. Latest subscriptions are intentionally lossy,
   must not block acquisition, and must preserve the distinction between a
-  valid zero and an unavailable attribute. Do not claim historian durability
-  until the separate publisher/spool/writer pipeline is implemented.
+  valid zero and an unavailable attribute. Every validated PL record must be
+  committed to `msap1-meter-stream` before latest-state publication.
+  `msap1-meter-historian` acknowledges its independent spool cursor only after
+  its typed historical projection commits; do not bypass this ordering or let
+  a lossy subscriber block either durable service.
 - `mnc::Service` provides lifecycle, readiness, watchdog, reload, and shutdown
   behavior for product daemons. `msap1-service-manager` orders/adopts settings,
   acquisition, and web systemd units through sd-bus; systemd remains the only

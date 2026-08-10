@@ -229,10 +229,23 @@ void fragmented_and_coalesced_streams()
 			"persistent IPC client reused a correlation ID");
 		persistent->close();
 
-		for (int attempt = 0; attempt != 100 && requests.load() != 6;
+		/* The synchronous facade used by the stream and historian clients
+		 * keeps the same framed connection alive across product calls. */
+		mnc::ipc::PersistentBlockingClient blocking_persistent(path.string());
+		const auto facade_first = blocking_persistent.request(
+			{mnc::ipc::FrameKind::request, 13, 0, {std::byte{9}}}, 1000);
+		const auto facade_second = blocking_persistent.request(
+			{mnc::ipc::FrameKind::request, 14, 0, {std::byte{10}}}, 1000);
+		require(facade_first.correlation_id != 0 &&
+			facade_second.correlation_id != 0 &&
+			facade_first.correlation_id != facade_second.correlation_id,
+			"persistent blocking facade reused a correlation ID");
+		blocking_persistent.close();
+
+		for (int attempt = 0; attempt != 100 && requests.load() != 8;
 		     ++attempt)
 			std::this_thread::sleep_for(2ms);
-		require(requests == 6 && peer_valid,
+		require(requests == 8 && peer_valid,
 			"server did not process all frames or expose SO_PEERCRED");
 		require(connection_errors == 0,
 			"orderly client disconnect was reported as a server error");

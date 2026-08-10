@@ -19,6 +19,8 @@ add_subdirectory(libs/glaze EXCLUDE_FROM_ALL)
 add_subdirectory(common)
 add_subdirectory(apps/cli)
 add_subdirectory(apps/settings)
+add_subdirectory(apps/meter-stream)
+add_subdirectory(apps/meter-historian)
 add_subdirectory(apps/acquisition)
 add_subdirectory(apps/service-manager)
 

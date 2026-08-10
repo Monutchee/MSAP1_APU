@@ -22,4 +22,11 @@ namespace msap1::settings::daemon {
  */
 void apply_to_acquisition(const msap1::settings::ProductSettings &settings);
 
+/** Apply database routing/retention to the stream and historian services. */
+void apply_to_database_services(
+	const msap1::settings::ProductSettings &settings);
+
+/** Apply one complete product snapshot to every runtime settings consumer. */
+void apply_to_runtime(const msap1::settings::ProductSettings &settings);
+
 } // namespace msap1::settings::daemon

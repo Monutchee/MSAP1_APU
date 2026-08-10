@@ -12,6 +12,7 @@
 #include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
+#include "msap1/meter/stream/meter_stream_ipc.hpp"
 #include "msap1/settings/settings.hpp"
 #include "msap1/waveform/waveform_capture.hpp"
 #include "ipc/ipc_channel.hpp"
@@ -160,6 +161,7 @@ private:
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
+	msap1::meter_stream::MeterStreamClient meter_stream_;
 	MeterRecordIngestor ingest_;
 	msap1::meter::Msap1MeterDataProvider meter_provider_;
 	RpuHealthMonitor health_;

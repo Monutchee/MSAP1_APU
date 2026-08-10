@@ -1,0 +1,548 @@
+#include "msap1/meter/history/meter_history.hpp"
+
+#include "mnc/storage/sqlite/sqlite_database.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+
+namespace msap1::history {
+namespace {
+
+using mnc::meter::MeterAttributeId;
+using mnc::storage::sqlite::Database;
+using mnc::storage::sqlite::Transaction;
+
+std::int64_t period_value(MeasurementPeriod period)
+{
+	return static_cast<std::int64_t>(period);
+}
+
+MeasurementPeriod period_for(mnc::meter_stream::DatabaseDataset dataset)
+{
+	switch (dataset) {
+	case mnc::meter_stream::DatabaseDataset::basic:
+		return MeasurementPeriod::Basic;
+	case mnc::meter_stream::DatabaseDataset::cycles_150_180:
+		return MeasurementPeriod::Cycles150_180;
+	case mnc::meter_stream::DatabaseDataset::minutes_10:
+		return MeasurementPeriod::Min10;
+	case mnc::meter_stream::DatabaseDataset::hours_2:
+		return MeasurementPeriod::Hour2;
+	case mnc::meter_stream::DatabaseDataset::raw_record_spool:
+		throw std::invalid_argument("spool is not a historian dataset");
+	}
+	throw std::invalid_argument("unknown historian dataset");
+}
+
+mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
+{
+	switch (period) {
+	case MeasurementPeriod::Basic:
+		return mnc::meter_stream::DatabaseDataset::basic;
+	case MeasurementPeriod::Cycles150_180:
+		return mnc::meter_stream::DatabaseDataset::cycles_150_180;
+	case MeasurementPeriod::Min10:
+		return mnc::meter_stream::DatabaseDataset::minutes_10;
+	case MeasurementPeriod::Hour2:
+		return mnc::meter_stream::DatabaseDataset::hours_2;
+	}
+	throw std::invalid_argument("unknown historian measurement period");
+}
+
+void validate_historian_policies(
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
+{
+	if (policies.size() != 4)
+		throw std::invalid_argument(
+			"historian requires exactly four dataset policies");
+	std::set<mnc::meter_stream::DatabaseDataset> datasets;
+	for (const auto &policy : policies) {
+		mnc::meter_stream::validate_database_policy(policy);
+		if (policy.dataset ==
+		    mnc::meter_stream::DatabaseDataset::raw_record_spool)
+			throw std::invalid_argument(
+				"spool policy cannot be applied to the historian");
+		if (!datasets.insert(policy.dataset).second)
+			throw std::invalid_argument("duplicate historian dataset policy");
+	}
+}
+
+bool supported_attribute(MeterAttributeId attribute)
+{
+	switch (attribute) {
+	case MeterAttributeId::Frequency:
+	case MeterAttributeId::VanRms:
+	case MeterAttributeId::VbnRms:
+	case MeterAttributeId::VcnRms:
+	case MeterAttributeId::IaRms:
+	case MeterAttributeId::IbRms:
+	case MeterAttributeId::IcRms:
+	case MeterAttributeId::InRms:
+		return true;
+	case MeterAttributeId::VabRms:
+	case MeterAttributeId::VbcRms:
+	case MeterAttributeId::VcaRms:
+		return false;
+	}
+	return false;
+}
+
+std::uint64_t logical_period_bytes(Database &database, MeasurementPeriod period)
+{
+	auto usage = database.prepare(R"SQL(
+SELECT COALESCE(SUM(96 +
+ (SELECT COUNT(*) * 40 FROM measurement_values v WHERE v.block_id=b.id)),0)
+FROM measurement_blocks b WHERE b.period=?
+)SQL");
+	usage.bind(1, period_value(period));
+	(void)usage.step();
+	return static_cast<std::uint64_t>(usage.integer(0));
+}
+
+std::uint64_t sqlite_family_size(const std::filesystem::path &path)
+{
+	std::uint64_t total = 0;
+	for (const auto &candidate : {path, std::filesystem::path(path.string() + "-wal"),
+		std::filesystem::path(path.string() + "-shm")}) {
+		std::error_code error;
+		const auto size = std::filesystem::file_size(candidate, error);
+		if (!error)
+			total += size;
+	}
+	return total;
+}
+
+template<typename Unit>
+void add_reading(std::vector<std::pair<MeterAttributeId, const Reading<Unit> *>> &out,
+	MeterAttributeId id, const Reading<Unit> &reading)
+{
+	out.emplace_back(id, &reading);
+}
+
+void initialize(Database &database, bool persistent)
+{
+	if (persistent) database.execute("PRAGMA journal_mode=WAL");
+	database.execute("PRAGMA foreign_keys=ON");
+	database.execute("PRAGMA synchronous=FULL");
+	database.execute(R"SQL(
+CREATE TABLE IF NOT EXISTS measurement_blocks(
+ id INTEGER PRIMARY KEY,
+ stream_cursor INTEGER NOT NULL UNIQUE,
+ period INTEGER NOT NULL,
+ record_kind INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ configuration_generation INTEGER NOT NULL,
+ measured_at_ns INTEGER NOT NULL,
+ window_start INTEGER NOT NULL,
+ window_end INTEGER NOT NULL,
+ quality INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS measurement_blocks_time
+ ON measurement_blocks(period, measured_at_ns);
+CREATE TABLE IF NOT EXISTS measurement_values(
+ block_id INTEGER NOT NULL REFERENCES measurement_blocks(id) ON DELETE CASCADE,
+ attribute_id INTEGER NOT NULL,
+ signed_value INTEGER NOT NULL,
+ quality INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ PRIMARY KEY(block_id, attribute_id)
+);
+CREATE TABLE IF NOT EXISTS historian_metadata(
+ dataset INTEGER PRIMARY KEY,
+ clear_through_cursor INTEGER NOT NULL
+);
+)SQL");
+}
+
+void remove_database_family(const std::filesystem::path &path)
+{
+	for (const auto &candidate : {path,
+		std::filesystem::path(path.string() + "-wal"),
+		std::filesystem::path(path.string() + "-shm")}) {
+		std::error_code error;
+		const bool removed = std::filesystem::remove(candidate, error);
+		if (error && !removed)
+			throw std::runtime_error("remove historian database file " +
+				candidate.string() + ": " + error.message());
+	}
+}
+
+void remove_database_sidecars(const std::filesystem::path &path)
+{
+	for (const auto &candidate : {
+		std::filesystem::path(path.string() + "-wal"),
+		std::filesystem::path(path.string() + "-shm")}) {
+		std::error_code error;
+		(void)std::filesystem::remove(candidate, error);
+		if (error)
+			throw std::runtime_error("remove historian database sidecar " +
+				candidate.string() + ": " + error.message());
+	}
+}
+
+void write_clear_floor(Database &database,
+	mnc::meter_stream::DatabaseDataset dataset, std::uint64_t cursor)
+{
+	auto statement = database.prepare(R"SQL(
+INSERT INTO historian_metadata(dataset,clear_through_cursor) VALUES(?,?)
+ON CONFLICT(dataset) DO UPDATE SET clear_through_cursor=excluded.clear_through_cursor
+)SQL");
+	statement.bind(1, static_cast<std::int32_t>(dataset));
+	statement.bind(2, cursor);
+	statement.execute();
+}
+
+} // namespace
+
+class MeterHistoryStore::Impl final {
+public:
+	Impl(std::filesystem::path path,
+		std::vector<mnc::meter_stream::DatabaseStoragePolicy> configured)
+		: persistent_path(std::move(path)), memory(":memory:"), persistent(persistent_path),
+		  manager(std::move(configured))
+	{
+		initialize(memory, false);
+		initialize(persistent, true);
+		auto floors = persistent.prepare(
+			"SELECT dataset,clear_through_cursor FROM historian_metadata");
+		while (floors.step()) {
+			clear_floors[static_cast<mnc::meter_stream::DatabaseDataset>(
+				floors.integer(0))] = static_cast<std::uint64_t>(
+				floors.integer(1));
+		}
+		/* The stream owns the durable consumer cursor, but exposing the
+		 * newest committed historian cursor immediately after restart keeps
+		 * lag/status truthful before the next record arrives.  Volatile rows
+		 * are rebuilt separately by MeterHistorianService. */
+		auto latest = persistent.prepare(
+			"SELECT COALESCE(MAX(stream_cursor),0) FROM measurement_blocks");
+		(void)latest.step();
+		acknowledged_cursor =
+			static_cast<std::uint64_t>(latest.integer(0));
+	}
+
+	Database &database(MeasurementPeriod period)
+	{
+		const auto dataset = dataset_for(period);
+		return manager.policy(dataset).backend == mnc::meter_stream::StorageBackend::memory
+			? memory : persistent;
+	}
+
+	std::filesystem::path persistent_path;
+	Database memory;
+	Database persistent;
+	mnc::meter_stream::DatabasePolicyManager manager;
+	mutable std::mutex mutex;
+	std::uint64_t acknowledged_cursor = 0;
+	std::map<mnc::meter_stream::DatabaseDataset, std::uint64_t> clear_floors;
+};
+
+MeterHistoryStore::MeterHistoryStore(std::filesystem::path path,
+	std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies)
+	: impl_([&] {
+		validate_historian_policies(policies);
+		return std::make_unique<Impl>(std::move(path), std::move(policies));
+	}()) {}
+MeterHistoryStore::~MeterHistoryStore() = default;
+
+void MeterHistoryStore::append(const MeterUpdate &update,
+	std::uint64_t stream_cursor, std::int64_t measured_at_ns)
+{
+	std::scoped_lock lock(impl_->mutex);
+	const auto dataset = dataset_for(update.period);
+	if (const auto floor = impl_->clear_floors.find(dataset);
+	    floor != impl_->clear_floors.end() && stream_cursor <= floor->second) {
+		impl_->acknowledged_cursor = std::max(
+			impl_->acknowledged_cursor, stream_cursor);
+		return;
+	}
+	auto &database = impl_->database(update.period);
+	Transaction transaction(database);
+	auto block = database.prepare(R"SQL(
+INSERT OR IGNORE INTO measurement_blocks(stream_cursor,period,record_kind,
+ source_sequence,configuration_generation,measured_at_ns,window_start,window_end,quality)
+VALUES(?,?,?,?,?,?,?,?,?)
+)SQL");
+	block.bind(1, stream_cursor); block.bind(2, period_value(update.period));
+	block.bind(3, static_cast<std::int64_t>(update.kind));
+	block.bind(4, update.sequence);
+	block.bind(5, static_cast<std::int64_t>(update.configuration_generation));
+	block.bind(6, measured_at_ns);
+	std::uint64_t first = 0; std::uint64_t last = 0;
+	if (update.timing) { first = update.timing->first_sample_index; last = first + update.timing->sample_count - 1u; }
+	else if (update.aggregate_timing) { first = update.aggregate_timing->first_sample_index; last = first + update.aggregate_timing->sample_count - 1u; }
+	block.bind(7, first); block.bind(8, last); block.bind(9, std::int32_t{1});
+	block.execute();
+	const bool inserted = database.changes() == 1;
+	auto find = database.prepare("SELECT id FROM measurement_blocks WHERE stream_cursor=?");
+	find.bind(1, stream_cursor); if (!find.step()) throw std::runtime_error("historian block missing");
+	const auto block_id = find.integer(0);
+	/* A retained persistent projection can be encountered again while a
+	 * volatile projection rebuilds. Its immutable stream cursor means the
+	 * existing values are already authoritative; avoid needless writes/WAL
+	 * growth on that idempotent replay path. */
+	if (inserted && update.fundamental) {
+		const auto &f = *update.fundamental;
+		auto value = database.prepare(R"SQL(
+INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence)
+VALUES(?,?,?,?,?)
+)SQL");
+		auto put = [&](MeterAttributeId id, const auto &reading) {
+			value.bind(1, block_id); value.bind(2, static_cast<std::int32_t>(id));
+			value.bind(3, reading.value); value.bind(4, static_cast<std::int32_t>(reading.quality));
+			value.bind(5, reading.source_sequence); value.execute(); value.reset();
+		};
+		put(MeterAttributeId::Frequency, f.frequency);
+		put(MeterAttributeId::VanRms, f.voltage_ln.phase_a);
+		put(MeterAttributeId::VbnRms, f.voltage_ln.phase_b);
+		put(MeterAttributeId::VcnRms, f.voltage_ln.phase_c);
+		put(MeterAttributeId::IaRms, f.current.phase_a);
+		put(MeterAttributeId::IbRms, f.current.phase_b);
+		put(MeterAttributeId::IcRms, f.current.phase_c);
+		put(MeterAttributeId::InRms, f.current.neutral);
+	}
+	transaction.commit();
+	impl_->acknowledged_cursor = std::max(impl_->acknowledged_cursor, stream_cursor);
+
+	/* Retention is enforced only after the block is safely committed.  The
+	 * stream spool remains the authoritative replay source, so pruning a
+	 * volatile/basic projection cannot lose the accepted producer record. */
+	const auto policy = impl_->manager.policy(dataset);
+	if (policy.retention.maximum_age) {
+		const auto cutoff = measured_at_ns -
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				*policy.retention.maximum_age).count();
+		auto remove = database.prepare(
+			"DELETE FROM measurement_blocks WHERE period=? AND measured_at_ns<?");
+		remove.bind(1, period_value(update.period));
+		remove.bind(2, cutoff);
+		remove.execute();
+	}
+	if (policy.retention.maximum_bytes) {
+		auto used = logical_period_bytes(database, update.period);
+		while (used > *policy.retention.maximum_bytes) {
+			auto oldest = database.prepare(R"SQL(
+SELECT b.id, 96 +
+ (SELECT COUNT(*) * 40 FROM measurement_values v WHERE v.block_id=b.id)
+FROM measurement_blocks b WHERE b.period=? ORDER BY measured_at_ns LIMIT 256
+)SQL");
+			oldest.bind(1, period_value(update.period));
+			std::vector<std::pair<std::int64_t, std::uint64_t>> ids;
+			while (oldest.step())
+				ids.emplace_back(oldest.integer(0),
+					static_cast<std::uint64_t>(oldest.integer(1)));
+			if (ids.empty()) break;
+			auto remove = database.prepare("DELETE FROM measurement_blocks WHERE id=?");
+			for (const auto &[id, bytes] : ids) {
+				remove.bind(1, id); remove.execute(); remove.reset();
+				used -= std::min(used, bytes);
+				if (used <= *policy.retention.maximum_bytes)
+					break;
+			}
+		}
+	}
+}
+
+std::vector<HistoryPoint> MeterHistoryStore::query(const HistoryQuery &query) const
+{
+	(void)dataset_for(query.period);
+	if (query.limit == 0 || query.limit > 50000)
+		throw std::invalid_argument("history query limit must be 1..50000");
+	if (query.start_nanoseconds > query.end_nanoseconds)
+		throw std::invalid_argument("history query start is after its end");
+	for (const auto attribute : query.attributes) {
+		if (!supported_attribute(attribute))
+			throw std::invalid_argument("unsupported history attribute");
+	}
+	std::scoped_lock lock(impl_->mutex);
+	auto &database = impl_->database(query.period);
+	std::string sql = R"SQL(
+SELECT b.measured_at_ns,v.source_sequence,v.attribute_id,v.signed_value,v.quality
+FROM measurement_blocks b JOIN measurement_values v ON v.block_id=b.id
+WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
+)SQL";
+	if (!query.attributes.empty()) {
+		sql += " AND v.attribute_id IN (";
+		for (std::size_t index = 0; index < query.attributes.size(); ++index)
+			sql += index == 0 ? "?" : ",?";
+		sql += ")";
+	}
+	sql += " ORDER BY b.measured_at_ns,v.attribute_id LIMIT ?";
+	auto statement = database.prepare(sql);
+	int parameter = 1;
+	statement.bind(parameter++, period_value(query.period));
+	statement.bind(parameter++, query.start_nanoseconds);
+	statement.bind(parameter++, query.end_nanoseconds);
+	for (const auto attribute : query.attributes)
+		statement.bind(parameter++, static_cast<std::int32_t>(attribute));
+	statement.bind(parameter, static_cast<std::int64_t>(query.limit));
+	std::vector<HistoryPoint> result;
+	while (statement.step()) {
+		const auto id = static_cast<MeterAttributeId>(statement.integer(2));
+		result.push_back({statement.integer(0), static_cast<std::uint64_t>(statement.integer(1)),
+			id, statement.integer(3), static_cast<MeasurementQuality>(statement.integer(4))});
+	}
+	return result;
+}
+
+HistorianStatus MeterHistoryStore::status() const
+{
+	std::scoped_lock lock(impl_->mutex);
+	HistorianStatus result; result.acknowledged_cursor = impl_->acknowledged_cursor;
+	result.storage_bytes = sqlite_family_size(impl_->persistent_path);
+	for (const auto &policy : impl_->manager.policies()) {
+		if (policy.dataset == mnc::meter_stream::DatabaseDataset::raw_record_spool)
+			continue;
+		const auto period = period_for(policy.dataset);
+		auto &database = impl_->database(period);
+		auto range = database.prepare(
+			"SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
+			"FROM measurement_blocks WHERE period=?");
+		range.bind(1, period_value(period)); (void)range.step();
+		HistorianStatus::DatasetStatus item;
+		item.dataset = policy.dataset; item.backend = policy.backend;
+		item.block_count = static_cast<std::uint64_t>(range.integer(0));
+		result.block_count += item.block_count;
+		if (item.block_count != 0) {
+			item.oldest_nanoseconds = range.integer(1);
+			item.newest_nanoseconds = range.integer(2);
+		}
+		item.storage_bytes = logical_period_bytes(database, period);
+		if (policy.backend == mnc::meter_stream::StorageBackend::memory)
+			result.storage_bytes += item.storage_bytes;
+		result.datasets.push_back(item);
+	}
+	return result;
+}
+
+std::vector<mnc::meter_stream::DatabaseStoragePolicy> MeterHistoryStore::policies() const
+{ return impl_->manager.policies(); }
+
+void MeterHistoryStore::prepare_policy_migration(
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
+{
+	validate_historian_policies(policies);
+	std::scoped_lock lock(impl_->mutex);
+	for (const auto &policy : policies) {
+		const auto current = impl_->manager.policy(policy.dataset);
+		if (current.backend == policy.backend ||
+		    policy.backend != mnc::meter_stream::StorageBackend::memory)
+			continue;
+		auto remove = impl_->memory.prepare(
+			"DELETE FROM measurement_blocks WHERE period=?");
+		remove.bind(1, period_value(period_for(policy.dataset)));
+		remove.execute();
+	}
+}
+
+void MeterHistoryStore::apply_policies(
+	std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies)
+{
+	validate_historian_policies(policies);
+	std::scoped_lock lock(impl_->mutex);
+	/* The service serializes this routing switch with live ingest, then
+	 * backfills the newly selected targets from the durable spool. */
+	impl_->manager.apply(std::move(policies));
+}
+
+void MeterHistoryStore::clear_datasets(
+	std::span<const mnc::meter_stream::DatabaseDataset> datasets,
+	std::uint64_t through_stream_cursor)
+{
+	std::set<mnc::meter_stream::DatabaseDataset> unique;
+	for (const auto dataset : datasets) {
+		(void)period_for(dataset);
+		if (!unique.insert(dataset).second)
+			throw std::invalid_argument("duplicate historian dataset clear request");
+	}
+	if (unique.empty())
+		throw std::invalid_argument("historian dataset clear request is empty");
+
+	std::scoped_lock lock(impl_->mutex);
+	{
+		Transaction transaction(impl_->memory);
+		for (const auto dataset : unique) {
+			auto remove = impl_->memory.prepare(
+				"DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period_for(dataset)));
+			remove.execute();
+		}
+		transaction.commit();
+	}
+	{
+		Transaction transaction(impl_->persistent);
+		for (const auto dataset : unique) {
+			auto remove = impl_->persistent.prepare(
+				"DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period_for(dataset)));
+			remove.execute();
+			write_clear_floor(impl_->persistent, dataset,
+				through_stream_cursor);
+		}
+		transaction.commit();
+	}
+	for (const auto dataset : unique)
+		impl_->clear_floors[dataset] = through_stream_cursor;
+	/* Reclaim the pages occupied by explicitly deleted history while the
+	 * historian is already in its serialized maintenance window. */
+	impl_->persistent.execute("VACUUM");
+	impl_->persistent.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+}
+
+void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
+{
+	const std::array datasets{
+		mnc::meter_stream::DatabaseDataset::basic,
+		mnc::meter_stream::DatabaseDataset::cycles_150_180,
+		mnc::meter_stream::DatabaseDataset::minutes_10,
+		mnc::meter_stream::DatabaseDataset::hours_2,
+	};
+	std::scoped_lock lock(impl_->mutex);
+
+	const auto replacement_path = std::filesystem::path(
+		impl_->persistent_path.string() + ".fresh");
+	remove_database_family(replacement_path);
+	{
+		Database replacement(replacement_path);
+		initialize(replacement, true);
+		Transaction transaction(replacement);
+		for (const auto dataset : datasets)
+			write_clear_floor(replacement, dataset, through_stream_cursor);
+		transaction.commit();
+		replacement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+	}
+
+	impl_->persistent.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+	impl_->persistent = Database(":memory:");
+	try {
+		/* Both databases were checkpointed and closed above. Remove only
+		 * their now-obsolete WAL/SHM files before atomically replacing the
+		 * main database; never delete sidecars after the new DB is live. */
+		remove_database_sidecars(impl_->persistent_path);
+		remove_database_sidecars(replacement_path);
+		std::filesystem::rename(replacement_path, impl_->persistent_path);
+	} catch (...) {
+		impl_->persistent = Database(impl_->persistent_path);
+		initialize(impl_->persistent, true);
+		remove_database_family(replacement_path);
+		throw;
+	}
+
+	impl_->persistent = Database(impl_->persistent_path);
+	initialize(impl_->persistent, true);
+	impl_->memory = Database(":memory:");
+	initialize(impl_->memory, false);
+	impl_->clear_floors.clear();
+	for (const auto dataset : datasets)
+		impl_->clear_floors[dataset] = through_stream_cursor;
+}
+
+} // namespace msap1::history

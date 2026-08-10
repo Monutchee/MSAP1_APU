@@ -237,6 +237,35 @@ private:
 	ConnectionLimits limits_;
 };
 
+/**
+ * Synchronous facade over one persistent correlation-aware RequestClient.
+ *
+ * Long-running services should prefer this class to BlockingClient: the
+ * latter intentionally creates a fresh Unix socket for a single request,
+ * while this facade owns an io_context thread and reuses one framed stream.
+ * The first request connects lazily, and the request after a transport
+ * failure reconnects. A request whose response is lost is never retried
+ * automatically because the server may already have committed its effect.
+ */
+class PersistentBlockingClient {
+public:
+	explicit PersistentBlockingClient(std::string path,
+		ConnectionLimits limits = {});
+	~PersistentBlockingClient();
+	PersistentBlockingClient(const PersistentBlockingClient &) = delete;
+	PersistentBlockingClient &operator=(const PersistentBlockingClient &) = delete;
+	PersistentBlockingClient(PersistentBlockingClient &&) noexcept;
+	PersistentBlockingClient &operator=(PersistentBlockingClient &&) noexcept;
+
+	Frame request(Frame request, int timeout_ms = 3000) const;
+	void close() noexcept;
+	[[nodiscard]] bool is_open() const noexcept;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
+};
+
 [[nodiscard]] std::vector<std::byte> encode_envelope(const Frame &frame);
 [[nodiscard]] Frame decode_envelope(std::span<const std::byte> header,
 				    std::vector<std::byte> payload,
