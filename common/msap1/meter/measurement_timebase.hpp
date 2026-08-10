@@ -72,6 +72,17 @@ class MeasurementTimebase {
 public:
 	static constexpr std::chrono::seconds default_staleness_threshold{30};
 
+	/**
+	 * How far BEHIND the newest sync point a sample index may sit and still
+	 * receive a UTC label. Records are consumed forward, so the only
+	 * legitimate backward distance is whatever was in flight when a sync
+	 * landed — far below this. Anything further is a corrupted index, not a
+	 * late record, and must not be labelled. Forward distance is
+	 * deliberately unbounded: Holdover legitimately runs arbitrarily far
+	 * ahead of the last sync.
+	 */
+	static constexpr std::uint64_t max_backward_extrapolation_seconds = 60;
+
 	explicit MeasurementTimebase(std::chrono::nanoseconds staleness_threshold =
 					     default_staleness_threshold);
 

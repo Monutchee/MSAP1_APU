@@ -53,6 +53,29 @@ MeasurementTimebase::utc_for_sample(std::uint64_t sample_index,
 	if (configuration_generation != latest_sync_->configuration_generation)
 		return std::nullopt;
 	/*
+	 * Refuse an absurd BACKWARD extrapolation. Records are consumed
+	 * forward, so a sample index can legitimately sit only slightly behind
+	 * the newest sync point — by whatever was in flight when that sync
+	 * landed. An index far behind it is not a late record, it is a
+	 * corrupted one, and extrapolating to it would mint a confident UTC
+	 * label hours in the past complete with the sync's small uncertainty
+	 * bound.
+	 *
+	 * The bound is deliberately asymmetric. Forward distance is NOT
+	 * limited: during Holdover, with no fresh sync arriving, records
+	 * legitimately run arbitrarily far ahead of the last sync point, and
+	 * quality() plus the uncertainty bound already convey that reduced
+	 * trust. Only the backward direction is physically impossible.
+	 */
+	if (sample_index < latest_sync_->sample_counter) {
+		const auto behind = latest_sync_->sample_counter - sample_index;
+		const auto limit =
+			static_cast<std::uint64_t>(latest_sync_->sample_rate_hz) *
+			max_backward_extrapolation_seconds;
+		if (behind > limit)
+			return std::nullopt;
+	}
+	/*
 	 * Linear extrapolation from the latest sync point at the rate that
 	 * sync point was latched under. The signed delta is exact for any
 	 * realistic distance between a record and its sync point; splitting

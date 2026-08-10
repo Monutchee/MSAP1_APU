@@ -136,6 +136,25 @@ bool MeterRecordIngestor::track_basic_continuity(
 		    forward_distance < (std::uint32_t{1} << 31u)) {
 			sequence_gaps_ += forward_distance;
 			sequence_continuous = false;
+			/*
+			 * Lost basic records were previously counted and never
+			 * logged, so the only symptom was a sequence_gaps total
+			 * with no timestamp and no cause. Log it like every
+			 * other continuity fault. A gap here also appears
+			 * whenever the PREVIOUS record was rejected by the
+			 * decoder — that record never became the baseline — so
+			 * this is what makes a rejection traceable instead of
+			 * silently shifting the count.
+			 */
+			log_message(dma_log, mnc::logging::Priority::warning,
+				"meter record sequence gap: expected " +
+					std::to_string(expected) + ", got " +
+					std::to_string(received),
+				"meter_sequence_gap",
+				{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
+				 {"MNC_SEQUENCE", std::to_string(received)},
+				 {"MNC_MISSING_RECORDS",
+				  std::to_string(forward_distance)}});
 		} else if (forward_distance != 0u) {
 			/*
 			 * A stale/out-of-order record is invalid, not billions

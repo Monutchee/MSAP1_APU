@@ -33,7 +33,12 @@ protected:
 
 private:
 	void consume();
-	void ingest(const mnc::meter_stream::MeterStreamRecord &record);
+	/**
+	 * Project one spooled record. Returns false when the record itself is
+	 * undecodable and was skipped; throws only on systemic failures (a
+	 * database or storage error) so those are still retried.
+	 */
+	bool ingest(const mnc::meter_stream::MeterStreamRecord &record);
 	void backfill();
 	[[nodiscard]] bool rebuilds_volatile_period(
 		const mnc::meter_stream::MeterStreamRecord &record) const;
@@ -56,6 +61,10 @@ private:
 	std::atomic<bool> backfilling_{false};
 	std::atomic<bool> backfill_incomplete_{false};
 	std::atomic<std::uint64_t> oldest_available_stream_cursor_{0};
+	/* Spooled records skipped because they could not be decoded. The spool
+	 * is durable, so such a record persists across restarts: it must cost
+	 * one record, never the whole projection. */
+	std::atomic<std::uint64_t> undecodable_records_{0};
 	std::mutex migration_mutex_;
 	std::vector<std::weak_ptr<mnc::ipc::FramedConnection>> subscribers_;
 };
