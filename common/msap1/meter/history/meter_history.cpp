@@ -281,10 +281,15 @@ VALUES(?,?,?,?,?,?,?,?,?)
 	else if (update.aggregate_timing) { first = update.aggregate_timing->first_sample_index; last = first + update.aggregate_timing->sample_count - 1u; }
 	block.bind(7, first); block.bind(8, last); block.bind(9, std::int32_t{1});
 	block.execute();
+	const bool inserted = database.changes() == 1;
 	auto find = database.prepare("SELECT id FROM measurement_blocks WHERE stream_cursor=?");
 	find.bind(1, stream_cursor); if (!find.step()) throw std::runtime_error("historian block missing");
 	const auto block_id = find.integer(0);
-	if (update.fundamental) {
+	/* A retained persistent projection can be encountered again while a
+	 * volatile projection rebuilds. Its immutable stream cursor means the
+	 * existing values are already authoritative; avoid needless writes/WAL
+	 * growth on that idempotent replay path. */
+	if (inserted && update.fundamental) {
 		const auto &f = *update.fundamental;
 		auto value = database.prepare(R"SQL(
 INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence)

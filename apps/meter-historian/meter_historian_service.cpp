@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string_view>
@@ -100,18 +101,18 @@ void MeterHistorianService::on_start()
 	stream_.register_consumer("historian");
 
 	/* Volatile projections disappear with the process and are rebuilt from
-	 * an independent spool cursor before live consumption begins. Persistent
-	 * rows use stream_cursor as an idempotency key, so replay is also safe
-	 * when policies change from memory to disk. */
-	if (std::ranges::any_of(store_->policies(), [](const auto &policy) {
+	 * an independent spool cursor.  This deliberately runs in the consumer
+	 * thread after the IPC server is ready: a large retained spool must never
+	 * make systemd kill the historian before it can create its socket. */
+	backfilling_ = std::ranges::any_of(store_->policies(), [](const auto &policy) {
 		return policy.dataset !=
 			mnc::meter_stream::DatabaseDataset::raw_record_spool &&
 			policy.backend == mnc::meter_stream::StorageBackend::memory;
-	})) {
+	});
+	if (backfilling_) {
 		(void)logger().write(mnc::logging::Priority::notice,
-			"rebuilding volatile historian datasets from the durable spool",
+			"volatile historian rebuild will continue after service readiness",
 			"volatile_history_rebuild_started");
-		backfill();
 	}
 
 	server_.start(
@@ -138,6 +139,20 @@ void MeterHistorianService::on_start()
 
 void MeterHistorianService::consume()
 {
+	if (backfilling_) {
+		try {
+			backfill();
+			(void)logger().write(mnc::logging::Priority::notice,
+				"volatile historian rebuild completed", "volatile_history_rebuild_completed");
+		} catch (const std::exception &error) {
+			consumer_healthy_ = false;
+			(void)logger().write(mnc::logging::Priority::error,
+				std::string("volatile historian rebuild failed: ") + error.what(),
+				"volatile_history_rebuild_failed");
+		}
+		backfilling_ = false;
+	}
+
 	while (!stopping_) {
 		try {
 			auto records = stream_.read_after("historian", 256);
@@ -154,9 +169,12 @@ void MeterHistorianService::consume()
 			std::scoped_lock migration(migration_mutex_);
 			for (const auto &record : records) {
 				ingest(record);
-				stream_.acknowledge("historian", record.cursor);
 				post_event(ipc::Event::record_committed, record.cursor);
 			}
+			/* The per-record database commit is the durability boundary. A single
+			 * page acknowledgement avoids one IPC round trip per record while
+			 * retaining at-least-once replay if the process stops before this call. */
+			stream_.acknowledge("historian", records.back().cursor);
 			consumer_healthy_ = true;
 		} catch (const std::exception &error) {
 			consumer_healthy_ = false;
@@ -166,6 +184,27 @@ void MeterHistorianService::consume()
 			std::this_thread::sleep_for(std::chrono::seconds(1));
 		}
 	}
+}
+
+bool MeterHistorianService::rebuilds_volatile_period(
+	const mnc::meter_stream::MeterStreamRecord &record) const
+{
+	using Dataset = mnc::meter_stream::DatabaseDataset;
+	const auto dataset = [&]() -> std::optional<Dataset> {
+		switch (static_cast<MeasurementPeriod>(record.measurement_period)) {
+		case MeasurementPeriod::Basic: return Dataset::basic;
+		case MeasurementPeriod::Cycles150_180: return Dataset::cycles_150_180;
+		case MeasurementPeriod::Min10: return Dataset::minutes_10;
+		case MeasurementPeriod::Hour2: return Dataset::hours_2;
+		}
+		return std::nullopt;
+	}();
+	if (!dataset)
+		return false;
+	return std::ranges::any_of(store_->policies(), [dataset](const auto &policy) {
+		return policy.dataset == *dataset &&
+			policy.backend == mnc::meter_stream::StorageBackend::memory;
+	});
 }
 
 void MeterHistorianService::ingest(
@@ -199,13 +238,21 @@ void MeterHistorianService::backfill()
 
 	try {
 		for (;;) {
+			if (stopping_)
+				break;
 			auto records = stream_.read_after(consumer, 512);
 			if (records.empty())
 				break;
 			for (const auto &record : records) {
-				ingest(record);
-				stream_.acknowledge(consumer, record.cursor);
+				/* Persistent projections already retain their committed rows.
+				 * Replaying only the selected volatile datasets avoids rewriting
+				 * every persistent record during each process restart. */
+				if (rebuilds_volatile_period(record))
+					ingest(record);
 			}
+			/* One acknowledgement per fetched page is safe because every row
+			 * has committed before advancing the temporary replay cursor. */
+			stream_.acknowledge(consumer, records.back().cursor);
 		}
 		stream_.unregister_consumer(consumer);
 	} catch (...) {
@@ -242,6 +289,8 @@ mnc::ServiceHealth MeterHistorianService::health() const
 		return {false, "historian IPC worker failed"};
 	if (!consumer_healthy_)
 		return {false, "historian stream consumer is retrying"};
+	if (backfilling_)
+		return {true, "historian ready; volatile history rebuild in progress"};
 	return {true, "historian ready"};
 }
 

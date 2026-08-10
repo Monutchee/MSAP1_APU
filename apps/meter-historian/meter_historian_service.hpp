@@ -35,6 +35,8 @@ private:
 	void consume();
 	void ingest(const mnc::meter_stream::MeterStreamRecord &record);
 	void backfill();
+	[[nodiscard]] bool rebuilds_volatile_period(
+		const mnc::meter_stream::MeterStreamRecord &record) const;
 	void handle(mnc::ipc::UnixStreamServer::Connection connection,
 		mnc::ipc::Frame frame);
 	void subscribe(const mnc::ipc::UnixStreamServer::Connection &connection);
@@ -51,6 +53,7 @@ private:
 	std::atomic<bool> failed_{false};
 	std::atomic<bool> consumer_healthy_{true};
 	std::atomic<bool> migrating_{false};
+	std::atomic<bool> backfilling_{false};
 	std::atomic<bool> backfill_incomplete_{false};
 	std::atomic<std::uint64_t> oldest_available_stream_cursor_{0};
 	std::mutex migration_mutex_;
