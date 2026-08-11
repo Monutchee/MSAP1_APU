@@ -163,11 +163,79 @@ Bounded by construction, because the viewport never exceeds the screen.
 **Do not do this before step 1.** Auto-loading over undecimated data is the
 version that hangs the browser, and it will look fine in a ten-minute test.
 
-### 4. Binary transport, only if profiled
+### 4. Response shape, then BEVE — in that order, and last
 
-`HistoryPoint` is an object per point carrying an attribute string — on the
-order of 100 B of JS heap against 8 B in a `Float64Array`, and JSON parsing is
-often the largest single cost. Worth measuring before assuming.
+Glaze is already vendored (`libs/glaze`) and BEVE is already in production use
+for service IPC — `glz::write_beve`/`glz::read_beve` in
+`common/msap1/acquisition/ipc/acquisition_ipc.hpp`. The HTTP API is JSON. So
+the backend cost of emitting BEVE is close to zero: same structs, different
+call. That makes it tempting to reach for first. It should be last, and the
+reason is worth writing down.
+
+A JSON `HistoryPoint` is about **140 bytes**, of which roughly **92 (66 %) is
+repeated metadata**: about 74 bytes of field names plus an 18-byte
+`"voltage.ln.a.rms"` on every single point. The waste is *structural*, not
+syntactic, so changing only the encoding barely helps:
+
+| Encoding | Bytes/point | vs JSON |
+| --- | --- | --- |
+| JSON, row of objects (today) | ~140 | 1× |
+| **BEVE, same shape** | ~115 | **1.2×** |
+| BEVE, structs-as-arrays (keys dropped) | ~52 | 2.7× |
+| Columnar JSON (`times[]`, `values[]`) | ~40 | 3.5× |
+| **Columnar BEVE** (typed arrays) | **~17** | **8.2×** |
+
+`write_beve` as a drop-in is worth about **18 %**, because BEVE is
+self-describing and still writes a struct's keys.
+
+The result to remember: **columnar JSON beats row-oriented BEVE.** Shape
+dominates encoding. Restructuring to per-attribute series — `{ attribute,
+times: i64[], values: i64[], qualities: u8[] }` — moves the attribute string
+from once-per-point to once-per-series and removes key repetition entirely,
+with no new client dependency.
+
+Columnar BEVE then adds what JSON cannot: typed arrays that `memcpy` into
+`BigInt64Array`/`Float64Array` with **no per-element parsing**. For 100 k
+points that is two typed arrays instead of 100 k objects and 100 k strings,
+and the parse/GC saving is frequently larger than the byte saving.
+
+#### Why it is still not the fix
+
+For 30 days of `basic` with three attributes (38.9 M points):
+
+| | Payload |
+| --- | --- |
+| JSON rows, as today | ~5.4 GB |
+| Columnar BEVE | ~660 MB |
+| **M4-decimated to 1900 px, JSON rows** | **~3.2 MB** |
+| M4-decimated, columnar BEVE | ~388 KB |
+
+Decimation is ~1700×; encoding is ~8×. One is asymptotic, the other a
+constant factor. And once decimated, plain JSON is already only ~3.2 MB, so
+BEVE's marginal value for history is small until **step 3** makes pan and zoom
+into rapid re-queries — at which point 388 KB against 3.2 MB is the difference
+between a snappy drag and a sluggish one. That is when it earns its keep.
+
+It buys nothing for the waveform path, which is already binary with
+typed-array parsing (`MSAP1_WEB/src/waveform/waveformFile.ts`).
+
+#### Costs to weigh before adopting it
+
+- **The client decoder is the risk.** Glaze is C++; the browser needs a JS/TS
+  BEVE reader and the maturity of available implementations needs verifying.
+  A general one may not be necessary: for a *fixed* columnar schema, a
+  hand-rolled decoder reading a small header plus three typed arrays is on the
+  order of 100 lines, with no dependency and no version risk.
+- **DevTools stops being useful.** Reading raw JSON in the Network tab is how
+  the empty-response and timezone questions were actually settled during the
+  investigation that produced this note. Losing that on diagnostic endpoints
+  is a real cost. Content negotiation on `Accept` — JSON by default, BEVE on
+  request — keeps both, and is cheap because Glaze emits either from the same
+  struct.
+- **One correctness bonus.** TypeScript `number` is a double, so 53-bit safe
+  integers, and nanosecond timestamps (~1.79 × 10^18) already exceed that:
+  they currently quantise to ~256 ns in the browser. Harmless for charting but
+  real. A BEVE `i64` read into a `BigInt64Array` fixes it properly.
 
 ## Baseline already in place
 
@@ -198,6 +266,12 @@ sampling ever become preferable to bespoke bucketing.
 - Do aggregate-quality semantics need to distinguish "no data in this
   column" from "data present but invalid"? The chart already relies on nulls
   to break the line.
+- If BEVE is adopted, is it negotiated per request or does the endpoint
+  simply change? Negotiation preserves DevTools on the developer pages and
+  costs little with Glaze, but leaves two response paths to keep in step.
+- Should the columnar shape replace `HistoryPoint` or sit beside it? Replacing
+  it touches every consumer; adding a second representation risks the two
+  drifting apart.
 
 ## References
 
