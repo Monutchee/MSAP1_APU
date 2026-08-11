@@ -36,8 +36,23 @@ struct DatasetStorageSettings {
  * documents acquire this section without losing unrelated configuration.
  */
 struct DatabaseSettings {
+	/*
+	 * The spool is a handoff buffer, not an archive: every consumer projects
+	 * its records within milliseconds under normal operation, and the durable
+	 * measurement record lives in the historian projections. One hour is
+	 * therefore ample, and it bounds two costs that a 24 h window made
+	 * severe. It caps the volatile rebuild a restart has to replay, and it
+	 * caps how much of this per-record, fsync-per-commit write load is
+	 * retained on eMMC.
+	 *
+	 * Shortening it cannot lose data: prune() deletes only
+	 * `cursor <= MIN(acknowledged_cursor) AND ingested_at_ns < cutoff`, so
+	 * records no consumer has acknowledged are never removed however old they
+	 * are. A lagging historian holds the prune point back and the spool simply
+	 * grows past an hour until it catches up.
+	 */
 	DatasetStorageSettings spool{
-		.backend = "persistent", .maximum_age_seconds = 24u * 60u * 60u};
+		.backend = "persistent", .maximum_age_seconds = 60u * 60u};
 	DatasetStorageSettings basic{
 		.backend = "memory", .maximum_age_seconds = 24u * 60u * 60u,
 		.maximum_bytes = 512ull * 1024ull * 1024ull};
