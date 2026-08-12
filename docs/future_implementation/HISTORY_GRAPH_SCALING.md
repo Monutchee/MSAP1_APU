@@ -9,7 +9,7 @@ The relevant code is:
 ```text
 common/msap1/meter/history/meter_history.cpp   MeterHistoryStore::query()
 common/msap1/meter/history/meter_history.hpp   HistoryQuery, HistoryPoint
-apps/web-backend/api/history_routes.cpp        maximum_points = 50000
+apps/MeterCore/Services/web-backend/api/history_routes.cpp        maximum_points = 50000
 MSAP1_WEB/src/history/HistoryPage.tsx          the chart and its paging
 MSAP1_WEB/src/api.ts                           HistoryQuery/HistoryResponse
 ```

@@ -294,7 +294,7 @@ if(BUILD_TESTING)
         glaze::glaze
     )
     target_include_directories(meter_aggregate_route_test PRIVATE
-        ${PROJECT_SOURCE_DIR}/apps/web-backend/api)
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
     target_compile_options(meter_aggregate_route_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME meter_aggregate_route_test
@@ -359,9 +359,9 @@ if(BUILD_TESTING)
     # source into the test rather than opening real devices.
     add_executable(acquisition_architecture_test
         ${PROJECT_SOURCE_DIR}/tests/acquisition_architecture_test.cpp
-        ${PROJECT_SOURCE_DIR}/apps/acquisition/pipeline/record_ingestor.cpp)
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/acquisition/pipeline/record_ingestor.cpp)
     target_include_directories(acquisition_architecture_test PRIVATE
-        ${PROJECT_SOURCE_DIR}/apps/acquisition)
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/acquisition)
     target_link_libraries(acquisition_architecture_test PRIVATE
         msap1::acquisition
         mnc::logging)

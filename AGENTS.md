@@ -13,7 +13,13 @@
   larger libraries split into feature subdirectories (for example
   `common/msap1/acquisition/{ipc,rpu,dma}/`). The include root is `common/`,
   so includes name the library: `#include "msap1/meter/meter_record.hpp"`.
-  Each executable has its own directory under `apps/`.
+  Each executable has its own directory under `apps/`, grouped by delivery
+  group: `apps/MeterCore/Services/<service>/` holds the metering daemons, and a
+  future protocol-gateway group gets its own `apps/<Group>/` beside it rather
+  than being folded into MeterCore. Tools that serve every group stay at the
+  top level (`apps/mnc-cli/`). Each group directory owns the
+  `add_subdirectory` list for its own members, so the repository root only
+  names groups.
 - Reusable Linux logging interfaces live under `common/mnc/logging` and use
   the `mnc::logging` namespace. Keep product-neutral journal writer/query
   mechanics there and MSAP1 component, event, and access policy in this
@@ -23,7 +29,8 @@
   keep MSAP1 wire-protocol handling in this repository.
 - `libs/webengine` and `libs/glaze` are pinned submodules. Keep WebEngine
   platform-neutral; MSAP1 routes, runtime paths, authentication policy, and
-  systemd integration belong under `apps/web-backend` or `meta-msap1`.
+  systemd integration belong under `apps/MeterCore/Services/web-backend` or
+  `meta-msap1`.
 
 ## Architecture contract
 
