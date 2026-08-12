@@ -36,7 +36,7 @@
 namespace msap1::meter {
 
 /* Same monotonic clock the acquisition daemon uses for freshness tracking
- * (apps/acquisition/support/time.hpp). */
+ * (apps/MeterCore/Services/acquisition/support/time.hpp). */
 using MonotonicTime = std::chrono::steady_clock::time_point;
 
 /** One correlation of the PL sample counter with CLOCK_REALTIME. */
