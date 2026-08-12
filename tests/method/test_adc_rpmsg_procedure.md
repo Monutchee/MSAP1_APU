@@ -18,7 +18,7 @@ systemctl status msap1-fpga-acquisition --no-pager -l
 ```
 
 Expect AXI DMA and `msap1_meter_dma` to probe, `/dev/msap1-meter` to belong to
-`msap1-data`, and no Linux driver to bind AD7771 SPI/capture/config registers.
+`mnc-data`, and no Linux driver to bind AD7771 SPI/capture/config registers.
 No fixed reserved-memory region is required; buffers come from DMA/CMA.
 
 ## 2. Configuration and baseline health
