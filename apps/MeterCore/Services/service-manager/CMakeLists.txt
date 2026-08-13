@@ -8,6 +8,7 @@ target_include_directories(msap1-service-manager PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(msap1-service-manager PRIVATE
     msap1::service-protocol
+	msap1::settings
     mnc::ipc
     mnc::logging
     mnc::service

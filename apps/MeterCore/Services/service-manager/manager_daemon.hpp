@@ -12,6 +12,7 @@
 #include "mnc/service/service_manager.hpp"
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <atomic>
 #include <exception>
@@ -45,11 +46,15 @@ protected:
 	[[nodiscard]] mnc::ServiceHealth health() const override;
 
 private:
+	void schedule_settings_policy();
+	void reconcile_settings_policy();
+
 	mnc::ServiceManager manager_;
 	RequestRouter router_;
 	boost::asio::io_context context_;
 	mnc::ipc::UnixStreamServer server_;
 	HealthAuditor auditor_;
+	boost::asio::steady_timer settings_policy_timer_;
 	std::thread worker_;
 	std::exception_ptr failure_;
 	std::atomic<bool> failed_{false};

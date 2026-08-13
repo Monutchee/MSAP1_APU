@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "metering": {
     "sample_rate_hz": 128000,
     "nominal_frequency_hz": 60,
@@ -69,5 +69,27 @@
 			"unit_id": 1
 		},
 		"rtu": []
+  },
+  "mqtt": {
+    "enabled": false,
+    "connection": {
+      "transport": "mqtt",
+      "broker_host": "",
+      "broker_port": 1883,
+      "websocket_path": "/mqtt",
+      "client_id": "msap1",
+      "username": "",
+      "keep_alive_seconds": 30,
+      "connect_timeout_seconds": 10,
+      "reconnect_min_seconds": 1,
+      "reconnect_max_seconds": 60
+    },
+    "tls": {
+      "use_system_ca": true,
+      "verify_peer": true,
+      "verify_hostname": true,
+      "use_client_certificate": false
+    },
+    "publications": []
   }
 }

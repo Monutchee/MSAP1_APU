@@ -19,7 +19,7 @@ namespace msap1::service_manager::daemon {
  * @brief Watches the managed units and maintains the daemon's degraded flag.
  *
  * Every five seconds the auditor asks the ServiceManager for each managed
- * unit's status. A unit that is not active, or that systemd has given up
+ * unit's status. A required unit that is not active, or any unit that systemd has given up
  * restarting, marks the product degraded — the flag feeds the daemon's own
  * mnc::Service health, which is what the platform watchdog observes. A
  * unit that exhausted its restart policy is additionally logged at

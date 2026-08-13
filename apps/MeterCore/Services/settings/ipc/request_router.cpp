@@ -2,8 +2,11 @@
 
 #include "ipc/access_policy.hpp"
 
+#include <glaze/glaze.hpp>
+
 #include <algorithm>
 #include <exception>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -47,6 +50,12 @@ void RequestRouter::handle(mnc::ipc::UnixStreamServer::Connection connection,
 			response.status = Status::recovery_mode;
 			response.message = "settings recovery mode: " +
 					   handler_.recovery_reason();
+		} else if (mqtt_runtime_only(command) &&
+			   !may_resolve_mqtt_runtime(
+				   connection->peer_credentials())) {
+			response.status = Status::permission_denied;
+			response.message =
+				"MQTT runtime credentials require the MQTT service identity";
 		} else if (mutation_command(command) &&
 			   !access.operator_access) {
 			response.status = Status::permission_denied;
@@ -124,6 +133,52 @@ void RequestRouter::dispatch(
 		subscribers_.push_back(connection);
 		response.message = "subscribed";
 		break;
+	case Command::set_named_secret:
+		handler_.set_secret(request.name, request.json);
+		event = make_event("SettingsSecretChanged");
+		break;
+	case Command::clear_named_secret:
+		handler_.clear_secret(request.name);
+		event = make_event("SettingsSecretChanged");
+		break;
+	case Command::get_named_secret_status:
+		response.message = handler_.has_secret(request.name)
+			? "present" : "absent";
+		break;
+	case Command::resolve_mqtt_credentials:
+		response.json = glz::write_json(std::map<std::string, std::string>{
+			{"password", handler_.runtime_secret("mqtt.password")},
+			{"private_key_passphrase", handler_.runtime_secret(
+				"mqtt.private_key_passphrase")}}).value_or("{}");
+		break;
+	case Command::put_asset:
+		handler_.put_asset(request.name, request.json);
+		event = make_event("SettingsAssetChanged");
+		break;
+	case Command::delete_asset:
+		handler_.delete_asset(request.name);
+		event = make_event("SettingsAssetChanged");
+		break;
+	case Command::get_asset_status:
+		response.message = handler_.has_asset(request.name)
+			? "present" : "absent";
+		break;
+	case Command::download_asset:
+		if (request.name == "client-key") {
+			response.status = Status::permission_denied;
+			response.message = "private keys are upload-only";
+		} else {
+			response.json = handler_.read_asset(request.name);
+		}
+		break;
+	case Command::resolve_mqtt_assets: {
+		std::map<std::string, std::string> assets;
+		for (const auto name : {"ca", "client-certificate", "client-key"})
+			if (handler_.has_asset(name))
+				assets.emplace(name, handler_.read_asset(name));
+		response.json = glz::write_json(assets).value_or("{}");
+		break;
+	}
 	}
 }
 

@@ -168,7 +168,8 @@ void ServiceManager::start_registered()
 	std::scoped_lock lock(mutex_);
 	std::vector<std::string> started;
 	for (const auto &service : services_)
-		start_one(service, started);
+		if (service.auto_start)
+			start_one(service, started);
 }
 
 std::vector<ManagedServiceStatus> ServiceManager::statuses()
@@ -176,15 +177,21 @@ std::vector<ManagedServiceStatus> ServiceManager::statuses()
 	std::scoped_lock lock(mutex_);
 	std::vector<ManagedServiceStatus> result;
 	result.reserve(services_.size());
-	for (const auto &service : services_)
-		result.push_back(controller_->inspect(service));
+	for (const auto &service : services_) {
+		auto status = controller_->inspect(service);
+		status.required_active = service.auto_start;
+		result.push_back(std::move(status));
+	}
 	return result;
 }
 
 ManagedServiceStatus ServiceManager::status(std::string_view name)
 {
 	std::scoped_lock lock(mutex_);
-	return controller_->inspect(find(name));
+	const auto service = find(name);
+	auto status = controller_->inspect(service);
+	status.required_active = service.auto_start;
+	return status;
 }
 
 ManagedServiceStatus ServiceManager::control(std::string_view name,
@@ -193,7 +200,9 @@ ManagedServiceStatus ServiceManager::control(std::string_view name,
 	std::scoped_lock lock(mutex_);
 	const auto service = find(name);
 	controller_->control(service, action);
-	return controller_->inspect(service);
+	auto status = controller_->inspect(service);
+	status.required_active = service.auto_start;
+	return status;
 }
 
 } // namespace mnc

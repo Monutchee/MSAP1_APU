@@ -18,6 +18,7 @@ namespace msap1::service_manager::daemon {
  *
  *   settings  ->  meter-stream  ->  fpga-acquisition  ->  web-backend
  *                         \----->  meter-historian  ----/
+ *                         \----->  mqtt-publisher (settings-controlled)
  *
  * (Acquisition needs the settings authority to hand it the active
  * configuration; the web backend needs acquisition for live data.)
@@ -38,6 +39,9 @@ inline void register_product_units(mnc::ServiceManager &manager)
 	manager.register_service({"modbus",
 		"msap1-modbus-server.service",
 		{"settings", "fpga-acquisition"}});
+	manager.register_service({"mqtt-publisher",
+		"msap1-mqtt-publisher.service",
+		{"settings", "fpga-acquisition"}, false});
 	manager.register_service({"web-backend",
 		"msap1-web-backend.service",
 		{"fpga-acquisition", "meter-historian"}});

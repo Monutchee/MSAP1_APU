@@ -55,6 +55,50 @@ target_compile_definitions(mnc_ipc PUBLIC BOOST_ERROR_CODE_HEADER_ONLY=1)
 target_compile_options(mnc_ipc PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(mnc_ipc PUBLIC Threads::Threads)
 
+# The MQTT scheduler depends only on this narrow interface. The Paho adapter
+# is a separate optional target so host-side unit tests can inject a fake even
+# when the embedded Paho development package is not installed.
+add_library(mnc_mqtt STATIC
+    mnc/mqtt/mqtt_client.cpp
+)
+add_library(mnc::mqtt ALIAS mnc_mqtt)
+target_include_directories(mnc_mqtt PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_mqtt PUBLIC cxx_std_23)
+target_compile_definitions(mnc_mqtt PUBLIC BOOST_ERROR_CODE_HEADER_ONLY=1)
+target_compile_options(mnc_mqtt PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_mqtt PUBLIC Threads::Threads)
+
+find_path(PAHO_MQTT_CPP_INCLUDE_DIR mqtt/async_client.h)
+find_library(PAHO_MQTT_CPP_LIBRARY NAMES paho-mqttpp3)
+find_library(PAHO_MQTT_C_SSL_LIBRARY NAMES paho-mqtt3as)
+if(PAHO_MQTT_CPP_INCLUDE_DIR AND PAHO_MQTT_CPP_LIBRARY AND
+   PAHO_MQTT_C_SSL_LIBRARY)
+    add_library(mnc_paho_mqtt STATIC
+        mnc/mqtt/paho_mqtt_client.cpp
+    )
+    add_library(mnc::paho-mqtt ALIAS mnc_paho_mqtt)
+    target_include_directories(mnc_paho_mqtt PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+        $<INSTALL_INTERFACE:include>
+        ${PAHO_MQTT_CPP_INCLUDE_DIR}
+    )
+    target_compile_features(mnc_paho_mqtt PUBLIC cxx_std_23)
+    target_compile_definitions(mnc_paho_mqtt PUBLIC
+        BOOST_ERROR_CODE_HEADER_ONLY=1)
+    target_compile_options(mnc_paho_mqtt PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(mnc_paho_mqtt PUBLIC
+        mnc::mqtt
+        ${PAHO_MQTT_CPP_LIBRARY}
+        ${PAHO_MQTT_C_SSL_LIBRARY}
+        Threads::Threads)
+else()
+    message(STATUS
+        "Paho MQTT C++ not found; MQTT service is omitted from this host build")
+endif()
+
 # Transport-independent Modbus protocol handling plus Boost.Asio TCP/RTU
 # adapters. Product register addresses deliberately live outside this target.
 add_library(mnc_modbus STATIC
@@ -195,8 +239,10 @@ target_link_libraries(msap1_settings PUBLIC
     mnc::ipc
     msap1::meter
 )
-target_link_libraries(msap1_settings PRIVATE
+target_link_libraries(msap1_settings PUBLIC
     glaze::glaze
+)
+target_link_libraries(msap1_settings PRIVATE
     OpenSSL::Crypto
 )
 
@@ -240,6 +286,20 @@ target_link_libraries(msap1_modbus PUBLIC
 	mnc::meter-data-provider
 )
 target_link_libraries(msap1_modbus PRIVATE glaze::glaze)
+
+msap1_library(msap1_mqtt msap1::mqtt
+    msap1/mqtt/meter_publication_catalog.cpp
+    msap1/mqtt/meter_snapshot_payload_encoder.cpp
+    msap1/mqtt/meter_publication_scheduler.cpp
+    msap1/mqtt/mqtt_ipc.cpp
+)
+target_link_libraries(msap1_mqtt PUBLIC
+    mnc::mqtt
+    mnc::meter-data-provider
+    mnc::ipc
+    msap1::meter
+)
+target_link_libraries(msap1_mqtt PRIVATE glaze::glaze)
 
 msap1_library(msap1_system msap1::system
     msap1/system/soc_temperature.cpp
@@ -431,4 +491,12 @@ if(BUILD_TESTING)
         PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     target_compile_options(settings_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME settings_test COMMAND settings_test)
+
+    add_executable(mqtt_test
+        ${PROJECT_SOURCE_DIR}/tests/mqtt_test.cpp)
+    target_link_libraries(mqtt_test PRIVATE
+        msap1::mqtt
+        glaze::glaze)
+    target_compile_options(mqtt_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mqtt_test COMMAND mqtt_test)
 endif()

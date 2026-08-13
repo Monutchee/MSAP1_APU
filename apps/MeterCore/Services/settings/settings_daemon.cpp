@@ -19,6 +19,9 @@ SettingsDaemon::SettingsDaemon()
 		   msap1::settings::SettingsApplyCoordinator{
 			   [](const auto &settings) {
 				   apply_to_runtime(settings);
+			   },
+			   [](const auto &settings) {
+				   apply_to_mqtt_service(settings);
 			   }}),
 	  router_(handler_),
 	  server_(context_.get_executor(),

@@ -39,6 +39,10 @@ void HealthAuditor::run_once()
 		if (status.active_state == "active" &&
 		    !status.permanently_failed)
 			continue;
+		/* A settings-controlled service is healthy while intentionally
+		 * disabled. An exhausted restart policy is still a real failure. */
+		if (!status.required_active && !status.permanently_failed)
+			continue;
 		degraded = true;
 		if (status.permanently_failed) {
 			const std::array fields{

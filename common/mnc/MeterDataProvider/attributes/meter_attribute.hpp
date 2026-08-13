@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <compare>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace mnc::meter {
@@ -101,5 +102,12 @@ struct MeterAttributeDescriptor {
 };
 
 [[nodiscard]] MeterAttributeDescriptor describe(MeterAttributeKey attribute);
+
+/** Resolve a stable external catalog key to its logical attribute. */
+[[nodiscard]] std::optional<MeterAttributeKey>
+find_attribute(std::string_view key) noexcept;
+
+/** Enumerate the stable scalar catalog in declaration order. */
+[[nodiscard]] std::span<const MeterAttributeKey> defined_attributes() noexcept;
 
 } // namespace mnc::meter
