@@ -134,6 +134,61 @@ IPC call. A future latest-snapshot subscription/cache should remove valid-read
 round trips without weakening the one-coherent-snapshot rule; spawning a thread
 per Modbus client is not the intended solution.
 
+## MSAP1 register contract schema
+
+The product ABI is defined by one human-maintained `constexpr` schema under
+`common/msap1/modbus/register_map`. It has three deliberately small layers:
+
+```text
+explicit stable RegisterBlock bases
+        + dense/indexed generators
+                    ↓
+          sorted constexpr map
+                    ↓
+       compile-time contract checks
+                    ↓
+        binary runtime address lookup
+                    ↓
+      runtime / tests / map exporter
+```
+
+Absolute addresses are assigned at stable group boundaries. Repeated values
+inside a group advance automatically by their declared datatype width. This
+avoids thousands of hand-written absolute entries without creating a global
+auto-packer where inserting one value could renumber unrelated registers.
+
+Measurement-backed definitions directly identify a `MeasurementPeriod` and
+`MeterAttributeKey`, including an optional index for future harmonic families.
+Only metadata and provenance fields use the small Modbus-specific
+`SpecialRegister` enum. The complete flat map is validated at compile time for
+block overlap, field overlap, datatype width, block escape, 16-bit address
+overflow, sort order, and accidental duplicate logical sources.
+
+Lookup uses binary search over the sorted generated map. Undefined addresses
+inside reserved regions remain Illegal Data Address until a future contract
+version actually maps them.
+
+### Reserved address blocks
+
+The existing version-1 addresses remain unchanged. Major future groups have
+stable reserved regions so additions do not shift published fields:
+
+| Function | Range | Purpose |
+|---:|---:|---|
+| FC03 | `0x0000–0x00FF` | Map metadata and future holding metadata |
+| FC04 | `0x0000–0x001F` | Published Basic measurements and status |
+| FC04 | `0x0020–0x0FFF` | Reserved Basic-period growth |
+| FC04 | `0x1000–0x1FFF` | 150/180-cycle measurements |
+| FC04 | `0x2000–0x2FFF` | 10-minute measurements |
+| FC04 | `0x3000–0x3FFF` | 2-hour measurements |
+| FC04 | `0x4000–0x4FFF` | Voltage harmonics |
+| FC04 | `0x5000–0x5FFF` | Current harmonics |
+| FC04 | `0x6000–0x6FFF` | Future power-quality measurements |
+
+The current `Basic` period represents the grid-synchronized 10/12-cycle
+product. Reserved regions are an ABI allocation policy, not an indication that
+their future measurements are implemented today.
+
 ## MSAP1 register contract, version 1
 
 All addresses below are zero-based protocol addresses. Some Modbus tools show
@@ -170,10 +225,22 @@ and unavailable.
 | 1 | 1 | uint16 | Word-order marker | `0x1234` |
 | 2 | 1 | uint16 | Published measurement-attribute count | 8 |
 
-The descriptor table is a small `constexpr` array. A compile-time check
-rejects overlapping addresses and widths inconsistent with their data type.
-This keeps the external contract reviewable and allocation-free without a
-runtime JSON/YAML map or per-register `std::function` objects.
+The table above is produced from the compiled schema; runtime JSON/YAML and
+per-register `std::function` objects are intentionally not used.
+
+### Register map export
+
+The development utility consumes the exact definitions used by the server:
+
+```sh
+modbus-map-dump --format text
+modbus-map-dump --format csv
+modbus-map-dump --format markdown
+```
+
+Markdown output also includes every reserved block. Customer documentation can
+therefore be generated from the same source used by runtime and tests instead
+of maintaining a parallel address table.
 
 ## Encoding
 
@@ -232,12 +299,15 @@ untrusted networks.
 To add a new published measurement:
 
 1. Add or reuse a typed meter attribute in the meter catalog.
-2. Add a `MeterField` and static register descriptor without overlapping the
-   existing map.
-3. Request the attribute in the one coherent snapshot.
-4. Encode it with the explicit helper and define its quality behavior.
+2. Select or reserve a stable `RegisterBlock` in
+   `msap1_register_schema.hpp`; never shift an existing block.
+3. Add the attribute to a dense group or indexed-family generator inside that
+   block, then include the group in the flattened map.
+4. Define its scalar encoding and quality behavior if the existing datatype
+   handling is insufficient.
 5. Increment the register-map version if the external contract changes.
-6. Extend map-boundary, word-order, quality, and snapshot-coherence tests.
+6. Extend generator, boundary, word-order, quality, export, and
+   snapshot-coherence tests.
 
 To add a function code, extend the common `FunctionCode` and
 `RequestHandler`; keep TCP/RTU limited to framing. If a function has a new RTU
@@ -251,7 +321,11 @@ Host tests cover FC03/04/06/10, exceptions, register boundaries, scalar
 encodings, known CRC vectors, RTU fragmentation/coalescing and independent
 assemblers, fragmented TCP frames, persistent requests, concurrent clients,
 transaction IDs, coherent snapshot acquisition, unavailable-as-NaN, and the
-quality bitmap.
+quality bitmap. Schema fixtures additionally prove that invalid overlapping
+blocks/fields, block escape, incorrect width, address overflow, and duplicate
+logical sources are rejected at compile time. Runtime tests exercise generated
+dense/indexed addressing, binary lookup, partial reads, projected snapshot
+requests, and exact exporter coverage.
 
 Target validation should additionally use an independent client such as
 `pymodbus`, `modpoll`, or QModMaster. Verify both zero-based and displayed

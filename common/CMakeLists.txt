@@ -233,6 +233,7 @@ target_link_libraries(msap1_acquisition PRIVATE
 # TCP/RTU framing remains wholly in the product-neutral mnc::modbus target.
 msap1_library(msap1_modbus msap1::modbus
 	msap1/modbus/modbus_register_map.cpp
+	msap1/modbus/register_map/register_map_export.cpp
 )
 target_link_libraries(msap1_modbus PUBLIC
 	mnc::modbus

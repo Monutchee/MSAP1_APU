@@ -2,45 +2,19 @@
 
 #include "mnc/MeterDataProvider/snapshot/meter_snapshot_provider.hpp"
 #include "mnc/modbus/modbus.hpp"
+#include "msap1/modbus/register_map/msap1_register_schema.hpp"
 
-#include <array>
 #include <cstdint>
-#include <optional>
 #include <span>
-#include <vector>
 
 namespace msap1::modbus {
 
-/** External MSAP1 Modbus map contract version. */
-inline constexpr std::uint16_t register_map_version = 1;
-
-enum class MeterField : std::uint8_t {
-	frequency,
-	voltage_ln_a,
-	voltage_ln_b,
-	voltage_ln_c,
-	current_a,
-	current_b,
-	current_c,
-	current_neutral,
-	quality_mask,
-	period,
-	source_sequence,
-	configuration_generation,
-	map_version,
-	word_order_marker,
-	attribute_count,
-};
-
-enum class DataType : std::uint8_t { uint16, uint32, float32 };
-
-struct RegisterDefinition {
-	mnc::modbus::FunctionCode function;
-	std::uint16_t address;
-	std::uint16_t words;
-	DataType type;
-	MeterField field;
-};
+using schema::DataType;
+using schema::RegisterBlock;
+using schema::RegisterDefinition;
+using schema::RegisterSource;
+using schema::SpecialRegister;
+inline constexpr auto register_map_version = schema::register_map_version;
 
 /**
  * Product register map backed by one coherent Basic meter snapshot per read.
@@ -65,7 +39,19 @@ public:
 		std::uint16_t address,
 		std::span<const std::uint16_t> values) override;
 
-	[[nodiscard]] static std::span<const RegisterDefinition> definitions();
+	/** The same generated map consumed by runtime, tests, and documentation. */
+	[[nodiscard]] static constexpr std::span<const RegisterDefinition>
+	definitions() noexcept
+	{
+		return schema::register_map;
+	}
+
+	/** Stable reserved blocks, including currently unused future regions. */
+	[[nodiscard]] static constexpr std::span<const RegisterBlock>
+	blocks() noexcept
+	{
+		return schema::register_blocks;
+	}
 
 private:
 	mnc::meter::MeterSnapshotProvider &provider_;
