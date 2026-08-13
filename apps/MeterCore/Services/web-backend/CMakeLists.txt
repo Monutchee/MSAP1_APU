@@ -20,7 +20,7 @@ target_link_libraries(msap1-web-backend PRIVATE
     msap1::acquisition
     msap1::meter
     msap1::settings
-    msap1::meter-stream
+    msap1::meter-data-provider-stream
     msap1::system
     mnc::logging
     mnc::service

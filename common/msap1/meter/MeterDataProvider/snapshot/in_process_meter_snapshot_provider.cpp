@@ -1,4 +1,4 @@
-#include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.hpp"
 
 #include <chrono>
 #include <stdexcept>
@@ -110,7 +110,7 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 } // namespace
 
 std::vector<mnc::meter::MeterCapabilities>
-Msap1MeterDataProvider::capabilities() const
+InProcessMeterSnapshotProvider::capabilities() const
 {
 	return {
 		{MeasurementPeriod::Basic, supported(MeasurementPeriod::Basic)},
@@ -119,7 +119,7 @@ Msap1MeterDataProvider::capabilities() const
 	};
 }
 
-mnc::meter::MeterSnapshot Msap1MeterDataProvider::project(
+mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 	const msap1::MeterPeriodView &view,
 	const mnc::meter::MeterSnapshotRequest &request)
 {
@@ -198,7 +198,8 @@ mnc::meter::MeterSnapshot Msap1MeterDataProvider::project(
 	return result;
 }
 
-std::optional<mnc::meter::MeterSnapshot> Msap1MeterDataProvider::latest(
+std::optional<mnc::meter::MeterSnapshot>
+InProcessMeterSnapshotProvider::latest(
 	const mnc::meter::MeterSnapshotRequest &request) const
 {
 	const auto view = data_.latest(request.period);
@@ -207,7 +208,8 @@ std::optional<mnc::meter::MeterSnapshot> Msap1MeterDataProvider::latest(
 	return project(*view, request);
 }
 
-mnc::meter::LatestSubscription Msap1MeterDataProvider::subscribe_latest(
+mnc::meter::LatestSubscription
+InProcessMeterSnapshotProvider::subscribe_latest(
 	const mnc::meter::MeterSnapshotRequest &request, Callback callback)
 {
 	if (!callback)

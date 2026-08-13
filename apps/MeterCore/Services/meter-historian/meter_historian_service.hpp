@@ -4,7 +4,7 @@
 #include "mnc/service/service.hpp"
 #include "msap1/meter/history/historian_ipc.hpp"
 #include "msap1/meter/history/meter_history.hpp"
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
 #include <boost/asio/io_context.hpp>
 
@@ -49,7 +49,7 @@ private:
 	void publish_event(ipc::Event event, std::uint64_t cursor);
 
 	boost::asio::io_context context_;
-	msap1::meter_stream::MeterStreamClient stream_;
+	msap1::meter_stream::MeterRecordStreamClient stream_;
 	std::unique_ptr<MeterHistoryStore> store_;
 	mnc::ipc::UnixStreamServer server_;
 	std::thread io_worker_;

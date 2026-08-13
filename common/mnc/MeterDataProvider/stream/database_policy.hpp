@@ -13,6 +13,8 @@
 
 namespace mnc::meter_stream {
 
+/** Storage and retention policy shared by durable meter-stream components. */
+
 enum class StorageBackend : std::uint8_t { memory = 0, persistent = 1 };
 
 enum class DatabaseDataset : std::uint8_t {

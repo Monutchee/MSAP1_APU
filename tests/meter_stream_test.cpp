@@ -1,4 +1,4 @@
-#include "mnc/MeterDataStreamer/meter_stream.hpp"
+#include "mnc/MeterDataProvider/stream/meter_stream.hpp"
 #include "msap1/meter/history/meter_history.hpp"
 
 #include <chrono>

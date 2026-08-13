@@ -1,9 +1,9 @@
 #pragma once
 
-#include "mnc/MeterDataStreamer/meter_stream.hpp"
+#include "mnc/MeterDataProvider/stream/durable_meter_spool.hpp"
 #include "mnc/ipc/ipc.hpp"
 #include "mnc/service/service.hpp"
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
 #include <boost/asio/io_context.hpp>
 

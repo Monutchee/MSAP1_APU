@@ -16,7 +16,7 @@ opens DMA, RPMsg, SQLite, or waveform devices.
 ```mermaid
 flowchart LR
     PL["PL meter records"] --> ACQ["msap1-fpga-acquisition"]
-    ACQ --> PROVIDER["AcquisitionMeterDataProvider"]
+    ACQ --> PROVIDER["AcquisitionMeterSnapshotProvider"]
     PROVIDER --> MAP["MSAP1 RegisterBank adapter"]
     MAP --> HANDLER["mnc::modbus::RequestHandler"]
     HANDLER --> TCP["ModbusTcpServer"]
@@ -97,13 +97,22 @@ clients. The configured client limit bounds resource use.
 
 `ModbusRtuServer` creates one asynchronous `boost::asio::serial_port` owner
 per enabled device. Each port has independent receive assembly, CRC checking,
-unit filtering, and error recovery. One serial-device failure is reported but
-does not stop other ports or TCP.
+unit filtering, and error recovery. Configured ports are opened atomically:
+failure to open any candidate port rejects that runtime configuration so the
+service can restore its previous working transports.
+
+After startup, a read/write failure closes only the affected RTU port and
+cancels its pending timer and response queue; the remaining configured ports
+continue serving requests. Response queues are bounded, so a stalled serial
+peer cannot cause unbounded memory growth.
 
 RTU CRC16 is calculated with `boost::crc_optimal` using the Modbus polynomial
 and reflection rules. Supported requests are parsed by their function-specific
-length. A 3.5-character silence timer discards incomplete data before the next
-frame; above 19,200 baud it uses the Modbus fixed 1.75 ms interval.
+length. Unsupported functions remain buffered because their request length is
+not generally knowable; the 3.5-character silent interval then finalizes the
+whole request before CRC validation and the Illegal Function response. Above
+19,200 baud the timer uses the Modbus fixed 1.75 ms interval. Known supported
+requests retain immediate length-based dispatch for compatibility and latency.
 
 ## Coherent data access
 
@@ -114,9 +123,71 @@ immutable snapshot. It never fetches one measurement per register. Therefore
 a read spanning frequency, voltage, and current cannot mix acquisition
 sequences.
 
-The cross-process `AcquisitionMeterDataProvider` is a typed adapter over the
+The cross-process `AcquisitionMeterSnapshotProvider` is a typed adapter over the
 existing acquisition client. Modbus code does not construct IPC frames or
 depend on acquisition command IDs.
+
+The adapter is currently synchronous and the service intentionally owns one
+Asio worker. A delayed acquisition reply can therefore pause all Modbus
+transports temporarily. Invalid register ranges are prevalidated before this
+IPC call. A future latest-snapshot subscription/cache should remove valid-read
+round trips without weakening the one-coherent-snapshot rule; spawning a thread
+per Modbus client is not the intended solution.
+
+## MSAP1 register contract schema
+
+The product ABI is defined by one human-maintained `constexpr` schema under
+`common/msap1/modbus/register_map`. It has three deliberately small layers:
+
+```text
+explicit stable RegisterBlock bases
+        + dense/indexed generators
+                    ↓
+          sorted constexpr map
+                    ↓
+       compile-time contract checks
+                    ↓
+        binary runtime address lookup
+                    ↓
+      runtime / tests / map exporter
+```
+
+Absolute addresses are assigned at stable group boundaries. Repeated values
+inside a group advance automatically by their declared datatype width. This
+avoids thousands of hand-written absolute entries without creating a global
+auto-packer where inserting one value could renumber unrelated registers.
+
+Measurement-backed definitions directly identify a `MeasurementPeriod` and
+`MeterAttributeKey`, including an optional index for future harmonic families.
+Only metadata and provenance fields use the small Modbus-specific
+`SpecialRegister` enum. The complete flat map is validated at compile time for
+block overlap, field overlap, datatype width, block escape, 16-bit address
+overflow, sort order, and accidental duplicate logical sources.
+
+Lookup uses binary search over the sorted generated map. Undefined addresses
+inside reserved regions remain Illegal Data Address until a future contract
+version actually maps them.
+
+### Reserved address blocks
+
+The existing version-1 addresses remain unchanged. Major future groups have
+stable reserved regions so additions do not shift published fields:
+
+| Function | Range | Purpose |
+|---:|---:|---|
+| FC03 | `0x0000–0x00FF` | Map metadata and future holding metadata |
+| FC04 | `0x0000–0x001F` | Published Basic measurements and status |
+| FC04 | `0x0020–0x0FFF` | Reserved Basic-period growth |
+| FC04 | `0x1000–0x1FFF` | 150/180-cycle measurements |
+| FC04 | `0x2000–0x2FFF` | 10-minute measurements |
+| FC04 | `0x3000–0x3FFF` | 2-hour measurements |
+| FC04 | `0x4000–0x4FFF` | Voltage harmonics |
+| FC04 | `0x5000–0x5FFF` | Current harmonics |
+| FC04 | `0x6000–0x6FFF` | Future power-quality measurements |
+
+The current `Basic` period represents the grid-synchronized 10/12-cycle
+product. Reserved regions are an ABI allocation policy, not an indication that
+their future measurements are implemented today.
 
 ## MSAP1 register contract, version 1
 
@@ -154,10 +225,44 @@ and unavailable.
 | 1 | 1 | uint16 | Word-order marker | `0x1234` |
 | 2 | 1 | uint16 | Published measurement-attribute count | 8 |
 
-The descriptor table is a small `constexpr` array. A compile-time check
-rejects overlapping addresses and widths inconsistent with their data type.
-This keeps the external contract reviewable and allocation-free without a
-runtime JSON/YAML map or per-register `std::function` objects.
+The table above is produced from the compiled schema; runtime JSON/YAML and
+per-register `std::function` objects are intentionally not used.
+
+### Register map export
+
+The development utility consumes the exact definitions used by the server:
+
+```sh
+modbus-map-dump --format text
+modbus-map-dump --format csv
+modbus-map-dump --format markdown
+modbus-map-dump --format json
+```
+
+Markdown output also includes every reserved block. Customer documentation can
+therefore be generated from the same source used by runtime and tests instead
+of maintaining a parallel address table.
+
+JSON output uses the versioned schema `mnc.modbus-register-map.v1`. It contains
+both mapped logical registers and reserved address blocks. Addresses are
+zero-based Modbus protocol addresses; numeric values are accompanied by hex
+display strings. Function codes, source kinds, measurement attributes, indexed
+attributes, measurement periods, data types, word counts, aliases, and the
+high-word-first convention are represented as separate fields so documentation
+generators do not need to parse human-readable labels.
+
+For example, a Python documentation generator can load the map directly:
+
+```python
+import json
+import subprocess
+
+document = json.loads(subprocess.check_output(
+    ["modbus-map-dump", "--format", "json"], text=True))
+
+for register in document["registers"]:
+    print(register["function_code"], register["address"], register["source"])
+```
 
 ## Encoding
 
@@ -216,12 +321,15 @@ untrusted networks.
 To add a new published measurement:
 
 1. Add or reuse a typed meter attribute in the meter catalog.
-2. Add a `MeterField` and static register descriptor without overlapping the
-   existing map.
-3. Request the attribute in the one coherent snapshot.
-4. Encode it with the explicit helper and define its quality behavior.
+2. Select or reserve a stable `RegisterBlock` in
+   `msap1_register_schema.hpp`; never shift an existing block.
+3. Add the attribute to a dense group or indexed-family generator inside that
+   block, then include the group in the flattened map.
+4. Define its scalar encoding and quality behavior if the existing datatype
+   handling is insufficient.
 5. Increment the register-map version if the external contract changes.
-6. Extend map-boundary, word-order, quality, and snapshot-coherence tests.
+6. Extend generator, boundary, word-order, quality, export, and
+   snapshot-coherence tests.
 
 To add a function code, extend the common `FunctionCode` and
 `RequestHandler`; keep TCP/RTU limited to framing. If a function has a new RTU
@@ -235,7 +343,11 @@ Host tests cover FC03/04/06/10, exceptions, register boundaries, scalar
 encodings, known CRC vectors, RTU fragmentation/coalescing and independent
 assemblers, fragmented TCP frames, persistent requests, concurrent clients,
 transaction IDs, coherent snapshot acquisition, unavailable-as-NaN, and the
-quality bitmap.
+quality bitmap. Schema fixtures additionally prove that invalid overlapping
+blocks/fields, block escape, incorrect width, address overflow, and duplicate
+logical sources are rejected at compile time. Runtime tests exercise generated
+dense/indexed addressing, binary lookup, partial reads, projected snapshot
+requests, and exact exporter coverage.
 
 Target validation should additionally use an independent client such as
 `pymodbus`, `modpoll`, or QModMaster. Verify both zero-based and displayed

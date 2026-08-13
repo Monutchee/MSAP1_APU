@@ -1,23 +1,22 @@
-# Future MeterDataProvider layout cleanup
+# MeterDataProvider layout
 
 ## Status
 
-This is a deferred source-layout cleanup. Do not perform it as part of the
-initial Modbus implementation.
+This document records the implemented meter-data access boundaries.
 
-The product-neutral meter access APIs should eventually share one library
-root:
+The product-neutral meter access APIs share one library root:
 
 ```text
 common/mnc/MeterDataProvider/
+├── meter_data_provider.hpp
 ├── attributes/
 ├── snapshot/
 └── stream/
 ```
 
 The existing `attributes/` and `snapshot/` directories remain in place.
-Product-neutral files currently under `common/mnc/MeterDataStreamer/` should
-move into `MeterDataProvider/stream/` when this cleanup is scheduled.
+The durable stream interfaces and implementation live beside the snapshot API
+under `MeterDataProvider/stream/`.
 
 ## Motivation
 
@@ -33,7 +32,7 @@ Keeping both beneath `MeterDataProvider` makes this relationship visible
 without combining their semantics or allowing Modbus to depend on the durable
 database path.
 
-## Proposed layout
+## Implemented layout
 
 ```text
 common/mnc/MeterDataProvider/
@@ -46,10 +45,13 @@ common/mnc/MeterDataProvider/
 │   └── meter_snapshot_provider.hpp
 └── stream/
     ├── database_policy.hpp
+    ├── meter_stream_record.hpp
+    ├── meter_stream_status.hpp
     ├── meter_record_publisher.hpp
     ├── meter_stream_consumer.hpp
     ├── durable_meter_spool.hpp
-    └── durable_meter_spool.cpp
+    ├── durable_meter_spool.cpp
+    └── meter_stream.hpp
 ```
 
 MSAP1-specific IPC adapters remain outside the product-neutral library:
@@ -57,7 +59,8 @@ MSAP1-specific IPC adapters remain outside the product-neutral library:
 ```text
 common/msap1/meter/MeterDataProvider/
 ├── snapshot/
-│   └── acquisition_meter_data_provider.*
+│   ├── in_process_meter_snapshot_provider.*
+│   └── acquisition_meter_snapshot_provider.*
 └── stream/
     └── meter_stream_ipc.*
 ```
@@ -75,31 +78,39 @@ flowchart LR
     DS --> HC["Historian consumer"]
 ```
 
-## Migration steps
+## Public roles
 
-1. Split the declarations in `meter_stream.hpp` into focused headers under
-   `MeterDataProvider/stream/`.
-2. Move the product-neutral stream implementation and database policy without
-   changing public class names or behavior.
-3. Update include paths and the `mnc::meter-data-streamer` CMake target. Keep a
-   temporary forwarding header if downstream repositories require a staged
-   migration.
-4. Move the MSAP1 stream IPC adapter beneath the corresponding MSAP1 provider
-   hierarchy; keep its protocol and socket path unchanged.
-5. Update documentation and dependency checks.
-6. Remove the old `MeterDataStreamer` directory only after all includes and
-   tests use the new paths.
+`MeterDataProvider` is a consumer-facing facade with two explicit accessors:
+
+```cpp
+provider.snapshot_provider(); // latest state; intermediate updates may vanish
+provider.stream_consumer();   // ordered records with explicit acknowledgement
+```
+
+`MeterDataProviderView` combines independently implemented providers by
+non-owning reference. The `View` suffix makes that lifetime contract visible.
+It is a dependency-injection convenience at composition roots, not a reason
+to pass both capabilities to every subsystem.
+
+Record publication is deliberately a third, separate role:
+
+```cpp
+class MeterRecordPublisher;
+```
+
+Acquisition receives that narrow write-side interface. It is not exposed by
+the consumer facade, so a Modbus, Web, CLI, or historian reader cannot inject
+records.
 
 ## Compatibility requirements
 
-- Do not change the `MeterSnapshotProvider`, `MeterRecordPublisher`, or
-  `MeterStreamConsumer` behavior.
+- `MeterSnapshotProvider`, `MeterRecordPublisher`, and `MeterStreamConsumer`
+  retain separate behavior and dependencies.
 - Do not change meter-stream IPC, cursor acknowledgement, database schema,
   retention policy, or systemd service behavior.
 - Modbus must continue to use only `MeterSnapshotProvider`; it must not read
   the durable spool or historian database.
 - Acquisition must still durably publish a validated record before updating
   the lossy latest-state view.
-- Complete the cleanup as a dedicated refactor with build, unit-test, target,
-  and include-dependency verification.
-
+- Verify the component with build, unit-test, target, and include-dependency
+  checks whenever either delivery path changes.

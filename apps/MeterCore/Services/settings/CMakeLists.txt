@@ -9,7 +9,7 @@ target_include_directories(msap1-settings PRIVATE
 target_link_libraries(msap1-settings PRIVATE
     msap1::settings
     msap1::acquisition
-    msap1::meter-stream
+    msap1::meter-data-provider-stream
     mnc::logging
     mnc::service
 )

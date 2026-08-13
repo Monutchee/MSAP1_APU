@@ -6,9 +6,13 @@
 namespace msap1::meter {
 
 /** Product adapter that projects decoded MSAP1 values onto the reusable API. */
-class Msap1MeterDataProvider final : public mnc::meter::MeterSnapshotProvider {
+class InProcessMeterSnapshotProvider final
+	: public mnc::meter::MeterSnapshotProvider {
 public:
-	explicit Msap1MeterDataProvider(msap1::MeterData &data) : data_(data) {}
+	explicit InProcessMeterSnapshotProvider(msap1::MeterData &data)
+		: data_(data)
+	{
+	}
 
 	[[nodiscard]] std::vector<mnc::meter::MeterCapabilities>
 	capabilities() const override;

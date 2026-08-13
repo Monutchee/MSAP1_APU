@@ -28,18 +28,19 @@ target_compile_features(mnc_sqlite PUBLIC cxx_std_23)
 target_compile_options(mnc_sqlite PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(mnc_sqlite PUBLIC ${SQLITE3_LIBRARY})
 
-add_library(mnc_meter_data_streamer STATIC
-    mnc/MeterDataStreamer/meter_stream.cpp
+add_library(mnc_meter_data_provider_stream STATIC
+    mnc/MeterDataProvider/stream/durable_meter_spool.cpp
 )
-add_library(mnc::meter-data-streamer ALIAS mnc_meter_data_streamer)
-target_include_directories(mnc_meter_data_streamer PUBLIC
+add_library(mnc::meter-data-provider-stream ALIAS
+    mnc_meter_data_provider_stream)
+target_include_directories(mnc_meter_data_provider_stream PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(mnc_meter_data_streamer PUBLIC cxx_std_23)
-target_compile_options(mnc_meter_data_streamer PRIVATE
+target_compile_features(mnc_meter_data_provider_stream PUBLIC cxx_std_23)
+target_compile_options(mnc_meter_data_provider_stream PRIVATE
     -Wall -Wextra -Wpedantic)
-target_link_libraries(mnc_meter_data_streamer PUBLIC mnc::sqlite)
+target_link_libraries(mnc_meter_data_provider_stream PUBLIC mnc::sqlite)
 
 add_library(mnc_ipc STATIC
     mnc/ipc/ipc.cpp
@@ -57,7 +58,11 @@ target_link_libraries(mnc_ipc PUBLIC Threads::Threads)
 # Transport-independent Modbus protocol handling plus Boost.Asio TCP/RTU
 # adapters. Product register addresses deliberately live outside this target.
 add_library(mnc_modbus STATIC
-    mnc/modbus/modbus.cpp
+    mnc/modbus/encoding.cpp
+    mnc/modbus/request_handler.cpp
+    mnc/modbus/rtu_server.cpp
+    mnc/modbus/server.cpp
+    mnc/modbus/tcp_server.cpp
 )
 add_library(mnc::modbus ALIAS mnc_modbus)
 target_include_directories(mnc_modbus PUBLIC
@@ -145,7 +150,7 @@ target_compile_options(mnc_meter_data_provider PRIVATE
 # dependency on IPC, WebEngine, persistence, or command-line presentation.
 msap1_library(msap1_meter msap1::meter
     msap1/meter/meter_data.cpp
-    msap1/meter/MeterDataProvider/msap1_meter_data_provider.cpp
+    msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.cpp
     msap1/meter/meter_config.cpp
     msap1/meter/meter_health.cpp
     msap1/meter/measurement_timebase.cpp
@@ -157,14 +162,15 @@ target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
 )
 
-msap1_library(msap1_meter_stream msap1::meter-stream
-    msap1/meter/stream/meter_stream_ipc.cpp
+msap1_library(msap1_meter_data_provider_stream
+    msap1::meter-data-provider-stream
+    msap1/meter/MeterDataProvider/stream/meter_stream_ipc.cpp
     msap1/meter/history/meter_history.cpp
     msap1/meter/history/historian_ipc.cpp
 )
-target_link_libraries(msap1_meter_stream PUBLIC
+target_link_libraries(msap1_meter_data_provider_stream PUBLIC
     msap1::meter
-    mnc::meter-data-streamer
+    mnc::meter-data-provider-stream
     mnc::ipc
 )
 
@@ -206,7 +212,7 @@ msap1_library(msap1_waveform msap1::waveform
 # meaning.
 msap1_library(msap1_acquisition msap1::acquisition
 	msap1/acquisition/ipc/acquisition_ipc.cpp
-	msap1/meter/MeterDataProvider/acquisition_meter_data_provider.cpp
+	msap1/meter/MeterDataProvider/snapshot/acquisition_meter_snapshot_provider.cpp
     msap1/acquisition/dma/meter_dma_reader.cpp
     msap1/acquisition/rpu/rpu_controller.cpp
     msap1/acquisition/rpu/protocol.cpp
@@ -227,11 +233,13 @@ target_link_libraries(msap1_acquisition PRIVATE
 # TCP/RTU framing remains wholly in the product-neutral mnc::modbus target.
 msap1_library(msap1_modbus msap1::modbus
 	msap1/modbus/modbus_register_map.cpp
+	msap1/modbus/register_map/register_map_export.cpp
 )
 target_link_libraries(msap1_modbus PUBLIC
 	mnc::modbus
-	msap1::acquisition
+	mnc::meter-data-provider
 )
+target_link_libraries(msap1_modbus PRIVATE glaze::glaze)
 
 msap1_library(msap1_system msap1::system
     msap1/system/soc_temperature.cpp
@@ -348,7 +356,8 @@ if(BUILD_TESTING)
     add_executable(meter_stream_test
         ${PROJECT_SOURCE_DIR}/tests/meter_stream_test.cpp)
     target_link_libraries(meter_stream_test PRIVATE
-        msap1::meter-stream mnc::meter-data-streamer)
+        msap1::meter-data-provider-stream
+        mnc::meter-data-provider-stream)
     target_compile_options(meter_stream_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME meter_stream_test COMMAND meter_stream_test)

@@ -1,12 +1,112 @@
 #include "msap1/modbus/modbus_register_map.hpp"
+#include "msap1/modbus/register_map/register_map_export.hpp"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
+
+namespace schema_test {
+
+using mnc::meter::MeasurementPeriod;
+using mnc::meter::MeterAttributeId;
+using mnc::meter::MeterAttributeKey;
+using mnc::modbus::FunctionCode;
+using namespace msap1::modbus::schema;
+
+constexpr auto input = FunctionCode::read_input_registers;
+constexpr RegisterBlock dense_block{input, 0x0100, 0x0020, "test.dense"};
+constexpr auto dense = make_attribute_block(
+	dense_block, MeasurementPeriod::Basic, DataType::float32,
+	std::array{
+		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::VbnRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::VcnRms, std::nullopt},
+	});
+static_assert(dense[0].address == 0x0100 && dense[1].address == 0x0102 &&
+	dense[2].address == 0x0104,
+	"dense register groups must advance by datatype width");
+
+constexpr RegisterBlock indexed_block{input, 0x4000, 0x0020, "test.indexed"};
+constexpr auto indexed = make_indexed_block<1, 3>(indexed_block,
+	MeasurementPeriod::Basic, MeterAttributeId::VanRms, DataType::float32);
+static_assert(indexed[0].address == 0x4000 && indexed[2].address == 0x4004 &&
+	std::get<MeasurementSource>(indexed[0].source).attribute.index == 1 &&
+	std::get<MeasurementSource>(indexed[2].source).attribute.index == 3,
+	"indexed register groups must preserve address and logical indexes");
+
+static_assert(register_width(DataType::uint16) == 1);
+static_assert(register_width(DataType::uint32) == 2);
+static_assert(register_width(DataType::int32) == 2);
+static_assert(register_width(DataType::float32) == 2);
+static_assert(register_width(DataType::uint64) == 4);
+
+constexpr std::array overlapping_blocks{
+	RegisterBlock{input, 0x1000, 0x1000, "test.first"},
+	RegisterBlock{input, 0x1800, 0x1000, "test.second"},
+};
+static_assert(!validate_blocks(overlapping_blocks),
+	"overlapping reserved blocks must be rejected");
+
+constexpr std::array one_block{dense_block};
+constexpr std::array overlapping_entries{
+	RegisterDefinition{input, 0x0100, 2, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VanRms, std::nullopt}}},
+	RegisterDefinition{input, 0x0101, 2, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VbnRms, std::nullopt}}},
+};
+static_assert(!validate_register_map(one_block, overlapping_entries),
+	"overlapping logical fields must be rejected");
+
+constexpr RegisterBlock undersized_block{input, 0x0100, 0x0002,
+	"test.undersized"};
+constexpr auto escaped_entries = make_attribute_block(undersized_block,
+	MeasurementPeriod::Basic, DataType::float32,
+	std::array{
+		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
+		MeterAttributeKey{MeterAttributeId::VbnRms, std::nullopt},
+	});
+static_assert(!validate_register_map(std::array{undersized_block},
+	escaped_entries), "entries escaping their reserved block must be rejected");
+
+constexpr RegisterBlock final_register{input, 0xffff, 1, "test.last"};
+constexpr std::array overflowing_entry{
+	RegisterDefinition{input, 0xffff, 2, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VanRms, std::nullopt}}},
+};
+static_assert(!validate_register_map(std::array{final_register},
+	overflowing_entry), "16-bit Modbus address overflow must be rejected");
+
+constexpr std::array wrong_width{
+	RegisterDefinition{input, 0x0100, 1, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VanRms, std::nullopt}}},
+};
+static_assert(!validate_register_map(one_block, wrong_width),
+	"definitions must match their datatype width");
+
+constexpr std::array duplicate_source{
+	RegisterDefinition{input, 0x0100, 2, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VanRms, std::nullopt}}},
+	RegisterDefinition{input, 0x0104, 2, DataType::float32,
+		MeasurementSource{MeasurementPeriod::Basic,
+			{MeterAttributeId::VanRms, std::nullopt}}},
+};
+static_assert(!validate_register_map(one_block, duplicate_source),
+	"accidental duplicate logical sources must be rejected");
+
+} // namespace schema_test
 
 void require(bool condition, const char *message)
 {
@@ -25,6 +125,7 @@ public:
 		const mnc::meter::MeterSnapshotRequest &request) const override
 	{
 		++reads;
+		last_request = request;
 		mnc::meter::MeterSnapshot snapshot;
 		snapshot.period = request.period;
 		snapshot.sequence = 0x12345678;
@@ -60,6 +161,7 @@ public:
 	}
 
 	mutable std::uint32_t reads = 0;
+	mutable mnc::meter::MeterSnapshotRequest last_request;
 };
 
 float decode_float(std::uint16_t high, std::uint16_t low)
@@ -106,9 +208,158 @@ void metadata_and_boundaries()
 	require(registers.read(mnc::modbus::FunctionCode::read_input_registers, 21, 2).exception ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"register boundary was not rejected");
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers,
+		0x20, 1).exception ==
+		mnc::modbus::ExceptionCode::illegal_data_address,
+		"undefined address inside a reserved block was not rejected");
+	require(provider.reads == 0,
+		"invalid address queried the snapshot provider before validation");
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers,
+		0xffff, 2).exception ==
+		mnc::modbus::ExceptionCode::illegal_data_address,
+		"overflowing register range did not return Illegal Data Address");
+	require(provider.reads == 0,
+		"overflowing address queried the snapshot provider");
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers,
+		0, 0).exception == mnc::modbus::ExceptionCode::illegal_data_value,
+		"zero register count did not return Illegal Data Value");
+	require(provider.reads == 0,
+		"zero-count request queried the snapshot provider");
 	require(registers.write_single(0, 1) ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"read-only initial map accepted a write");
+}
+
+void projected_snapshot_requests()
+{
+	SnapshotProvider provider;
+	msap1::modbus::Msap1RegisterBank registers(provider);
+	const auto frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 2);
+	require(frequency.exception == mnc::modbus::ExceptionCode::none &&
+		provider.last_request.attributes.size() == 1 &&
+		provider.last_request.attributes.front().id ==
+			mnc::meter::MeterAttributeId::Frequency,
+		"single-value read did not project only its required attribute");
+
+	const auto quality = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 16, 1);
+	require(quality.exception == mnc::modbus::ExceptionCode::none &&
+		provider.last_request.attributes.size() == 8,
+		"quality mask did not request all published attributes coherently");
+}
+
+void generated_map_lookup_and_export()
+{
+	const auto definitions =
+		msap1::modbus::Msap1RegisterBank::definitions();
+	for (const auto &entry : definitions) {
+		for (std::uint32_t offset = 0; offset < entry.words; ++offset) {
+			const auto *found = msap1::modbus::schema::find_definition(
+				definitions, entry.function,
+				static_cast<std::uint16_t>(entry.address + offset));
+			require(found == &entry,
+				"binary lookup did not return the generated definition");
+		}
+	}
+	require(msap1::modbus::schema::find_definition(definitions,
+		mnc::modbus::FunctionCode::read_input_registers, 0x20) == nullptr,
+		"binary lookup mapped an undefined reserved address");
+
+	const auto csv = msap1::modbus::export_register_map(
+		msap1::modbus::RegisterMapFormat::csv);
+	require(static_cast<std::size_t>(std::ranges::count(csv, '\n')) ==
+		definitions.size() + 1,
+		"CSV exporter did not visit every generated definition exactly once");
+	const auto markdown = msap1::modbus::export_register_map(
+		msap1::modbus::RegisterMapFormat::markdown);
+	require(markdown.find("Reserved address blocks") != std::string::npos &&
+		markdown.find("voltage_harmonics") != std::string::npos,
+		"Markdown exporter omitted the generated map or reserved blocks");
+	const auto json = msap1::modbus::export_register_map(
+		msap1::modbus::RegisterMapFormat::json);
+	require(json.find("\"schema\": \"mnc.modbus-register-map.v1\"") !=
+			std::string::npos &&
+		json.find("\"function_code\": 3") != std::string::npos &&
+		json.find("\"function_code\": 4") != std::string::npos &&
+		json.find("\"source_kind\": \"measurement\"") !=
+			std::string::npos &&
+		json.find("\"source_kind\": \"special\"") != std::string::npos &&
+		json.find("\"blocks\": [") != std::string::npos &&
+		json.find("\"name\": \"voltage_harmonics\"") !=
+			std::string::npos,
+		"JSON exporter omitted its schema, functions, sources, or blocks");
+}
+
+void partial_register_reads()
+{
+	SnapshotProvider provider;
+	msap1::modbus::Msap1RegisterBank registers(provider);
+	const auto full_float = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 6);
+	require(full_float.exception == mnc::modbus::ExceptionCode::none &&
+		full_float.values.size() == 6,
+		"full float register fixture failed");
+
+	const auto low_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 1, 1);
+	const auto high_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 1);
+	require(high_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		high_frequency.values ==
+			(std::vector<std::uint16_t>{full_float.values[0]}),
+		"single high word of float32 was not sliced correctly");
+	require(low_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		low_frequency.values ==
+			(std::vector<std::uint16_t>{full_float.values[1]}),
+		"single low word of float32 was not sliced correctly");
+	const auto complete_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 2);
+	require(complete_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		complete_frequency.values == (std::vector<std::uint16_t>{
+			full_float.values[0], full_float.values[1]}),
+		"complete float32 field was not returned unchanged");
+	const auto spanning_float = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 1, 2);
+	require(spanning_float.exception == mnc::modbus::ExceptionCode::none &&
+		spanning_float.values == (std::vector<std::uint16_t>{
+			full_float.values[1], full_float.values[2]}),
+		"partial read spanning float32 fields was not sliced correctly");
+
+	const auto full_u32 = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 4);
+	require(full_u32.exception == mnc::modbus::ExceptionCode::none &&
+		full_u32.values.size() == 4,
+		"full uint32 register fixture failed");
+	const auto high_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 1);
+	require(high_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		high_sequence.values ==
+			(std::vector<std::uint16_t>{full_u32.values[0]}),
+		"single high word of uint32 was not sliced correctly");
+	const auto low_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 19, 1);
+	require(low_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		low_sequence.values ==
+			(std::vector<std::uint16_t>{full_u32.values[1]}),
+		"single low word of uint32 was not sliced correctly");
+	const auto complete_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 2);
+	require(complete_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		complete_sequence.values == (std::vector<std::uint16_t>{
+			full_u32.values[0], full_u32.values[1]}),
+		"complete uint32 field was not returned unchanged");
+	const auto spanning_u32 = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 19, 2);
+	require(spanning_u32.exception == mnc::modbus::ExceptionCode::none &&
+		spanning_u32.values == (std::vector<std::uint16_t>{
+			full_u32.values[1], full_u32.values[2]}),
+		"partial read spanning uint32 fields was not sliced correctly");
+
+	/* Each request, including a partial one, must still be coherent and use
+	 * exactly one snapshot rather than reading once per register definition. */
+	require(provider.reads == 10,
+		"partial register reads did not use one coherent snapshot each");
 }
 
 } // namespace
@@ -117,4 +368,7 @@ int main()
 {
 	coherent_input_block();
 	metadata_and_boundaries();
+	partial_register_reads();
+	projected_snapshot_requests();
+	generated_map_lookup_and_export();
 }

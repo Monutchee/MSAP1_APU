@@ -16,10 +16,10 @@ namespace msap1::meter {
  * snapshot request. The current IPC exposes one-shot snapshots only, so
  * subscribe_latest() is intentionally unsupported.
  */
-class AcquisitionMeterDataProvider final
+class AcquisitionMeterSnapshotProvider final
 	: public mnc::meter::MeterSnapshotProvider {
 public:
-	explicit AcquisitionMeterDataProvider(
+	explicit AcquisitionMeterSnapshotProvider(
 		std::string socket_path = acquisition_socket_path)
 		: client_(std::move(socket_path))
 	{

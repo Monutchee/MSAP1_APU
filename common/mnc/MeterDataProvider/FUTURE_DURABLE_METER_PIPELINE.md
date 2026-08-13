@@ -27,4 +27,4 @@ flowchart LR
   required.
 
 The complete implementation and extension rules are documented in
-[`../MeterDataStreamer/README.md`](../MeterDataStreamer/README.md).
+[`stream/README.md`](stream/README.md).

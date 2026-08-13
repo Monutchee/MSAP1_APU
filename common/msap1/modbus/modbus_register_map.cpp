@@ -1,134 +1,37 @@
 #include "msap1/modbus/modbus_register_map.hpp"
 
+#include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 namespace msap1::modbus {
 namespace {
 
-using mnc::meter::MeterAttributeId;
 using mnc::meter::MeterAttributeKey;
 using mnc::meter::MeterAttributeValue;
+using mnc::meter::MeterSnapshot;
+using mnc::meter::MeterSnapshotRequest;
+using mnc::meter::MeasurementPeriod;
 using mnc::meter::ReadingQuality;
 using mnc::modbus::FunctionCode;
+using schema::MeasurementSource;
+using schema::SpecialSource;
 
-/* Input registers are intentionally contiguous. This makes common SCADA
- * block reads efficient while this table remains the reviewable protocol
- * contract. 32-bit values occupy address/address+1, high word first. */
-constexpr std::array register_definitions{
-	RegisterDefinition{FunctionCode::read_input_registers, 0, 2, DataType::float32,
-		MeterField::frequency},
-	RegisterDefinition{FunctionCode::read_input_registers, 2, 2, DataType::float32,
-		MeterField::voltage_ln_a},
-	RegisterDefinition{FunctionCode::read_input_registers, 4, 2, DataType::float32,
-		MeterField::voltage_ln_b},
-	RegisterDefinition{FunctionCode::read_input_registers, 6, 2, DataType::float32,
-		MeterField::voltage_ln_c},
-	RegisterDefinition{FunctionCode::read_input_registers, 8, 2, DataType::float32,
-		MeterField::current_a},
-	RegisterDefinition{FunctionCode::read_input_registers, 10, 2, DataType::float32,
-		MeterField::current_b},
-	RegisterDefinition{FunctionCode::read_input_registers, 12, 2, DataType::float32,
-		MeterField::current_c},
-	RegisterDefinition{FunctionCode::read_input_registers, 14, 2, DataType::float32,
-		MeterField::current_neutral},
-	RegisterDefinition{FunctionCode::read_input_registers, 16, 1, DataType::uint16,
-		MeterField::quality_mask},
-	RegisterDefinition{FunctionCode::read_input_registers, 17, 1, DataType::uint16,
-		MeterField::period},
-	RegisterDefinition{FunctionCode::read_input_registers, 18, 2, DataType::uint32,
-		MeterField::source_sequence},
-	RegisterDefinition{FunctionCode::read_input_registers, 20, 2, DataType::uint32,
-		MeterField::configuration_generation},
-	RegisterDefinition{FunctionCode::read_holding_registers, 0, 1, DataType::uint16,
-		MeterField::map_version},
-	RegisterDefinition{FunctionCode::read_holding_registers, 1, 1, DataType::uint16,
-		MeterField::word_order_marker},
-	RegisterDefinition{FunctionCode::read_holding_registers, 2, 1, DataType::uint16,
-		MeterField::attribute_count},
-};
-
-consteval std::uint16_t expected_words(DataType type)
+const RegisterDefinition *definition(FunctionCode function,
+	std::uint16_t address)
 {
-	switch (type) {
-	case DataType::uint16: return 1;
-	case DataType::uint32:
-	case DataType::float32: return 2;
-	}
-	return 0;
+	return schema::find_definition(schema::register_map, function, address);
 }
 
-consteval bool valid_register_contract()
-{
-	for (std::size_t index = 0; index < register_definitions.size(); ++index) {
-		const auto &entry = register_definitions[index];
-		if (entry.words == 0 || entry.words != expected_words(entry.type) ||
-		    static_cast<std::uint32_t>(entry.address) + entry.words > 0x10000u)
-			return false;
-		for (std::size_t other = index + 1;
-		     other < register_definitions.size(); ++other) {
-			const auto &candidate = register_definitions[other];
-			if (candidate.function != entry.function)
-				continue;
-			const auto entry_end = static_cast<std::uint32_t>(entry.address) +
-				entry.words;
-			const auto candidate_end =
-				static_cast<std::uint32_t>(candidate.address) +
-				candidate.words;
-			if (entry.address < candidate_end &&
-			    candidate.address < entry_end)
-				return false;
-		}
-	}
-	return true;
-}
-
-static_assert(valid_register_contract(),
-	"MSAP1 Modbus register definitions overlap or have an invalid width");
-
-constexpr std::array measurement_attributes{
-	MeterAttributeId::Frequency,
-	MeterAttributeId::VanRms,
-	MeterAttributeId::VbnRms,
-	MeterAttributeId::VcnRms,
-	MeterAttributeId::IaRms,
-	MeterAttributeId::IbRms,
-	MeterAttributeId::IcRms,
-	MeterAttributeId::InRms,
-};
-
-const RegisterDefinition *definition(FunctionCode function, std::uint16_t address)
-{
-	const auto found = std::ranges::find_if(register_definitions,
-		[=](const auto &entry) {
-			return entry.function == function && address >= entry.address &&
-			       address < entry.address + entry.words;
-		});
-	return found == register_definitions.end() ? nullptr : &*found;
-}
-
-std::optional<MeterAttributeId> attribute(MeterField field)
-{
-	switch (field) {
-	case MeterField::frequency: return MeterAttributeId::Frequency;
-	case MeterField::voltage_ln_a: return MeterAttributeId::VanRms;
-	case MeterField::voltage_ln_b: return MeterAttributeId::VbnRms;
-	case MeterField::voltage_ln_c: return MeterAttributeId::VcnRms;
-	case MeterField::current_a: return MeterAttributeId::IaRms;
-	case MeterField::current_b: return MeterAttributeId::IbRms;
-	case MeterField::current_c: return MeterAttributeId::IcRms;
-	case MeterField::current_neutral: return MeterAttributeId::InRms;
-	default: return std::nullopt;
-	}
-}
-
-const MeterAttributeValue *reading(const mnc::meter::MeterSnapshot &snapshot,
-	MeterAttributeId id)
+const MeterAttributeValue *reading(const MeterSnapshot &snapshot,
+	MeterAttributeKey attribute)
 {
 	const auto found = std::ranges::find_if(snapshot.values,
-		[id](const auto &value) {
-			return value.attribute.id == id && !value.attribute.index;
+		[attribute](const auto &value) {
+			return value.attribute == attribute;
 		});
 	return found == snapshot.values.end() ? nullptr : &*found;
 }
@@ -147,65 +50,157 @@ float engineering_value(const MeterAttributeValue *value)
 	return std::numeric_limits<float>::quiet_NaN();
 }
 
-std::vector<std::uint16_t> encode(const RegisterDefinition &entry,
-	const std::optional<mnc::meter::MeterSnapshot> &snapshot)
+std::vector<std::uint16_t> encode_measurement(
+	const RegisterDefinition &entry, const MeasurementSource &source,
+	const std::optional<MeterSnapshot> &snapshot)
 {
-	if (const auto id = attribute(entry.field)) {
-		return mnc::modbus::encode_float(snapshot
-			? engineering_value(reading(*snapshot, *id))
-			: std::numeric_limits<float>::quiet_NaN());
+	const auto *value = snapshot ? reading(*snapshot, source.attribute) : nullptr;
+	const auto available = value && value->quality == ReadingQuality::Valid;
+	switch (entry.type) {
+	case DataType::float32:
+		return mnc::modbus::encode_float(engineering_value(value));
+	case DataType::uint16:
+		return mnc::modbus::encode_u16(available
+			? static_cast<std::uint16_t>(value->value) : 0);
+	case DataType::uint32:
+		return mnc::modbus::encode_u32(available
+			? static_cast<std::uint32_t>(value->value) : 0);
+	case DataType::int32:
+		return mnc::modbus::encode_i32(available
+			? static_cast<std::int32_t>(value->value) : 0);
+	case DataType::uint64:
+		return mnc::modbus::encode_u64(available
+			? static_cast<std::uint64_t>(value->value) : 0);
 	}
-	switch (entry.field) {
-	case MeterField::quality_mask: {
+	throw std::logic_error("unsupported MSAP1 Modbus measurement datatype");
+}
+
+std::vector<std::uint16_t> encode_special(const SpecialSource &source,
+	const std::optional<MeterSnapshot> &snapshot)
+{
+	switch (source.field) {
+	case SpecialRegister::quality_mask: {
 		std::uint16_t mask = 0;
-		if (snapshot)
-			for (std::size_t index = 0; index < measurement_attributes.size(); ++index) {
+		if (snapshot) {
+			for (std::size_t index = 0;
+			     index < schema::published_measurement_attributes.size();
+			     ++index) {
 				const auto *value = reading(*snapshot,
-					measurement_attributes[index]);
+					schema::published_measurement_attributes[index]);
 				if (value && value->quality == ReadingQuality::Valid)
 					mask |= static_cast<std::uint16_t>(1u << index);
 			}
+		}
 		return {mask};
 	}
-	case MeterField::period:
+	case SpecialRegister::period:
 		return {static_cast<std::uint16_t>(snapshot
-			? snapshot->period : mnc::meter::MeasurementPeriod::Basic)};
-	case MeterField::source_sequence:
+			? snapshot->period
+			: source.period.value_or(MeasurementPeriod::Basic))};
+	case SpecialRegister::source_sequence:
 		return mnc::modbus::encode_u32(snapshot
 			? static_cast<std::uint32_t>(snapshot->sequence) : 0);
-	case MeterField::configuration_generation:
+	case SpecialRegister::configuration_generation:
 		return mnc::modbus::encode_u32(snapshot
 			? snapshot->configuration_generation : 0);
-	case MeterField::map_version: return {register_map_version};
-	case MeterField::word_order_marker: return {0x1234};
-	case MeterField::attribute_count:
-		return {static_cast<std::uint16_t>(measurement_attributes.size())};
-	default:
-		throw std::logic_error("unhandled MSAP1 Modbus register field");
+	case SpecialRegister::map_version:
+		return {schema::register_map_version};
+	case SpecialRegister::word_order_marker:
+		return {0x1234};
+	case SpecialRegister::attribute_count:
+		return {static_cast<std::uint16_t>(
+			schema::published_measurement_attributes.size())};
 	}
+	throw std::logic_error("unhandled MSAP1 Modbus special register");
+}
+
+std::vector<std::uint16_t> encode(const RegisterDefinition &entry,
+	const std::optional<MeterSnapshot> &snapshot)
+{
+	return std::visit(
+		[&](const auto &source) -> std::vector<std::uint16_t> {
+			using Source = std::decay_t<decltype(source)>;
+			if constexpr (std::is_same_v<Source, MeasurementSource>)
+				return encode_measurement(entry, source, snapshot);
+			else
+				return encode_special(source, snapshot);
+		},
+		entry.source);
+}
+
+struct SnapshotSelection {
+	std::optional<MeasurementPeriod> period;
+	mnc::meter::MeterAttributeSet attributes;
+	bool incompatible_periods = false;
+};
+
+void include_period(SnapshotSelection &selection, MeasurementPeriod period)
+{
+	if (selection.period && *selection.period != period)
+		selection.incompatible_periods = true;
+	else
+		selection.period = period;
+}
+
+SnapshotSelection snapshot_selection(FunctionCode function,
+	std::uint16_t address, std::uint32_t end)
+{
+	SnapshotSelection selection;
+	const RegisterDefinition *previous = nullptr;
+	for (std::uint32_t current = address; current < end; ++current) {
+		const auto *entry = definition(function,
+			static_cast<std::uint16_t>(current));
+		if (entry == previous)
+			continue;
+		previous = entry;
+		std::visit(
+			[&](const auto &source) {
+				using Source = std::decay_t<decltype(source)>;
+				if constexpr (std::is_same_v<Source, MeasurementSource>) {
+					include_period(selection, source.period);
+					selection.attributes.add(source.attribute);
+				} else if (source.period) {
+					include_period(selection, *source.period);
+					if (source.field == SpecialRegister::quality_mask)
+						for (const auto attribute :
+						     schema::published_measurement_attributes)
+							selection.attributes.add(attribute);
+				}
+			},
+			entry->source);
+	}
+	return selection;
 }
 
 } // namespace
-
-std::span<const RegisterDefinition> Msap1RegisterBank::definitions()
-{
-	return register_definitions;
-}
 
 mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
 	FunctionCode function, std::uint16_t address, std::uint16_t count) const
 {
 	if (!mnc::modbus::is_register_read(function))
 		return {mnc::modbus::ExceptionCode::illegal_function, {}};
-	if (count == 0 || static_cast<std::uint32_t>(address) + count > 0x10000u)
+	if (count == 0)
 		return {mnc::modbus::ExceptionCode::illegal_data_value, {}};
+	const auto end = static_cast<std::uint32_t>(address) + count;
+	if (end > 0x10000u)
+		return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
 
-	std::optional<mnc::meter::MeterSnapshot> snapshot;
-	if (function == FunctionCode::read_input_registers) {
-		mnc::meter::MeterSnapshotRequest request;
-		request.period = mnc::meter::MeasurementPeriod::Basic;
-		for (const auto id : measurement_attributes)
-			request.attributes.push_back(MeterAttributeKey{id, std::nullopt});
+	/* Validate every requested 16-bit register before entering IPC. Reserved
+	 * gaps remain unavailable until a future map version defines them. */
+	for (std::uint32_t current = address; current < end; ++current) {
+		if (!definition(function, static_cast<std::uint16_t>(current)))
+			return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
+	}
+
+	const auto selection = snapshot_selection(function, address, end);
+	if (selection.incompatible_periods)
+		return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
+
+	std::optional<MeterSnapshot> snapshot;
+	if (selection.period) {
+		MeterSnapshotRequest request;
+		request.period = *selection.period;
+		request.attributes = selection.attributes.values();
 		try {
 			snapshot = provider_.latest(request);
 		} catch (...) {
@@ -217,11 +212,9 @@ mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
 	result.reserve(count);
 	const RegisterDefinition *cached = nullptr;
 	std::vector<std::uint16_t> encoded;
-	for (std::uint32_t current = address;
-	     current < static_cast<std::uint32_t>(address) + count; ++current) {
-		const auto *entry = definition(function, static_cast<std::uint16_t>(current));
-		if (!entry)
-			return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
+	for (std::uint32_t current = address; current < end; ++current) {
+		const auto *entry = definition(function,
+			static_cast<std::uint16_t>(current));
 		if (entry != cached) {
 			encoded = encode(*entry, snapshot);
 			cached = entry;

@@ -18,8 +18,8 @@ target_link_libraries(msap1-fpga-acquisition PRIVATE
     msap1::waveform
     mnc::logging
     mnc::service
-    mnc::meter-data-streamer
-    msap1::meter-stream
+    mnc::meter-data-provider-stream
+    msap1::meter-data-provider-stream
 )
 target_compile_features(msap1-fpga-acquisition PRIVATE cxx_std_23)
 target_compile_options(msap1-fpga-acquisition PRIVATE -Wall -Wextra -Wpedantic)

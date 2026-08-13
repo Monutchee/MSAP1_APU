@@ -10,7 +10,7 @@
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
-#include "mnc/MeterDataStreamer/meter_stream.hpp"
+#include "mnc/MeterDataProvider/stream/meter_record_publisher.hpp"
 #include "support/time.hpp"
 
 #include <cstdint>

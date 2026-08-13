@@ -6,6 +6,7 @@ target_include_directories(msap1-modbus-server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(msap1-modbus-server PRIVATE
     msap1::modbus
+    msap1::acquisition
     msap1::settings
     mnc::logging
     mnc::service
