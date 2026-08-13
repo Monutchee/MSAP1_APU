@@ -40,6 +40,8 @@ protected:
 	[[nodiscard]] virtual ServiceHealth health() const = 0;
 
 	void request_stop() noexcept;
+	/** Request the same orderly reload path used by SIGHUP. */
+	void request_reload() noexcept;
 	[[nodiscard]] bool stop_requested() const noexcept;
 	[[nodiscard]] logging::Logger &logger() noexcept { return logger_; }
 
@@ -49,6 +51,7 @@ private:
 	std::string name_;
 	logging::Logger logger_;
 	std::atomic<bool> stop_requested_{false};
+	std::atomic<bool> reload_requested_{false};
 };
 
 } // namespace mnc

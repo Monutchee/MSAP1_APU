@@ -35,6 +35,9 @@ inline void register_product_units(mnc::ServiceManager &manager)
 		"msap1-fpga-acquisition.service", {"settings", "meter-stream"}});
 	manager.register_service({"meter-historian",
 		"msap1-meter-historian.service", {"meter-stream"}});
+	manager.register_service({"modbus",
+		"msap1-modbus-server.service",
+		{"settings", "fpga-acquisition"}});
 	manager.register_service({"web-backend",
 		"msap1-web-backend.service",
 		{"fpga-acquisition", "meter-historian"}});

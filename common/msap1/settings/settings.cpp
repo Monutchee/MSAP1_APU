@@ -91,6 +91,7 @@ void ProductSettings::validate() const
 	metering.validate();
 	waveform.validate();
 	database.validate();
+	modbus.validate();
 	(void)prepare_meter_configuration(to_meter_configuration(*this),
 		metering.sample_rate_hz);
 }

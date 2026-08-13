@@ -41,6 +41,23 @@ The reusable `mnc::logging` library writes and reads structured systemd
 journal entries; MSAP1-specific component/event policy remains in this
 repository.
 
+## Modbus protocol gateway
+
+`msap1-modbus-server` publishes the latest coherent Basic meter snapshot over
+Modbus TCP and any enabled Modbus RTU ports. It does not own a measurement
+cache, DMA device, or database: the product register adapter uses the typed
+`MeterSnapshotProvider`, and one Modbus block read maps one acquisition
+snapshot into all requested registers.
+
+The product-neutral `mnc::modbus` library provides asynchronous Boost.Asio
+TCP/RTU transports and shared FC03, FC04, FC06, and FC10 request processing.
+The initial MSAP1 register contract is read-only; FC06/FC10 therefore return
+Illegal Data Address until a reviewed writable product register is added.
+Runtime TCP and RTU communication settings are part of the central
+`active.json` settings document and hot-reload without restarting acquisition.
+See [Modbus server architecture](docs/System_Architecture/MODBUS_SERVER.md)
+for the register table, byte order, quality rules, and extension workflow.
+
 ## Runtime settings
 
 The canonical factory document is maintained in this repository at

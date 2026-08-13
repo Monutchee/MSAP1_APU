@@ -89,6 +89,13 @@
   `msap1-meter-historian` acknowledges its independent spool cursor only after
   its typed historical projection commits; do not bypass this ordering or let
   a lossy subscriber block either durable service.
+- Product-neutral Modbus framing, request handling, CRC, and asynchronous
+  TCP/RTU transports live under `common/mnc/modbus`. The source-controlled
+  MSAP1 register contract and its `MeterSnapshotProvider` adapter live under
+  `common/msap1/modbus`; Modbus code must never open acquisition IPC, DMA, or
+  database resources directly. Each multi-register electrical read acquires
+  exactly one coherent meter snapshot. The initial map is read-only even
+  though the common engine implements FC06 and FC10 for future products.
 - `mnc::Service` provides lifecycle, readiness, watchdog, reload, and shutdown
   behavior for product daemons. `msap1-service-manager` orders/adopts settings,
   acquisition, and web systemd units through sd-bus; systemd remains the only
