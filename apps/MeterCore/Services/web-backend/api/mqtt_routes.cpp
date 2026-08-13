@@ -176,18 +176,25 @@ webengine::Response put_mqtt_configuration(
 webengine::Response get_mqtt_status(
 	AppContext &app, const webengine::RequestContext &)
 {
+	/*
+	 * A disabled publisher intentionally has no running service or socket.
+	 * Check the persisted policy first so a normal disabled state never waits
+	 * for an IPC timeout or reports the absent socket as a runtime failure.
+	 */
+	try {
+		const auto active = settings::SettingsCodec::decode(
+			app.settings.active().json);
+		if (!active.mqtt.enabled)
+			return json_response(webengine::http::status::ok,
+				mqtt::MqttServiceStatus{});
+	} catch (const std::exception &error) {
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+
 	try {
 		return json_response(webengine::http::status::ok, app.mqtt.status());
 	} catch (const std::exception &error) {
-		/* A stopped unit is the expected runtime state when disabled. */
-		try {
-			const auto active = settings::SettingsCodec::decode(
-				app.settings.active().json);
-			if (!active.mqtt.enabled)
-				return json_response(webengine::http::status::ok,
-					mqtt::MqttServiceStatus{});
-		} catch (...) {
-		}
 		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
