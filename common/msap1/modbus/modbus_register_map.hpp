@@ -35,7 +35,7 @@ enum class MeterField : std::uint8_t {
 enum class DataType : std::uint8_t { uint16, uint32, float32 };
 
 struct RegisterDefinition {
-	mnc::modbus::RegisterTable table;
+	mnc::modbus::FunctionCode function;
 	std::uint16_t address;
 	std::uint16_t words;
 	DataType type;
@@ -57,7 +57,7 @@ public:
 	}
 
 	[[nodiscard]] mnc::modbus::RegisterReadResult read(
-		mnc::modbus::RegisterTable table, std::uint16_t address,
+		mnc::modbus::FunctionCode function, std::uint16_t address,
 		std::uint16_t count) const override;
 	[[nodiscard]] mnc::modbus::ExceptionCode write_single(
 		std::uint16_t address, std::uint16_t value) override;

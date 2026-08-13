@@ -33,12 +33,13 @@ std::uint8_t octet(std::byte value)
 
 class TestBank final : public RegisterBank {
 public:
-	RegisterReadResult read(RegisterTable table, std::uint16_t address,
+	RegisterReadResult read(FunctionCode function, std::uint16_t address,
 		std::uint16_t count) const override
 	{
 		if (read_exception != ExceptionCode::none)
 			return {read_exception, {}};
-		const auto &source = table == RegisterTable::input ? input : holding;
+		const auto &source = function == FunctionCode::read_input_registers
+			? input : holding;
 		if (static_cast<std::size_t>(address) + count > source.size())
 			return {ExceptionCode::illegal_data_address, {}};
 		return {ExceptionCode::none,

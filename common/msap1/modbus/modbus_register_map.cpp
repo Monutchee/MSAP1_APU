@@ -11,41 +11,41 @@ using mnc::meter::MeterAttributeId;
 using mnc::meter::MeterAttributeKey;
 using mnc::meter::MeterAttributeValue;
 using mnc::meter::ReadingQuality;
-using mnc::modbus::RegisterTable;
+using mnc::modbus::FunctionCode;
 
 /* Input registers are intentionally contiguous. This makes common SCADA
  * block reads efficient while this table remains the reviewable protocol
  * contract. 32-bit values occupy address/address+1, high word first. */
 constexpr std::array register_definitions{
-	RegisterDefinition{RegisterTable::input, 0, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 0, 2, DataType::float32,
 		MeterField::frequency},
-	RegisterDefinition{RegisterTable::input, 2, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 2, 2, DataType::float32,
 		MeterField::voltage_ln_a},
-	RegisterDefinition{RegisterTable::input, 4, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 4, 2, DataType::float32,
 		MeterField::voltage_ln_b},
-	RegisterDefinition{RegisterTable::input, 6, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 6, 2, DataType::float32,
 		MeterField::voltage_ln_c},
-	RegisterDefinition{RegisterTable::input, 8, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 8, 2, DataType::float32,
 		MeterField::current_a},
-	RegisterDefinition{RegisterTable::input, 10, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 10, 2, DataType::float32,
 		MeterField::current_b},
-	RegisterDefinition{RegisterTable::input, 12, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 12, 2, DataType::float32,
 		MeterField::current_c},
-	RegisterDefinition{RegisterTable::input, 14, 2, DataType::float32,
+	RegisterDefinition{FunctionCode::read_input_registers, 14, 2, DataType::float32,
 		MeterField::current_neutral},
-	RegisterDefinition{RegisterTable::input, 16, 1, DataType::uint16,
+	RegisterDefinition{FunctionCode::read_input_registers, 16, 1, DataType::uint16,
 		MeterField::quality_mask},
-	RegisterDefinition{RegisterTable::input, 17, 1, DataType::uint16,
+	RegisterDefinition{FunctionCode::read_input_registers, 17, 1, DataType::uint16,
 		MeterField::period},
-	RegisterDefinition{RegisterTable::input, 18, 2, DataType::uint32,
+	RegisterDefinition{FunctionCode::read_input_registers, 18, 2, DataType::uint32,
 		MeterField::source_sequence},
-	RegisterDefinition{RegisterTable::input, 20, 2, DataType::uint32,
+	RegisterDefinition{FunctionCode::read_input_registers, 20, 2, DataType::uint32,
 		MeterField::configuration_generation},
-	RegisterDefinition{RegisterTable::holding, 0, 1, DataType::uint16,
+	RegisterDefinition{FunctionCode::read_holding_registers, 0, 1, DataType::uint16,
 		MeterField::map_version},
-	RegisterDefinition{RegisterTable::holding, 1, 1, DataType::uint16,
+	RegisterDefinition{FunctionCode::read_holding_registers, 1, 1, DataType::uint16,
 		MeterField::word_order_marker},
-	RegisterDefinition{RegisterTable::holding, 2, 1, DataType::uint16,
+	RegisterDefinition{FunctionCode::read_holding_registers, 2, 1, DataType::uint16,
 		MeterField::attribute_count},
 };
 
@@ -69,7 +69,7 @@ consteval bool valid_register_contract()
 		for (std::size_t other = index + 1;
 		     other < register_definitions.size(); ++other) {
 			const auto &candidate = register_definitions[other];
-			if (candidate.table != entry.table)
+			if (candidate.function != entry.function)
 				continue;
 			const auto entry_end = static_cast<std::uint32_t>(entry.address) +
 				entry.words;
@@ -98,11 +98,11 @@ constexpr std::array measurement_attributes{
 	MeterAttributeId::InRms,
 };
 
-const RegisterDefinition *definition(RegisterTable table, std::uint16_t address)
+const RegisterDefinition *definition(FunctionCode function, std::uint16_t address)
 {
 	const auto found = std::ranges::find_if(register_definitions,
 		[=](const auto &entry) {
-			return entry.table == table && address >= entry.address &&
+			return entry.function == function && address >= entry.address &&
 			       address < entry.address + entry.words;
 		});
 	return found == register_definitions.end() ? nullptr : &*found;
@@ -193,13 +193,15 @@ std::span<const RegisterDefinition> Msap1RegisterBank::definitions()
 }
 
 mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
-	RegisterTable table, std::uint16_t address, std::uint16_t count) const
+	FunctionCode function, std::uint16_t address, std::uint16_t count) const
 {
+	if (!mnc::modbus::is_register_read(function))
+		return {mnc::modbus::ExceptionCode::illegal_function, {}};
 	if (count == 0 || static_cast<std::uint32_t>(address) + count > 0x10000u)
 		return {mnc::modbus::ExceptionCode::illegal_data_value, {}};
 
 	std::optional<mnc::meter::MeterSnapshot> snapshot;
-	if (table == RegisterTable::input) {
+	if (function == FunctionCode::read_input_registers) {
 		mnc::meter::MeterSnapshotRequest request;
 		request.period = mnc::meter::MeasurementPeriod::Basic;
 		for (const auto id : measurement_attributes)
@@ -217,7 +219,7 @@ mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
 	std::vector<std::uint16_t> encoded;
 	for (std::uint32_t current = address;
 	     current < static_cast<std::uint32_t>(address) + count; ++current) {
-		const auto *entry = definition(table, static_cast<std::uint16_t>(current));
+		const auto *entry = definition(function, static_cast<std::uint16_t>(current));
 		if (!entry)
 			return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
 		if (entry != cached) {

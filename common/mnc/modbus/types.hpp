@@ -34,7 +34,12 @@ enum class ExceptionCode : std::uint8_t {
 	gateway_target_device_failed_to_respond = 0x0b,
 };
 
-enum class RegisterTable : std::uint8_t { holding, input };
+/** Return whether a function code selects a Modbus register read table. */
+constexpr bool is_register_read(FunctionCode function) noexcept
+{
+	return function == FunctionCode::read_holding_registers ||
+	       function == FunctionCode::read_input_registers;
+}
 
 /** Transport-neutral request after TCP/RTU framing has been removed. */
 struct Request {

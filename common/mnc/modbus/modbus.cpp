@@ -159,10 +159,8 @@ std::optional<Response> RequestHandler::handle(
 		const auto count = quantity();
 		if (count == 0 || count > 125)
 			return response(exception(function, ExceptionCode::illegal_data_value));
-		const auto table = function ==
-			static_cast<std::uint8_t>(FunctionCode::read_holding_registers)
-			? RegisterTable::holding : RegisterTable::input;
-		auto result = registers_.read(table, address(), count);
+		auto result = registers_.read(static_cast<FunctionCode>(function),
+			address(), count);
 		if (result.exception != ExceptionCode::none)
 			return response(exception(function, result.exception));
 		if (result.values.size() != count)

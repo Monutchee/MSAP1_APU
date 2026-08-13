@@ -24,7 +24,7 @@ class RegisterBank {
 public:
 	virtual ~RegisterBank() = default;
 	[[nodiscard]] virtual RegisterReadResult read(
-		RegisterTable table, std::uint16_t address,
+		FunctionCode function, std::uint16_t address,
 		std::uint16_t count) const = 0;
 	[[nodiscard]] virtual ExceptionCode write_single(
 		std::uint16_t address, std::uint16_t value) = 0;

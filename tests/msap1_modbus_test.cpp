@@ -73,7 +73,7 @@ void coherent_input_block()
 	SnapshotProvider provider;
 	msap1::modbus::Msap1RegisterBank registers(provider);
 	const auto result = registers.read(
-		mnc::modbus::RegisterTable::input, 0, 22);
+		mnc::modbus::FunctionCode::read_input_registers, 0, 22);
 	require(result.exception == mnc::modbus::ExceptionCode::none,
 		"contiguous input block failed");
 	require(provider.reads == 1,
@@ -97,13 +97,13 @@ void metadata_and_boundaries()
 	SnapshotProvider provider;
 	msap1::modbus::Msap1RegisterBank registers(provider);
 	const auto metadata = registers.read(
-		mnc::modbus::RegisterTable::holding, 0, 3);
+		mnc::modbus::FunctionCode::read_holding_registers, 0, 3);
 	require(metadata.exception == mnc::modbus::ExceptionCode::none &&
 		metadata.values == (std::vector<std::uint16_t>{1, 0x1234, 8}),
 		"register-map metadata changed");
 	require(provider.reads == 0,
 		"metadata read unnecessarily queried meter data");
-	require(registers.read(mnc::modbus::RegisterTable::input, 21, 2).exception ==
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers, 21, 2).exception ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"register boundary was not rejected");
 	require(registers.write_single(0, 1) ==
