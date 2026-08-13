@@ -9,10 +9,11 @@
 #include "msap1/acquisition/dma/meter_dma_reader.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "msap1/acquisition/rpu/rpu_controller.hpp"
+#include "mnc/MeterDataProvider/meter_data_provider.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/meter_config.hpp"
-#include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/settings/settings.hpp"
 #include "msap1/waveform/waveform_capture.hpp"
 #include "ipc/ipc_channel.hpp"
@@ -161,9 +162,12 @@ private:
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
-	msap1::meter_stream::MeterStreamClient meter_stream_;
+	msap1::meter_stream::MeterRecordStreamClient meter_stream_;
 	MeterRecordIngestor ingest_;
-	msap1::meter::Msap1MeterDataProvider meter_provider_;
+	msap1::meter::InProcessMeterSnapshotProvider snapshot_provider_;
+	/* Composition root for the two consumer-facing meter-data paths. Narrow
+	 * interfaces are still passed to Modbus, historian, and other consumers. */
+	mnc::meter::MeterDataProviderView meter_data_provider_;
 	RpuHealthMonitor health_;
 	IpcChannel ipc_;
 	msap1::AcquisitionCommandRegistry registry_;

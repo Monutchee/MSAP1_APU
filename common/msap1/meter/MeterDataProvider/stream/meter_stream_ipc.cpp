@@ -1,4 +1,4 @@
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
 #include <stdexcept>
 
@@ -107,13 +107,13 @@ mnc::meter_stream::MeterStreamRecord decode_record(ByteReader &reader)
 	return record;
 }
 
-MeterStreamClient::MeterStreamClient(std::string path)
+MeterRecordStreamClient::MeterRecordStreamClient(std::string path)
 	: transport_(std::make_unique<mnc::ipc::PersistentBlockingClient>(
 		std::move(path), connection_limits))
 {
 }
 
-mnc::ipc::Frame MeterStreamClient::request(Command command,
+mnc::ipc::Frame MeterRecordStreamClient::request(Command command,
 	std::vector<std::byte> payload, int timeout_ms) const
 {
 	mnc::ipc::Frame frame;
@@ -123,7 +123,7 @@ mnc::ipc::Frame MeterStreamClient::request(Command command,
 	return transport_->request(std::move(frame), timeout_ms);
 }
 
-std::uint64_t MeterStreamClient::publish(
+std::uint64_t MeterRecordStreamClient::publish(
 	const mnc::meter_stream::MeterStreamRecord &record)
 {
 	auto response = request(Command::publish_record, encode_record(record));
@@ -134,7 +134,7 @@ std::uint64_t MeterStreamClient::publish(
 	return cursor;
 }
 
-void MeterStreamClient::register_consumer(std::string_view name)
+void MeterRecordStreamClient::register_consumer(std::string_view name)
 {
 	ByteWriter writer;
 	write_string(writer, name);
@@ -144,7 +144,7 @@ void MeterStreamClient::register_consumer(std::string_view name)
 	reader.require_finished();
 }
 
-void MeterStreamClient::unregister_consumer(std::string_view name)
+void MeterRecordStreamClient::unregister_consumer(std::string_view name)
 {
 	ByteWriter writer; write_string(writer, name);
 	auto response = request(Command::unregister_consumer, writer.take());
@@ -153,7 +153,7 @@ void MeterStreamClient::unregister_consumer(std::string_view name)
 }
 
 std::vector<mnc::meter_stream::MeterStreamRecord>
-MeterStreamClient::read_after(std::string_view name, std::size_t limit)
+MeterRecordStreamClient::read_after(std::string_view name, std::size_t limit)
 {
 	ByteWriter writer;
 	write_string(writer, name);
@@ -170,7 +170,8 @@ MeterStreamClient::read_after(std::string_view name, std::size_t limit)
 	return records;
 }
 
-void MeterStreamClient::acknowledge(std::string_view name, std::uint64_t cursor)
+void MeterRecordStreamClient::acknowledge(
+	std::string_view name, std::uint64_t cursor)
 {
 	ByteWriter writer;
 	write_string(writer, name);
@@ -181,7 +182,7 @@ void MeterStreamClient::acknowledge(std::string_view name, std::uint64_t cursor)
 	reader.require_finished();
 }
 
-mnc::meter_stream::StreamStatus MeterStreamClient::status() const
+mnc::meter_stream::StreamStatus MeterRecordStreamClient::status() const
 {
 	auto response = request(Command::get_stream_status);
 	ByteReader reader(response.payload);
@@ -200,7 +201,7 @@ mnc::meter_stream::StreamStatus MeterStreamClient::status() const
 	return result;
 }
 
-DatabaseStoragePolicy MeterStreamClient::policy() const
+DatabaseStoragePolicy MeterRecordStreamClient::policy() const
 {
 	auto response = request(Command::get_storage_policy);
 	ByteReader reader(response.payload);
@@ -210,7 +211,7 @@ DatabaseStoragePolicy MeterStreamClient::policy() const
 	return result;
 }
 
-void MeterStreamClient::apply_policy(DatabaseStoragePolicy policy)
+void MeterRecordStreamClient::apply_policy(DatabaseStoragePolicy policy)
 {
 	ByteWriter writer;
 	encode_policy(writer, policy);

@@ -1,4 +1,5 @@
-#include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
+#include "mnc/MeterDataProvider/meter_data_provider.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -9,6 +10,19 @@
 #include <stdexcept>
 
 namespace {
+
+class FakeMeterStreamConsumer final
+	: public mnc::meter_stream::MeterStreamConsumer {
+public:
+	void register_consumer(std::string_view) override {}
+	void unregister_consumer(std::string_view) override {}
+	std::vector<mnc::meter_stream::MeterStreamRecord> read_after(
+		std::string_view, std::size_t) override
+	{
+		return {};
+	}
+	void acknowledge(std::string_view, std::uint64_t) override {}
+};
 
 void require(bool condition, const char *message)
 {
@@ -51,7 +65,7 @@ void describes_protocol_independent_attributes()
 void capabilities_advertise_only_supported_periods()
 {
 	msap1::MeterData data;
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	const auto capabilities = provider.capabilities();
 	require(capabilities.size() == 2,
 		"provider advertised vocabulary-only future periods");
@@ -63,6 +77,24 @@ void capabilities_advertise_only_supported_periods()
 			mnc::meter::MeasurementPeriod::Cycles150_180 &&
 			!capabilities[1].attributes.empty(),
 		"150/180-cycle capability is missing");
+}
+
+void facade_exposes_the_injected_delivery_paths()
+{
+	msap1::MeterData data;
+	msap1::meter::InProcessMeterSnapshotProvider snapshots(data);
+	FakeMeterStreamConsumer stream;
+	mnc::meter::MeterDataProviderView view(snapshots, stream);
+	mnc::meter::MeterDataProvider &provider = view;
+
+	require(&provider.snapshot_provider() == &snapshots,
+		"MeterDataProvider changed the injected snapshot provider");
+	require(&provider.stream_consumer() == &stream,
+		"MeterDataProvider changed the injected stream consumer");
+
+	const mnc::meter::MeterDataProvider &const_provider = view;
+	require(&const_provider.snapshot_provider() == &snapshots,
+		"const MeterDataProvider changed the snapshot provider");
 }
 
 void projects_selected_values_and_unavailable_attributes()
@@ -84,7 +116,7 @@ void projects_selected_values_and_unavailable_attributes()
 		voltage(0, msap1::MeasurementQuality::valid, 42);
 	data.apply(update);
 
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.attributes = {
 		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
@@ -120,7 +152,7 @@ void preserves_explicit_order_after_deduplication()
 	update.fundamental.emplace();
 	data.apply(update);
 
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.attributes = {
 		MeterAttributeKey{MeterAttributeId::VanRms, std::nullopt},
@@ -147,7 +179,7 @@ void rejects_unknown_attribute_identity()
 	update.fundamental.emplace();
 	data.apply(update);
 
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.attributes = {{
 		static_cast<mnc::meter::MeterAttributeId>(0xffffu), std::nullopt}};
@@ -168,7 +200,7 @@ void empty_selection_means_all_supported_values()
 	update.sequence = 5;
 	update.fundamental.emplace();
 	data.apply(update);
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.period = mnc::meter::MeasurementPeriod::Cycles150_180;
 	const auto snapshot = provider.latest(request);
@@ -210,7 +242,7 @@ void preserves_measurement_time_provenance()
 	update.timing = block_timing(msap1::TimeQuality::Synchronized);
 	data.apply(update);
 
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.attributes = {{MeterAttributeId::VanRms, std::nullopt}};
 	const auto latest = provider.latest(request);
@@ -254,7 +286,7 @@ void latest_and_subscription_share_timing_projection()
 	update.timing = block_timing(msap1::TimeQuality::Unsynchronized);
 	data.apply(update);
 
-	msap1::meter::Msap1MeterDataProvider provider(data);
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	mnc::meter::MeterSnapshotRequest request{};
 	request.attributes = {{mnc::meter::MeterAttributeId::Frequency,
 		std::nullopt}};
@@ -304,7 +336,7 @@ void subscription_does_not_capture_provider_lifetime()
 	mnc::meter::LatestSubscription subscription;
 	{
 		auto provider = std::make_unique<
-			msap1::meter::Msap1MeterDataProvider>(data);
+			msap1::meter::InProcessMeterSnapshotProvider>(data);
 		subscription = provider->subscribe_latest(
 			request, [&](const mnc::meter::MeterSnapshot &) {
 				std::scoped_lock lock(mutex);
@@ -330,6 +362,7 @@ int main()
 	try {
 		describes_protocol_independent_attributes();
 		capabilities_advertise_only_supported_periods();
+		facade_exposes_the_injected_delivery_paths();
 		projects_selected_values_and_unavailable_attributes();
 		preserves_explicit_order_after_deduplication();
 		rejects_unknown_attribute_identity();

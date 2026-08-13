@@ -2,7 +2,7 @@
 
 #include "mnc/modbus/modbus.hpp"
 #include "mnc/service/service.hpp"
-#include "msap1/meter/MeterDataProvider/acquisition_meter_data_provider.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/acquisition_meter_snapshot_provider.hpp"
 #include "msap1/modbus/modbus_register_map.hpp"
 #include "msap1/settings/definition/modbus_settings.hpp"
 
@@ -40,7 +40,7 @@ private:
 		std::string_view message);
 
 	boost::asio::io_context context_;
-	msap1::meter::AcquisitionMeterDataProvider meter_data_;
+	msap1::meter::AcquisitionMeterSnapshotProvider meter_data_;
 	msap1::modbus::Msap1RegisterBank register_bank_;
 	mnc::modbus::RequestHandler request_handler_;
 	std::unique_ptr<mnc::modbus::ModbusServer> server_;

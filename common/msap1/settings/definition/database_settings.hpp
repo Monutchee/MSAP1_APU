@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mnc/MeterDataStreamer/database_policy.hpp"
+#include "mnc/MeterDataProvider/stream/database_policy.hpp"
 
 #include <chrono>
 #include <cstdint>

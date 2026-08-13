@@ -1,8 +1,8 @@
-# Meter data streaming and historian architecture
+# MeterDataProvider durable-stream architecture
 
 ## Purpose
 
-The streamer separates two different delivery guarantees:
+The MeterDataProvider module separates two different delivery guarantees:
 
 - `MeterData` and `MeterSnapshotProvider` expose the newest typed state. These
   paths are intentionally lossy and optimized for Web, CLI, Modbus, and

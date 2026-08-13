@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mnc/MeterDataStreamer/meter_stream.hpp"
+#include "mnc/MeterDataProvider/stream/meter_stream.hpp"
 #include "mnc/ipc/ipc.hpp"
 
 #include <cstdint>
@@ -56,10 +56,12 @@ enum class Event : std::uint32_t {
 	mnc::ipc::ByteReader &reader);
 
 /** Typed synchronous adapter used by acquisition and historian. */
-class MeterStreamClient final : public mnc::meter_stream::MeterRecordPublisher,
-				public mnc::meter_stream::MeterStreamConsumer {
+class MeterRecordStreamClient final
+	: public mnc::meter_stream::MeterRecordPublisher,
+	  public mnc::meter_stream::MeterStreamConsumer {
 public:
-	explicit MeterStreamClient(std::string path = std::string(socket_path));
+	explicit MeterRecordStreamClient(
+		std::string path = std::string(socket_path));
 	std::uint64_t publish(
 		const mnc::meter_stream::MeterStreamRecord &record) override;
 	void register_consumer(std::string_view name) override;

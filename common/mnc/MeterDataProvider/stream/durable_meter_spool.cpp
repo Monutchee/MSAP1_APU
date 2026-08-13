@@ -1,4 +1,4 @@
-#include "mnc/MeterDataStreamer/meter_stream.hpp"
+#include "mnc/MeterDataProvider/stream/durable_meter_spool.hpp"
 
 #include "mnc/storage/sqlite/sqlite_database.hpp"
 

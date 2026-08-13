@@ -1,7 +1,7 @@
 #pragma once
 
 #include "msap1/meter/history/historian_ipc.hpp"
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
 #include <span>
 
@@ -21,7 +21,7 @@ public:
 	void recreate_history_database() const;
 
 private:
-	mutable meter_stream::MeterStreamClient stream_;
+	mutable meter_stream::MeterRecordStreamClient stream_;
 	mutable history::ipc::HistorianClient historian_;
 };
 

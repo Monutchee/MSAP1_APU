@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
-#include "mnc/MeterDataStreamer/database_policy.hpp"
+#include "mnc/MeterDataProvider/stream/database_policy.hpp"
 #include "msap1/meter/meter_data.hpp"
 
 #include <cstdint>

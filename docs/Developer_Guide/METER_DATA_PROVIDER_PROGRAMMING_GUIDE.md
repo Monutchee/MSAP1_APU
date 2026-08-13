@@ -1,9 +1,11 @@
 # MSAP1 MeterDataProvider programming guide
 
 This guide explains how an APU application reads typed meter values through
-`Msap1MeterDataProvider` and `MeterSnapshotProvider`. It is intended for Web,
-CLI, Modbus, telemetry, and other latest-value consumers. It does not describe
-the future lossless historian pipeline.
+`MeterDataProvider`, `MeterSnapshotProvider`, and
+`InProcessMeterSnapshotProvider`. The snapshot examples are intended for Web,
+CLI, Modbus, telemetry, and other latest-value consumers. Durable ordered
+consumption is documented separately in
+[`common/mnc/MeterDataProvider/stream/README.md`](../../common/mnc/MeterDataProvider/stream/README.md).
 
 ## 1. Provider boundary
 
@@ -14,17 +16,29 @@ flowchart LR
     PL["PL meter DMA records"] --> ACQ["msap1-fpga-acquisition"]
     ACQ --> DEC["typed MTR1/MTR2 decoder registry"]
     DEC --> DATA["msap1::MeterData"]
-    DATA --> PROVIDER["Msap1MeterDataProvider"]
+    DATA --> PROVIDER["InProcessMeterSnapshotProvider"]
     PROVIDER --> SNAP["MeterSnapshotProvider API"]
     SNAP --> WEB["Web / typed API"]
     SNAP --> CLI["CLI / typed client"]
     SNAP --> PUB["Future publishers"]
 ```
 
-`MeterData` owns latest period views. `Msap1MeterDataProvider` projects a typed
+`MeterData` owns latest period views. `InProcessMeterSnapshotProvider` projects a typed
 MSAP1 view into the product-neutral `mnc::meter::MeterSnapshot` shape. Consumers
 do not open `/dev/msap1-meter`, read RPMsg, parse MTR1 records, or know the PL
 record layout.
+
+`MeterDataProvider` is the common consumer-facing facade. It exposes two
+different guarantees without mixing them:
+
+~~~cpp
+auto &latest_values = provider.snapshot_provider();
+auto &ordered_records = provider.stream_consumer();
+~~~
+
+The first may coalesce intermediate updates; the second uses durable ordered
+cursors. Most consumers should receive only the narrower interface they use.
+Acquisition receives the separate `MeterRecordPublisher` write-side interface.
 
 The provider currently advertises:
 
@@ -43,7 +57,7 @@ Reserved periods are not advertised until their PL record and decoder exist.
 #include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
 #include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 #include "mnc/MeterDataProvider/snapshot/meter_snapshot_provider.hpp"
-#include "msap1/meter/MeterDataProvider/msap1_meter_data_provider.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.hpp"
 #include "msap1/meter/meter_data.hpp"
 ~~~
 
@@ -63,7 +77,7 @@ acquisition thread or copy the whole store:
 
 ~~~cpp
 msap1::MeterData data;
-msap1::meter::Msap1MeterDataProvider provider(data);
+msap1::meter::InProcessMeterSnapshotProvider provider(data);
 
 for (const auto& capability : provider.capabilities()) {
     std::cout << "period=" << static_cast<int>(capability.period)
@@ -246,10 +260,10 @@ sequenceDiagram
     participant C as Web or CLI
     participant G as Typed acquisition client
     participant A as Acquisition service
-    participant P as Msap1MeterDataProvider
+    participant P as InProcessMeterSnapshotProvider
     participant D as MeterData
     C->>G: MeterSnapshotRequest
-    G->>A: IPC v14 request
+    G->>A: Current acquisition IPC request
     A->>P: latest(request)
     P->>D: latest(period)
     D-->>P: immutable period view

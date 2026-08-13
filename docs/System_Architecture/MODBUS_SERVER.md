@@ -16,7 +16,7 @@ opens DMA, RPMsg, SQLite, or waveform devices.
 ```mermaid
 flowchart LR
     PL["PL meter records"] --> ACQ["msap1-fpga-acquisition"]
-    ACQ --> PROVIDER["AcquisitionMeterDataProvider"]
+    ACQ --> PROVIDER["AcquisitionMeterSnapshotProvider"]
     PROVIDER --> MAP["MSAP1 RegisterBank adapter"]
     MAP --> HANDLER["mnc::modbus::RequestHandler"]
     HANDLER --> TCP["ModbusTcpServer"]
@@ -114,7 +114,7 @@ immutable snapshot. It never fetches one measurement per register. Therefore
 a read spanning frequency, voltage, and current cannot mix acquisition
 sequences.
 
-The cross-process `AcquisitionMeterDataProvider` is a typed adapter over the
+The cross-process `AcquisitionMeterSnapshotProvider` is a typed adapter over the
 existing acquisition client. Modbus code does not construct IPC frames or
 depend on acquisition command IDs.
 

@@ -2,7 +2,7 @@
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "msap1/meter/history/historian_ipc.hpp"
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
 #include <stdexcept>
 #include <vector>
@@ -23,7 +23,7 @@ void apply_to_acquisition(const msap1::settings::ProductSettings &settings)
 void apply_to_database_services(
 	const msap1::settings::ProductSettings &settings)
 {
-	msap1::meter_stream::MeterStreamClient stream;
+	msap1::meter_stream::MeterRecordStreamClient stream;
 	stream.apply_policy(settings.database.spool_policy());
 	msap1::history::ipc::HistorianClient{}.apply_policies(
 		settings.database.historian_policies());

@@ -1,6 +1,6 @@
 #include "meter_stream_service.hpp"
 
-#include "msap1/meter/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/settings/settings_ipc.hpp"
 
 #include <chrono>

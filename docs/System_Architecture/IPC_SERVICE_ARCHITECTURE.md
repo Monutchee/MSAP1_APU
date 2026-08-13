@@ -7,7 +7,7 @@ flowchart LR
     PL["PL meter DMA records"] --> DAEMON["msap1-fpga-acquisition"]
     DAEMON --> DECODER["typed sparse decoder registry"]
     DECODER --> STORE["MeterLatestStore\nindependent period views"]
-    STORE --> API["MeterDataProvider\ntyped snapshot and latest subscription"]
+    STORE --> API["MeterSnapshotProvider\ntyped snapshot and latest subscription"]
     API --> IPC["mnc::ipc\nBoost.Asio Unix stream"]
     IPC --> WEB["web backend"]
     IPC --> CLI["mnc CLI"]
@@ -18,9 +18,10 @@ The acquisition daemon validates and decodes each PL record, updates the
 independent latest-period stores, and publishes a typed snapshot. This path is
 deliberately a latest-value service: a slow subscriber may miss intermediate
 updates and can never backpressure DMA acquisition. It makes no durability or
-historian guarantee. A future lossless pipeline is kept separate so database
-latency cannot affect live metering; see
-[`FUTURE_DURABLE_METER_PIPELINE.md`](../common/mnc/MeterDataProvider/FUTURE_DURABLE_METER_PIPELINE.md).
+historian guarantee. The implemented `MeterRecordPublisher` and
+`MeterStreamConsumer` path remains separate so database latency cannot affect
+live metering; see the
+[`MeterDataProvider` stream guide](../../common/mnc/MeterDataProvider/stream/README.md).
 
 ## Typed multi-period meter data
 
@@ -54,9 +55,9 @@ does not calculate meter values.
 Each latest-state subscription owns a small worker with a single pending
 view. If its consumer is slow, a newer view replaces the unread one. This is
 intentional for Web and telemetry publishing services: they cannot block
-acquisition. Consumers that must observe every record will use the future
-`MeterRecordPublisher -> DurableMeterSpool -> DatabaseWriter` pipeline rather
-than this latest-state API.
+acquisition. Consumers that must observe every record use the
+`MeterRecordPublisher -> DurableMeterSpool -> historian` pipeline rather than
+this latest-state API.
 
 ## `mnc::ipc` transport
 
@@ -161,7 +162,7 @@ classDiagram
         -RpuControl rpu
         -WaveformCapture waveform
         -MeterData latest
-        -Msap1MeterDataProvider provider
+        -InProcessMeterSnapshotProvider provider
     }
     class MeterRecordSource {
         <<interface>>

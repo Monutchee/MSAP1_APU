@@ -30,7 +30,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
 	  ingest_(meter_, configuration_, timebase_, meter_stream_),
-	  meter_provider_(ingest_.meter_data()),
+	  snapshot_provider_(ingest_.meter_data()),
+	  meter_data_provider_(snapshot_provider_, meter_stream_),
 	  health_(rpu_),
 	  ipc_(options.socket_path)
 {
@@ -495,7 +496,8 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 {
 	msap1::MeterSnapshotResponse response{};
 	response.running = running_;
-	if (const auto snapshot = meter_provider_.latest(request.selection)) {
+	if (const auto snapshot = meter_data_provider_.snapshot_provider().latest(
+		request.selection)) {
 		response.has_snapshot = true;
 		response.snapshot = *snapshot;
 	}

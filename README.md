@@ -119,7 +119,7 @@ values never inherit between periods. See
 Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
 Modbus, and telemetry publishers. Durable historian delivery is implemented
 by `msap1-meter-stream` and `msap1-meter-historian`; see
-[Meter data streaming and historian architecture](common/mnc/MeterDataStreamer/README.md).
+[Meter data streaming and historian architecture](common/mnc/MeterDataProvider/stream/README.md).
 
 The authenticated external API is:
 

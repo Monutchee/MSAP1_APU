@@ -1,4 +1,4 @@
-#include "msap1/meter/MeterDataProvider/acquisition_meter_data_provider.hpp"
+#include "msap1/meter/MeterDataProvider/snapshot/acquisition_meter_snapshot_provider.hpp"
 
 #include <stdexcept>
 
@@ -23,7 +23,7 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 } // namespace
 
 std::vector<mnc::meter::MeterCapabilities>
-AcquisitionMeterDataProvider::capabilities() const
+AcquisitionMeterSnapshotProvider::capabilities() const
 {
 	using Period = mnc::meter::MeasurementPeriod;
 	return {
@@ -33,7 +33,7 @@ AcquisitionMeterDataProvider::capabilities() const
 }
 
 std::optional<mnc::meter::MeterSnapshot>
-AcquisitionMeterDataProvider::latest(
+AcquisitionMeterSnapshotProvider::latest(
 	const mnc::meter::MeterSnapshotRequest &request) const
 {
 	std::scoped_lock lock(mutex_);
@@ -49,7 +49,7 @@ AcquisitionMeterDataProvider::latest(
 }
 
 mnc::meter::LatestSubscription
-AcquisitionMeterDataProvider::subscribe_latest(
+AcquisitionMeterSnapshotProvider::subscribe_latest(
 	const mnc::meter::MeterSnapshotRequest &, Callback)
 {
 	throw std::logic_error(
