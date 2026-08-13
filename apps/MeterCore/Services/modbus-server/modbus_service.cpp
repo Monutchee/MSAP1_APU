@@ -39,6 +39,7 @@ void ModbusService::on_start()
 	{
 		std::scoped_lock lock(settings_mutex_);
 		active_settings_ = settings.modbus;
+		observed_settings_ = settings.modbus;
 	}
 	start_transports(settings.modbus);
 	settings_watcher_ = std::thread([this] { watch_settings(); });
@@ -49,9 +50,24 @@ void ModbusService::on_start()
 void ModbusService::start_transports(
 	const msap1::settings::ModbusSettings &settings)
 {
+	(void)logger().write(mnc::logging::Priority::info,
+		"Applying Modbus configuration: enabled=" +
+			std::string(settings.enabled ? "true" : "false") +
+			", TCP=" +
+			std::string(settings.tcp.enabled ? "enabled" : "disabled") +
+			", RTU entries=" + std::to_string(settings.rtu.size()),
+		"configuration_starting");
 	context_.restart();
 	server_ = std::make_unique<mnc::modbus::ModbusServer>();
 	if (settings.enabled && settings.tcp.enabled) {
+		(void)logger().write(mnc::logging::Priority::info,
+			"Configuring Modbus TCP endpoint " +
+				settings.tcp.listen_address + ":" +
+				std::to_string(settings.tcp.port) +
+				" unit=" + std::to_string(settings.tcp.unit_id) +
+				" clients=" +
+				std::to_string(settings.tcp.maximum_clients),
+			"tcp_configured");
 		server_->add(std::make_unique<mnc::modbus::ModbusTcpServer>(
 			context_.get_executor(), request_handler_,
 			mnc::modbus::TcpServerConfig{
@@ -69,6 +85,11 @@ void ModbusService::start_transports(
 		for (const auto &port : settings.rtu) {
 			if (!port.enabled)
 				continue;
+			(void)logger().write(mnc::logging::Priority::info,
+				"Configuring Modbus RTU endpoint " + port.device +
+					" baud=" + std::to_string(port.baud_rate) +
+					" unit=" + std::to_string(port.unit_id),
+				"rtu_configured");
 			rtu.push_back({.device = port.device,
 				.baud_rate = port.baud_rate,
 				.data_bits = port.data_bits,
@@ -117,6 +138,7 @@ void ModbusService::on_reload()
 	settings.modbus.validate();
 	{
 		std::scoped_lock lock(settings_mutex_);
+		observed_settings_ = settings.modbus;
 		if (settings.modbus == active_settings_)
 			return;
 	}
@@ -164,8 +186,14 @@ void ModbusService::watch_settings()
 		try {
 			const auto settings =
 				msap1::settings::ipc::SettingsClient{}.active(1500);
-			std::scoped_lock lock(settings_mutex_);
-			if (settings.modbus != active_settings_)
+			bool changed = false;
+			{
+				std::scoped_lock lock(settings_mutex_);
+				changed = settings.modbus != observed_settings_;
+				if (changed)
+					observed_settings_ = settings.modbus;
+			}
+			if (changed)
 				request_reload();
 		} catch (const std::exception &error) {
 			(void)logger().write(mnc::logging::Priority::debug,

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -75,6 +76,19 @@ std::vector<std::byte> request(std::uint8_t function,
 	std::vector<std::byte> value{static_cast<std::byte>(function)};
 	for (const auto byte : payload)
 		value.push_back(static_cast<std::byte>(byte));
+	return value;
+}
+
+std::vector<std::byte> rtu_adu(std::uint8_t unit, std::uint8_t function,
+	std::initializer_list<std::uint8_t> payload)
+{
+	std::vector<std::byte> value{
+		static_cast<std::byte>(unit), static_cast<std::byte>(function)};
+	for (const auto byte : payload)
+		value.push_back(static_cast<std::byte>(byte));
+	const auto checksum = crc16(value);
+	value.push_back(static_cast<std::byte>(checksum & 0xffu));
+	value.push_back(static_cast<std::byte>(checksum >> 8u));
 	return value;
 }
 
@@ -208,6 +222,69 @@ void rtu_assembler_test()
 	require(first_port.empty(), "RTU silent-interval reset did not clear state");
 }
 
+void rtu_unknown_function_test()
+{
+	/* Unsupported functions do not define a request length known to the common
+	 * assembler. A non-eight-byte request must therefore remain intact until
+	 * the RTU silent interval supplies the authoritative frame boundary. */
+	const auto unknown = rtu_adu(1, 0x41,
+		{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90});
+	require(unknown.size() != 8, "unknown-function fixture unexpectedly has eight bytes");
+	RtuFrameAssembler assembler;
+	require(assembler.push(unknown).empty(),
+		"unknown RTU function was guessed as a fixed-size request");
+	const auto completed = assembler.finish_on_silence();
+	require(completed && *completed == unknown && assembler.empty(),
+		"RTU silent interval did not preserve the complete unknown request");
+	require(valid_crc(*completed),
+		"unknown RTU request CRC was not checked over the complete frame");
+
+	TestBank bank;
+	RequestHandler handler(bank);
+	const auto reply = handler.handle(Request{1,
+		std::span(*completed).subspan(1, completed->size() - 3), true}, 1);
+	require(reply && octet(reply->pdu[0]) == 0xc1 &&
+		octet(reply->pdu[1]) == static_cast<std::uint8_t>(
+			ExceptionCode::illegal_function),
+		"unknown RTU function did not produce Illegal Function");
+
+	const auto valid = rtu_adu(1, 0x03, {0, 0, 0, 1});
+	const auto frames = assembler.push(valid);
+	require(frames.size() == 1 && frames.front() == valid,
+		"unknown RTU function poisoned the following valid request");
+}
+
+void rtu_malformed_recovery_test()
+{
+	const auto valid = rtu_adu(1, 0x03, {0, 0, 0, 1});
+	auto corrupt = valid;
+	corrupt[3] ^= std::byte{0x40};
+	RtuFrameAssembler assembler;
+	const auto corrupt_frames = assembler.push(corrupt);
+	require(corrupt_frames.size() == 1 &&
+		!valid_crc(corrupt_frames.front()),
+		"full corrupt RTU CRC was not rejected");
+
+	/* FC10 byte-count 248 implies a 257-byte request, one byte beyond the
+	 * accepted RTU ADU bound. The assembler must reject and clear that input so
+	 * a subsequent well-formed request is decoded normally. */
+	std::vector<std::byte> oversized{
+		std::byte{1}, std::byte{0x10}, std::byte{0}, std::byte{0},
+		std::byte{0}, std::byte{124}, std::byte{248}};
+	oversized.resize(257, std::byte{0});
+	bool rejected = false;
+	try {
+		(void)assembler.push(oversized);
+	} catch (const std::length_error &) {
+		rejected = true;
+	}
+	require(rejected && assembler.empty(),
+		"oversized RTU request did not reset assembler state");
+	const auto recovered = assembler.push(valid);
+	require(recovered.size() == 1 && recovered.front() == valid,
+		"assembler did not recover after an oversized RTU request");
+}
+
 std::vector<std::byte> tcp_adu(std::uint16_t transaction,
 	std::span<const std::byte> pdu)
 {
@@ -264,6 +341,85 @@ void tcp_test()
 	server_thread.join();
 }
 
+bool wait_for_disconnect(boost::asio::ip::tcp::socket &socket)
+{
+	socket.non_blocking(true);
+	std::array<std::byte, 1> byte{};
+	for (unsigned attempt = 0; attempt < 100; ++attempt) {
+		boost::system::error_code error;
+		(void)socket.read_some(boost::asio::buffer(byte), error);
+		if (error == boost::asio::error::eof ||
+		    error == boost::asio::error::connection_reset ||
+		    error == boost::asio::error::operation_aborted)
+			return true;
+		if (error != boost::asio::error::would_block &&
+		    error != boost::asio::error::try_again)
+			return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	return false;
+}
+
+void tcp_client_limit_test()
+{
+	TestBank bank;
+	RequestHandler handler(bank);
+	std::atomic<unsigned> errors{0};
+	boost::asio::io_context server_io;
+	ModbusTcpServer server(server_io.get_executor(), handler,
+		{"127.0.0.1", 0, 1},
+		[&](std::string_view, std::string_view) { ++errors; });
+	server.start();
+	std::thread server_thread([&] { server_io.run(); });
+
+	boost::asio::io_context client_io;
+	const boost::asio::ip::tcp::endpoint endpoint(
+		boost::asio::ip::make_address("127.0.0.1"), server.local_port());
+	boost::asio::ip::tcp::socket first(client_io);
+	first.connect(endpoint);
+	const auto pdu = request(0x04, {0, 0, 0, 1});
+	const auto frame = tcp_adu(0x0101, pdu);
+	boost::asio::write(first, boost::asio::buffer(frame));
+	std::array<std::byte, 11> reply{};
+	boost::asio::read(first, boost::asio::buffer(reply));
+
+	boost::asio::ip::tcp::socket excess(client_io);
+	excess.connect(endpoint);
+	require(wait_for_disconnect(excess),
+		"maximum_clients=1 admitted an excess TCP session");
+
+	/* Rejecting a second connection must not disturb the admitted session. */
+	const auto next = tcp_adu(0x0102, pdu);
+	boost::asio::write(first, boost::asio::buffer(next));
+	boost::asio::read(first, boost::asio::buffer(reply));
+	require(read_u16_be(reply) == 0x0102,
+		"excess TCP connection disturbed the admitted client");
+
+	boost::system::error_code ignored;
+	first.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+	first.close(ignored);
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	/* Releasing the admitted client must return its slot. */
+	boost::asio::ip::tcp::socket replacement(client_io);
+	replacement.connect(endpoint);
+	const auto replacement_frame = tcp_adu(0x0103, pdu);
+	boost::asio::write(replacement,
+		boost::asio::buffer(replacement_frame));
+	boost::asio::read(replacement, boost::asio::buffer(reply));
+	require(read_u16_be(reply) == 0x0103,
+		"released TCP client slot was not reusable");
+	replacement.shutdown(boost::asio::ip::tcp::socket::shutdown_both,
+		ignored);
+	replacement.close(ignored);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	require(errors.load() == 0,
+		"normal TCP client disconnect was reported as a transport fault");
+	server.stop();
+	server_io.stop();
+	server_thread.join();
+}
+
 } // namespace
 
 int main()
@@ -272,5 +428,8 @@ int main()
 	exception_code_test();
 	encoding_test();
 	rtu_assembler_test();
+	rtu_unknown_function_test();
+	rtu_malformed_recovery_test();
 	tcp_test();
+	tcp_client_limit_test();
 }

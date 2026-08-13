@@ -27,13 +27,19 @@ struct RtuPortConfig {
 };
 
 /**
- * Incremental RTU request assembler. It uses function-specific lengths so
- * fragmented reads and multiple frames in one kernel read are both normal.
+ * Incremental RTU request assembler.
+ *
+ * Supported requests use their defined wire length, allowing fragmented reads
+ * and multiple complete requests in one kernel read. Unsupported functions do
+ * not have a generally inferable request length and remain buffered until the
+ * serial-line silent interval supplies the authoritative frame boundary.
  */
 class RtuFrameAssembler final {
 public:
 	[[nodiscard]] std::vector<std::vector<std::byte>> push(
 		std::span<const std::byte> bytes);
+	/** Finish the pending frame when the Modbus RTU t3.5 gap expires. */
+	[[nodiscard]] std::optional<std::vector<std::byte>> finish_on_silence();
 	void clear() noexcept { buffer_.clear(); }
 	[[nodiscard]] bool empty() const noexcept { return buffer_.empty(); }
 	[[nodiscard]] std::size_t pending_size() const noexcept

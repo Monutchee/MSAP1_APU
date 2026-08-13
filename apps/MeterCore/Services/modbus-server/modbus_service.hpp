@@ -48,6 +48,10 @@ private:
 	std::thread settings_watcher_;
 	mutable std::mutex settings_mutex_;
 	msap1::settings::ModbusSettings active_settings_;
+	/* Last settings document seen by the watcher. This remains distinct from
+	 * active_settings_: a rejected candidate must not trigger a destructive
+	 * stop/rollback cycle every time the watcher polls. */
+	msap1::settings::ModbusSettings observed_settings_;
 	std::atomic<bool> stopping_{false};
 	std::atomic<bool> failed_{false};
 };

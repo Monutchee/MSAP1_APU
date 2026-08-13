@@ -106,9 +106,93 @@ void metadata_and_boundaries()
 	require(registers.read(mnc::modbus::FunctionCode::read_input_registers, 21, 2).exception ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"register boundary was not rejected");
+	require(provider.reads == 0,
+		"invalid address queried the snapshot provider before validation");
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers,
+		0xffff, 2).exception ==
+		mnc::modbus::ExceptionCode::illegal_data_address,
+		"overflowing register range did not return Illegal Data Address");
+	require(provider.reads == 0,
+		"overflowing address queried the snapshot provider");
+	require(registers.read(mnc::modbus::FunctionCode::read_input_registers,
+		0, 0).exception == mnc::modbus::ExceptionCode::illegal_data_value,
+		"zero register count did not return Illegal Data Value");
+	require(provider.reads == 0,
+		"zero-count request queried the snapshot provider");
 	require(registers.write_single(0, 1) ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"read-only initial map accepted a write");
+}
+
+void partial_register_reads()
+{
+	SnapshotProvider provider;
+	msap1::modbus::Msap1RegisterBank registers(provider);
+	const auto full_float = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 6);
+	require(full_float.exception == mnc::modbus::ExceptionCode::none &&
+		full_float.values.size() == 6,
+		"full float register fixture failed");
+
+	const auto low_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 1, 1);
+	const auto high_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 1);
+	require(high_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		high_frequency.values ==
+			(std::vector<std::uint16_t>{full_float.values[0]}),
+		"single high word of float32 was not sliced correctly");
+	require(low_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		low_frequency.values ==
+			(std::vector<std::uint16_t>{full_float.values[1]}),
+		"single low word of float32 was not sliced correctly");
+	const auto complete_frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0, 2);
+	require(complete_frequency.exception == mnc::modbus::ExceptionCode::none &&
+		complete_frequency.values == (std::vector<std::uint16_t>{
+			full_float.values[0], full_float.values[1]}),
+		"complete float32 field was not returned unchanged");
+	const auto spanning_float = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 1, 2);
+	require(spanning_float.exception == mnc::modbus::ExceptionCode::none &&
+		spanning_float.values == (std::vector<std::uint16_t>{
+			full_float.values[1], full_float.values[2]}),
+		"partial read spanning float32 fields was not sliced correctly");
+
+	const auto full_u32 = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 4);
+	require(full_u32.exception == mnc::modbus::ExceptionCode::none &&
+		full_u32.values.size() == 4,
+		"full uint32 register fixture failed");
+	const auto high_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 1);
+	require(high_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		high_sequence.values ==
+			(std::vector<std::uint16_t>{full_u32.values[0]}),
+		"single high word of uint32 was not sliced correctly");
+	const auto low_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 19, 1);
+	require(low_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		low_sequence.values ==
+			(std::vector<std::uint16_t>{full_u32.values[1]}),
+		"single low word of uint32 was not sliced correctly");
+	const auto complete_sequence = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 18, 2);
+	require(complete_sequence.exception == mnc::modbus::ExceptionCode::none &&
+		complete_sequence.values == (std::vector<std::uint16_t>{
+			full_u32.values[0], full_u32.values[1]}),
+		"complete uint32 field was not returned unchanged");
+	const auto spanning_u32 = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 19, 2);
+	require(spanning_u32.exception == mnc::modbus::ExceptionCode::none &&
+		spanning_u32.values == (std::vector<std::uint16_t>{
+			full_u32.values[1], full_u32.values[2]}),
+		"partial read spanning uint32 fields was not sliced correctly");
+
+	/* Each request, including a partial one, must still be coherent and use
+	 * exactly one snapshot rather than reading once per register definition. */
+	require(provider.reads == 10,
+		"partial register reads did not use one coherent snapshot each");
 }
 
 } // namespace
@@ -117,4 +201,5 @@ int main()
 {
 	coherent_input_block();
 	metadata_and_boundaries();
+	partial_register_reads();
 }

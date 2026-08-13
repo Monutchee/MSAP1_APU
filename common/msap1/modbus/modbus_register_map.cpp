@@ -197,8 +197,20 @@ mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
 {
 	if (!mnc::modbus::is_register_read(function))
 		return {mnc::modbus::ExceptionCode::illegal_function, {}};
-	if (count == 0 || static_cast<std::uint32_t>(address) + count > 0x10000u)
+	if (count == 0)
 		return {mnc::modbus::ExceptionCode::illegal_data_value, {}};
+	const auto end = static_cast<std::uint32_t>(address) + count;
+	if (end > 0x10000u)
+		return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
+
+	/* Validate the complete request before entering the synchronous snapshot
+	 * adapter. Besides preserving Illegal Data Address precedence, this keeps
+	 * malformed traffic from occupying the service's sole Asio worker while
+	 * acquisition IPC is unavailable. */
+	for (std::uint32_t current = address; current < end; ++current) {
+		if (!definition(function, static_cast<std::uint16_t>(current)))
+			return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
+	}
 
 	std::optional<mnc::meter::MeterSnapshot> snapshot;
 	if (function == FunctionCode::read_input_registers) {
@@ -217,11 +229,8 @@ mnc::modbus::RegisterReadResult Msap1RegisterBank::read(
 	result.reserve(count);
 	const RegisterDefinition *cached = nullptr;
 	std::vector<std::uint16_t> encoded;
-	for (std::uint32_t current = address;
-	     current < static_cast<std::uint32_t>(address) + count; ++current) {
+	for (std::uint32_t current = address; current < end; ++current) {
 		const auto *entry = definition(function, static_cast<std::uint16_t>(current));
-		if (!entry)
-			return {mnc::modbus::ExceptionCode::illegal_data_address, {}};
 		if (entry != cached) {
 			encoded = encode(*entry, snapshot);
 			cached = entry;

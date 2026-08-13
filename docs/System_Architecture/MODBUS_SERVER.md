@@ -97,13 +97,22 @@ clients. The configured client limit bounds resource use.
 
 `ModbusRtuServer` creates one asynchronous `boost::asio::serial_port` owner
 per enabled device. Each port has independent receive assembly, CRC checking,
-unit filtering, and error recovery. One serial-device failure is reported but
-does not stop other ports or TCP.
+unit filtering, and error recovery. Configured ports are opened atomically:
+failure to open any candidate port rejects that runtime configuration so the
+service can restore its previous working transports.
+
+After startup, a read/write failure closes only the affected RTU port and
+cancels its pending timer and response queue; the remaining configured ports
+continue serving requests. Response queues are bounded, so a stalled serial
+peer cannot cause unbounded memory growth.
 
 RTU CRC16 is calculated with `boost::crc_optimal` using the Modbus polynomial
 and reflection rules. Supported requests are parsed by their function-specific
-length. A 3.5-character silence timer discards incomplete data before the next
-frame; above 19,200 baud it uses the Modbus fixed 1.75 ms interval.
+length. Unsupported functions remain buffered because their request length is
+not generally knowable; the 3.5-character silent interval then finalizes the
+whole request before CRC validation and the Illegal Function response. Above
+19,200 baud the timer uses the Modbus fixed 1.75 ms interval. Known supported
+requests retain immediate length-based dispatch for compatibility and latency.
 
 ## Coherent data access
 
@@ -117,6 +126,13 @@ sequences.
 The cross-process `AcquisitionMeterSnapshotProvider` is a typed adapter over the
 existing acquisition client. Modbus code does not construct IPC frames or
 depend on acquisition command IDs.
+
+The adapter is currently synchronous and the service intentionally owns one
+Asio worker. A delayed acquisition reply can therefore pause all Modbus
+transports temporarily. Invalid register ranges are prevalidated before this
+IPC call. A future latest-snapshot subscription/cache should remove valid-read
+round trips without weakening the one-coherent-snapshot rule; spawning a thread
+per Modbus client is not the intended solution.
 
 ## MSAP1 register contract, version 1
 

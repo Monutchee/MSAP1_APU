@@ -58,7 +58,11 @@ target_link_libraries(mnc_ipc PUBLIC Threads::Threads)
 # Transport-independent Modbus protocol handling plus Boost.Asio TCP/RTU
 # adapters. Product register addresses deliberately live outside this target.
 add_library(mnc_modbus STATIC
-    mnc/modbus/modbus.cpp
+    mnc/modbus/encoding.cpp
+    mnc/modbus/request_handler.cpp
+    mnc/modbus/rtu_server.cpp
+    mnc/modbus/server.cpp
+    mnc/modbus/tcp_server.cpp
 )
 add_library(mnc::modbus ALIAS mnc_modbus)
 target_include_directories(mnc_modbus PUBLIC
@@ -232,7 +236,7 @@ msap1_library(msap1_modbus msap1::modbus
 )
 target_link_libraries(msap1_modbus PUBLIC
 	mnc::modbus
-	msap1::acquisition
+	mnc::meter-data-provider
 )
 
 msap1_library(msap1_system msap1::system
