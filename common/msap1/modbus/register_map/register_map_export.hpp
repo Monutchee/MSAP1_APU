@@ -9,6 +9,7 @@ enum class RegisterMapFormat : std::uint8_t {
 	text,
 	csv,
 	markdown,
+	json,
 };
 
 /** Render the compiled register schema; no parallel documentation table exists. */

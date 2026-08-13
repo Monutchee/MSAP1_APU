@@ -236,11 +236,33 @@ The development utility consumes the exact definitions used by the server:
 modbus-map-dump --format text
 modbus-map-dump --format csv
 modbus-map-dump --format markdown
+modbus-map-dump --format json
 ```
 
 Markdown output also includes every reserved block. Customer documentation can
 therefore be generated from the same source used by runtime and tests instead
 of maintaining a parallel address table.
+
+JSON output uses the versioned schema `mnc.modbus-register-map.v1`. It contains
+both mapped logical registers and reserved address blocks. Addresses are
+zero-based Modbus protocol addresses; numeric values are accompanied by hex
+display strings. Function codes, source kinds, measurement attributes, indexed
+attributes, measurement periods, data types, word counts, aliases, and the
+high-word-first convention are represented as separate fields so documentation
+generators do not need to parse human-readable labels.
+
+For example, a Python documentation generator can load the map directly:
+
+```python
+import json
+import subprocess
+
+document = json.loads(subprocess.check_output(
+    ["modbus-map-dump", "--format", "json"], text=True))
+
+for register in document["registers"]:
+    print(register["function_code"], register["address"], register["source"])
+```
 
 ## Encoding
 

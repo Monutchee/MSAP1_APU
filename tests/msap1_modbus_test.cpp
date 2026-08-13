@@ -276,6 +276,19 @@ void generated_map_lookup_and_export()
 	require(markdown.find("Reserved address blocks") != std::string::npos &&
 		markdown.find("voltage_harmonics") != std::string::npos,
 		"Markdown exporter omitted the generated map or reserved blocks");
+	const auto json = msap1::modbus::export_register_map(
+		msap1::modbus::RegisterMapFormat::json);
+	require(json.find("\"schema\": \"mnc.modbus-register-map.v1\"") !=
+			std::string::npos &&
+		json.find("\"function_code\": 3") != std::string::npos &&
+		json.find("\"function_code\": 4") != std::string::npos &&
+		json.find("\"source_kind\": \"measurement\"") !=
+			std::string::npos &&
+		json.find("\"source_kind\": \"special\"") != std::string::npos &&
+		json.find("\"blocks\": [") != std::string::npos &&
+		json.find("\"name\": \"voltage_harmonics\"") !=
+			std::string::npos,
+		"JSON exporter omitted its schema, functions, sources, or blocks");
 }
 
 void partial_register_reads()

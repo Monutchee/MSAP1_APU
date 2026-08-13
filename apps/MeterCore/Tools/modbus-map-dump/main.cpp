@@ -14,12 +14,15 @@ msap1::modbus::RegisterMapFormat format(std::string_view value)
 		return msap1::modbus::RegisterMapFormat::csv;
 	if (value == "markdown")
 		return msap1::modbus::RegisterMapFormat::markdown;
-	throw std::invalid_argument("format must be text, csv, or markdown");
+	if (value == "json")
+		return msap1::modbus::RegisterMapFormat::json;
+	throw std::invalid_argument(
+		"format must be text, csv, markdown, or json");
 }
 
 void usage(std::ostream &output)
 {
-	output << "Usage: modbus-map-dump [--format text|csv|markdown]\n";
+	output << "Usage: modbus-map-dump [--format text|csv|markdown|json]\n";
 }
 
 } // namespace

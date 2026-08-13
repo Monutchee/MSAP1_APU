@@ -239,6 +239,7 @@ target_link_libraries(msap1_modbus PUBLIC
 	mnc::modbus
 	mnc::meter-data-provider
 )
+target_link_libraries(msap1_modbus PRIVATE glaze::glaze)
 
 msap1_library(msap1_system msap1::system
     msap1/system/soc_temperature.cpp
