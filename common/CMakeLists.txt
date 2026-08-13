@@ -54,6 +54,21 @@ target_compile_definitions(mnc_ipc PUBLIC BOOST_ERROR_CODE_HEADER_ONLY=1)
 target_compile_options(mnc_ipc PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(mnc_ipc PUBLIC Threads::Threads)
 
+# Transport-independent Modbus protocol handling plus Boost.Asio TCP/RTU
+# adapters. Product register addresses deliberately live outside this target.
+add_library(mnc_modbus STATIC
+    mnc/modbus/modbus.cpp
+)
+add_library(mnc::modbus ALIAS mnc_modbus)
+target_include_directories(mnc_modbus PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_modbus PUBLIC cxx_std_23)
+target_compile_definitions(mnc_modbus PUBLIC BOOST_ERROR_CODE_HEADER_ONLY=1)
+target_compile_options(mnc_modbus PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_modbus PUBLIC Threads::Threads)
+
 if(MNC_LOGGING_REQUIRE_SYSTEMD)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
@@ -190,7 +205,8 @@ msap1_library(msap1_waveform msap1::waveform
 # structs to glaze BEVE payloads while mnc::ipc remains unaware of their
 # meaning.
 msap1_library(msap1_acquisition msap1::acquisition
-    msap1/acquisition/ipc/acquisition_ipc.cpp
+	msap1/acquisition/ipc/acquisition_ipc.cpp
+	msap1/meter/MeterDataProvider/acquisition_meter_data_provider.cpp
     msap1/acquisition/dma/meter_dma_reader.cpp
     msap1/acquisition/rpu/rpu_controller.cpp
     msap1/acquisition/rpu/protocol.cpp
@@ -205,6 +221,16 @@ target_link_libraries(msap1_acquisition PUBLIC
 target_link_libraries(msap1_acquisition PRIVATE
     mnc::rpmsg_chrdev
     mnc::logging
+)
+
+# Static MSAP1 register contract and its snapshot-backed RegisterBank adapter.
+# TCP/RTU framing remains wholly in the product-neutral mnc::modbus target.
+msap1_library(msap1_modbus msap1::modbus
+	msap1/modbus/modbus_register_map.cpp
+)
+target_link_libraries(msap1_modbus PUBLIC
+	mnc::modbus
+	msap1::acquisition
 )
 
 msap1_library(msap1_system msap1::system
@@ -261,6 +287,18 @@ msap1_forbid_direct_dependencies(mnc_ipc
 )
 
 if(BUILD_TESTING)
+	add_executable(modbus_test ${PROJECT_SOURCE_DIR}/tests/modbus_test.cpp)
+	target_link_libraries(modbus_test PRIVATE mnc::modbus)
+	target_compile_options(modbus_test PRIVATE -Wall -Wextra -Wpedantic)
+	add_test(NAME modbus_test COMMAND modbus_test)
+
+	add_executable(msap1_modbus_test
+		${PROJECT_SOURCE_DIR}/tests/msap1_modbus_test.cpp)
+	target_link_libraries(msap1_modbus_test PRIVATE msap1::modbus)
+	target_compile_options(msap1_modbus_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME msap1_modbus_test COMMAND msap1_modbus_test)
+
     add_executable(ipc_test ${PROJECT_SOURCE_DIR}/tests/ipc_test.cpp)
     target_link_libraries(ipc_test PRIVATE mnc::ipc)
     target_compile_options(ipc_test PRIVATE -Wall -Wextra -Wpedantic)

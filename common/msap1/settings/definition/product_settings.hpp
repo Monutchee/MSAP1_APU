@@ -3,6 +3,7 @@
 #include "msap1/settings/definition/adc_settings.hpp"
 #include "msap1/settings/definition/database_settings.hpp"
 #include "msap1/settings/definition/metering_settings.hpp"
+#include "msap1/settings/definition/modbus_settings.hpp"
 #include "msap1/settings/definition/waveform_settings.hpp"
 
 #include <cstdint>
@@ -19,6 +20,7 @@ struct ProductSettings {
 	AdcSettings adc;
 	WaveformSettings waveform;
 	DatabaseSettings database;
+	ModbusSettings modbus;
 
 	/** Per-domain constraints plus the cross-domain meter configuration
 	 *  check; the complete rule set for a persistable document. */

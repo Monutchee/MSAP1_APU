@@ -2,6 +2,7 @@ add_subdirectory(settings)
 add_subdirectory(meter-stream)
 add_subdirectory(meter-historian)
 add_subdirectory(acquisition)
+add_subdirectory(modbus-server)
 add_subdirectory(service-manager)
 
 # webengine::webengine is added by the repository root under the same option.

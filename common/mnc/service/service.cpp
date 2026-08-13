@@ -38,6 +38,8 @@ Service::Service(std::string name, std::string component)
 
 void Service::request_stop() noexcept { stop_requested_ = true; }
 
+void Service::request_reload() noexcept { reload_requested_ = true; }
+
 bool Service::stop_requested() const noexcept { return stop_requested_; }
 
 bool Service::notify(std::string_view state) const noexcept
@@ -90,10 +92,14 @@ int Service::execute()
 			if (signal == SIGINT || signal == SIGTERM) {
 				request_stop();
 			} else if (signal == SIGHUP) {
+				reload_requested_ = true;
+			}
+			if (reload_requested_.exchange(false)) {
 				on_reload();
 				logger_.write(logging::Priority::notice,
 					name_ + " reloaded", "service_reloaded");
-			} else if (signal < 0 && errno != EAGAIN && errno != EINTR) {
+			}
+			if (signal < 0 && errno != EAGAIN && errno != EINTR) {
 				throw std::runtime_error("sigtimedwait failed: " +
 					std::string(std::strerror(errno)));
 			}
