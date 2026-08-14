@@ -3,6 +3,7 @@
 #include "support/logs.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <string>
 
@@ -31,6 +32,13 @@ void stamp_time_state(Timing &timing,
 		timing.utc_start = estimate->utc;
 		timing.utc_uncertainty_ns = estimate->uncertainty_ns;
 	}
+}
+
+std::string hex_word(std::uint32_t value)
+{
+	char buffer[11];
+	(void)std::snprintf(buffer, sizeof buffer, "0x%08X", value);
+	return buffer;
 }
 
 } // namespace
@@ -250,10 +258,98 @@ bool MeterRecordIngestor::track_aggregate_continuity(
 	return false;
 }
 
+/*
+ * Field-incident forensics: matches_configuration() was the ONLY silent
+ * rejection path, and during the 2026-08-13/14 PL emission fault episodes
+ * that silence cost the investigation the one datum that localizes the
+ * failing hardware stage — WHICH header word arrives corrupted.
+ *
+ * The words are dumped RAW and unlabeled because their meaning depends on
+ * the (possibly corrupted) format word: in the MTR2 layout words 12/13 are
+ * a sample index, not the drop counters they are in MTR1, and any semantic
+ * label here would assert the wrong meaning during exactly the analysis
+ * this log exists for. Words 0..15 cover every header/diagnostic field and
+ * expose beat-shift patterns; words 60/61 carry the v2 first-sample index
+ * that separates in-place corruption from a stale replayed record.
+ *
+ * Rate limited to one entry per 2 s: the observed fault rejects one record
+ * per 3 s window (each passes), while a total mismatch storm (all records
+ * failing) stays bounded below the record rate. Suppressed rejections are
+ * counted and reported on the next emitted entry, so the journal can never
+ * falsely confirm a one-per-window pattern.
+ *
+ * The reason re-derivation below must stay in lockstep with
+ * matches_configuration(): the final branch is only reachable for a v1
+ * record failing the window check.
+ */
+void MeterRecordIngestor::log_configuration_mismatch(
+	const msap1::MeterRecord &record)
+{
+	const auto now = Clock::now();
+	if (last_reject_log_ &&
+	    now - *last_reject_log_ < std::chrono::seconds(2)) {
+		++suppressed_reject_logs_;
+		return;
+	}
+	last_reject_log_ = now;
+	const auto suppressed = suppressed_reject_logs_;
+	suppressed_reject_logs_ = 0;
+
+	std::string reason;
+	if (!record.header_valid())
+		reason = "invalid header";
+	else if (record.configuration_generation() !=
+		 configuration_.wire.generation)
+		reason = "generation mismatch (expected " +
+			 std::to_string(configuration_.wire.generation) + ")";
+	else if (record.sample_rate_hz() != configuration_.wire.sample_rate_hz)
+		reason = "sample rate mismatch (expected " +
+			 std::to_string(configuration_.wire.sample_rate_hz) + ")";
+	else
+		reason = "v1 window mismatch (expected " +
+			 std::to_string(configuration_.wire.rms_window_samples) + ")";
+
+	std::string header_words;
+	for (std::size_t index = 0; index < 16; ++index) {
+		if (index != 0)
+			header_words += ' ';
+		header_words += hex_word(record.word(index));
+	}
+	const auto sample_index_words =
+		hex_word(record.word(60)) + ' ' + hex_word(record.word(61));
+
+	log_message(dma_log, mnc::logging::Priority::warning,
+		"meter record rejected by configuration match: " + reason +
+			"; seq=" + std::to_string(record.word(3)) +
+			" words[0..15]=" + header_words +
+			" words[60..61]=" + sample_index_words +
+			(suppressed != 0
+				 ? " (+" + std::to_string(suppressed) +
+					   " rejections suppressed)"
+				 : ""),
+		"meter_record_config_rejected",
+		{{"MNC_REJECT_REASON", reason},
+		 {"MNC_SEQUENCE", std::to_string(record.word(3))},
+		 {"MNC_RECORD_FORMAT", hex_word(record.word(1))},
+		 {"MNC_CONFIGURATION_GENERATION",
+		  std::to_string(record.word(4))},
+		 {"MNC_EXPECTED_CONFIGURATION_GENERATION",
+		  std::to_string(configuration_.wire.generation)},
+		 {"MNC_SAMPLE_RATE_HZ", std::to_string(record.word(5))},
+		 {"MNC_EXPECTED_SAMPLE_RATE_HZ",
+		  std::to_string(configuration_.wire.sample_rate_hz)},
+		 {"MNC_EXPECTED_WINDOW_SAMPLES",
+		  std::to_string(configuration_.wire.rms_window_samples)},
+		 {"MNC_HEADER_WORDS", header_words},
+		 {"MNC_SAMPLE_INDEX_WORDS", sample_index_words},
+		 {"MNC_SUPPRESSED_REJECTS", std::to_string(suppressed)}});
+}
+
 void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 {
 	if (!matches_configuration(record)) {
 		++invalid_records_;
+		log_configuration_mismatch(record);
 		return;
 	}
 

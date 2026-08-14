@@ -159,6 +159,9 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
+	/** Log a matches_configuration() rejection with the failed check and the
+	 * raw header words — the datum that localizes a PL emission fault. */
+	void log_configuration_mismatch(const msap1::MeterRecord &record);
 	[[nodiscard]] bool matches_configuration(
 		const msap1::MeterRecord &record) const;
 	[[nodiscard]] bool track_basic_continuity(
@@ -183,6 +186,12 @@ private:
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
 	std::uint64_t last_transport_overruns_ = 0;
+	/* Rate limit for configuration-mismatch forensics: the observed
+	 * one-rejection-per-window fault passes, a total-mismatch storm stays
+	 * bounded below the record rate, and anything suppressed is counted
+	 * and reported on the next emitted entry. */
+	std::optional<Clock::time_point> last_reject_log_;
+	std::uint64_t suppressed_reject_logs_ = 0;
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache) and the newest accepted aggregate
 	 * sequence. An aggregate between two basic blocks must never look
