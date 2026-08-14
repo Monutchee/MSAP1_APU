@@ -26,6 +26,7 @@ public:
 		return device_path_;
 	}
 	[[nodiscard]] MeterRecordBatch read_available() override;
+	[[nodiscard]] std::uint64_t transport_overruns() noexcept override;
 
 private:
 	std::string device_path_;

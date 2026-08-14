@@ -42,17 +42,28 @@ struct DatabaseSettings {
 	 * measurement record lives in the historian projections. One hour is
 	 * therefore ample, and it bounds two costs that a 24 h window made
 	 * severe. It caps the volatile rebuild a restart has to replay, and it
-	 * caps how much of this per-record, fsync-per-commit write load is
-	 * retained on eMMC.
+	 * caps how much of this per-record write load is retained.
 	 *
-	 * Shortening it cannot lose data: prune() deletes only
+	 * The memory backend is the default because the producer's publish is a
+	 * SYNCHRONOUS round-trip on the acquisition hot path: with a persistent
+	 * spool every record costs an fsync on /data, and one slow-storage
+	 * episode stalls acquisition long enough to overrun the kernel DMA ring
+	 * and lose PL records (observed in the field on SD media). Volatility is
+	 * safe because the cursor lease keeps cursors monotonic across restarts
+	 * and the historian reports the lost rebuild window truthfully.
+	 *
+	 * Age pruning cannot lose data: prune() deletes only
 	 * `cursor <= MIN(acknowledged_cursor) AND ingested_at_ns < cutoff`, so
 	 * records no consumer has acknowledged are never removed however old they
-	 * are. A lagging historian holds the prune point back and the spool simply
-	 * grows past an hour until it catches up.
+	 * are. A lagging historian holds the prune point back and the spool grows
+	 * past an hour until it catches up — which is why the byte cap exists: it
+	 * is the hard bound that turns a wedged consumer into bounded, reported
+	 * record loss instead of unbounded memory growth.
 	 */
 	DatasetStorageSettings spool{
-		.backend = "persistent", .maximum_age_seconds = 60u * 60u};
+		.backend = "memory", .maximum_age_seconds = 60u * 60u,
+		.maximum_bytes = 32ull * 1024ull * 1024ull,
+		.volatile_spool_acknowledged = true};
 	DatasetStorageSettings basic{
 		.backend = "memory", .maximum_age_seconds = 24u * 60u * 60u,
 		.maximum_bytes = 512ull * 1024ull * 1024ull};

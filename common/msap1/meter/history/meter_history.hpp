@@ -57,6 +57,28 @@ struct HistorianStatus {
 	std::vector<DatasetStatus> datasets;
 };
 
+/**
+ * Can the volatile projections be rebuilt from everything ever published?
+ * @p oldest_cursor and @p session_start_cursor come from the stream's
+ * status; @p persisted_high_water from the historian's own persistent
+ * projections (its durable proof that history predates this spool session).
+ *
+ * Two ways coverage is lost: records pruned within the current spool session
+ * (the oldest retained cursor moved past the session's first possible one),
+ * and a spool session that began only after history already existed — which
+ * is how a volatile spool restart looks, and how an EMPTY spool
+ * (oldest_cursor of 0) is kept truthful instead of passing as complete.
+ * The replaced heuristic, oldest_cursor > 1, did exactly that.
+ */
+[[nodiscard]] constexpr bool backfill_is_incomplete(std::uint64_t oldest_cursor,
+	std::uint64_t session_start_cursor, std::uint64_t persisted_high_water)
+{
+	if (oldest_cursor > session_start_cursor + 1)
+		return true;
+	return persisted_high_water > 0 &&
+		session_start_cursor > persisted_high_water;
+}
+
 /** Routes each typed PL result to the configured volatile/persistent store. */
 class MeterHistoryStore final {
 public:
@@ -70,6 +92,10 @@ public:
 		std::int64_t measured_at_nanoseconds);
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
 	[[nodiscard]] HistorianStatus status() const;
+	/** Highest stream cursor the persistent projections have committed, or 0
+	 * when they hold nothing.  This is the historian's own durable coverage
+	 * mark, independent of the spool's (possibly volatile) consumer state. */
+	[[nodiscard]] std::uint64_t persisted_stream_high_water() const;
 	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
 	policies() const;
 	/**

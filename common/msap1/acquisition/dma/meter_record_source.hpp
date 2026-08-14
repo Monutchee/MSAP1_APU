@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace msap1::acquisition {
@@ -33,6 +34,17 @@ public:
 	[[nodiscard]] virtual int native_handle() const noexcept = 0;
 	[[nodiscard]] virtual std::string_view name() const noexcept = 0;
 	[[nodiscard]] virtual MeterRecordBatch read_available() = 0;
+	/**
+	 * Records lost in the kernel transport ring since start(), absolute.
+	 * Zero for sources without transport accounting.  A payload sequence gap
+	 * with no matching overrun growth is PL-side loss; with matching growth
+	 * it is kernel-side (userspace fell behind the DMA ring) — the
+	 * distinction that decides where to look next.
+	 */
+	[[nodiscard]] virtual std::uint64_t transport_overruns() noexcept
+	{
+		return 0;
+	}
 };
 
 } // namespace msap1::acquisition

@@ -31,6 +31,9 @@ public:
 	[[nodiscard]] DatabaseStoragePolicy policy() const;
 	void apply_policy(DatabaseStoragePolicy policy);
 	void prune();
+	/** Cheap counter access so the service can notice hard-cap evictions on
+	 * the publish path without paying for a full status() query. */
+	[[nodiscard]] std::uint64_t dropped_unacknowledged_records() const;
 
 private:
 	class Impl;

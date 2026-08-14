@@ -377,6 +377,15 @@ VALUES(?,?,?,?,?,?,?,?,?)
 	auto find = database.prepare("SELECT id FROM measurement_blocks WHERE stream_cursor=?");
 	find.bind(1, stream_cursor); if (!find.step()) throw std::runtime_error("historian block missing");
 	const auto block_id = find.integer(0);
+	/*
+	 * The statement must not stay in its row-available state across the
+	 * COMMIT below: SQLite's WAL auto-checkpoint runs at commit and aborts
+	 * whenever the committing connection still has an active statement.
+	 * Leaving this SELECT unreset therefore blocked every checkpoint this
+	 * store ever attempted, and the WAL grew without bound (1.4 GB on
+	 * hardware) while the main database file stayed permanently empty.
+	 */
+	find.reset();
 	/* A retained persistent projection can be encountered again while a
 	 * volatile projection rebuilds. Its immutable stream cursor means the
 	 * existing values are already authoritative; avoid needless writes/WAL
@@ -524,6 +533,15 @@ HistorianStatus MeterHistoryStore::status() const
 
 std::vector<mnc::meter_stream::DatabaseStoragePolicy> MeterHistoryStore::policies() const
 { return impl_->manager.policies(); }
+
+std::uint64_t MeterHistoryStore::persisted_stream_high_water() const
+{
+	std::scoped_lock lock(impl_->mutex);
+	auto latest = impl_->persistent.prepare(
+		"SELECT COALESCE(MAX(stream_cursor),0) FROM measurement_blocks");
+	(void)latest.step();
+	return static_cast<std::uint64_t>(latest.integer(0));
+}
 
 void MeterHistoryStore::prepare_policy_migration(
 	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)

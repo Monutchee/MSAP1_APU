@@ -8,6 +8,7 @@
 #include <boost/asio/io_context.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <thread>
@@ -37,6 +38,11 @@ private:
 	std::thread worker_;
 	std::vector<std::weak_ptr<mnc::ipc::FramedConnection>> subscribers_;
 	std::atomic<bool> failed_{false};
+	/* Hard-cap eviction reporting: the counter delta says how many records
+	 * were lost, the time floor keeps a wedged consumer from flooding the
+	 * journal at the publish rate. */
+	std::uint64_t reported_dropped_records_ = 0;
+	std::chrono::steady_clock::time_point last_drop_report_{};
 };
 
 } // namespace msap1::meter_stream::daemon
