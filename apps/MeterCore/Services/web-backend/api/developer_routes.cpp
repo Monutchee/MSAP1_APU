@@ -178,6 +178,10 @@ classify_log_entry(const mnc::logging::Entry &entry)
 		return {"fpga-acquisition", entry.module};
 	if (entry.unit == "msap1-web-backend.service")
 		return {"web-backend", entry.module};
+	if (entry.unit == "msap1-mqtt-publisher.service")
+		return {"mqtt-publisher", entry.module};
+	if (entry.unit == "msap1-modbus-server.service")
+		return {"modbus", entry.module};
 	return {{}, {}};
 }
 
@@ -187,10 +191,18 @@ DeveloperLogsDto developer_logs(std::string_view target)
 	const auto params = query_parameters(target);
 	mnc::logging::Query query;
 	query.limit = log_limit(params);
-	query.components = {"fpga-acquisition", "web-backend", "firmware"};
+	query.components = {
+		"fpga-acquisition",
+		"web-backend",
+		"mqtt-publisher",
+		"modbus",
+		"firmware",
+	};
 	query.units = {
 		"msap1-fpga-acquisition.service",
 		"msap1-web-backend.service",
+		"msap1-mqtt-publisher.service",
+		"msap1-modbus-server.service",
 		"dfx-mgr-fw-load.service",
 		"msap1-dfx-firmware-rpu-load.service",
 	};
@@ -209,6 +221,12 @@ DeveloperLogsDto developer_logs(std::string_view target)
 		} else if (item->second == "web-backend") {
 			query.components = {"web-backend"};
 			query.units = {"msap1-web-backend.service"};
+		} else if (item->second == "mqtt-publisher") {
+			query.components = {"mqtt-publisher"};
+			query.units = {"msap1-mqtt-publisher.service"};
+		} else if (item->second == "modbus") {
+			query.components = {"modbus"};
+			query.units = {"msap1-modbus-server.service"};
 		} else {
 			throw std::invalid_argument("unsupported log component");
 		}

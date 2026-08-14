@@ -1,6 +1,7 @@
 #include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 
 #include <stdexcept>
+#include <array>
 
 namespace mnc::meter {
 
@@ -12,6 +13,13 @@ constexpr MeterAttributeKey key(Id id)
 {
 	return MeterAttributeKey{id, std::nullopt};
 }
+
+constexpr std::array catalog{
+	key(Id::Frequency), key(Id::VanRms), key(Id::VbnRms),
+	key(Id::VcnRms), key(Id::VabRms), key(Id::VbcRms),
+	key(Id::VcaRms), key(Id::IaRms), key(Id::IbRms),
+	key(Id::IcRms), key(Id::InRms),
+};
 
 } // namespace
 
@@ -42,6 +50,23 @@ MeterAttributeDescriptor describe(MeterAttributeKey attribute)
 		return {attribute, "current.n.rms", MeterUnit::MicroAmperes};
 	}
 	throw std::invalid_argument("unknown meter attribute");
+}
+
+std::optional<MeterAttributeKey> find_attribute(std::string_view name) noexcept
+{
+	for (const auto attribute : catalog) {
+		try {
+			if (describe(attribute).key == name)
+				return attribute;
+		} catch (...) {
+		}
+	}
+	return std::nullopt;
+}
+
+std::span<const MeterAttributeKey> defined_attributes() noexcept
+{
+	return catalog;
 }
 
 std::vector<MeterAttributeKey> attributes_in(MeterAttributeGroup group)

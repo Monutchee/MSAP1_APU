@@ -22,8 +22,10 @@
 #include "app_context.hpp"
 
 #include <array>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <webengine/Http.hpp>
 #include <webengine/Role.hpp>
@@ -160,6 +162,40 @@ webengine::Response post_history_query(AppContext &,
 webengine::Response get_history_health(AppContext &,
 				       const webengine::RequestContext &);
 
+/* ── mqtt_routes.cpp — MQTT publisher configuration and credentials ───── */
+webengine::Response get_mqtt_capabilities(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_mqtt_configuration(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response put_mqtt_configuration(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_mqtt_status(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response put_mqtt_password(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_mqtt_password(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response put_mqtt_private_key_passphrase(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_mqtt_private_key_passphrase(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_mqtt_ca(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_mqtt_client_certificate(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_mqtt_client_key(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response upload_mqtt_ca(AppContext &,
+	const webengine::RequestContext &, const webengine::FileUpload &);
+webengine::Response upload_mqtt_client_certificate(AppContext &,
+	const webengine::RequestContext &, const webengine::FileUpload &);
+webengine::Response upload_mqtt_client_key(AppContext &,
+	const webengine::RequestContext &, const webengine::FileUpload &);
+std::optional<webengine::FileDownload> download_mqtt_ca(AppContext &,
+	const webengine::RequestContext &);
+std::optional<webengine::FileDownload> download_mqtt_client_certificate(
+	AppContext &, const webengine::RequestContext &);
+
 /**
  * @brief Every route of the external JSON API, grouped by module.
  *
@@ -272,6 +308,43 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/history/health",
 	 webengine::Role::Viewer, &get_history_health,
 	 "Historian service health"},
+
+	/* MQTT publishing (mqtt_routes.cpp) */
+	{webengine::http::verb::get, "/api/v1/mqtt/capabilities",
+	 webengine::Role::Admin, &get_mqtt_capabilities,
+	 "MQTT-selectable meter periods and attributes"},
+	{webengine::http::verb::get, "/api/v1/mqtt/configuration",
+	 webengine::Role::Admin, &get_mqtt_configuration,
+	 "Active MQTT settings and credential presence"},
+	{webengine::http::verb::put, "/api/v1/mqtt/configuration",
+	 webengine::Role::Admin, &put_mqtt_configuration,
+	 "Persist MQTT publication settings"},
+	{webengine::http::verb::get, "/api/v1/mqtt/status",
+	 webengine::Role::Admin, &get_mqtt_status,
+	 "MQTT connection and per-publication status"},
+	{webengine::http::verb::put,
+	 "/api/v1/mqtt/credentials/password", webengine::Role::Admin,
+	 &put_mqtt_password, "Replace the MQTT broker password"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/mqtt/credentials/password", webengine::Role::Admin,
+	 &delete_mqtt_password, "Remove the MQTT broker password"},
+	{webengine::http::verb::put,
+	 "/api/v1/mqtt/credentials/private-key-passphrase",
+	 webengine::Role::Admin, &put_mqtt_private_key_passphrase,
+	 "Replace the MQTT private-key passphrase"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/mqtt/credentials/private-key-passphrase",
+	 webengine::Role::Admin, &delete_mqtt_private_key_passphrase,
+	 "Remove the MQTT private-key passphrase"},
+	{webengine::http::verb::delete_, "/api/v1/mqtt/tls/ca",
+	 webengine::Role::Admin, &delete_mqtt_ca, "Remove the MQTT CA asset"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/mqtt/tls/client-certificate", webengine::Role::Admin,
+	 &delete_mqtt_client_certificate,
+	 "Remove the MQTT client certificate"},
+	{webengine::http::verb::delete_, "/api/v1/mqtt/tls/client-key",
+	 webengine::Role::Admin, &delete_mqtt_client_key,
+	 "Remove the upload-only MQTT private key"},
 });
 
 /**
@@ -292,6 +365,31 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 				return handler(context, request);
 			},
 			route.min_role);
+
+	constexpr std::size_t certificate_limit = 1024 * 1024;
+	const std::vector<std::string> certificate_types{
+		"application/octet-stream", "application/x-pem-file",
+		"application/pkix-cert", "application/x-x509-ca-cert"};
+	engine.add_file_upload("/api/v1/mqtt/tls/ca",
+		[&context](const auto &request, const auto &file) {
+			return upload_mqtt_ca(context, request, file);
+		}, webengine::Role::Admin, certificate_limit, certificate_types);
+	engine.add_file_download("/api/v1/mqtt/tls/ca",
+		[&context](const auto &request) {
+			return download_mqtt_ca(context, request);
+		}, webengine::Role::Admin);
+	engine.add_file_upload("/api/v1/mqtt/tls/client-certificate",
+		[&context](const auto &request, const auto &file) {
+			return upload_mqtt_client_certificate(context, request, file);
+		}, webengine::Role::Admin, certificate_limit, certificate_types);
+	engine.add_file_download("/api/v1/mqtt/tls/client-certificate",
+		[&context](const auto &request) {
+			return download_mqtt_client_certificate(context, request);
+		}, webengine::Role::Admin);
+	engine.add_file_upload("/api/v1/mqtt/tls/client-key",
+		[&context](const auto &request, const auto &file) {
+			return upload_mqtt_client_key(context, request, file);
+		}, webengine::Role::Admin, certificate_limit, certificate_types);
 }
 
 } // namespace msap1::web::api

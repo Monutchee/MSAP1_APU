@@ -26,6 +26,9 @@ void apply_to_acquisition(const msap1::settings::ProductSettings &settings);
 void apply_to_database_services(
 	const msap1::settings::ProductSettings &settings);
 
+/** Reconcile the optional MQTT unit with the candidate settings. */
+void apply_to_mqtt_service(const msap1::settings::ProductSettings &settings);
+
 /** Apply one complete product snapshot to every runtime settings consumer. */
 void apply_to_runtime(const msap1::settings::ProductSettings &settings);
 

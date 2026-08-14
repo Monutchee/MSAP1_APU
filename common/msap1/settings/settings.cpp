@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -27,6 +28,30 @@ bool is_blank_document(std::string_view document)
 	return std::ranges::all_of(document, [](unsigned char character) {
 		return std::isspace(character) != 0;
 	});
+}
+
+void validate_pem_asset(std::string_view name, std::string_view contents)
+{
+	if (contents.find('\0') != std::string_view::npos)
+		throw std::invalid_argument("MQTT TLS assets must be PEM text");
+	if (name == "ca" || name == "client-certificate") {
+		if (!contents.contains("-----BEGIN CERTIFICATE-----") ||
+		    !contents.contains("-----END CERTIFICATE-----"))
+			throw std::invalid_argument(
+				"MQTT certificate asset is not PEM encoded");
+		return;
+	}
+	static constexpr std::array key_labels{
+		std::string_view{"PRIVATE KEY"},
+		std::string_view{"ENCRYPTED PRIVATE KEY"},
+		std::string_view{"RSA PRIVATE KEY"},
+		std::string_view{"EC PRIVATE KEY"},
+	};
+	for (const auto label : key_labels)
+		if (contents.contains("-----BEGIN " + std::string(label) + "-----") &&
+		    contents.contains("-----END " + std::string(label) + "-----"))
+			return;
+	throw std::invalid_argument("MQTT client key is not PEM encoded");
 }
 
 std::string read_file(const std::filesystem::path &path)
@@ -64,7 +89,13 @@ std::string encode_document(const T &document, bool pretty)
 
 ProductSettings SettingsCodec::decode(std::string_view json)
 {
-	return decode_document<ProductSettings>(json, "product settings");
+	auto settings = decode_document<ProductSettings>(json, "product settings");
+	// Schema 1 predates MQTT. Missing members already receive typed defaults;
+	// advancing the version here provides a lossless in-memory migration and
+	// the next successful save persists schema 2.
+	if (settings.schema_version == 1)
+		settings.schema_version = ProductSettings::supported_schema_version;
+	return settings;
 }
 
 std::string SettingsCodec::encode(const ProductSettings &settings, bool pretty)
@@ -92,6 +123,7 @@ void ProductSettings::validate() const
 	waveform.validate();
 	database.validate();
 	modbus.validate();
+	mqtt.validate();
 	(void)prepare_meter_configuration(to_meter_configuration(*this),
 		metering.sample_rate_hz);
 }
@@ -119,9 +151,19 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 	return result;
 }
 
-SettingsApplyCoordinator::SettingsApplyCoordinator(Apply apply)
-	: apply_(std::move(apply))
+SettingsApplyCoordinator::SettingsApplyCoordinator(Apply apply,
+	Apply after_persist)
+	: apply_(std::move(apply)), after_persist_(std::move(after_persist))
 {
+}
+
+void SettingsApplyCoordinator::after_persist(
+	const ProductSettings &candidate, const ProductSettings &previous) const
+{
+	if (SettingsCodec::encode(candidate, false) ==
+	    SettingsCodec::encode(previous, false) || !after_persist_)
+		return;
+	after_persist_(candidate);
 }
 
 void SettingsApplyCoordinator::apply(const ProductSettings &candidate,
@@ -148,6 +190,12 @@ void SettingsApplyCoordinator::rollback(const ProductSettings &previous) const n
 	try {
 		apply_(previous);
 	} catch (...) {
+	}
+	if (after_persist_) {
+		try {
+			after_persist_(previous);
+		} catch (...) {
+		}
 	}
 }
 
@@ -249,12 +297,22 @@ ActiveSnapshot SettingsHandler::save_locked(const ProductSettings &settings,
 	coordinator_.apply(settings, previous.settings);
 	try {
 		repository_.write_active(canonical);
+		/* Publish the candidate in memory before post-persistence service
+		 * actions. A service started or reloaded here reads this same settings
+		 * authority and must observe the new snapshot, not the previous one. */
+		active_ = {digest, settings};
+		coordinator_.after_persist(settings, previous.settings);
 	} catch (...) {
+		active_ = previous;
+		try {
+			repository_.write_active(
+				SettingsCodec::encode(previous.settings));
+		} catch (...) {
+		}
 		coordinator_.rollback(previous.settings);
 		throw;
 	}
 
-	active_ = {digest, settings};
 	recovery_mode_ = false;
 	recovery_reason_.clear();
 	return active_;
@@ -268,12 +326,25 @@ ActiveSnapshot SettingsHandler::factory_reset(bool confirmed)
 	auto defaults = load_factory_locked();
 	SettingsValidator::validate(defaults);
 	const auto previous_secrets = secrets_.read_document();
+	std::map<std::string, std::string> previous_assets;
+	for (const auto name : {"ca", "client-certificate", "client-key"}) {
+		const auto path = asset_path(name);
+		if (std::filesystem::is_regular_file(path))
+			previous_assets.emplace(name, read_file(path));
+	}
 	secrets_.clear();
+	for (const auto name : {"ca", "client-certificate", "client-key"}) {
+		std::error_code ignored;
+		std::filesystem::remove(asset_path(name), ignored);
+	}
 	try {
 		return save_locked(defaults, true);
 	} catch (...) {
 		if (previous_secrets)
 			secrets_.replace(*previous_secrets);
+		for (const auto &[name, contents] : previous_assets)
+			mnc::settings::AtomicFileWriter::write(
+				asset_path(name), contents, 0600);
 		throw;
 	}
 }
@@ -286,6 +357,110 @@ void SettingsHandler::set_secret_document(std::string_view canonical_json)
 		throw std::runtime_error("invalid secrets JSON: " +
 			glz::format_error(error, canonical_json));
 	secrets_.replace(canonical_json);
+}
+
+std::string SettingsHandler::validate_secret_name(std::string_view name)
+{
+	if (name != "mqtt.password" && name != "mqtt.private_key_passphrase")
+		throw std::invalid_argument("unknown settings secret");
+	return std::string(name);
+}
+
+std::string SettingsHandler::validate_asset_name(std::string_view name)
+{
+	if (name != "ca" && name != "client-certificate" &&
+	    name != "client-key")
+		throw std::invalid_argument("unknown MQTT TLS asset");
+	return std::string(name);
+}
+
+void SettingsHandler::set_secret(std::string_view name, std::string_view value)
+{
+	std::scoped_lock lock(mutex_);
+	std::map<std::string, std::string> values;
+	if (const auto document = secrets_.read_document(); document &&
+	    !is_blank_document(*document))
+		values = decode_document<decltype(values)>(*document, "secrets");
+	values[validate_secret_name(name)] = value;
+	secrets_.replace(encode_document(values, true));
+}
+
+void SettingsHandler::clear_secret(std::string_view name)
+{
+	std::scoped_lock lock(mutex_);
+	std::map<std::string, std::string> values;
+	if (const auto document = secrets_.read_document(); document &&
+	    !is_blank_document(*document))
+		values = decode_document<decltype(values)>(*document, "secrets");
+	values.erase(validate_secret_name(name));
+	if (values.empty())
+		secrets_.clear();
+	else
+		secrets_.replace(encode_document(values, true));
+}
+
+bool SettingsHandler::has_secret(std::string_view name) const
+{
+	std::scoped_lock lock(mutex_);
+	const auto document = secrets_.read_document();
+	if (!document || is_blank_document(*document))
+		return false;
+	const auto values = decode_document<std::map<std::string, std::string>>(
+		*document, "secrets");
+	return values.contains(validate_secret_name(name));
+}
+
+std::string SettingsHandler::runtime_secret(std::string_view name) const
+{
+	std::scoped_lock lock(mutex_);
+	const auto document = secrets_.read_document();
+	if (!document || is_blank_document(*document))
+		return {};
+	const auto values = decode_document<std::map<std::string, std::string>>(
+		*document, "secrets");
+	const auto found = values.find(validate_secret_name(name));
+	return found == values.end() ? std::string{} : found->second;
+}
+
+std::filesystem::path SettingsHandler::asset_path(std::string_view name) const
+{
+	const auto validated = validate_asset_name(name);
+	const auto filename = validated == "ca" ? "ca.pem" :
+		validated == "client-certificate" ? "client-certificate.pem" :
+		"client-key.pem";
+	return repository_.root() / "assets" / "mqtt" / filename;
+}
+
+void SettingsHandler::put_asset(std::string_view name,
+	std::string_view contents)
+{
+	if (contents.empty() || contents.size() > 1024u * 1024u)
+		throw std::invalid_argument("invalid MQTT TLS asset size");
+	const auto validated = validate_asset_name(name);
+	validate_pem_asset(validated, contents);
+	std::scoped_lock lock(mutex_);
+	mnc::settings::AtomicFileWriter::write(asset_path(validated), contents, 0600);
+}
+
+void SettingsHandler::delete_asset(std::string_view name)
+{
+	std::scoped_lock lock(mutex_);
+	std::error_code error;
+	if (!std::filesystem::remove(asset_path(name), error) && error)
+		throw std::runtime_error("cannot delete MQTT TLS asset: " +
+			error.message());
+}
+
+bool SettingsHandler::has_asset(std::string_view name) const
+{
+	std::scoped_lock lock(mutex_);
+	return std::filesystem::is_regular_file(asset_path(name));
+}
+
+std::string SettingsHandler::read_asset(std::string_view name) const
+{
+	std::scoped_lock lock(mutex_);
+	return read_file(asset_path(name));
 }
 
 bool SettingsHandler::has_secrets() const

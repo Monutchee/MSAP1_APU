@@ -15,6 +15,7 @@
 #include "msap1/settings/settings_ipc.hpp"
 
 #include <cstdint>
+#include <pwd.h>
 #include <string_view>
 
 #include <unistd.h>
@@ -28,7 +29,19 @@ using msap1::settings::ipc::Status;
 [[nodiscard]] inline bool administrator_only(Command command)
 {
 	return command == Command::factory_reset ||
-	       command == Command::set_secret;
+	       command == Command::set_secret ||
+	       command == Command::set_named_secret ||
+	       command == Command::clear_named_secret ||
+	       command == Command::put_asset ||
+	       command == Command::delete_asset ||
+	       command == Command::download_asset;
+}
+
+/** Commands that expose runtime-only credentials to the MQTT service. */
+[[nodiscard]] inline bool mqtt_runtime_only(Command command)
+{
+	return command == Command::resolve_mqtt_credentials ||
+	       command == Command::resolve_mqtt_assets;
 }
 
 /** @brief Commands that change persistent state. */
@@ -36,7 +49,11 @@ using msap1::settings::ipc::Status;
 {
 	return command == Command::save_active ||
 	       command == Command::factory_reset ||
-	       command == Command::set_secret;
+	       command == Command::set_secret ||
+	       command == Command::set_named_secret ||
+	       command == Command::clear_named_secret ||
+	       command == Command::put_asset ||
+	       command == Command::delete_asset;
 }
 
 /**
@@ -75,6 +92,22 @@ evaluate_peer(const mnc::ipc::PeerCredentials &credentials)
 	const bool trusted = credentials.uid == 0u ||
 			     credentials.gid == service_group;
 	return {trusted, trusted};
+}
+
+/**
+ * Permit credential resolution only to root or the dedicated MQTT account.
+ * Group membership is deliberately insufficient: the Web adapter belongs to
+ * the settings group so it can forward authenticated mutations, but it must
+ * never receive broker passwords or private-key material.
+ */
+[[nodiscard]] inline bool
+may_resolve_mqtt_runtime(const mnc::ipc::PeerCredentials &credentials)
+{
+	if (credentials.uid == 0u)
+		return true;
+	const auto *account = ::getpwnam("mnc-mqtt");
+	return account != nullptr &&
+	       credentials.uid == static_cast<std::uint32_t>(account->pw_uid);
 }
 
 /**

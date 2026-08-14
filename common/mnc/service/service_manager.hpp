@@ -15,6 +15,9 @@ struct ManagedService {
 	std::string name;
 	std::string unit;
 	std::vector<std::string> after;
+	/** Optional units are registered and controllable, but are not started by
+	 * start_registered(). Product policy may activate them later. */
+	bool auto_start = true;
 };
 
 struct ManagedServiceStatus {
@@ -24,6 +27,7 @@ struct ManagedServiceStatus {
 	std::string sub_state;
 	std::uint32_t restart_count = 0;
 	bool permanently_failed = false;
+	bool required_active = true;
 };
 
 class UnitController {

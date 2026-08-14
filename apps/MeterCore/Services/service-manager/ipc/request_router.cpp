@@ -1,10 +1,22 @@
 #include "ipc/request_router.hpp"
 
 #include <exception>
+#include <pwd.h>
 #include <stdexcept>
 #include <utility>
 
 namespace msap1::service_manager::daemon {
+namespace {
+
+bool control_authorized(const mnc::ipc::PeerCredentials &peer)
+{
+	if (peer.uid == 0)
+		return true;
+	const auto *settings_user = ::getpwnam("mnc-settings");
+	return settings_user != nullptr && peer.uid == settings_user->pw_uid;
+}
+
+} // namespace
 
 RequestRouter::RequestRouter(mnc::ServiceManager &manager) : manager_(manager)
 {
@@ -41,7 +53,7 @@ void RequestRouter::handle(mnc::ipc::UnixStreamServer::Connection connection,
 		const auto request = decode_request(frame);
 		command = request.command;
 		if (is_control(command) &&
-		    connection->peer_credentials().uid != 0) {
+		    !control_authorized(connection->peer_credentials())) {
 			response.status = Status::permission_denied;
 			response.message = "service control requires root";
 		} else if (command == Command::list) {

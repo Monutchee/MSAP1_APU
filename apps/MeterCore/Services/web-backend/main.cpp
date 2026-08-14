@@ -127,7 +127,9 @@ int run_web_backend()
 		msap1::web::AcquisitionGateway acquisition;
 		msap1::web::SettingsGateway settings;
 		msap1::web::DatabaseGateway database;
-		msap1::web::AppContext context{acquisition, settings, database, nginx};
+		msap1::web::MqttGateway mqtt;
+		msap1::web::AppContext context{
+			acquisition, settings, database, mqtt, nginx};
 
 		webengine::WebEngine engine(auth);
 		ActiveEngineRegistration active_engine(engine);

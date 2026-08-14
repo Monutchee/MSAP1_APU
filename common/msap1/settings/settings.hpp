@@ -39,13 +39,16 @@ public:
 class SettingsApplyCoordinator final {
 public:
 	using Apply = std::function<void(const ProductSettings &)>;
-	SettingsApplyCoordinator(Apply apply = {});
+	SettingsApplyCoordinator(Apply apply = {}, Apply after_persist = {});
 	void apply(const ProductSettings &candidate,
 		   const ProductSettings &previous) const;
+	void after_persist(const ProductSettings &candidate,
+		const ProductSettings &previous) const;
 	void rollback(const ProductSettings &previous) const noexcept;
 
 private:
 	Apply apply_;
+	Apply after_persist_;
 };
 
 /** Single-writer typed settings aggregate. */
@@ -64,6 +67,15 @@ public:
 	[[nodiscard]] ActiveSnapshot save(const ProductSettings &settings);
 	[[nodiscard]] ActiveSnapshot factory_reset(bool confirmed);
 	void set_secret_document(std::string_view canonical_json);
+	void set_secret(std::string_view name, std::string_view value);
+	void clear_secret(std::string_view name);
+	[[nodiscard]] bool has_secret(std::string_view name) const;
+	[[nodiscard]] std::string runtime_secret(std::string_view name) const;
+	void put_asset(std::string_view name, std::string_view contents);
+	void delete_asset(std::string_view name);
+	[[nodiscard]] bool has_asset(std::string_view name) const;
+	[[nodiscard]] std::string read_asset(std::string_view name) const;
+	[[nodiscard]] std::filesystem::path asset_path(std::string_view name) const;
 	[[nodiscard]] bool has_secrets() const;
 	[[nodiscard]] bool recovery_mode() const;
 	[[nodiscard]] std::string recovery_reason() const;
@@ -73,6 +85,8 @@ private:
 	[[nodiscard]] ProductSettings load_factory_locked() const;
 	[[nodiscard]] ActiveSnapshot save_locked(const ProductSettings &settings,
 		bool allow_recovery);
+	[[nodiscard]] static std::string validate_secret_name(std::string_view name);
+	[[nodiscard]] static std::string validate_asset_name(std::string_view name);
 
 	mutable std::mutex mutex_;
 	mnc::settings::FileSettingsRepository repository_;

@@ -7,6 +7,7 @@
 
 #include "gateway/acquisition_gateway.hpp"
 #include "gateway/database_gateway.hpp"
+#include "gateway/mqtt_gateway.hpp"
 #include "gateway/settings_gateway.hpp"
 
 namespace webengine {
@@ -31,6 +32,8 @@ struct AppContext {
 	SettingsGateway &settings;
 	/** Typed IPC boundary to durable stream and historian services. */
 	DatabaseGateway &database;
+	/** Typed boundary to MQTT runtime state and protected assets. */
+	MqttGateway &mqtt;
 	/** Supervised nginx front end; consulted by the system health API. */
 	webengine::NginxController &nginx;
 };
