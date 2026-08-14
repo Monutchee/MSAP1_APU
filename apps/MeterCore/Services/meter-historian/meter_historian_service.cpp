@@ -185,6 +185,23 @@ void MeterHistorianService::consume()
 			(void)logger().write(mnc::logging::Priority::error,
 				std::string("historian ingest failed: ") + error.what(),
 				"historian_ingest_failed");
+			/*
+			 * A volatile spool loses the consumers table with the
+			 * meter-stream process, and read_after() then rejects this
+			 * consumer forever — re-registration is the only way back.
+			 * It is idempotent (a live registration keeps its
+			 * acknowledged cursor), so re-asserting it on every error
+			 * needs no matching on the failure's cause.
+			 */
+			try {
+				stream_.register_consumer("historian");
+				(void)logger().write(mnc::logging::Priority::notice,
+					"historian stream consumer re-registered",
+					"historian_consumer_reregistered");
+			} catch (const std::exception &) {
+				/* The stream is unreachable; the retry below also
+				 * covers this. */
+			}
 			std::this_thread::sleep_for(std::chrono::seconds(1));
 		}
 	}
@@ -269,7 +286,9 @@ void MeterHistorianService::backfill()
 	stream_.register_consumer(consumer);
 	const auto stream_status = stream_.status();
 	oldest_available_stream_cursor_ = stream_status.oldest_cursor;
-	backfill_incomplete_ = stream_status.oldest_cursor > 1;
+	backfill_incomplete_ = backfill_is_incomplete(stream_status.oldest_cursor,
+		stream_status.session_start_cursor,
+		store_->persisted_stream_high_water());
 	if (backfill_incomplete_) {
 		(void)logger().write(mnc::logging::Priority::warning,
 			"historian backfill begins after records already pruned from the spool",

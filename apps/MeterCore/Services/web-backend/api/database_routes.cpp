@@ -27,6 +27,8 @@ struct StreamStatusDto {
 	std::uint64_t newest_cursor = 0;
 	std::uint64_t record_count = 0;
 	std::uint64_t storage_bytes = 0;
+	std::uint64_t session_start_cursor = 0;
+	std::uint64_t dropped_unacknowledged_records = 0;
 	std::vector<ConsumerCursorDto> consumers;
 };
 
@@ -107,6 +109,9 @@ DatabaseStatusDto database_status(AppContext &app)
 	result.stream.newest_cursor = stream.newest_cursor;
 	result.stream.record_count = stream.record_count;
 	result.stream.storage_bytes = stream.storage_bytes;
+	result.stream.session_start_cursor = stream.session_start_cursor;
+	result.stream.dropped_unacknowledged_records =
+		stream.dropped_unacknowledged_records;
 	for (const auto &consumer : stream.consumers)
 		result.stream.consumers.push_back(
 			{consumer.name, consumer.acknowledged_cursor});

@@ -125,6 +125,22 @@ void MeterStreamService::handle(mnc::ipc::UnixStreamServer::Connection connectio
 		case Command::publish_record: {
 			auto record = decode_record(input); input.require_finished();
 			const auto cursor = spool_->publish(record);
+			const auto dropped = spool_->dropped_unacknowledged_records();
+			if (dropped != reported_dropped_records_) {
+				const auto now = std::chrono::steady_clock::now();
+				if (now - last_drop_report_ >= std::chrono::seconds(10)) {
+					(void)logger().write(mnc::logging::Priority::warning,
+						"spool byte cap evicted " +
+							std::to_string(dropped -
+								reported_dropped_records_) +
+							" unacknowledged records (" +
+							std::to_string(dropped) +
+							" total); a consumer is not keeping up",
+						"spool_records_dropped");
+					reported_dropped_records_ = dropped;
+					last_drop_report_ = now;
+				}
+			}
 			output.u32(static_cast<std::uint32_t>(Status::ok)); output.u64(cursor);
 			publish_event(Event::record_committed, cursor);
 			break;
@@ -156,6 +172,8 @@ void MeterStreamService::handle(mnc::ipc::UnixStreamServer::Connection connectio
 			output.u8(status.durability); output.u8(0); output.u16(0);
 			output.u64(status.oldest_cursor); output.u64(status.newest_cursor);
 			output.u64(status.record_count); output.u64(status.storage_bytes);
+			output.u64(status.session_start_cursor);
+			output.u64(status.dropped_unacknowledged_records);
 			output.u32(static_cast<std::uint32_t>(status.consumers.size()));
 			for (const auto &consumer : status.consumers) {
 				write_string(output, consumer.name);

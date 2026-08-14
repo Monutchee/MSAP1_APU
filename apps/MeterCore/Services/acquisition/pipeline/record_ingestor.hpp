@@ -179,6 +179,10 @@ private:
 	std::uint64_t invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
 	std::uint64_t aggregate_sequence_gaps_ = 0;
+	/* Kernel transport-overrun total at the last sequence-gap log. The
+	 * delta at gap time is what attributes the loss: it either matches the
+	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
+	std::uint64_t last_transport_overruns_ = 0;
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache) and the newest accepted aggregate
 	 * sequence. An aggregate between two basic blocks must never look

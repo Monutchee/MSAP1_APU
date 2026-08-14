@@ -194,6 +194,8 @@ mnc::meter_stream::StreamStatus MeterRecordStreamClient::status() const
 	result.newest_cursor = reader.u64();
 	result.record_count = reader.u64();
 	result.storage_bytes = reader.u64();
+	result.session_start_cursor = reader.u64();
+	result.dropped_unacknowledged_records = reader.u64();
 	const auto count = reader.u32();
 	for (std::uint32_t index = 0; index < count; ++index)
 		result.consumers.push_back({read_string(reader), reader.u64()});

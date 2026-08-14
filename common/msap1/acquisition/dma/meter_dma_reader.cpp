@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 namespace msap1::acquisition {
@@ -15,6 +16,20 @@ namespace {
 {
 	throw std::runtime_error(operation + ": " + std::strerror(errno));
 }
+
+/* Mirror of struct msap1_dma_transport_status (msap1_dma_uapi.h); the layout
+ * and request number are frozen kernel ABI. */
+struct MeterTransportStatusIoctl {
+	std::uint64_t produced_blocks;
+	std::uint64_t consumed_blocks;
+	std::uint64_t overrun_blocks;
+	std::uint32_t ring_blocks;
+	std::uint32_t reserved;
+};
+static_assert(sizeof(MeterTransportStatusIoctl) == 32);
+
+constexpr unsigned long meter_transport_status_ioctl =
+	_IOR('W', 0x02, MeterTransportStatusIoctl);
 
 } // namespace
 
@@ -63,6 +78,16 @@ MeterRecordBatch MeterDmaReader::read_available()
 	if (!result.partial_record)
 		result.count = result.bytes / sizeof(MeterRecord);
 	return result;
+}
+
+std::uint64_t MeterDmaReader::transport_overruns() noexcept
+{
+	if (fd_ < 0)
+		return 0;
+	MeterTransportStatusIoctl status{};
+	if (::ioctl(fd_, meter_transport_status_ioctl, &status) != 0)
+		return 0;
+	return status.overrun_blocks;
 }
 
 } // namespace msap1::acquisition

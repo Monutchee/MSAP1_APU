@@ -145,16 +145,37 @@ bool MeterRecordIngestor::track_basic_continuity(
 			 * decoder — that record never became the baseline — so
 			 * this is what makes a rejection traceable instead of
 			 * silently shifting the count.
+			 *
+			 * The kernel transport-overrun delta is captured with the
+			 * gap because it decides where the record was lost: the
+			 * kernel ring drops records only when userspace falls
+			 * behind, so a gap with no overrun growth happened
+			 * upstream of the ring (PL or rejection), and a gap with
+			 * matching growth is a consumer stall — two entirely
+			 * different investigations.
 			 */
+			const auto overruns = meter_.transport_overruns();
+			const auto overrun_delta =
+				overruns - last_transport_overruns_;
+			last_transport_overruns_ = overruns;
 			log_message(dma_log, mnc::logging::Priority::warning,
 				"meter record sequence gap: expected " +
 					std::to_string(expected) + ", got " +
-					std::to_string(received),
+					std::to_string(received) +
+					(overrun_delta != 0
+						 ? " (kernel transport overran " +
+						   std::to_string(overrun_delta) +
+						   " records)"
+						 : " (no kernel transport overrun)"),
 				"meter_sequence_gap",
 				{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
 				 {"MNC_SEQUENCE", std::to_string(received)},
 				 {"MNC_MISSING_RECORDS",
-				  std::to_string(forward_distance)}});
+				  std::to_string(forward_distance)},
+				 {"MNC_TRANSPORT_OVERRUNS",
+				  std::to_string(overruns)},
+				 {"MNC_TRANSPORT_OVERRUN_DELTA",
+				  std::to_string(overrun_delta)}});
 		} else if (forward_distance != 0u) {
 			/*
 			 * A stale/out-of-order record is invalid, not billions

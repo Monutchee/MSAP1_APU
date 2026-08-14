@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -29,6 +30,8 @@ void remove_database(const std::filesystem::path &path)
 	std::filesystem::remove(path, error);
 	std::filesystem::remove(path.string() + "-wal", error);
 	std::filesystem::remove(path.string() + "-shm", error);
+	std::filesystem::remove(path.string() + ".cursor-lease", error);
+	std::filesystem::remove(path.string() + ".cursor-lease.tmp", error);
 }
 
 mnc::meter_stream::DatabaseStoragePolicy spool_policy(
@@ -124,6 +127,132 @@ void spool_backend_switch_replaces_stale_target()
 	remove_database(path);
 }
 
+void memory_spool_cursors_survive_restart()
+{
+	using namespace mnc::meter_stream;
+	const auto path = temporary_database("spool-lease-test");
+	remove_database(path);
+	std::uint64_t first_cursor = 0;
+	std::uint64_t first_session = 0;
+	{
+		DurableMeterSpool spool(path,
+			spool_policy(StorageBackend::memory));
+		first_cursor = spool.publish(record(1));
+		first_session = spool.status().session_start_cursor;
+		require(first_cursor > first_session,
+			"published cursor is not inside its session");
+		require(std::filesystem::exists(
+				std::filesystem::path(path.string() + ".cursor-lease")),
+			"spool construction did not persist a cursor lease");
+	}
+	{
+		/* A fresh :memory: database restarts AUTOINCREMENT at 1; the lease
+		 * must keep the public cursor space monotonic anyway, because
+		 * consumers persist dedup keys and clear floors keyed by it. */
+		DurableMeterSpool spool(path,
+			spool_policy(StorageBackend::memory));
+		require(spool.status().session_start_cursor > first_cursor,
+			"session start did not advance past the previous session");
+		require(spool.publish(record(2)) > first_cursor,
+			"volatile spool restart reused cursor space");
+	}
+	{
+		/* A persistent spool must stay monotonic even with a corrupt
+		 * lease: its own database still holds the issued maximum. */
+		remove_database(path);
+		std::uint64_t persisted = 0;
+		{
+			DurableMeterSpool spool(path,
+				spool_policy(StorageBackend::persistent));
+			persisted = spool.publish(record(3));
+		}
+		std::ofstream(path.string() + ".cursor-lease")
+			<< "not a number";
+		DurableMeterSpool spool(path,
+			spool_policy(StorageBackend::persistent));
+		require(spool.publish(record(4)) > persisted,
+			"corrupt lease regressed a persistent spool's cursors");
+	}
+	remove_database(path);
+}
+
+void publish_enforces_hard_byte_cap()
+{
+	using namespace mnc::meter_stream;
+	const auto path = temporary_database("spool-cap-test");
+	remove_database(path);
+	{
+		/* Room for roughly four 256-byte records at the accounted
+		 * 128-byte overhead; no consumer ever acknowledges. */
+		DatabaseStoragePolicy policy{DatabaseDataset::raw_record_spool,
+			StorageBackend::memory, {std::nullopt, std::uint64_t{1600}}};
+		DurableMeterSpool spool(path, policy);
+		spool.register_consumer("lagging");
+		std::uint64_t newest = 0;
+		for (std::uint64_t sequence = 1; sequence <= 10; ++sequence)
+			newest = spool.publish(record(sequence));
+		const auto status = spool.status();
+		require(status.record_count <= 4,
+			"hard byte cap did not bound an unacknowledged spool");
+		require(status.dropped_unacknowledged_records > 0,
+			"unacknowledged evictions were not counted");
+		const auto survivors = spool.read_after("lagging", 16);
+		require(!survivors.empty() &&
+			survivors.back().cursor == newest,
+			"the newest record must survive the cap");
+		for (std::size_t index = 1; index < survivors.size(); ++index)
+			require(survivors[index - 1].cursor < survivors[index].cursor,
+				"cap eviction broke cursor ordering");
+	}
+	remove_database(path);
+}
+
+void register_consumer_preserves_acknowledged_cursor()
+{
+	using namespace mnc::meter_stream;
+	const auto path = temporary_database("spool-reregister-test");
+	remove_database(path);
+	{
+		DurableMeterSpool spool(path,
+			spool_policy(StorageBackend::memory));
+		spool.register_consumer("historian");
+		const auto first = spool.publish(record(1));
+		(void)spool.publish(record(2));
+		spool.acknowledge("historian", first);
+		/* The historian re-registers on every consume error; a live
+		 * registration must keep its cursor or replay would follow
+		 * every transient fault. */
+		spool.register_consumer("historian");
+		require(spool.read_after("historian", 16).size() == 1,
+			"re-registration reset an acknowledged cursor");
+	}
+	remove_database(path);
+}
+
+void backfill_predicate_reports_lost_coverage()
+{
+	using msap1::history::backfill_is_incomplete;
+	/* Virgin historian, empty fresh spool: nothing was ever published. */
+	require(!backfill_is_incomplete(0, 1000, 0),
+		"an empty fresh spool must count as complete");
+	/* Virgin historian, spool holding everything it ever issued. */
+	require(!backfill_is_incomplete(1001, 1000, 0),
+		"a complete first session was reported incomplete");
+	/* Records pruned within the session are lost coverage. */
+	require(backfill_is_incomplete(1002, 1000, 0),
+		"in-session pruning was not reported");
+	/* A spool session that began after durable history existed cannot
+	 * rebuild what came before it — the volatile-restart case, including
+	 * the empty spool that previously masqueraded as complete. */
+	require(backfill_is_incomplete(2000, 1999, 1500),
+		"a post-coverage spool session was reported complete");
+	require(backfill_is_incomplete(0, 1999, 1500),
+		"an empty post-coverage spool was reported complete");
+	/* Durable coverage extending past the session start is continuity. */
+	require(!backfill_is_incomplete(5, 4, 10),
+		"a covering session was reported incomplete");
+}
+
 void malformed_policies_are_rejected()
 {
 	using namespace mnc::meter_stream;
@@ -160,6 +289,45 @@ msap1::MeterUpdate fundamental_update()
 	update.fundamental->voltage_ln.phase_b.quality =
 		msap1::MeasurementQuality::unavailable;
 	return update;
+}
+
+void historian_wal_stays_bounded_under_sustained_appends()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-wal-test");
+	remove_database(path);
+	{
+		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+			{D::basic, B::persistent, {}},
+			{D::cycles_150_180, B::persistent, {}},
+			{D::minutes_10, B::persistent, {}},
+			{D::hours_2, B::persistent, {}},
+		};
+		msap1::history::MeterHistoryStore history(path, policies);
+		/* Enough commits that SQLite's 1000-page auto-checkpoint must fire
+		 * many times over.  With any statement left row-active across the
+		 * append's COMMIT, every checkpoint aborts, the main database file
+		 * never grows past its empty schema, and the WAL accumulates one
+		 * commit's frames forever — 1.4 GB in the field.  Bounding both
+		 * files here is the regression test for that failure mode. */
+		auto update = fundamental_update();
+		for (std::uint64_t cursor = 1; cursor <= 2000; ++cursor) {
+			update.sequence = cursor;
+			history.append(update, cursor,
+				2'000'000'000 + static_cast<std::int64_t>(cursor));
+		}
+		std::error_code error;
+		const auto wal_bytes = std::filesystem::file_size(
+			std::filesystem::path(path.string() + "-wal"), error);
+		require(!error, "historian WAL file is missing");
+		require(wal_bytes < 8u * 1024u * 1024u,
+			"historian WAL grew unbounded: checkpoints are not completing");
+		const auto main_bytes = std::filesystem::file_size(path, error);
+		require(!error && main_bytes > 64u * 1024u,
+			"checkpoints never backfilled the main database");
+	}
+	remove_database(path);
 }
 
 void historian_preserves_quality_and_storage_routing()
@@ -400,6 +568,11 @@ int main()
 {
 	spool_is_ordered_idempotent_and_durable();
 	spool_backend_switch_replaces_stale_target();
+	memory_spool_cursors_survive_restart();
+	publish_enforces_hard_byte_cap();
+	register_consumer_preserves_acknowledged_cursor();
+	backfill_predicate_reports_lost_coverage();
+	historian_wal_stays_bounded_under_sustained_appends();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
 	historian_enforces_retention_without_rescanning();

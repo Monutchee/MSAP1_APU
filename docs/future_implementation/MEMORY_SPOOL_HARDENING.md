@@ -1,6 +1,10 @@
 # Memory-Backed Spool Hardening
 
-Status: planned, not implemented.
+Status: implemented 2026-08-14 (all steps below, plus the appendix's ring
+deepening at 8 records and meter-path transport-overrun logging; the WAL
+checkpoint bug found during the same investigation — a row-active statement
+across COMMIT in `MeterHistoryStore::append()` — is fixed alongside, with a
+regression test in `tests/meter_stream_test.cpp`).
 Origin: 2026-08-13 `meter_sequence_gap` incident investigation.
 
 ## Background

@@ -12,7 +12,11 @@ namespace msap1::meter_stream {
 
 inline constexpr std::string_view socket_path =
 	"/run/monutchee/meter-stream.sock";
-inline constexpr std::uint32_t protocol_version = 1;
+/* Version 2 appended session_start_cursor and dropped_unacknowledged_records
+ * to the get_stream_status reply.  The version is not carried on the wire —
+ * all peers ship in one image and the decoder's require_finished() turns any
+ * accidental mix into a loud error frame. */
+inline constexpr std::uint32_t protocol_version = 2;
 
 /* A maximum ReadRecords reply can contain 4096 complete 256-byte PL records
  * plus timing metadata. Keep that bounded batch valid without relaxing the
