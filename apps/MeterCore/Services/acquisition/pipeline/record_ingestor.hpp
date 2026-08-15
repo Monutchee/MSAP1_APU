@@ -159,8 +159,11 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
-	/** Log a matches_configuration() rejection with the failed check and the
-	 * raw header words — the datum that localizes a PL emission fault. */
+	/** Rate-limited raw-word forensics shared by every silent rejection
+	 * path — the datum that localizes a PL emission fault. */
+	void log_rejected_record(const std::string &reason, const char *event,
+		const msap1::MeterRecord &record);
+	/** Derive which matches_configuration() check failed, then dump. */
 	void log_configuration_mismatch(const msap1::MeterRecord &record);
 	[[nodiscard]] bool matches_configuration(
 		const msap1::MeterRecord &record) const;
