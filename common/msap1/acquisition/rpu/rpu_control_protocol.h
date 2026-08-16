@@ -273,6 +273,12 @@ struct msap1_adc_health_payload {
 	uint8_t spi_last_failed_register;
 	uint8_t spi_last_received_header;
 	uint8_t spi_diagnostics_reserved[2];
+	/* Malformed reply headers bucketed by high nibble, saturating at
+	 * 0xFFFF. The only valid header is 0x20, so a healthy bus leaves
+	 * every bucket zero. A single "last header" byte cannot tell a
+	 * systematic corruption from random mis-sampling; the shape here
+	 * can, and that distinction selects the next fix. */
+	uint16_t spi_header_histogram[16];
 	uint32_t adc_source;
 	uint32_t simulator_status;
 	uint32_t simulator_active_generation;

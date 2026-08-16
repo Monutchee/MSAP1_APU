@@ -8,7 +8,7 @@ namespace msap1 {
 
 static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
-static_assert(sizeof(msap1_adc_health_payload) == 198,
+static_assert(sizeof(msap1_adc_health_payload) == 230,
 	      "unexpected ADC health payload layout");
 /* 172 legacy bytes + the trailing nominal_frequency_hz field (wire v2). */
 static_assert(sizeof(msap1_meter_config_payload) == 176,

@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -390,7 +391,26 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << static_cast<unsigned int>(health.spi_last_failed_register)
 	       << ", header 0x"
 	       << static_cast<unsigned int>(health.spi_last_received_header)
-	       << std::dec << '\n'
+	       << std::dec << '\n';
+	/* Only the shape of the bad-header distribution distinguishes a
+	 * systematic corruption from random mis-sampling, so print the
+	 * populated buckets rather than a single most-recent sample.
+	 * Silent when the bus is clean. */
+	{
+		std::ostringstream buckets;
+		for (std::size_t bucket = 0; bucket < 16; ++bucket) {
+			if (health.spi_header_histogram[bucket] == 0)
+				continue;
+			if (!buckets.str().empty())
+				buckets << "  ";
+			buckets << "0x" << std::hex << bucket << "_" << std::dec
+				<< "=" << health.spi_header_histogram[bucket];
+		}
+		if (!buckets.str().empty())
+			output << "  Bad header buckets:   " << buckets.str()
+			       << '\n';
+	}
+	output
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
 	       << '\n'
 	       << "  Processing status:   0x" << health.processing_status << std::dec
@@ -463,6 +483,13 @@ struct AdcHealthDto {
 	std::uint32_t fifo_overflows = 0;
 	std::uint32_t header_errors = 0;
 	std::uint32_t spi_error = 0;
+	std::uint32_t spi_protocol_errors = 0;
+	std::uint32_t spi_retry_recoveries = 0;
+	/* Malformed reply headers bucketed by high nibble; index is the
+	 * nibble. All-zero on a healthy bus (the only valid header is
+	 * 0x20). Exported as a fixed 16-slot array so a consumer can
+	 * difference two samples without matching up sparse keys. */
+	std::array<std::uint16_t, 16> spi_header_histogram{};
 	std::vector<HealthReasonDto> degraded_reasons;
 	std::vector<RegisterDto> registers;
 };
@@ -611,10 +638,16 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.fifo_overflows = health.overflow_count,
 			.header_errors = health.header_error_count,
 			.spi_error = health.spi_error,
+			.spi_protocol_errors = health.spi_protocol_error_count,
+			.spi_retry_recoveries = health.spi_retry_recovery_count,
 			.degraded_reasons = {},
 			.registers = {},
 		},
 	};
+	for (std::size_t bucket = 0;
+	     bucket < dto.adc.spi_header_histogram.size(); ++bucket)
+		dto.adc.spi_header_histogram[bucket] =
+			health.spi_header_histogram[bucket];
 	for (const auto &reason : status.adc_degraded_reasons)
 		dto.adc.degraded_reasons.push_back({reason.code, reason.message});
 	if (result.full && status.spi_responsive)
