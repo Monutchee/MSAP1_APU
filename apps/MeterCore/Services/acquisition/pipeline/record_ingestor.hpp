@@ -156,6 +156,19 @@ public:
 	{
 		return aggregate_sequence_gaps_;
 	}
+	/**
+	 * @brief Kernel transport accounting, read live from the source.
+	 *
+	 * Not an ingest counter: these totals belong to the driver and are
+	 * surfaced beside the ingest ones because only their combination says
+	 * where a record was lost. Sampled on demand, so a caller building a
+	 * reply gets the ring's state at reply time.
+	 */
+	[[nodiscard]] msap1::acquisition::MeterTransportStatus
+	transport_status() const
+	{
+		return meter_.transport_status();
+	}
 
 private:
 	void accept(const msap1::MeterRecord &record);

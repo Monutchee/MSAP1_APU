@@ -476,6 +476,14 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.dma_read_errors = ingest_.dma_read_errors();
 	response.invalid_records = ingest_.invalid_records();
 	response.sequence_gaps = ingest_.sequence_gaps();
+	/* One sample of the whole kernel accounting, so produced, consumed,
+	 * overrun, and callbacks on the wire all describe the same instant. */
+	const auto transport = ingest_.transport_status();
+	response.transport_produced_blocks = transport.produced_blocks;
+	response.transport_consumed_blocks = transport.consumed_blocks;
+	response.transport_overrun_blocks = transport.overrun_blocks;
+	response.transport_callbacks = transport.callbacks;
+	response.transport_ring_blocks = transport.ring_blocks;
 	response.time_quality = timebase_.quality(Clock::now());
 	/* Provenance of the cached aggregate, captured at ingest — NOT
 	 * timebase_.quality() above, which is the clock's state at this

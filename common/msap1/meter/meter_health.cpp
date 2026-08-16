@@ -24,6 +24,13 @@ void append_reason(std::vector<HealthReason> &reasons, std::string code,
 
 } // namespace
 
+std::uint64_t transport_callback_deficit(const InfoResponse &response)
+{
+	if (response.transport_callbacks >= response.transport_produced_blocks)
+		return 0;
+	return response.transport_produced_blocks - response.transport_callbacks;
+}
+
 std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 {

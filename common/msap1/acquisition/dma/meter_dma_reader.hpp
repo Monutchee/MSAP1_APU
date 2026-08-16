@@ -26,7 +26,10 @@ public:
 		return device_path_;
 	}
 	[[nodiscard]] MeterRecordBatch read_available() override;
-	[[nodiscard]] std::uint64_t transport_overruns() noexcept override;
+	/* transport_overruns() is deliberately not overridden: the base
+	 * default projects it out of this one ioctl, so there is a single
+	 * place where the kernel counters are read. */
+	[[nodiscard]] MeterTransportStatus transport_status() noexcept override;
 
 private:
 	std::string device_path_;

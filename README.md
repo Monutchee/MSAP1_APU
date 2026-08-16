@@ -295,6 +295,16 @@ after one second; only two consecutive failures replace a known-good health
 snapshot. Recovered per-register retries and the last malformed register/header
 are included in the output.
 
+Both summaries carry a `DMA transport` line with the kernel driver's own ring
+accounting: blocks produced, blocks consumed, overruns, cyclic completion
+callbacks, and the ring depth. The Xilinx cyclic callback fires per interrupt
+rather than per period, so the reported deficit (produced minus callbacks) is
+the number of period completions the driver coalesced. These counters are
+observability only — no health verdict depends on them — but a sequence gap
+with matching overrun growth is a consumer stall, while one without it happened
+upstream in PL. The same values appear under `acquisition.dma_transport` in the
+JSON output and in the Web health document.
+
 The command also reports both the number of AXI packets accepted by the
 capture stream, external AD7771 DCLK frequency, and `ADC_DRDY_N` frame rate
 measured in PL. The DCLK and DRDY fields are `unavailable` until two one-second

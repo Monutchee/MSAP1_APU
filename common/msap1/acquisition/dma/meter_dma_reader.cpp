@@ -82,14 +82,15 @@ MeterRecordBatch MeterDmaReader::read_available()
 	return result;
 }
 
-std::uint64_t MeterDmaReader::transport_overruns() noexcept
+MeterTransportStatus MeterDmaReader::transport_status() noexcept
 {
 	if (fd_ < 0)
-		return 0;
+		return {};
 	MeterTransportStatusIoctl status{};
 	if (::ioctl(fd_, meter_transport_status_ioctl, &status) != 0)
-		return 0;
-	return status.overrun_blocks;
+		return {};
+	return {status.produced_blocks, status.consumed_blocks,
+		status.overrun_blocks, status.callbacks, status.ring_blocks};
 }
 
 } // namespace msap1::acquisition
