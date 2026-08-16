@@ -41,11 +41,11 @@ std::string hex_word(std::uint32_t value)
 	return buffer;
 }
 
-/* Words 0..15 cover every header/diagnostic field and expose truncation and
- * beat-shift patterns; they are dumped RAW and unlabeled because their
- * meaning depends on the (possibly corrupted) format word — in the MTR2
- * layout words 12/13 are a sample index, not the MTR1 drop counters, and a
- * wrong label would poison exactly the analysis this dump exists for. */
+/* Words 0..15 cover the shared envelope (0..12) and the format-specific
+ * header extension (13..15) and expose truncation and beat-shift patterns;
+ * they are dumped RAW and unlabeled because words 13..15 depend on the
+ * (possibly corrupted) format word, and a wrong label would poison exactly
+ * the analysis this dump exists for. */
 std::string header_words_hex(const msap1::MeterRecord &record)
 {
 	std::string result;
@@ -57,11 +57,12 @@ std::string header_words_hex(const msap1::MeterRecord &record)
 	return result;
 }
 
-/* Words 60/61: the v2 first-sample index. Zero here on a record whose front
- * half is intact is the partial-emission signature observed in the field. */
+/* Words 9/10: the envelope first-sample index (every record type). Zero
+ * here on a record whose front half is intact is the partial-emission
+ * signature observed in the field. */
 std::string sample_index_words_hex(const msap1::MeterRecord &record)
 {
-	return hex_word(record.word(60)) + ' ' + hex_word(record.word(61));
+	return hex_word(record.word(9)) + ' ' + hex_word(record.word(10));
 }
 
 } // namespace
@@ -133,25 +134,18 @@ void MeterRecordIngestor::clear_latest()
 bool MeterRecordIngestor::matches_configuration(
 	const msap1::MeterRecord &record) const
 {
-	if (!record.header_valid() ||
-	    record.configuration_generation() !=
-		configuration_.wire.generation ||
-	    record.sample_rate_hz() != configuration_.wire.sample_rate_hz)
-		return false;
-	/*
-	 * Only v1 records must echo the configured window: a v2 block is
-	 * cycle-defined, so its word-6 sample count legitimately varies with
-	 * grid frequency and matches the configured value only in free-run.
-	 */
-	if (record.record_format() == msap1::meter_periodic_format &&
-	    record.window_samples() != configuration_.wire.rms_window_samples)
-		return false;
-	return true;
+	/* No window echo: a basic block is cycle-defined, so its word-6
+	 * sample count legitimately varies with grid frequency and matches
+	 * the configured value only in free-run. */
+	return record.header_valid() &&
+	       record.configuration_generation() ==
+		       configuration_.wire.generation &&
+	       record.sample_rate_hz() == configuration_.wire.sample_rate_hz;
 }
 
 /*
  * Basic (MTR1) continuity: wire-sequence tracking against the newest
- * accepted basic record, plus — for consecutive v2 sequences — sample-range
+ * accepted basic record, plus — for consecutive sequences — sample-range
  * continuity on the PL conversion-domain counter. Interleaved aggregate
  * records never participate: they neither advance nor break this baseline.
  */
@@ -226,16 +220,14 @@ bool MeterRecordIngestor::track_basic_continuity(
 		}
 	}
 	/*
-	 * v2 sample-range continuity: blocks are gapless by construction on
+	 * Sample-range continuity: blocks are gapless by construction on
 	 * the PL conversion-domain counter, so between consecutive sequences
 	 * first(N+1) must equal first(N) + count(N). A mismatch means lost
 	 * samples that the sequence numbers did not reveal; count it as a gap
 	 * and resync — this record still becomes the new continuity baseline,
 	 * exactly like sequence-gap handling.
 	 */
-	if (sequence_continuous &&
-	    record.record_format() == msap1::meter_periodic_format_v2 &&
-	    latest_record_->record_format() == msap1::meter_periodic_format_v2) {
+	if (sequence_continuous) {
 		const auto expected_first = latest_record_->first_sample_index() +
 			latest_record_->block_sample_count();
 		if (record.first_sample_index() != expected_first) {
@@ -329,7 +321,7 @@ void MeterRecordIngestor::log_rejected_record(const std::string &reason,
 		"meter record rejected: " + reason +
 			"; seq=" + std::to_string(record.word(3)) +
 			" words[0..15]=" + header_words +
-			" words[60..61]=" + sample_index_words +
+			" words[9..10]=" + sample_index_words +
 			(suppressed != 0
 				 ? " (+" + std::to_string(suppressed) +
 					   " rejections suppressed)"
@@ -352,8 +344,8 @@ void MeterRecordIngestor::log_rejected_record(const std::string &reason,
 
 /*
  * The reason re-derivation must stay in lockstep with
- * matches_configuration(): the final branch is only reachable for a v1
- * record failing the window check.
+ * matches_configuration(): the final branch is only reachable for a record
+ * failing the sample-rate check.
  */
 void MeterRecordIngestor::log_configuration_mismatch(
 	const msap1::MeterRecord &record)
@@ -365,12 +357,9 @@ void MeterRecordIngestor::log_configuration_mismatch(
 		 configuration_.wire.generation)
 		reason = "generation mismatch (expected " +
 			 std::to_string(configuration_.wire.generation) + ")";
-	else if (record.sample_rate_hz() != configuration_.wire.sample_rate_hz)
+	else
 		reason = "sample rate mismatch (expected " +
 			 std::to_string(configuration_.wire.sample_rate_hz) + ")";
-	else
-		reason = "v1 window mismatch (expected " +
-			 std::to_string(configuration_.wire.rms_window_samples) + ")";
 	log_rejected_record(reason, "meter_record_config_rejected", record);
 }
 
@@ -414,7 +403,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			"meter record rejected by decoder: " +
 				std::string(error.what()) +
 				"; words[0..15]=" + header_words_hex(record) +
-				" words[60..61]=" + sample_index_words_hex(record),
+				" words[9..10]=" + sample_index_words_hex(record),
 			"meter_record_decode_rejected",
 			{{"MNC_SEQUENCE", std::to_string(record.sequence())},
 			 {"MNC_HEADER_WORDS", header_words_hex(record)},

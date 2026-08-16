@@ -222,6 +222,15 @@ void meter_record_contract()
 	record.words[5] = 32000;
 	record.words[6] = 6400;
 	record.words[7] = 1u << 6;
+	record.words[9] = 0x00000010u;
+	record.words[10] = 0x00000001u;
+	record.words[11] = 3;
+	record.words[12] = 4;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	record.words[60] = 5;
+	record.words[61] = 6;
+	record.words[62] = 7;
+	record.words[63] = 8;
 	const std::uint64_t mean = static_cast<std::uint64_t>(-125000);
 	const std::uint64_t rms = 230123456;
 	const std::size_t base = 16 + 6 * 5;
@@ -248,6 +257,20 @@ void meter_record_contract()
 		frequency.cycles_used == 10 &&
 		frequency.measurement_sequence == 19,
 		"wrong frequency record decoding");
+	/* v3 envelope positions: 64-bit first-sample index in words 9/10 and
+	 * the transport drop words in 11/12. */
+	require(record.first_sample_index() == 0x100000010ull,
+		"wrong first-sample index words");
+	require(record.emit_drops() == 3 && record.result_drops() == 4,
+		"wrong transport drop words");
+	const auto timing = record.timing();
+	require(timing.nominal_frequency_hz == 60 && timing.cycle_count == 12 &&
+		timing.cycle_locked && !timing.free_run_fallback,
+		"wrong timing word decoding");
+	/* MTR1 capture diagnostics latched at block close, words 60..63. */
+	require(record.capture_frames() == 5 && record.header_errors() == 6 &&
+		record.fifo_overflows() == 7 && record.adc_alerts() == 8,
+		"wrong capture diagnostic words");
 }
 
 void meter_configuration()

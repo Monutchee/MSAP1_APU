@@ -117,8 +117,8 @@ struct MeterUpdate {
 	std::optional<EnergyValues> energy;
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
-	/* Cycle-timing identity of the source block. Present for record
-	 * format v2; absent for v1 records, which predate cycle timing.
+	/* Cycle-timing identity of the source block. Present for every
+	 * periodic (MTR1) update; absent for aggregate updates.
 	 * The Basic period has no fixed duration — the actual duration is
 	 * sample_count / sample_rate per block (see SampleWindow). */
 	std::optional<BlockTiming> timing;
@@ -205,28 +205,24 @@ private:
 	std::map<std::uint32_t, Decoder> decoders_;
 };
 
-/** Decode a v1 (0x00010001) record: fundamental values, no block timing. */
+/**
+ * Decode an MTR1 (0x00010003) record: fundamental values plus the
+ * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
+ * TimeQuality and utc_start are NOT in the record — the PL does not know
+ * UTC state — so the decoder leaves them at Unsynchronized/absent and the
+ * caller (the ingestor) stamps them from the MeasurementTimebase after
+ * decoding.
+ */
 [[nodiscard]] MeterUpdate decode_periodic_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 
 /**
- * Decode a v2 (0x00010002) record: fundamental values plus the BlockTiming
- * identity from words 6/15/60/61. TimeQuality and utc_start are NOT in the
- * record — the PL does not know UTC state — so the decoder leaves them at
- * Unsynchronized/absent and the caller (the ingestor) stamps them from the
- * MeasurementTimebase after decoding.
- */
-[[nodiscard]] MeterUpdate decode_periodic_meter_record_v2(
-	const MeterRecord &record, SystemTime received_at =
-					     std::chrono::system_clock::now());
-
-/**
- * Decode an MTR2 aggregate (0x00020001) record: 150/180-cycle fundamental
+ * Decode an MTR2 aggregate (0x00020002) record: 150/180-cycle fundamental
  * values plus the AggregateTiming identity. The PL is the authoritative
  * aggregator — this only DECODES what the PL computed; the APU never
- * recomputes aggregate values. As for v2, TimeQuality and utc_start are not
- * in the record: the caller (the ingestor) stamps them from the
+ * recomputes aggregate values. As for MTR1, TimeQuality and utc_start are
+ * not in the record: the caller (the ingestor) stamps them from the
  * MeasurementTimebase after decoding.
  */
 [[nodiscard]] MeterUpdate decode_aggregate_meter_record(

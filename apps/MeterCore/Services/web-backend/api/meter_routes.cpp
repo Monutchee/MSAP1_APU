@@ -69,7 +69,7 @@ struct FrequencyConfigurationDto {
 
 /**
  * Cycle-timing identity of the latest basic measurement block, embedded in
- * GET /api/v1/meter/readings for v2 records (omitted for stored v1 records).
+ * GET /api/v1/meter/readings.
  */
 struct MeterTimingDto {
 	std::uint64_t block_sequence;
@@ -89,16 +89,16 @@ struct MeterReadingsDto {
 	std::uint64_t sequence;
 	std::uint32_t configuration_generation;
 	std::uint32_t sample_rate_hz;
-	std::uint32_t rms_window_samples;
+	std::uint32_t block_sample_count;
 	std::uint32_t status;
 	std::uint32_t capture_frames;
 	std::uint32_t header_errors;
 	std::uint32_t fifo_overflows;
-	std::uint32_t packetizer_drops;
-	std::uint32_t hub_drops;
+	std::uint32_t emit_drops;
+	std::uint32_t result_drops;
 	FrequencyReadingDto frequency;
 	std::array<MeterChannelDto, 8> channels;
-	/* Absent (omitted from the JSON) when the record predates v2. */
+	/* Absent (omitted from the JSON) until timing provenance exists. */
 	std::optional<MeterTimingDto> timing;
 };
 
@@ -115,11 +115,11 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 	const auto &diagnostics = response.diagnostics;
 	MeterReadingsDto result{
 		snapshot.sequence, snapshot.configuration_generation,
-		diagnostics.sample_rate_hz, diagnostics.rms_window_samples,
+		diagnostics.sample_rate_hz, diagnostics.block_sample_count,
 		diagnostics.status,
 		diagnostics.capture_frames, diagnostics.header_errors,
-		diagnostics.fifo_overflows, diagnostics.packetizer_drops,
-		diagnostics.hub_drops,
+		diagnostics.fifo_overflows, diagnostics.emit_drops,
+		diagnostics.result_drops,
 		{diagnostics.frequency.enabled, false,
 		 diagnostics.frequency.reference_valid,
 		 diagnostics.frequency.out_of_range,
@@ -134,9 +134,9 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 		{},
 	};
 	/* Prefer the timing carried by the typed snapshot. The diagnostics timing
-	 * is retained as a compatibility fallback and supplies product-specific
-	 * cycle-lock flags for format-v2 records. Both are populated from the same
-	 * ingestion-time provenance, never from the HTTP request clock. */
+	 * is retained as a compatibility fallback and supplies the product-specific
+	 * cycle-lock flags. Both are populated from the same ingestion-time
+	 * provenance, never from the HTTP request clock. */
 	if (snapshot.timing || diagnostics.timing) {
 		const auto *compat = diagnostics.timing
 			? &*diagnostics.timing : nullptr;

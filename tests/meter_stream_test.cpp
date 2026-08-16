@@ -44,7 +44,7 @@ mnc::meter_stream::DatabaseStoragePolicy spool_policy(
 mnc::meter_stream::MeterStreamRecord record(std::uint64_t sequence)
 {
 	mnc::meter_stream::MeterStreamRecord result;
-	result.record_format = 0x00010002;
+	result.record_format = 0x00010003;
 	result.record_kind = 1;
 	result.measurement_period = 0;
 	result.source_sequence = sequence;

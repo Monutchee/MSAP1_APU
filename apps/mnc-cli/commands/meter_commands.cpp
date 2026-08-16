@@ -642,12 +642,12 @@ struct MeterSnapshot {
 	std::uint64_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t sample_rate_hz = 0;
-	std::uint32_t window_samples = 0;
+	std::uint32_t block_sample_count = 0;
 	std::uint32_t capture_frames = 0;
 	std::uint32_t header_errors = 0;
 	std::uint32_t fifo_overflows = 0;
-	std::uint32_t packetizer_drops = 0;
-	std::uint32_t hub_drops = 0;
+	std::uint32_t emit_drops = 0;
+	std::uint32_t result_drops = 0;
 	std::vector<MeterChannelDto> channels;
 	MeterFrequencyDto frequency;
 };
@@ -664,12 +664,12 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 		.sequence = snapshot.sequence,
 		.configuration_generation = snapshot.configuration_generation,
 		.sample_rate_hz = diagnostics.sample_rate_hz,
-		.window_samples = diagnostics.rms_window_samples,
+		.block_sample_count = diagnostics.block_sample_count,
 		.capture_frames = diagnostics.capture_frames,
 		.header_errors = diagnostics.header_errors,
 		.fifo_overflows = diagnostics.fifo_overflows,
-		.packetizer_drops = diagnostics.packetizer_drops,
-		.hub_drops = diagnostics.hub_drops,
+		.emit_drops = diagnostics.emit_drops,
+		.result_drops = diagnostics.result_drops,
 		.channels = {},
 		.frequency = {},
 	};
@@ -731,7 +731,7 @@ void print_snapshot(const MeterSnapshot &snapshot, std::ostream &output)
 	output << "\033[2J\033[HMSAP1 meter results"
 	       << "  sequence=" << snapshot.sequence << "  generation=0x"
 	       << std::hex << snapshot.configuration_generation << std::dec
-	       << "  window=" << snapshot.window_samples << " samples\n\n";
+	       << "  block=" << snapshot.block_sample_count << " samples\n\n";
 	for (const auto &channel : snapshot.channels) {
 		output << "CH" << channel.channel << ' ' << std::setw(3)
 		       << channel.name << "  RMS=";
@@ -760,8 +760,8 @@ void print_snapshot(const MeterSnapshot &snapshot, std::ostream &output)
 	output << "\nPL capture=" << snapshot.capture_frames
 	       << " header_errors=" << snapshot.header_errors
 	       << " fifo_overflows=" << snapshot.fifo_overflows
-	       << " packetizer_drops=" << snapshot.packetizer_drops
-	       << " hub_drops=" << snapshot.hub_drops
+	       << " emit_drops=" << snapshot.emit_drops
+	       << " result_drops=" << snapshot.result_drops
 	       << "\nCtrl-C to stop.\n" << std::flush;
 }
 

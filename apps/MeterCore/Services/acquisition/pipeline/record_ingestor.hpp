@@ -26,12 +26,12 @@ namespace msap1::acquisition::daemon {
  * Responsibilities, in the order a record flows through:
  *
  *  1. Drain complete 256-byte records from the DMA reader.
- *  2. Validate each record against the ACTIVE configuration (generation,
- *     sample rate, and — for v1 records — the configured RMS window) and
- *     track continuity PER FORMAT: basic records keep sequence plus v2
- *     sample-range continuity; aggregate records get sequence continuity
- *     only (the PL already enforces sample-range continuity of the 15
- *     blocks inside an aggregate, and consecutive aggregates may
+ *  2. Validate each record against the ACTIVE configuration (generation
+ *     and sample rate; blocks are cycle-defined, so there is no window
+ *     echo to match) and track continuity PER FORMAT: basic records keep
+ *     sequence plus sample-range continuity; aggregate records get sequence
+ *     continuity only (the PL already enforces sample-range continuity of
+ *     the 15 blocks inside an aggregate, and consecutive aggregates may
  *     legitimately be separated by aggregation resets).
  *  3. Decode into the typed latest store and stamp the decoded timing's
  *     TimeQuality/UTC from the measurement timebase (identically for
