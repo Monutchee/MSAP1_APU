@@ -13,7 +13,7 @@
 #include <stdexcept>
 
 /*
- * MTR2 (0x00020001) aggregate-record tests: the test-only reference
+ * MTR2 (0x00020002) aggregate-record tests: the test-only reference
  * aggregator against golden vectors, the decoder against records built from
  * reference output, and the defensive validation of shapes the PL must
  * never emit. The PL is the authoritative aggregator; nothing here computes
@@ -99,13 +99,13 @@ msap1::MeterRecord aggregate_record(const AggregateSpec &spec)
 	record.words[8] = (spec.arithmetic_error ? (1u << 0) : 0u) |
 			  (spec.complete ? (1u << 1) : 0u) |
 			  (spec.frequency_valid ? (1u << 2) : 0u);
-	record.words[9] = spec.first_basic_sequence;
-	record.words[10] = spec.last_basic_sequence;
-	record.words[11] = spec.basic_block_count | (spec.nominal_hz << 8) |
-			   (spec.cycle_count << 16);
-	record.words[12] = static_cast<std::uint32_t>(spec.first_sample_index);
-	record.words[13] =
+	record.words[9] = static_cast<std::uint32_t>(spec.first_sample_index);
+	record.words[10] =
 		static_cast<std::uint32_t>(spec.first_sample_index >> 32);
+	record.words[13] = spec.basic_block_count | (spec.nominal_hz << 8) |
+			   (spec.cycle_count << 16);
+	record.words[14] = spec.first_basic_sequence;
+	record.words[15] = spec.last_basic_sequence;
 	for (std::size_t channel = 0;
 	     channel != msap1::meter_channel_count; ++channel) {
 		const auto bits = std::bit_cast<std::uint64_t>(
@@ -263,7 +263,7 @@ void decode_reference_built_record_60hz()
 		"aggregate timing identity does not match the record header");
 	require(timing.first_sample_index == 0x230000010ull &&
 		timing.sample_count == 384'015,
-		"the aggregate sample range was not decoded from words 12/13/6");
+		"the aggregate sample range was not decoded from words 9/10/6");
 	require(timing.first_basic_sequence == 100 &&
 		timing.last_basic_sequence == 114,
 		"the contributing basic sequence range was not decoded");
@@ -391,7 +391,7 @@ void decode_applies_rms_quality_priority()
 /*
  * Malformed aggregation identities must never silently become valid
  * aggregates: the decoder rejects every shape the PL cannot emit, exactly
- * like the hardened v2 rules.
+ * like the hardened MTR1 rules.
  */
 void decode_rejects_malformed_aggregates()
 {

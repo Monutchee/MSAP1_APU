@@ -39,6 +39,10 @@ void signed64(msap1::MeterRecord &record, std::size_t word,
 	record.words[word + 1] = static_cast<std::uint32_t>(bits >> 32);
 }
 
+/* Minimal valid MTR1 record: a locked 12-cycle block at exactly the 60 Hz
+ * nominal (6400 samples at 32 kSPS), the 64-bit first-sample index in
+ * envelope words 9/10, the timing word at 13, and the transport drop words
+ * 11/12 zero — as every emitted record carries them. */
 msap1::MeterRecord periodic_record()
 {
 	msap1::MeterRecord record{};
@@ -50,6 +54,9 @@ msap1::MeterRecord periodic_record()
 	record.words[5] = 32000;
 	record.words[6] = 6400;
 	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[10] = 0x00000001u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16) | (1u << 18);
 	for (std::size_t channel = 0; channel != 7; ++channel) {
 		const auto base = 16u + channel * 5u;
 		signed64(record, base, static_cast<std::int64_t>(channel));
@@ -66,20 +73,6 @@ msap1::MeterRecord periodic_record()
 	return record;
 }
 
-/* Format-v2 variant: cycle-defined block with an actual sample count that
- * differs from the configured window, plus the timing word and the 64-bit
- * first-sample index in words 60/61. */
-msap1::MeterRecord periodic_record_v2()
-{
-	auto record = periodic_record();
-	record.words[1] = msap1::meter_periodic_format_v2;
-	record.words[6] = 6421;
-	record.words[15] = 60u | (12u << 8) | (1u << 16) | (1u << 18);
-	record.words[60] = 0x00000010u;
-	record.words[61] = 0x00000001u;
-	return record;
-}
-
 void decode_and_period_independence()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
@@ -88,9 +81,9 @@ void decode_and_period_independence()
 	require(update.period == msap1::MeasurementPeriod::Basic &&
 		update.kind == msap1::RecordKind::fundamental &&
 		update.sequence == 42 && update.fundamental.has_value(),
-		"MTR1 v1 did not decode as a basic fundamental update");
-	require(!update.timing.has_value(),
-		"a v1 record fabricated cycle-timing metadata");
+		"MTR1 did not decode as a basic fundamental update");
+	require(update.timing.has_value(),
+		"an MTR1 record decoded without cycle-timing metadata");
 	const auto &values = *update.fundamental;
 	require(values.frequency.valid() && values.frequency.value == 60001 &&
 		values.frequency.measured_at == timestamp &&
@@ -129,25 +122,29 @@ void decode_and_period_independence()
 		"out-of-order update replaced newer state");
 }
 
-void decode_v2_block_timing()
+void decode_block_timing()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
 	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
-	const auto update = registry.decode(periodic_record_v2(), timestamp);
+	/* A locked block need not match the nominal window: the actual
+	 * sample count varies with grid frequency. */
+	auto record = periodic_record();
+	record.words[6] = 6421;
+	const auto update = registry.decode(record, timestamp);
 	require(update.period == msap1::MeasurementPeriod::Basic &&
 		update.kind == msap1::RecordKind::fundamental &&
 		update.sequence == 42 && update.fundamental.has_value(),
-		"MTR1 v2 did not decode as a basic fundamental update");
+		"MTR1 did not decode as a basic fundamental update");
 	require(update.timing.has_value(),
-		"a v2 record decoded without cycle-timing metadata");
+		"an MTR1 record decoded without cycle-timing metadata");
 	const auto &timing = *update.timing;
 	require(timing.sequence == 42 &&
 		timing.configuration_generation == 0x12345678,
-		"v2 timing identity does not match the record header");
+		"the timing identity does not match the record header");
 	require(timing.first_sample_index == 0x100000010ull,
-		"64-bit first-sample index was not assembled from words 60/61");
+		"64-bit first-sample index was not assembled from words 9/10");
 	require(timing.sample_count == 6421,
-		"v2 word 6 was not decoded as the actual block sample count");
+		"word 6 was not decoded as the actual block sample count");
 	require(timing.cycle_count == 12 &&
 		timing.nominal_frequency == msap1::NominalFrequency::Hz60,
 		"cycle count or nominal frequency was not decoded");
@@ -162,35 +159,35 @@ void decode_v2_block_timing()
 	/* The actual block duration follows the actual sample count. */
 	require(update.fundamental->frequency.calculation_window.sample_count ==
 		6421,
-		"v2 calculation window did not use the actual sample count");
+		"the calculation window did not use the actual sample count");
 }
 
 /*
- * Malformed v2 timing must never silently become a valid basic measurement
+ * Malformed timing must never silently become a valid basic measurement
  * block: the decoder rejects shapes the PL cannot legitimately produce.
  */
-void decode_v2_rejects_malformed_timing()
+void decode_rejects_malformed_timing()
 {
 	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
 
 	/* A cycle-locked block must close exactly the nominal's cycle count
 	 * (12 at 60 Hz); 11 is impossible without lost zero crossings. */
-	auto wrong_cycles = periodic_record_v2();
-	wrong_cycles.words[15] = 60u | (11u << 8) | (1u << 16);
+	auto wrong_cycles = periodic_record();
+	wrong_cycles.words[13] = 60u | (11u << 8) | (1u << 16);
 	require_throws([&] { (void)registry.decode(wrong_cycles); },
 		       "a locked block with a wrong cycle count decoded");
 
 	/* A block with zero samples has no measurement in it. */
-	auto empty_block = periodic_record_v2();
+	auto empty_block = periodic_record();
 	empty_block.words[6] = 0;
 	require_throws([&] { (void)registry.decode(empty_block); },
 		       "a zero-sample block decoded");
 
 	/* first_sample_index + sample_count must stay inside the 64-bit
 	 * conversion counter. */
-	auto overflowing = periodic_record_v2();
-	overflowing.words[60] = 0xffffffffu;
-	overflowing.words[61] = 0xffffffffu;
+	auto overflowing = periodic_record();
+	overflowing.words[9] = 0xffffffffu;
+	overflowing.words[10] = 0xffffffffu;
 	require_throws([&] { (void)registry.decode(overflowing); },
 		       "an overflowing sample range decoded");
 
@@ -199,16 +196,16 @@ void decode_v2_rejects_malformed_timing()
 	 * counter. Observed on hardware as a disturbed provenance field, and it
 	 * must not decode — accepting it anchors the block's UTC label at the
 	 * start of capture while still reporting a small uncertainty bound. */
-	auto zero_index = periodic_record_v2();
-	zero_index.words[60] = 0;
-	zero_index.words[61] = 0;
+	auto zero_index = periodic_record();
+	zero_index.words[9] = 0;
+	zero_index.words[10] = 0;
 	require_throws([&] { (void)registry.decode(zero_index); },
 		       "a zero first-sample index decoded");
 
 	/* Only exact zero is impossible; index 1 is the genuine first block. */
-	auto first_ever = periodic_record_v2();
-	first_ever.words[60] = 1;
-	first_ever.words[61] = 0;
+	auto first_ever = periodic_record();
+	first_ever.words[9] = 1;
+	first_ever.words[10] = 0;
 	const auto first_update = registry.decode(first_ever);
 	require(first_update.timing.has_value() &&
 		first_update.timing->first_sample_index == 1u,
@@ -216,8 +213,8 @@ void decode_v2_rejects_malformed_timing()
 
 	/* Free-run fallback blocks are time-defined: any cycle count is
 	 * legitimate there, including zero on a dead grid. */
-	auto fallback = periodic_record_v2();
-	fallback.words[15] = 60u | (0u << 8) | (1u << 17);
+	auto fallback = periodic_record();
+	fallback.words[13] = 60u | (0u << 8) | (1u << 17);
 	const auto update = registry.decode(fallback);
 	require(update.timing.has_value() &&
 		update.timing->free_run_fallback &&
@@ -226,28 +223,46 @@ void decode_v2_rejects_malformed_timing()
 		"a zero-cycle free-run fallback block did not decode");
 }
 
+/*
+ * The retired v1 (0x00010001) and v2 (0x00010002) format words are UNKNOWN
+ * now — PL and APU ship together, so a record carrying one is a stale image
+ * or corruption, never a format to decode. Deliberate regression guard.
+ */
+void decode_rejects_retired_formats()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	for (const std::uint32_t retired : {0x00010001u, 0x00010002u}) {
+		auto record = periodic_record();
+		record.words[1] = retired;
+		require(!record.header_valid(),
+			"a retired format word passed header validation");
+		require_throws([&] { (void)registry.decode(record); },
+			       "a retired MTR1 format word decoded");
+	}
+}
+
 void class_a_aggregation_eligibility()
 {
 	using msap1::meter::class_a_aggregation_eligible;
 	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
 
 	/* Complete locked blocks aggregate: 12 cycles at 60 Hz... */
-	auto locked_60 = periodic_record_v2();
-	locked_60.words[15] = 60u | (12u << 8) | (1u << 16);
+	auto locked_60 = periodic_record();
+	locked_60.words[13] = 60u | (12u << 8) | (1u << 16);
 	require(class_a_aggregation_eligible(
 			*registry.decode(locked_60).timing),
 		"a complete locked 60 Hz block was not eligible");
 
 	/* ...and 10 cycles at 50 Hz. */
-	auto locked_50 = periodic_record_v2();
-	locked_50.words[15] = 50u | (10u << 8) | (1u << 16);
+	auto locked_50 = periodic_record();
+	locked_50.words[13] = 50u | (10u << 8) | (1u << 16);
 	require(class_a_aggregation_eligible(
 			*registry.decode(locked_50).timing),
 		"a complete locked 50 Hz block was not eligible");
 
 	/* Free-run fallback is time-defined data: never aggregated. */
-	auto fallback = periodic_record_v2();
-	fallback.words[15] = 60u | (12u << 8) | (1u << 17);
+	auto fallback = periodic_record();
+	fallback.words[13] = 60u | (12u << 8) | (1u << 17);
 	require(!class_a_aggregation_eligible(
 			*registry.decode(fallback).timing),
 		"a free-run fallback block was eligible");
@@ -255,8 +270,8 @@ void class_a_aggregation_eligibility()
 	/* The first block after an apply is conservatively ineligible even
 	 * when flagged locked (defense in depth: today's PL RTL cannot emit
 	 * first_block_after_apply together with cycle_locked). */
-	auto first_after_apply = periodic_record_v2();
-	first_after_apply.words[15] = 60u | (12u << 8) | (1u << 16) |
+	auto first_after_apply = periodic_record();
+	first_after_apply.words[13] = 60u | (12u << 8) | (1u << 16) |
 		(1u << 18);
 	require(!class_a_aggregation_eligible(
 			*registry.decode(first_after_apply).timing),
@@ -321,8 +336,8 @@ void subscriptions_and_registry_extension()
 	require(std::chrono::steady_clock::now() - started < 50ms,
 		"slow latest-state subscriber blocked meter ingestion");
 
-	/* 0x00020001 became the real MTR2 aggregate format, so the demo of
-	 * registering a future decoder uses the next unassigned word. */
+	/* Record type 0x0002 is the real MTR2 aggregate, so the demo of
+	 * registering a future decoder uses the next unassigned type. */
 	msap1::MeterDecoderRegistry registry;
 	constexpr std::uint32_t future_format = 0x00030001;
 	registry.register_decoder(future_format,
@@ -349,8 +364,9 @@ int main()
 {
 	try {
 		decode_and_period_independence();
-		decode_v2_block_timing();
-		decode_v2_rejects_malformed_timing();
+		decode_block_timing();
+		decode_rejects_malformed_timing();
+		decode_rejects_retired_formats();
 		class_a_aggregation_eligibility();
 		subscriptions_and_registry_extension();
 		std::cout << "meter data tests passed\n";

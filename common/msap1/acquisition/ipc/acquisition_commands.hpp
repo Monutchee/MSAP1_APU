@@ -40,8 +40,11 @@ inline constexpr const char *acquisition_socket_path =
  * ingest, so its provenance no longer follows the daemon's current clock
  * state.
  * 20: Normal meter reads use a product-neutral typed snapshot request;
- * raw MeterRecord remains confined to the legacy diagnostic info reply. */
-inline constexpr std::uint16_t acquisition_ipc_version = 20;
+ * raw MeterRecord remains confined to the legacy diagnostic info reply.
+ * 21: Snapshot diagnostics follow the v3 record envelope: the transport
+ * drop counters are emit_drops/result_drops and the configured-window echo
+ * is replaced by the block's actual sample count. */
+inline constexpr std::uint16_t acquisition_ipc_version = 21;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -170,7 +173,7 @@ struct InfoResponse {
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};
-	/* Newest 150/180-cycle aggregate (MTR2, 0x00020001). Meaningful only
+	/* Newest 150/180-cycle aggregate (MTR2, 0x00020002). Meaningful only
 	 * when has_aggregate_record is set; the basic latest_record above is
 	 * unaffected by, and never replaced with, an aggregate. */
 	MeterRecord latest_aggregate_record{};
@@ -196,7 +199,6 @@ struct MeterFrequencyDiagnostics {
 	std::uint32_t cycles_used = 0;
 };
 
-/** Optional cycle-timing identity supplied by MTR1 format v2. */
 /**
  * Compatibility timing carried beside the v20 snapshot response.
  *
@@ -224,13 +226,15 @@ struct MeterBlockTimingIpc {
  */
 struct MeterSnapshotDiagnostics {
 	std::uint32_t sample_rate_hz = 0;
-	std::uint32_t rms_window_samples = 0;
+	/* Actual samples in the record's block (envelope word 6) — a
+	 * cycle-defined block, not a configured-window echo. */
+	std::uint32_t block_sample_count = 0;
 	std::uint32_t status = 0;
 	std::uint32_t capture_frames = 0;
 	std::uint32_t header_errors = 0;
 	std::uint32_t fifo_overflows = 0;
-	std::uint32_t packetizer_drops = 0;
-	std::uint32_t hub_drops = 0;
+	std::uint32_t emit_drops = 0;
+	std::uint32_t result_drops = 0;
 	std::array<MeterChannelDiagnostics, 8> channels{};
 	MeterFrequencyDiagnostics frequency{};
 	std::optional<MeterBlockTimingIpc> timing;

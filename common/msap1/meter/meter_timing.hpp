@@ -33,8 +33,9 @@ enum class NominalFrequency : std::uint8_t {
 };
 
 /**
- * Aggregation tier of a decoded meter update. Only Basic is produced today;
- * the longer tiers are reserved for future aggregate record formats.
+ * Aggregation tier of a decoded meter update. Basic and the 150/180-cycle
+ * tier are produced today; the longer tiers are reserved for future
+ * aggregate record formats.
  */
 using MeasurementPeriod = mnc::meter::MeasurementPeriod;
 

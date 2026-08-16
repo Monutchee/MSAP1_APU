@@ -233,10 +233,9 @@ MeterData::Subscription MeterData::subscribe(MeasurementPeriod period,
 namespace {
 
 /**
- * Channel and frequency decoding shared by the v1 and v2 record formats.
- * Word 6 is the only input that differs in meaning: configured window
- * samples (v1) versus actual block sample count (v2); either way it is the
- * sample count the PL accumulated into these values.
+ * Channel and frequency decoding for the periodic (MTR1) record format.
+ * Word 6 is the actual block sample count — the sample count the PL
+ * accumulated into these values.
  */
 FundamentalValues decode_fundamental_values(const MeterRecord &record,
 					    std::uint64_t sequence,
@@ -378,27 +377,7 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 {
 	if (!record.header_valid() ||
 	    record.record_format() != meter_periodic_format)
-		throw std::invalid_argument("invalid MTR1 v1 record");
-	const auto sequence = static_cast<std::uint64_t>(record.sequence());
-	const auto window =
-		sample_window(record.window_samples(), record.sample_rate_hz());
-	MeterUpdate update{};
-	update.period = MeasurementPeriod::Basic;
-	update.kind = RecordKind::fundamental;
-	update.sequence = sequence;
-	update.configuration_generation = record.configuration_generation();
-	update.fundamental =
-		decode_fundamental_values(record, sequence, received_at, window);
-	/* v1 records predate cycle timing: no BlockTiming is available. */
-	return update;
-}
-
-MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
-					    SystemTime received_at)
-{
-	if (!record.header_valid() ||
-	    record.record_format() != meter_periodic_format_v2)
-		throw std::invalid_argument("invalid MTR1 v2 record");
+		throw std::invalid_argument("invalid MTR1 record");
 	/*
 	 * Validate the timing identity before building anything: malformed
 	 * timing must never silently become a valid basic measurement block.
@@ -409,14 +388,14 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 	if (timing_word.nominal_frequency_hz != 50u &&
 	    timing_word.nominal_frequency_hz != 60u)
 		throw std::invalid_argument(
-			"invalid nominal frequency in MTR1 v2 timing word");
+			"invalid nominal frequency in MTR1 timing word");
 	const auto nominal = timing_word.nominal_frequency_hz == 50u
 		? NominalFrequency::Hz50
 		: NominalFrequency::Hz60;
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(
-			"MTR1 v2 block has a zero sample count");
+			"MTR1 block has a zero sample count");
 	const auto first_sample_index = record.first_sample_index();
 	/*
 	 * Zero is not a reachable index. The PL conversion stage issues index 1
@@ -433,21 +412,21 @@ MeterUpdate decode_periodic_meter_record_v2(const MeterRecord &record,
 	 */
 	if (first_sample_index == 0u)
 		throw std::invalid_argument(
-			"MTR1 v2 block has a zero first-sample index");
+			"MTR1 block has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
-			"MTR1 v2 sample range overflows the 64-bit counter");
+			"MTR1 sample range overflows the 64-bit counter");
 	/* A locked block is cycle-defined by construction: exactly the
 	 * nominal's cycles-per-block. Fallback blocks are time-defined and
 	 * may close any cycle count, including 0 or a partial tail. */
 	if (timing_word.cycle_locked && !timing_word.free_run_fallback &&
 	    timing_word.cycle_count != cycles_per_basic_block(nominal))
 		throw std::invalid_argument(
-			"MTR1 v2 cycle-locked block has an impossible cycle count");
+			"MTR1 cycle-locked block has an impossible cycle count");
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
-	/* v2 word 6 is the ACTUAL sample count of this cycle-defined block. */
+	/* Word 6 is the ACTUAL sample count of this cycle-defined block. */
 	const auto window = sample_window(sample_count, record.sample_rate_hz());
 	MeterUpdate update{};
 	update.period = MeasurementPeriod::Basic;
@@ -482,7 +461,7 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 		throw std::invalid_argument("invalid MTR2 aggregate record");
 	/*
 	 * Validate the aggregation identity before building anything,
-	 * mirroring the hardened v2 rules: the PL emits only complete
+	 * mirroring the hardened MTR1 rules: the PL emits only complete
 	 * 15-block aggregates whose cycle count follows the nominal, so any
 	 * other shape is corruption or a future RTL regression and must
 	 * never silently decode into a valid aggregate.
@@ -593,15 +572,10 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
-	/* v1 stays registered: stored streams may replay 0x00010001 records. */
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
-			return decode_periodic_meter_record(record, received_at);
-		});
-	result.register_decoder(meter_periodic_format_v2,
-		[](const MeterRecord &record, SystemTime received_at) {
-			return decode_periodic_meter_record_v2(record,
-							       received_at);
+			return decode_periodic_meter_record(record,
+							    received_at);
 		});
 	/* MTR2 aggregates interleave with basic records on the same DMA
 	 * stream; the registry routes them by the format word. */

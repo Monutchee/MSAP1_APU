@@ -56,11 +56,13 @@ msap1::MeterRecord contract_aggregate_record()
 	record.words[7] = 0x7f;
 	/* complete | frequency_valid, no arithmetic error. */
 	record.words[8] = (1u << 1) | (1u << 2);
-	record.words[9] = 100;
-	record.words[10] = 114;
-	record.words[11] = 15u | (60u << 8) | (180u << 16);
-	record.words[12] = 331'990'790u;
-	record.words[13] = 0;
+	/* 64-bit first-sample index in envelope words 9/10; the transport
+	 * drop words 11/12 stay 0 as on every emitted record. */
+	record.words[9] = 331'990'790u;
+	record.words[10] = 0;
+	record.words[13] = 15u | (60u << 8) | (180u << 16);
+	record.words[14] = 100;
+	record.words[15] = 114;
 	/* Per-channel aggregate RMS, signed 64-bit micro-units at words
 	 * 16..31: 1.5 A on every current, 120 V on every voltage. */
 	const auto set_rms = [&record](std::size_t channel, std::int64_t micro) {
@@ -279,7 +281,7 @@ void a_malformed_cached_record_is_rejected()
 {
 	auto response = contract_response();
 	/* 15 blocks at a 60 Hz nominal is 180 cycles, never 150. */
-	response.latest_aggregate_record.words[11] =
+	response.latest_aggregate_record.words[13] =
 		15u | (60u << 8) | (150u << 16);
 	try {
 		(void)meter_aggregate_dto(response);

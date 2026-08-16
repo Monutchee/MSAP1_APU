@@ -17,7 +17,7 @@ The nominal duration is approximately 200 ms, but 200 ms is never the
 semantic definition. The actual duration varies with the real grid
 frequency — intentionally. A block at 49.9 Hz is longer than a block at
 50.1 Hz; both are valid basic blocks. Consequently the block sample count
-in an MTR1 v2 record (word 6) is the ACTUAL count, and consumers must never
+in an MTR1 record (word 6) is the ACTUAL count, and consumers must never
 assume a fixed count. When the PL loses its cycle reference it falls back
 to a fixed sample window (`rms_window_samples`, derived from the nominal
 frequency) and flags the block `free_run_fallback`; blocks stay gapless
@@ -137,9 +137,9 @@ It must never mark the electrical measurement invalid — `TimeQuality` and
 
 | Concept | What it is | Where it lives |
 |---|---|---|
-| Nominal frequency | Configuration: 50 or 60 Hz, selects the cycles-per-block rule and the fallback window | settings `metering.nominal_frequency_hz`, RPMsg `nominal_frequency_hz`, MTR1 v2 timing word bits [7:0] |
+| Nominal frequency | Configuration: 50 or 60 Hz, selects the cycles-per-block rule and the fallback window | settings `metering.nominal_frequency_hz`, RPMsg `nominal_frequency_hz`, MTR1 timing word bits [7:0] |
 | Measured frequency | The PL frequency estimator's measurement of the actual grid | MTR1 words 56–59 |
-| Cycle timing | The PL zero-cross-driven block boundary machinery | PL `grid_cycle_timing`, MTR1 v2 words 6/15/60/61 |
+| Cycle timing | The PL zero-cross-driven block boundary machinery | PL `grid_cycle_timing`, MTR1 words 6/9/10/13 |
 
 Nominal frequency is never inferred from the measured frequency, and the
 measured frequency never changes the block rule.
@@ -158,23 +158,30 @@ measured frequency never changes the block rule.
 
 ## Record formats
 
-MTR1 record format v2 (`0x00010002`) adds, relative to v1: actual block
-sample count (word 6), the timing word (word 15: nominal Hz, cycle count,
-cycle_locked / free_run_fallback / first_block_after_apply flags), and the
-64-bit first-sample index (words 60–61). The v1 decoder stays registered
-because stored streams may replay v1 records; v1 updates carry no
-BlockTiming.
+Both formats share one envelope in words 0..12 (normative source:
+MSAP1_PL `SourceData/HLS_DesignFile/common/include/measurement_record.hpp`;
+the PL engines build and serialize their own records): magic, format,
+size 256, per-producer sequence (word 3), configuration generation (4),
+sample rate (5), actual sample count (6), valid mask (7), status (8), the
+64-bit first-sample index (words 9–10, the PL conversion-domain counter),
+and the transport drop words (11–12, constant 0 by construction).
 
-Aggregate record format `0x00020001` (MTR2) reuses the MTR1 container
-(magic, 256 bytes) with its own layout: aggregate sequence (word 3), total
-sample count (word 6), ANDed valid mask (word 7), status flags (word 8),
-first/last contributing basic sequence (words 9–10), the composition word
-(word 11: block count 15, nominal Hz, total cycle count), the 64-bit
-first-sample index (words 12–13, same conversion domain as MTR1 v2 words
-60–61), per-channel aggregate RMS in signed 64-bit micro-units (words
-16–31, MTR1 channel order), and the mean frequency in millihertz
-(word 32). Decoding produces `MeasurementPeriod::Cycles150_180` updates
-carrying `AggregateTiming`; basic decoding is unchanged.
+MTR1 format v3 (`0x00010003`) adds the timing word (word 13: nominal Hz,
+cycle count, cycle_locked / free_run_fallback / first_block_after_apply
+flags), per-channel readings (words 16–55), the frequency block (56–59),
+and the capture diagnostics latched at block close (60–63).
+
+Aggregate format `0x00020002` (MTR2) carries the composition word
+(word 13: block count 15, nominal Hz, total cycle count), the first/last
+contributing basic sequence (words 14–15), per-channel aggregate RMS in
+signed 64-bit micro-units (words 16–31, MTR1 channel order), the mean
+frequency in millihertz (word 32), and the aggregation-engine diagnostics
+as of the emit (words 33–35: reset / ineligible / continuity counts).
+Decoding produces `MeasurementPeriod::Cycles150_180` updates carrying
+`AggregateTiming`; basic decoding is unchanged. Earlier formats (v1
+`0x00010001`, v2 `0x00010002`, MTR2 `0x00020001`) are not decodable —
+PL and APU ship together, and pre-production stores were reset at the
+cutover.
 
 The aggregate decoder validates the record's self-declared identity before
 building anything: it must be marked complete, carry a 50/60 Hz nominal,

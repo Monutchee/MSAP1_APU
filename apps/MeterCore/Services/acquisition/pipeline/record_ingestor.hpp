@@ -26,12 +26,12 @@ namespace msap1::acquisition::daemon {
  * Responsibilities, in the order a record flows through:
  *
  *  1. Drain complete 256-byte records from the DMA reader.
- *  2. Validate each record against the ACTIVE configuration (generation,
- *     sample rate, and — for v1 records — the configured RMS window) and
- *     track continuity PER FORMAT: basic records keep sequence plus v2
- *     sample-range continuity; aggregate records get sequence continuity
- *     only (the PL already enforces sample-range continuity of the 15
- *     blocks inside an aggregate, and consecutive aggregates may
+ *  2. Validate each record against the ACTIVE configuration (generation
+ *     and sample rate; blocks are cycle-defined, so there is no window
+ *     echo to match) and track continuity PER FORMAT: basic records keep
+ *     sequence plus sample-range continuity; aggregate records get sequence
+ *     continuity only (the PL already enforces sample-range continuity of
+ *     the 15 blocks inside an aggregate, and consecutive aggregates may
  *     legitimately be separated by aggregation resets).
  *  3. Decode into the typed latest store and stamp the decoded timing's
  *     TimeQuality/UTC from the measurement timebase (identically for
@@ -159,6 +159,12 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
+	/** Rate-limited raw-word forensics shared by every silent rejection
+	 * path — the datum that localizes a PL emission fault. */
+	void log_rejected_record(const std::string &reason, const char *event,
+		const msap1::MeterRecord &record);
+	/** Derive which matches_configuration() check failed, then dump. */
+	void log_configuration_mismatch(const msap1::MeterRecord &record);
 	[[nodiscard]] bool matches_configuration(
 		const msap1::MeterRecord &record) const;
 	[[nodiscard]] bool track_basic_continuity(
@@ -183,6 +189,12 @@ private:
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
 	std::uint64_t last_transport_overruns_ = 0;
+	/* Rate limit for configuration-mismatch forensics: the observed
+	 * one-rejection-per-window fault passes, a total-mismatch storm stays
+	 * bounded below the record rate, and anything suppressed is counted
+	 * and reported on the next emitted entry. */
+	std::optional<Clock::time_point> last_reject_log_;
+	std::uint64_t suppressed_reject_logs_ = 0;
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache) and the newest accepted aggregate
 	 * sequence. An aggregate between two basic blocks must never look

@@ -10,22 +10,28 @@
 
 namespace msap1 {
 
+/* The PL record wire formats are normative in the PL repository:
+ * MSAP1_PL/SourceData/HLS_DesignFile/common/include/measurement_record.hpp
+ * (both producers are HLS engines that build and serialize their own
+ * records). This header mirrors that contract; PL and APU change in the
+ * same release — the kernel framing is positional, so there is no version
+ * negotiation on the wire.
+ *
+ * Every record shares one envelope in words 0..12 (magic, format, size,
+ * per-producer sequence, generation, sample rate, sample count, valid
+ * mask, status, 64-bit first-sample timestamp, transport drop words), so
+ * provenance, continuity, and transport health decode identically for
+ * every record type; only words 13+ are format-specific. */
+
 inline constexpr std::size_t meter_channel_count = 8;
 inline constexpr std::size_t meter_record_word_count = 64;
 inline constexpr std::size_t meter_record_size = 256;
 inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
-inline constexpr std::uint32_t meter_periodic_format = 0x00010001u;
-/* Format v2: word 6 carries the ACTUAL block sample count, word 15 the
- * cycle-timing word, and words 60/61 the 64-bit first-sample index. Stored
- * streams may still contain v1 records, so both formats stay decodable. */
-inline constexpr std::uint32_t meter_periodic_format_v2 = 0x00010002u;
-/* Aggregate fundamental record, version 1 ("MTR2"): 15 consecutive eligible
- * basic blocks folded by the PL into one 150-cycle (50 Hz nominal) or
- * 180-cycle (60 Hz) aggregate. Same 256-byte container and magic as the
- * basic records — it interleaves with them on the meter DMA stream — but
- * with its OWN wire layout (see the aggregate accessors below) and its own
- * independent sequence counter starting at 1. */
-inline constexpr std::uint32_t meter_aggregate_format = 0x00020001u;
+/* Record type rides in [31:16] of word 1, version in [15:0]. The
+ * reservation table (energy/demand/harmonics/PQ) lives with the PL
+ * contract header; allocate there, never ad hoc. */
+inline constexpr std::uint32_t meter_periodic_format = 0x00010003u;
+inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 
 struct MeterChannelReading {
 	bool valid = false;
@@ -34,7 +40,7 @@ struct MeterChannelReading {
 	std::int64_t rms_micro_units = 0;
 };
 
-/** Decoded record word 15 (v2 only): PL cycle-timing provenance. */
+/** Decoded periodic record word 13: PL cycle-timing provenance. */
 struct MeterTimingWord {
 	/* Configured nominal frequency in Hz (50 or 60) — configuration
 	 * echoed by the PL, never a measurement. */
@@ -57,7 +63,7 @@ struct MeterAggregateStatus {
 	bool frequency_valid = false;
 };
 
-/** Decoded aggregate record word 11: aggregation composition. */
+/** Decoded aggregate record word 13: aggregation composition. */
 struct MeterAggregateComposition {
 	/* Contributing basic blocks (15 on every emitted record). */
 	std::uint8_t basic_block_count = 0;
@@ -107,39 +113,49 @@ struct MeterRecord {
 		return std::bit_cast<std::int64_t>(unsigned64(low_word));
 	}
 
+	/* ---- common envelope (words 0..12, every record type) ----------- */
+
 	std::uint32_t record_format() const { return word(1); }
 
 	bool header_valid() const
 	{
 		return word(0) == meter_record_magic &&
 		       (record_format() == meter_periodic_format ||
-			record_format() == meter_periodic_format_v2 ||
 			record_format() == meter_aggregate_format) &&
 		       word(2) == meter_record_size;
 	}
 
+	/* Per-producer monotone sequence; the periodic and aggregate streams
+	 * count independently (the aggregate stream starts at 1 and is never
+	 * continuous with the basic stream). */
 	std::uint32_t sequence() const { return word(3); }
 	std::uint32_t configuration_generation() const { return word(4); }
 	std::uint32_t sample_rate_hz() const { return word(5); }
-	/* v1 meaning of word 6: the CONFIGURED window sample count. */
-	std::uint32_t window_samples() const { return word(6); }
-	/* v2 meaning of word 6: the ACTUAL sample count of this block, which
-	 * varies with grid frequency when cycle timing is locked. */
+	/* Word 6: the ACTUAL sample count this record covers — one basic
+	 * block (varies with grid frequency when cycle timing is locked) or
+	 * the sum over an aggregate's 15 contributing blocks. */
 	std::uint32_t block_sample_count() const { return word(6); }
 	std::uint8_t valid_mask() const { return static_cast<std::uint8_t>(word(7)); }
 	std::uint32_t status() const { return word(8); }
-	std::uint32_t capture_frames() const { return word(9); }
-	std::uint32_t header_errors() const { return word(10); }
-	std::uint32_t fifo_overflows() const { return word(11); }
-	std::uint32_t packetizer_drops() const { return word(12); }
-	std::uint32_t hub_drops() const { return word(13); }
-	std::uint32_t adc_alerts() const { return word(14); }
 
-	/* ---- v2 timing fields (words 15 and 60/61) ---------------------- */
+	/* Words 9/10: first sample of this record's interval on the PL
+	 * 64-bit free-running conversion-domain counter (never reset by
+	 * configuration or UTC). The last sample is intentionally not in the
+	 * record: last = first + block_sample_count() - 1. */
+	std::uint64_t first_sample_index() const { return unsigned64(9); }
+
+	/* Words 11/12: transport health, carried in-record ("as of this
+	 * record"). Both are constant 0 by construction in the current
+	 * engines — emission is blocking and every closed window is
+	 * finalized — so any nonzero value is a fault. */
+	std::uint32_t emit_drops() const { return word(11); }
+	std::uint32_t result_drops() const { return word(12); }
+
+	/* ---- periodic (MTR1, 0x00010003) fields -------------------------- */
 
 	MeterTimingWord timing() const
 	{
-		const auto timing_word = word(15);
+		const auto timing_word = word(13);
 		return {
 			static_cast<std::uint8_t>(timing_word & 0xffu),
 			static_cast<std::uint8_t>((timing_word >> 8) & 0xffu),
@@ -148,12 +164,6 @@ struct MeterRecord {
 			(timing_word & (1u << 18)) != 0u,
 		};
 	}
-
-	/* First sample of this block on the PL 64-bit free-running
-	 * conversion-domain counter (never reset by configuration or UTC).
-	 * The last sample is intentionally not in the record:
-	 * last = first + block_sample_count() - 1. */
-	std::uint64_t first_sample_index() const { return unsigned64(60); }
 
 	MeterChannelReading channel(std::size_t index) const
 	{
@@ -187,14 +197,27 @@ struct MeterRecord {
 		};
 	}
 
-	/* ---- aggregate (MTR2, 0x00020001) fields ------------------------ */
+	/* Words 60..63: capture diagnostics, latched at block close (they can
+	 * therefore lag a concurrently running capture by the frames still in
+	 * flight when the block closed). */
+	std::uint32_t capture_frames() const { return word(60); }
+	std::uint32_t header_errors() const { return word(61); }
+	std::uint32_t fifo_overflows() const { return word(62); }
+	std::uint32_t adc_alerts() const { return word(63); }
 
-	/* Aggregate records count on their OWN sequence stream (starting at
-	 * 1): word 3 is never continuous with the basic record sequence. */
-	std::uint32_t aggregate_sequence() const { return word(3); }
-	/* Word 6: sum of the 15 contributing basic block sample counts
-	 * (~384k at 128 kSPS, comfortably inside uint32). */
-	std::uint32_t aggregate_sample_count() const { return word(6); }
+	/* ---- aggregate (MTR2, 0x00020002) fields ------------------------- */
+
+	std::uint32_t aggregate_sequence() const { return sequence(); }
+	std::uint32_t aggregate_sample_count() const
+	{
+		return block_sample_count();
+	}
+	/* Same conversion-domain counter as the periodic first-sample index:
+	 * the first sample of the FIRST contributing basic block. */
+	std::uint64_t aggregate_first_sample_index() const
+	{
+		return first_sample_index();
+	}
 	MeterAggregateStatus aggregate_status() const
 	{
 		const auto status_word = word(8);
@@ -204,13 +227,9 @@ struct MeterRecord {
 			(status_word & (1u << 2)) != 0u,
 		};
 	}
-	/* Words 9/10: BASIC-stream sequence range folded into this
-	 * aggregate (inclusive), for cross-stream correlation. */
-	std::uint32_t first_basic_sequence() const { return word(9); }
-	std::uint32_t last_basic_sequence() const { return word(10); }
 	MeterAggregateComposition aggregate_composition() const
 	{
-		const auto composition_word = word(11);
+		const auto composition_word = word(13);
 		return {
 			static_cast<std::uint8_t>(composition_word & 0xffu),
 			static_cast<std::uint8_t>((composition_word >> 8) &
@@ -218,13 +237,10 @@ struct MeterRecord {
 			static_cast<std::uint16_t>(composition_word >> 16),
 		};
 	}
-	/* First sample of the FIRST contributing basic block on the PL
-	 * 64-bit free-running conversion-domain counter — the same domain
-	 * as the MTR1 v2 first-sample index (words 60/61 there). */
-	std::uint64_t aggregate_first_sample_index() const
-	{
-		return unsigned64(12);
-	}
+	/* Words 14/15: BASIC-stream sequence range folded into this
+	 * aggregate (inclusive), for cross-stream correlation. */
+	std::uint32_t first_basic_sequence() const { return word(14); }
+	std::uint32_t last_basic_sequence() const { return word(15); }
 	/* Words 16..31: aggregate RMS in signed 64-bit micro-units, two
 	 * words (lo, hi) per channel. Channel order is identical to MTR1:
 	 * Ia, Ib, Ic, In, Vc, Vb, Va, ch7 = 0. Validity comes from the
@@ -238,6 +254,11 @@ struct MeterRecord {
 	/* Word 32: mean fundamental frequency in millihertz; 0 whenever
 	 * aggregate_status().frequency_valid is clear. */
 	std::uint32_t aggregate_frequency_millihz() const { return word(32); }
+	/* Words 33..35: aggregation-engine diagnostics as of this emit (the
+	 * counters that back the AGG_* PL registers). */
+	std::uint32_t aggregate_reset_count() const { return word(33); }
+	std::uint32_t aggregate_ineligible_count() const { return word(34); }
+	std::uint32_t aggregate_continuity_count() const { return word(35); }
 };
 
 static_assert(sizeof(MeterRecord) == meter_record_size,

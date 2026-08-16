@@ -210,28 +210,29 @@ public:
 	msap1::acquisition::MeterRecordBatch next;
 };
 
-/* Minimal valid v2 record for the continuity checks; channel words stay
- * zero because validation never inspects the electrical payload. */
-msap1::MeterRecord v2_record(std::uint32_t sequence,
-			     std::uint64_t first_sample_index,
-			     std::uint32_t sample_count,
-			     std::uint32_t generation)
+/* Minimal valid basic (MTR1) record for the continuity checks: first-sample
+ * index in envelope words 9/10, timing word 13; channel words stay zero
+ * because validation never inspects the electrical payload. */
+msap1::MeterRecord basic_record(std::uint32_t sequence,
+				std::uint64_t first_sample_index,
+				std::uint32_t sample_count,
+				std::uint32_t generation)
 {
 	msap1::MeterRecord record{};
 	record.words[0] = msap1::meter_record_magic;
-	record.words[1] = msap1::meter_periodic_format_v2;
+	record.words[1] = msap1::meter_periodic_format;
 	record.words[2] = msap1::meter_record_size;
 	record.words[3] = sequence;
 	record.words[4] = generation;
 	record.words[5] = 32000;
 	record.words[6] = sample_count;
-	record.words[15] = 60u | (12u << 8) | (1u << 16);
-	record.words[60] = static_cast<std::uint32_t>(first_sample_index);
-	record.words[61] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	record.words[9] = static_cast<std::uint32_t>(first_sample_index);
+	record.words[10] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
 	return record;
 }
 
-void ingestor_validates_v2_sample_range_continuity()
+void ingestor_validates_sample_range_continuity()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
 	{
@@ -254,30 +255,31 @@ void ingestor_validates_v2_sample_range_continuity()
 			ingest.read_available();
 		};
 
-		/* Gapless cycle blocks of varying length are accepted: the
-		 * v1 window-equality check must not apply to v2 records. */
-		feed(v2_record(1, 640'000, 6400, 0xfeedbeefu));
-		feed(v2_record(2, 646'400, 6421, 0xfeedbeefu));
-		feed(v2_record(3, 652'821, 6379, 0xfeedbeefu));
+		/* Gapless cycle blocks of varying length are accepted: word 6
+		 * is the actual cycle-defined sample count, and there is no
+		 * configured-window echo to match it against. */
+		feed(basic_record(1, 640'000, 6400, 0xfeedbeefu));
+		feed(basic_record(2, 646'400, 6421, 0xfeedbeefu));
+		feed(basic_record(3, 652'821, 6379, 0xfeedbeefu));
 		require(ingest.meter_records() == 3 &&
 			ingest.sequence_gaps() == 0 &&
 			ingest.invalid_records() == 0,
-			"gapless variable-length v2 blocks were not accepted");
+			"gapless variable-length blocks were not accepted");
 
 		/* A first-sample discontinuity with continuous sequences is
 		 * lost data: counted as a gap, then resynced. */
-		feed(v2_record(4, 700'000, 6400, 0xfeedbeefu));
+		feed(basic_record(4, 700'000, 6400, 0xfeedbeefu));
 		require(ingest.meter_records() == 4 &&
 			ingest.sequence_gaps() == 1,
 			"a first-sample-index gap was not detected");
-		feed(v2_record(5, 706'400, 6400, 0xfeedbeefu));
+		feed(basic_record(5, 706'400, 6400, 0xfeedbeefu));
 		require(ingest.sequence_gaps() == 1,
 			"continuity did not resync after a sample-range gap");
 
-		/* A wrong generation is invalid, exactly as for v1. */
-		feed(v2_record(6, 712'800, 6400, 0x12345678u));
+		/* A wrong generation is invalid. */
+		feed(basic_record(6, 712'800, 6400, 0x12345678u));
 		require(ingest.invalid_records() == 1,
-			"a stale-generation v2 record was accepted");
+			"a stale-generation record was accepted");
 	}
 }
 
@@ -299,11 +301,11 @@ msap1::MeterRecord aggregate_record(std::uint32_t sequence,
 	record.words[6] = 96'000;
 	record.words[7] = 0x7f;
 	record.words[8] = (1u << 1) | (1u << 2);
-	record.words[9] = sequence * 15u - 14u;
-	record.words[10] = sequence * 15u;
-	record.words[11] = 15u | (60u << 8) | (180u << 16);
-	record.words[12] = static_cast<std::uint32_t>(first_sample_index);
-	record.words[13] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	record.words[9] = static_cast<std::uint32_t>(first_sample_index);
+	record.words[10] = static_cast<std::uint32_t>(first_sample_index >> 32);
+	record.words[13] = 15u | (60u << 8) | (180u << 16);
+	record.words[14] = sequence * 15u - 14u;
+	record.words[15] = sequence * 15u;
 	record.words[32] = 60'000;
 	return record;
 }
@@ -349,10 +351,10 @@ void ingestor_tracks_interleaved_aggregate_stream()
 
 		/* Aggregates interleave mid-stream without disturbing the
 		 * basic sequence/sample-range chain, and vice versa. */
-		feed(v2_record(1, 640'000, 6400, 0xfeedbeefu));
-		feed(v2_record(2, 646'400, 6400, 0xfeedbeefu));
+		feed(basic_record(1, 640'000, 6400, 0xfeedbeefu));
+		feed(basic_record(2, 646'400, 6400, 0xfeedbeefu));
 		feed(aggregate_record(1, 640'000, 0xfeedbeefu));
-		feed(v2_record(3, 652'800, 6400, 0xfeedbeefu));
+		feed(basic_record(3, 652'800, 6400, 0xfeedbeefu));
 		feed(aggregate_record(2, 640'000, 0xfeedbeefu));
 		require(ingest.meter_records() == 5 &&
 			ingest.sequence_gaps() == 0 &&
@@ -363,7 +365,7 @@ void ingestor_tracks_interleaved_aggregate_stream()
 		/* A missing aggregate is a gap on the AGGREGATE counter only;
 		 * the basic counters must not move. */
 		feed(aggregate_record(4, 640'000, 0xfeedbeefu));
-		feed(v2_record(4, 659'200, 6400, 0xfeedbeefu));
+		feed(basic_record(4, 659'200, 6400, 0xfeedbeefu));
 		require(ingest.aggregate_sequence_gaps() == 1 &&
 			ingest.sequence_gaps() == 0 &&
 			ingest.meter_records() == 7,
@@ -373,7 +375,7 @@ void ingestor_tracks_interleaved_aggregate_stream()
 		 * even though an aggregate arrived after it. */
 		require(ingest.latest_record().has_value() &&
 			ingest.latest_record()->record_format() ==
-				msap1::meter_periodic_format_v2 &&
+				msap1::meter_periodic_format &&
 			ingest.latest_record()->sequence() == 4,
 			"latest_record() did not stay on the basic stream");
 
@@ -605,9 +607,9 @@ void ingestor_handles_u32_sequence_wrap()
 
 		/* The 32-bit wire sequence wraps ~37 h @ 32 kSPS; the 64-bit
 		 * sample counter keeps counting straight through it. */
-		feed(v2_record(0xffffffffu, 10'000'000'000ull, 6400,
+		feed(basic_record(0xffffffffu, 10'000'000'000ull, 6400,
 			       0xfeedbeefu));
-		feed(v2_record(0u, 10'000'006'400ull, 6400, 0xfeedbeefu));
+		feed(basic_record(0u, 10'000'006'400ull, 6400, 0xfeedbeefu));
 		require(ingest.meter_records() == 2 &&
 			ingest.sequence_gaps() == 0 &&
 			ingest.invalid_records() == 0,
@@ -646,7 +648,7 @@ int main()
 {
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
-	ingestor_validates_v2_sample_range_continuity();
+	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_pins_aggregate_time_quality_at_ingest();
 	ingestor_handles_u32_sequence_wrap();

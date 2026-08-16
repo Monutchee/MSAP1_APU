@@ -509,13 +509,13 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 		return response;
 	const auto &record = *ingest_.latest_record();
 	response.diagnostics.sample_rate_hz = record.sample_rate_hz();
-	response.diagnostics.rms_window_samples = record.window_samples();
+	response.diagnostics.block_sample_count = record.block_sample_count();
 	response.diagnostics.status = record.status();
 	response.diagnostics.capture_frames = record.capture_frames();
 	response.diagnostics.header_errors = record.header_errors();
 	response.diagnostics.fifo_overflows = record.fifo_overflows();
-	response.diagnostics.packetizer_drops = record.packetizer_drops();
-	response.diagnostics.hub_drops = record.hub_drops();
+	response.diagnostics.emit_drops = record.emit_drops();
+	response.diagnostics.result_drops = record.result_drops();
 	for (std::size_t index = 0; index < response.diagnostics.channels.size();
 	     ++index) {
 		const auto channel = record.channel(index);
@@ -535,39 +535,37 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 		frequency.reference_channel,
 		frequency.cycles_used,
 	};
-	if (record.record_format() == msap1::meter_periodic_format_v2) {
-		/* The typed view is stamped once by RecordIngestor when the record is
-		 * accepted. Do not ask the timebase again here: a later transition to
-		 * holdover must not rewrite the provenance of this historical block. */
-		if (response.snapshot.timing) {
-			/* Use the exact snapshot returned above, rather than looking up the
-			 * latest view a second time. This keeps diagnostics and typed values
-			 * tied to one accepted measurement even if another DMA record arrives
-			 * between the two operations. */
-			const auto &timing = *response.snapshot.timing;
-			const auto record_timing = record.timing();
-			const auto quality = [&] {
-				switch (timing.quality) {
-				case mnc::meter::TimeQuality::Synchronized:
-					return msap1::meter::TimeQuality::Synchronized;
-				case mnc::meter::TimeQuality::Holdover:
-					return msap1::meter::TimeQuality::Holdover;
-				case mnc::meter::TimeQuality::Unsynchronized:
-					break;
-				}
-				return msap1::meter::TimeQuality::Unsynchronized;
-			}();
-			response.diagnostics.timing = msap1::MeterBlockTimingIpc{
-				record.sequence(),
-				record.first_sample_index(),
-				record.block_sample_count(),
-				record_timing.cycle_count,
-				record_timing.nominal_frequency_hz,
-				record_timing.cycle_locked,
-				record_timing.free_run_fallback,
-				quality,
-			};
-		}
+	/* The typed view is stamped once by RecordIngestor when the record is
+	 * accepted. Do not ask the timebase again here: a later transition to
+	 * holdover must not rewrite the provenance of this historical block. */
+	if (response.snapshot.timing) {
+		/* Use the exact snapshot returned above, rather than looking up the
+		 * latest view a second time. This keeps diagnostics and typed values
+		 * tied to one accepted measurement even if another DMA record arrives
+		 * between the two operations. */
+		const auto &timing = *response.snapshot.timing;
+		const auto record_timing = record.timing();
+		const auto quality = [&] {
+			switch (timing.quality) {
+			case mnc::meter::TimeQuality::Synchronized:
+				return msap1::meter::TimeQuality::Synchronized;
+			case mnc::meter::TimeQuality::Holdover:
+				return msap1::meter::TimeQuality::Holdover;
+			case mnc::meter::TimeQuality::Unsynchronized:
+				break;
+			}
+			return msap1::meter::TimeQuality::Unsynchronized;
+		}();
+		response.diagnostics.timing = msap1::MeterBlockTimingIpc{
+			record.sequence(),
+			record.first_sample_index(),
+			record.block_sample_count(),
+			record_timing.cycle_count,
+			record_timing.nominal_frequency_hz,
+			record_timing.cycle_locked,
+			record_timing.free_run_fallback,
+			quality,
+		};
 	}
 	return response;
 }

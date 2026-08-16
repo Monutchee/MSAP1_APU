@@ -24,7 +24,9 @@ struct MeterTransportStatusIoctl {
 	std::uint64_t consumed_blocks;
 	std::uint64_t overrun_blocks;
 	std::uint32_t ring_blocks;
-	std::uint32_t reserved;
+	/* Cyclic completion callbacks the driver saw; diagnostic only.
+	 * produced_blocks - callbacks is the completion-coalescing deficit. */
+	std::uint32_t callbacks;
 };
 static_assert(sizeof(MeterTransportStatusIoctl) == 32);
 
