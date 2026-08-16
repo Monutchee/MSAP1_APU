@@ -387,6 +387,10 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << health.spi_protocol_error_count << '\n'
 	       << "  SPI retry recoveries: "
 	       << health.spi_retry_recovery_count << '\n'
+	       << "  Config mismatches:    "
+	       << health.spi_config_read_mismatch_count << '\n'
+	       << "  GEN_ERR_REG_1 events: "
+	       << health.spi_general_error_1_events << '\n'
 	       << "  Last SPI failure:     register 0x" << std::hex
 	       << static_cast<unsigned int>(health.spi_last_failed_register)
 	       << ", header 0x"
@@ -409,6 +413,27 @@ int write_meter_health_text(const MeterHealthResult &result,
 		if (!buckets.str().empty())
 			output << "  Bad header buckets:   " << buckets.str()
 			       << '\n';
+	}
+	/* GEN_ERR_REG_1 is clear-on-read, so the sweep that samples it also
+	 * destroys it. Name whichever bits were ever seen; silent if none. */
+	if (health.spi_general_error_1_sticky != 0u) {
+		static constexpr std::array<const char *, 8> gen_err_1_bits{
+			nullptr, "SPI_CRC_ERR", "SPI_INVALID_WRITE_ERR",
+			"SPI_INVALID_READ_ERR", "SPI_CLK_COUNT_ERR",
+			"ROM_CRC_ERR", "MEMMAP_CRC_ERR", nullptr};
+		std::ostringstream bits;
+		for (std::size_t bit = 0; bit < gen_err_1_bits.size(); ++bit) {
+			if (gen_err_1_bits[bit] == nullptr ||
+			    (health.spi_general_error_1_sticky &
+			     (1u << bit)) == 0u)
+				continue;
+			if (!bits.str().empty())
+				bits << ", ";
+			bits << gen_err_1_bits[bit];
+		}
+		if (bits.str().empty())
+			bits << "reserved bits only";
+		output << "  ADC latched SPI errs: " << bits.str() << '\n';
 	}
 	output
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
@@ -485,6 +510,14 @@ struct AdcHealthDto {
 	std::uint32_t spi_error = 0;
 	std::uint32_t spi_protocol_errors = 0;
 	std::uint32_t spi_retry_recoveries = 0;
+	/* Configuration reads whose two samples disagreed: the data-byte
+	 * corruption the protocol header check cannot detect. */
+	std::uint32_t spi_config_mismatches = 0;
+	/* Sticky OR of GEN_ERR_REG_1, and how many polls saw it non-zero.
+	 * The register clears on read, so this is the only lasting record
+	 * of the ADC's own view of an SPI fault. */
+	std::uint32_t spi_general_error_1_sticky = 0;
+	std::uint32_t spi_general_error_1_events = 0;
 	/* Malformed reply headers bucketed by high nibble; index is the
 	 * nibble. All-zero on a healthy bus (the only valid header is
 	 * 0x20). Exported as a fixed 16-slot array so a consumer can
@@ -640,6 +673,12 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.spi_error = health.spi_error,
 			.spi_protocol_errors = health.spi_protocol_error_count,
 			.spi_retry_recoveries = health.spi_retry_recovery_count,
+			.spi_config_mismatches =
+				health.spi_config_read_mismatch_count,
+			.spi_general_error_1_sticky =
+				health.spi_general_error_1_sticky,
+			.spi_general_error_1_events =
+				health.spi_general_error_1_events,
 			.degraded_reasons = {},
 			.registers = {},
 		},

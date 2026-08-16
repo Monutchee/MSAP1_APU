@@ -270,9 +270,20 @@ struct msap1_adc_health_payload {
 	uint8_t channel_gain[8][3];      /* 0x1F through 0x4B, stride 6 */
 	uint32_t spi_protocol_error_count; /* cumulative malformed headers */
 	uint32_t spi_retry_recovery_count; /* reads recovered by retry */
+	/* Configuration reads whose two samples disagreed. Counts the
+	 * data-byte corruption the header check structurally cannot see. */
+	uint32_t spi_config_read_mismatch_count;
+	/* Health polls that found GEN_ERR_REG_1 (0x59) non-zero. That
+	 * register is clear-on-read, so reading it during the sweep is also
+	 * what clears it -- these two fields are the only lasting record. */
+	uint32_t spi_general_error_1_events;
 	uint8_t spi_last_failed_register;
 	uint8_t spi_last_received_header;
-	uint8_t spi_diagnostics_reserved[2];
+	/* Sticky OR of every non-zero GEN_ERR_REG_1 sample. Bit 1
+	 * SPI_CRC_ERR, 2 SPI_INVALID_WRITE_ERR, 3 SPI_INVALID_READ_ERR,
+	 * 4 SPI_CLK_COUNT_ERR, 5 ROM_CRC_ERR, 6 MEMMAP_CRC_ERR. */
+	uint8_t spi_general_error_1_sticky;
+	uint8_t spi_diagnostics_reserved[1];
 	/* Malformed reply headers bucketed by high nibble, saturating at
 	 * 0xFFFF. The only valid header is 0x20, so a healthy bus leaves
 	 * every bucket zero. A single "last header" byte cannot tell a
