@@ -609,7 +609,8 @@ msap1::WaveformResponse CaptureCoordinator::waveform_response()
 			 session.trigger_tai_nanoseconds,
 			 session.trigger_realtime_nanoseconds,
 			 session.sample_rate_hz, session.event_count,
-			 session.state, std::string(session.filename.data())});
+			 session.state, session.decimation,
+			 std::string(session.filename.data())});
 	return response;
 }
 

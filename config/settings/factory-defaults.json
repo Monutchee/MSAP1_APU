@@ -50,7 +50,8 @@
   },
   "waveform": {
     "default_pretrigger_ms": 3000,
-    "default_posttrigger_ms": 3000
+    "default_posttrigger_ms": 3000,
+    "default_decimation": 1
   },
   "database": {
     "spool": {"backend": "memory", "maximum_age_seconds": 3600, "maximum_bytes": 33554432, "volatile_spool_acknowledged": true},

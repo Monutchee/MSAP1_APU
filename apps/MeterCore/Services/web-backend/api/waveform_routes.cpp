@@ -23,6 +23,8 @@ namespace {
 struct WaveformTriggerDto {
 	std::uint32_t pretrigger_ms = msap1::waveform_duration_unspecified;
 	std::uint32_t posttrigger_ms = msap1::waveform_duration_unspecified;
+	/** Capture-file decimation divisor; 0 uses the persisted default. */
+	std::uint32_t decimation = 0;
 };
 
 /** Body of DELETE /api/v1/waveforms. */
@@ -41,6 +43,7 @@ struct WaveformSessionDto {
 	std::uint64_t trigger_realtime_nanoseconds;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t event_count;
+	std::uint32_t decimation;
 	std::string filename;
 };
 
@@ -114,6 +117,7 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 			session.trigger_realtime_nanoseconds,
 			session.sample_rate_hz,
 			session.event_count,
+			session.decimation,
 			session.filename,
 		});
 	}
@@ -170,6 +174,7 @@ webengine::Response post_waveform_trigger(AppContext &app,
 				"invalid waveform trigger JSON");
 		const auto response = app.acquisition.trigger_waveform(
 			trigger.pretrigger_ms, trigger.posttrigger_ms,
+			trigger.decimation,
 			msap1::WaveformTriggerSource::manual_web);
 		/*
 		 * The daemon owns the duration limit because it is

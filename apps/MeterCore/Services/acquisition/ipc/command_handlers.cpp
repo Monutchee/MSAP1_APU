@@ -88,11 +88,14 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 					msap1::waveform_duration_unspecified
 				? defaults.default_posttrigger_ms
 				: request.posttrigger_ms;
+			const auto decimation = request.decimation == 0u
+				? defaults.default_decimation
+				: request.decimation;
 			try {
 				const auto session =
 					coordinator.waveform().trigger(
 						pretrigger_ms, posttrigger_ms,
-						request.source);
+						decimation, request.source);
 				log_message(waveform_log,
 					mnc::logging::Priority::notice,
 					"waveform capture triggered",

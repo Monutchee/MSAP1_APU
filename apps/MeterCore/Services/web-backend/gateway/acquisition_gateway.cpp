@@ -24,11 +24,12 @@ WaveformResponse AcquisitionGateway::waveform_status(int timeout_ms)
 
 WaveformResponse AcquisitionGateway::trigger_waveform(
 	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
-	WaveformTriggerSource source, int timeout_ms)
+	std::uint32_t decimation, WaveformTriggerSource source, int timeout_ms)
 {
 	WaveformTriggerRequest request;
 	request.pretrigger_ms = pretrigger_ms;
 	request.posttrigger_ms = posttrigger_ms;
+	request.decimation = decimation;
 	request.source = source;
 	return client_.request(request, timeout_ms);
 }

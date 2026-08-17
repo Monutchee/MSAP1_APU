@@ -95,7 +95,12 @@ struct WaveformSessionSummary {
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
-	std::uint32_t reserved = 0;
+	/**
+	 * Capture-file decimation divisor: each persisted sample is the mean
+	 * of this many acquisition frames. Sequences stay in the acquisition
+	 * frame domain; the effective file rate is sample_rate_hz/decimation.
+	 */
+	std::uint32_t decimation = 1;
 	std::array<char, waveform_session_name_size> filename{};
 };
 
@@ -211,6 +216,7 @@ public:
 	void read_available();
 	WaveformSessionSummary trigger(std::uint32_t pretrigger_ms,
 				       std::uint32_t posttrigger_ms,
+				       std::uint32_t decimation,
 				       WaveformTriggerSource source);
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();

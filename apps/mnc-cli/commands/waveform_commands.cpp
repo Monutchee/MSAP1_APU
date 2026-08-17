@@ -145,6 +145,7 @@ int run_trigger(const Options &options, std::ostream &output)
 	WaveformTriggerRequest trigger;
 	trigger.pretrigger_ms = options.waveform_pretrigger_ms;
 	trigger.posttrigger_ms = options.waveform_posttrigger_ms;
+	trigger.decimation = options.waveform_decimation;
 	trigger.source = WaveformTriggerSource::manual_cli;
 	return render(options, client.request(trigger, options.timeout_ms),
 		      output);
@@ -175,6 +176,29 @@ Command trigger_command()
 		[](Options &options, const std::string &value) {
 			options.waveform_posttrigger_ms =
 				parse_duration_ms(value, "--post-ms");
+		},
+	});
+	trigger.add_option({
+		"decimation", "N",
+		"Store the mean of every N frames: 1, 2, 4, 8, 16, or 32 "
+		"(default: committed setting)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			std::size_t end = 0;
+			unsigned long parsed = 0;
+			try {
+				parsed = std::stoul(value, &end, 0);
+			} catch (const std::exception &) {
+				throw std::invalid_argument(
+					"--decimation requires a divisor");
+			}
+			if (end != value.size() ||
+			    (parsed != 1u && parsed != 2u && parsed != 4u &&
+			     parsed != 8u && parsed != 16u && parsed != 32u))
+				throw std::invalid_argument(
+					"--decimation must be 1, 2, 4, 8, 16, or 32");
+			options.waveform_decimation =
+				static_cast<std::uint32_t>(parsed);
 		},
 	});
 	return trigger;
