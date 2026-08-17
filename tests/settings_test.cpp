@@ -97,7 +97,7 @@ void test_nominal_frequency_validation()
 void test_failed_apply_preserves_active()
 {
 	TestTree tree("rollback");
-	std::uint32_t runtime_pretrigger = 10000u;
+	std::uint32_t runtime_pretrigger = 3000u;
 	msap1::settings::SettingsApplyCoordinator coordinator{
 		[&](const ProductSettings &settings) {
 			if (settings.waveform.default_pretrigger_ms == 7777u)
@@ -115,8 +115,8 @@ void test_failed_apply_preserves_active()
 		failed = true;
 	}
 	assert(failed);
-	assert(handler.active().settings.waveform.default_pretrigger_ms == 10000u);
-	assert(runtime_pretrigger == 10000u);
+	assert(handler.active().settings.waveform.default_pretrigger_ms == 3000u);
+	assert(runtime_pretrigger == 3000u);
 }
 
 void test_empty_active_recovers_factory_defaults()
@@ -134,7 +134,7 @@ void test_empty_active_recovers_factory_defaults()
 	SettingsHandler recovered(tree.data, tree.factory);
 	recovered.initialize();
 	assert(!recovered.recovery_mode());
-	assert(recovered.active().settings.waveform.default_pretrigger_ms == 10000u);
+	assert(recovered.active().settings.waveform.default_pretrigger_ms == 3000u);
 }
 
 void test_invalid_active_recovers_factory_defaults()
@@ -156,13 +156,13 @@ void test_invalid_active_recovers_factory_defaults()
 		recovered.initialize();
 		assert(!recovered.recovery_mode());
 		assert(recovered.active().settings.waveform.default_posttrigger_ms ==
-			10000u);
+			3000u);
 	}
 
 	SettingsHandler reloaded(tree.data, tree.factory);
 	reloaded.initialize();
 	assert(!reloaded.recovery_mode());
-	assert(reloaded.active().settings.waveform.default_posttrigger_ms == 10000u);
+	assert(reloaded.active().settings.waveform.default_posttrigger_ms == 3000u);
 }
 
 void test_secrets_and_factory_reset()
@@ -180,7 +180,7 @@ void test_secrets_and_factory_reset()
 	settings.waveform.default_posttrigger_ms = 1234u;
 	(void)handler.save(settings);
 	(void)handler.factory_reset(true);
-	assert(handler.active().settings.waveform.default_posttrigger_ms == 10000u);
+	assert(handler.active().settings.waveform.default_posttrigger_ms == 3000u);
 	assert(!handler.has_secrets());
 }
 
