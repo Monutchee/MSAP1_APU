@@ -123,6 +123,30 @@ int main()
 			"oldest sequence mismatch");
 		require(initial.history_latest_sequence == 1024,
 			"latest sequence mismatch");
+		require(initial.pl_dropped_frames == 0,
+			"PL drop counter should start clean");
+
+		/*
+		 * The capture budget is rate-derived: the frame-sized history
+		 * ring minus two seconds of margin at the measured rate.
+		 */
+		require(initial.max_capture_frames ==
+				msap1::waveform_history_frames - 2u * 32000u,
+			"capture budget mismatch at 32 kSPS");
+		bool budget_rejected = false;
+		try {
+			capture.trigger(120000, 120000,
+				msap1::WaveformTriggerSource::manual_cli);
+		} catch (const std::invalid_argument &error) {
+			/* The rejection must name the budget in ms. */
+			budget_rejected =
+				std::string(error.what()).find(" ms") !=
+				std::string::npos;
+		}
+		require(budget_rejected,
+			"over-budget trigger was not rejected with the limit");
+		require(capture.sessions().empty(),
+			"a rejected trigger must not leave a session behind");
 
 		const auto triggered = capture.trigger(
 			10, 0, msap1::WaveformTriggerSource::manual_cli);

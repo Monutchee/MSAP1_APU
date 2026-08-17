@@ -88,18 +88,46 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 					msap1::waveform_duration_unspecified
 				? defaults.default_posttrigger_ms
 				: request.posttrigger_ms;
-			const auto session = coordinator.waveform().trigger(
-				pretrigger_ms, posttrigger_ms, request.source);
-			log_message(waveform_log,
-				mnc::logging::Priority::notice,
-				"waveform capture triggered",
-				"waveform_triggered",
-				{{"MNC_WAVEFORM_SESSION",
-				  std::to_string(session.id)},
-				 {"MNC_PRETRIGGER_MS",
-				  std::to_string(pretrigger_ms)},
-				 {"MNC_POSTTRIGGER_MS",
-				  std::to_string(posttrigger_ms)}});
+			try {
+				const auto session =
+					coordinator.waveform().trigger(
+						pretrigger_ms, posttrigger_ms,
+						request.source);
+				log_message(waveform_log,
+					mnc::logging::Priority::notice,
+					"waveform capture triggered",
+					"waveform_triggered",
+					{{"MNC_WAVEFORM_SESSION",
+					  std::to_string(session.id)},
+					 {"MNC_PRETRIGGER_MS",
+					  std::to_string(pretrigger_ms)},
+					 {"MNC_POSTTRIGGER_MS",
+					  std::to_string(posttrigger_ms)}});
+			} catch (const std::invalid_argument &error) {
+				/*
+				 * A window the history buffer cannot hold is
+				 * a client mistake, not a transport fault:
+				 * report bad_request with the usual waveform
+				 * status attached so the caller can compute
+				 * the current budget, instead of letting the
+				 * registry collapse it into a status-only
+				 * dma_error rejection.
+				 */
+				log_message(waveform_log,
+					mnc::logging::Priority::warning,
+					std::string("waveform trigger "
+						    "rejected: ") +
+						error.what(),
+					"waveform_trigger_rejected",
+					{{"MNC_PRETRIGGER_MS",
+					  std::to_string(pretrigger_ms)},
+					 {"MNC_POSTTRIGGER_MS",
+					  std::to_string(posttrigger_ms)}});
+				auto response = coordinator.waveform_response();
+				response.status =
+					AcquisitionStatus::bad_request;
+				return response;
+			}
 			return coordinator.waveform_response();
 		});
 	registry.on<msap1::WaveformDeleteRequest>(AcquisitionStatus::dma_error,

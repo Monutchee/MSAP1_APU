@@ -251,6 +251,7 @@ target_link_libraries(msap1_settings PRIVATE
 msap1_library(msap1_waveform msap1::waveform
     msap1/waveform/waveform_capture.cpp
 )
+target_link_libraries(msap1_waveform PRIVATE mnc::logging)
 
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
 # dependencies are intentional: acquisition_ipc.hpp binds the typed command

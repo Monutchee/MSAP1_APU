@@ -57,6 +57,8 @@ struct WaveformDto {
 	std::uint64_t sequence_gaps;
 	std::uint64_t transport_overrun_blocks;
 	std::uint64_t materialization_failures;
+	std::uint32_t pl_dropped_frames;
+	std::uint64_t max_capture_frames;
 	std::uint64_t history_oldest_sequence;
 	std::uint64_t history_latest_sequence;
 	std::uint64_t history_capacity_frames;
@@ -91,6 +93,8 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 		status.sequence_gaps,
 		status.transport_overrun_blocks,
 		status.materialization_failures,
+		status.pl_dropped_frames,
+		status.max_capture_frames,
 		status.history_oldest_sequence,
 		status.history_latest_sequence,
 		status.history_capacity_frames,
@@ -147,10 +151,11 @@ webengine::Response get_waveforms(AppContext &app,
  * @brief POST /api/v1/waveforms/trigger (Admin)
  *
  * Starts a manual waveform capture.  Omitted durations use the persistent
- * waveform defaults; explicit values are bounded to 0..120000 ms.
+ * waveform defaults; the acquisition daemon bounds explicit values against
+ * the rate-derived capture budget (and a 120 s per-field sanity cap).
  *
  * @return 200 with the updated waveform status, 400 for invalid JSON or
- *         out-of-range durations, or 503 when the trigger fails.
+ *         durations the budget rejects, or 503 when the trigger fails.
  */
 webengine::Response post_waveform_trigger(AppContext &app,
 					  const webengine::RequestContext &context)
@@ -163,14 +168,32 @@ webengine::Response post_waveform_trigger(AppContext &app,
 			return error_response(
 				webengine::http::status::bad_request,
 				"invalid waveform trigger JSON");
-		if (trigger.pretrigger_ms > 120000u ||
-		    trigger.posttrigger_ms > 120000u)
-			return error_response(
-				webengine::http::status::bad_request,
-				"waveform durations must be 0..120000 ms");
 		const auto response = app.acquisition.trigger_waveform(
 			trigger.pretrigger_ms, trigger.posttrigger_ms,
 			msap1::WaveformTriggerSource::manual_web);
+		/*
+		 * The daemon owns the duration limit because it is
+		 * rate-derived (the frame-sized history buffer spans fewer
+		 * seconds at higher sample rates). A bad_request reply still
+		 * carries the waveform status, so the budget it enforced can
+		 * be named here even though IPC rejections are status-only.
+		 */
+		if (response.status == msap1::AcquisitionStatus::bad_request) {
+			const auto &status = response.waveform;
+			std::string reason =
+				"waveform durations exceed the capture budget";
+			if (status.sample_rate_hz > 0u)
+				reason += ": pre+post may total at most " +
+					std::to_string(
+						status.max_capture_frames *
+						1000u /
+						status.sample_rate_hz) +
+					" ms at " +
+					std::to_string(status.sample_rate_hz) +
+					" frame/s";
+			return error_response(
+				webengine::http::status::bad_request, reason);
+		}
 		require_acquisition_ok(response.status);
 		log_api_event(mnc::logging::Priority::notice,
 			"manual waveform capture triggered",
