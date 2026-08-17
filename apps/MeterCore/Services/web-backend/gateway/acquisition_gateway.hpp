@@ -25,7 +25,8 @@ public:
 	[[nodiscard]] WaveformResponse waveform_status(int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse trigger_waveform(
 		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
-		WaveformTriggerSource source, int timeout_ms = 3000);
+		std::uint32_t decimation, WaveformTriggerSource source,
+		int timeout_ms = 3000);
 	[[nodiscard]] WaveformResponse delete_waveform(
 		std::uint64_t session_id, int timeout_ms = 3000);
 	[[nodiscard]] FrequencyResponse frequency_configuration(

@@ -42,6 +42,17 @@ const mnc::logging::Logger capture_log{"fpga-acquisition", "waveform"};
 	throw std::runtime_error(operation + ": " + std::strerror(errno));
 }
 
+/*
+ * Mirrors WaveformSettings::valid_decimation without coupling the capture
+ * core to the settings library. Power-of-two divisors of the acquisition
+ * rate; 32 bottoms out around 67 samples per 60 Hz cycle at 128 kSPS.
+ */
+bool valid_decimation(std::uint32_t decimation)
+{
+	return decimation == 1u || decimation == 2u || decimation == 4u ||
+		decimation == 8u || decimation == 16u || decimation == 32u;
+}
+
 std::uint64_t tai_now_nanoseconds()
 {
 	timespec timestamp{};
@@ -80,10 +91,16 @@ void write_binary(std::ofstream &stream, const T &value)
 	stream.write(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
+/*
+ * Version history: v3 adds the capture-file decimation divisor in the first
+ * four reserved bytes. Sequences stay in the acquisition frame domain, so a
+ * decimated file's frame_count is (last - first) / decimation + 1, not
+ * last - first + 1.
+ */
 #pragma pack(push, 1)
 struct WaveformFileHeaderV2 {
 	std::array<char, 8> magic{};
-	std::uint32_t version = 2;
+	std::uint32_t version = 3;
 	std::uint32_t header_bytes = 256;
 	std::uint64_t session_id = 0;
 	std::uint64_t first_sequence = 0;
@@ -107,7 +124,8 @@ struct WaveformFileHeaderV2 {
 	std::uint64_t frame_data_offset = 0;
 	std::uint64_t frame_count = 0;
 	std::uint64_t trigger_realtime_nanoseconds = 0;
-	std::array<std::byte, 104> reserved{};
+	std::uint32_t decimation = 1;
+	std::array<std::byte, 100> reserved{};
 };
 #pragma pack(pop)
 
@@ -239,6 +257,8 @@ private:
 			header.frame_count = job.frames.size();
 			header.trigger_realtime_nanoseconds =
 				job.summary.trigger_realtime_nanoseconds;
+			header.decimation =
+				std::max<std::uint32_t>(1u, job.summary.decimation);
 			output.write(reinterpret_cast<const char *>(&header),
 				     sizeof(header));
 			output.write(
@@ -441,7 +461,14 @@ void WaveformCapture::discover_persisted_sessions()
 		    header.magic !=
 			    std::array<char, 8>{
 				    'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} ||
-		    (header.version != 1u && header.version != 2u))
+		    (header.version != 1u && header.version != 2u &&
+		     header.version != 3u))
+			continue;
+
+		/* v2 wrote zeros where v3 keeps the decimation divisor. */
+		const std::uint32_t decimation =
+			header.version >= 3u ? header.decimation : 1u;
+		if (!valid_decimation(decimation))
 			continue;
 
 		Session session{};
@@ -453,10 +480,11 @@ void WaveformCapture::discover_persisted_sessions()
 			header.trigger_tai_nanoseconds;
 		session.summary.sample_rate_hz = header.sample_rate_hz;
 		session.summary.event_count = header.event_count;
+		session.summary.decimation = decimation;
 		session.summary.state = WaveformSessionState::complete;
 
 		std::uint64_t expected_file_bytes = 0;
-		if (header.version == 2u && bytes_read == sizeof(header) &&
+		if (header.version >= 2u && bytes_read == sizeof(header) &&
 		    header.header_bytes == sizeof(header) &&
 		    header.channel_count > 0u &&
 		    header.channel_count <= waveform_channels &&
@@ -475,8 +503,11 @@ void WaveformCapture::discover_persisted_sessions()
 					    header.event_count) *
 					    24u &&
 		    header.last_sequence >= header.first_sequence &&
+		    (header.last_sequence - header.first_sequence) %
+			    decimation == 0u &&
 		    header.frame_count ==
-			    header.last_sequence - header.first_sequence + 1u) {
+			    (header.last_sequence - header.first_sequence) /
+					    decimation + 1u) {
 			expected_file_bytes =
 				header.frame_data_offset +
 				header.frame_count * header.frame_bytes;
@@ -707,13 +738,16 @@ void WaveformCapture::accept_block(const WaveformBlock &block)
 
 WaveformSessionSummary WaveformCapture::trigger(
 	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
-	WaveformTriggerSource source)
+	std::uint32_t decimation, WaveformTriggerSource source)
 {
 	collect_materialization_results();
 	if (!have_history_ || sample_rate_hz_ == 0)
 		throw std::runtime_error("waveform history is not ready");
 	if (pretrigger_ms > 120000u || posttrigger_ms > 120000u)
 		throw std::invalid_argument("waveform duration exceeds 120 seconds");
+	if (!valid_decimation(decimation))
+		throw std::invalid_argument(
+			"waveform decimation must be 1, 2, 4, 8, 16, or 32");
 
 	const auto frames_for = [this](std::uint32_t milliseconds) {
 		return (static_cast<std::uint64_t>(sample_rate_hz_) * milliseconds +
@@ -764,6 +798,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 		session.summary.trigger_tai_nanoseconds = now_tai;
 		session.summary.trigger_realtime_nanoseconds = now_realtime;
 		session.summary.sample_rate_hz = sample_rate_hz_;
+		session.summary.decimation = decimation;
 		session.summary.state = WaveformSessionState::capturing;
 		sessions_.push_back(std::move(session));
 		active = std::prev(sessions_.end());
@@ -772,6 +807,22 @@ WaveformSessionSummary WaveformCapture::trigger(
 			std::min(active->summary.first_sequence, requested_first);
 		active->summary.last_sequence =
 			std::max(active->summary.last_sequence, requested_last);
+		/*
+		 * A window cannot mix sample rates, so an overlapping trigger
+		 * extends the active session at its original decimation.
+		 */
+		if (active->summary.decimation != decimation) {
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(active->summary.id)},
+				mnc::logging::Field{"MNC_DECIMATION",
+					std::to_string(
+						active->summary.decimation)}};
+			(void)capture_log.write(mnc::logging::Priority::notice,
+				"overlapping trigger keeps the active "
+				"session's decimation",
+				"waveform_decimation_kept", fields);
+		}
 	}
 	active->events.push_back({anchor, now_tai, source});
 	active->summary.event_count =
@@ -901,15 +952,46 @@ void WaveformCapture::enqueue_materialization(Session &session)
 	job.output_directory = output_directory_;
 	job.channel_metadata = channel_metadata_;
 
-	const auto frame_count =
+	const auto window =
 		session.summary.last_sequence -
 		session.summary.first_sequence + 1u;
-	if (frame_count > history_.size())
+	if (window > history_.size())
 		throw std::runtime_error("waveform session exceeds history");
-	job.frames.reserve(static_cast<std::size_t>(frame_count));
-	for (std::uint64_t offset = 0; offset < frame_count; ++offset) {
-		const auto sequence = session.summary.first_sequence + offset;
-		job.frames.push_back(history_[sequence % history_.size()]);
+	/*
+	 * Decimation by mean: each stored frame folds `decimation` raw frames
+	 * into their per-channel average — a crude anti-alias filter suited
+	 * to dip/swell inspection (transient hunting captures at 1). The
+	 * session's stored range is trimmed to whole groups so the persisted
+	 * invariant frame_count == (last - first) / decimation + 1 is exact.
+	 */
+	const std::uint64_t decimation =
+		std::max<std::uint32_t>(1u, session.summary.decimation);
+	const auto output_count = (window + decimation - 1u) / decimation;
+	session.summary.last_sequence = session.summary.first_sequence +
+		(output_count - 1u) * decimation;
+	job.summary = session.summary;
+	job.frames.reserve(static_cast<std::size_t>(output_count));
+	for (std::uint64_t output = 0; output < output_count; ++output) {
+		const auto group_first =
+			session.summary.first_sequence + output * decimation;
+		const auto group_frames = std::min<std::uint64_t>(
+			decimation,
+			session.summary.first_sequence + window - group_first);
+		std::array<std::int64_t, waveform_channels> sums{};
+		for (std::uint64_t offset = 0; offset < group_frames; ++offset) {
+			const auto &frame =
+				history_[(group_first + offset) % history_.size()];
+			for (std::size_t channel = 0;
+			     channel < waveform_channels; ++channel)
+				sums[channel] += frame[channel];
+		}
+		AsyncWriter::Frame frame{};
+		for (std::size_t channel = 0; channel < waveform_channels;
+		     ++channel)
+			frame[channel] = static_cast<std::int32_t>(
+				sums[channel] /
+				static_cast<std::int64_t>(group_frames));
+		job.frames.push_back(frame);
 	}
 	writer_->enqueue(std::move(job));
 	session.materialization_queued = true;

@@ -40,6 +40,7 @@ struct Options {
 	std::array<std::optional<double>, 7> simulator_rms{};
 	std::array<std::optional<double>, 7> simulator_phase_degrees{};
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
+	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
 	std::optional<std::string> log_component;
 	std::optional<std::string> log_module;

@@ -135,7 +135,7 @@ int main()
 			"capture budget mismatch at 32 kSPS");
 		bool budget_rejected = false;
 		try {
-			capture.trigger(120000, 120000,
+			capture.trigger(120000, 120000, 1,
 				msap1::WaveformTriggerSource::manual_cli);
 		} catch (const std::invalid_argument &error) {
 			/* The rejection must name the budget in ms. */
@@ -149,7 +149,7 @@ int main()
 			"a rejected trigger must not leave a session behind");
 
 		const auto triggered = capture.trigger(
-			10, 0, msap1::WaveformTriggerSource::manual_cli);
+			10, 0, 1, msap1::WaveformTriggerSource::manual_cli);
 		require(triggered.state ==
 				msap1::WaveformSessionState::capturing,
 			"trigger did not create an active session");
@@ -184,7 +184,13 @@ int main()
 		std::uint32_t file_version = 0;
 		persisted.read(reinterpret_cast<char *>(&file_version),
 			       sizeof(file_version));
-		require(file_version == 2u, "capture file version mismatch");
+		require(file_version == 3u, "capture file version mismatch");
+		persisted.seekg(152);
+		std::uint32_t file_decimation = 0;
+		persisted.read(reinterpret_cast<char *>(&file_decimation),
+			       sizeof(file_decimation));
+		require(file_decimation == 1u,
+			"undecimated capture must record divisor 1");
 		persisted.seekg(96);
 		std::uint32_t channel_count = 0;
 		std::uint32_t frame_bytes = 0;
@@ -223,6 +229,84 @@ int main()
 			"human-readable capture filename mismatch");
 
 		/*
+		 * A decimated capture: 2 ms pre at 32 kSPS = 64 frames plus
+		 * the anchor = a 65-frame window, folded by 4 into 17 stored
+		 * frames whose values are the per-group means of the ramp.
+		 */
+		bool bad_decimation_rejected = false;
+		try {
+			capture.trigger(2, 0, 3,
+				msap1::WaveformTriggerSource::manual_cli);
+		} catch (const std::invalid_argument &) {
+			bad_decimation_rejected = true;
+		}
+		require(bad_decimation_rejected,
+			"decimation 3 must be rejected");
+		const auto decimated = capture.trigger(
+			2, 0, 4, msap1::WaveformTriggerSource::manual_cli);
+		require(decimated.first_sequence == 960 &&
+				decimated.last_sequence == 1024,
+			"decimated window calculation mismatch");
+		capture.read_available();
+		const auto decimated_sessions =
+			wait_for_session(capture, decimated.id);
+		const auto decimated_session = std::find_if(
+			decimated_sessions.begin(), decimated_sessions.end(),
+			[&decimated](const auto &session) {
+				return session.id == decimated.id;
+			});
+		require(decimated_session != decimated_sessions.end() &&
+				decimated_session->state ==
+					msap1::WaveformSessionState::complete,
+			"decimated session was not materialized");
+		require(decimated_session->decimation == 4u,
+			"session decimation was not retained");
+		const auto decimated_file =
+			output / decimated_session->filename.data();
+		const auto decimated_frames = (1024u - 960u) / 4u + 1u;
+		require(std::filesystem::file_size(decimated_file) ==
+				256u + msap1::waveform_persisted_channels *
+					sizeof(msap1::WaveformChannelMetadata) +
+					24u + decimated_frames *
+					msap1::waveform_persisted_channels *
+					sizeof(std::int32_t),
+			"decimated file layout mismatch");
+		std::ifstream reduced(decimated_file, std::ios::binary);
+		std::uint32_t reduced_version = 0;
+		std::uint32_t reduced_decimation = 0;
+		std::uint64_t reduced_count = 0;
+		reduced.seekg(8);
+		reduced.read(reinterpret_cast<char *>(&reduced_version),
+			     sizeof(reduced_version));
+		reduced.seekg(136);
+		reduced.read(reinterpret_cast<char *>(&reduced_count),
+			     sizeof(reduced_count));
+		reduced.seekg(152);
+		reduced.read(reinterpret_cast<char *>(&reduced_decimation),
+			     sizeof(reduced_decimation));
+		require(reduced_version == 3u && reduced_decimation == 4u &&
+				reduced_count == decimated_frames,
+			"decimated header mismatch");
+		reduced.seekg(256 +
+			msap1::waveform_persisted_channels *
+				sizeof(msap1::WaveformChannelMetadata) +
+			24);
+		std::array<std::int32_t, msap1::waveform_persisted_channels>
+			mean_frame{};
+		reduced.read(reinterpret_cast<char *>(mean_frame.data()),
+			     sizeof(mean_frame));
+		/*
+		 * Sequences 960..963 are ramp values 9590..9620 step 10, so
+		 * the stored group mean is 9605 plus the channel offset.
+		 */
+		require(mean_frame[0] == 9605 && mean_frame[6] == 9611,
+			"decimated samples are not the group means");
+		/* Erase it so the restore test below still sees one file. */
+		capture.erase(decimated.id);
+		require(!std::filesystem::exists(decimated_file),
+			"deleted decimated capture was retained");
+
+		/*
 		 * A coordinated source change closes and reopens waveform DMA. The
 		 * next source is a new continuity epoch even if its first sequence is
 		 * unrelated to the previous source.
@@ -249,7 +333,7 @@ int main()
 		require(gap_status.sequence_gaps == 1024,
 			"missing frame count mismatch");
 		const auto gap_triggered = capture.trigger(
-			50, 0, msap1::WaveformTriggerSource::manual_cli);
+			50, 0, 1, msap1::WaveformTriggerSource::manual_cli);
 		capture.read_available();
 		const auto gap_sessions = capture.sessions();
 		const auto gap_session = std::find_if(

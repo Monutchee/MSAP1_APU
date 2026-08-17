@@ -48,7 +48,7 @@ inline constexpr const char *acquisition_socket_path =
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
  * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 22;
+inline constexpr std::uint16_t acquisition_ipc_version = 23;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -132,6 +132,7 @@ struct WaveformSessionIpc {
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
+	std::uint32_t decimation = 1;
 	std::string filename;
 };
 
@@ -394,6 +395,8 @@ struct WaveformTriggerRequest {
 	std::uint16_t version = acquisition_ipc_version;
 	std::uint32_t pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t posttrigger_ms = waveform_duration_unspecified;
+	/** Capture-file decimation divisor; 0 selects the persisted default. */
+	std::uint32_t decimation = 0;
 	WaveformTriggerSource source = WaveformTriggerSource::manual_cli;
 };
 
