@@ -77,7 +77,12 @@ public:
 		       << "  Invalid blocks:       " << status.invalid_blocks << '\n'
 		       << "  Sequence gaps:        " << status.sequence_gaps << '\n'
 		       << "  Transport overruns:   "
-		       << status.transport_overrun_blocks << " DMA blocks\n"
+		       << status.transport_overrun_blocks
+		       << " lapped-ring events (not lost blocks)\n"
+		       << "  PL dropped frames:    " << status.pl_dropped_frames
+		       << '\n'
+		       << "  Capture budget:       " << status.max_capture_frames
+		       << " frames pre+post\n"
 		       << "  File write failures:  "
 		       << status.materialization_failures << '\n'
 		       << "  Completed sessions:   " << status.completed_sessions

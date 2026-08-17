@@ -1,5 +1,7 @@
 #include "msap1/waveform/waveform_capture.hpp"
 
+#include "mnc/logging/logging.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -26,6 +28,14 @@ constexpr unsigned long waveform_correlate_ioctl =
 	_IOR('W', 0x01, WaveformCorrelationIoctl);
 constexpr unsigned long waveform_transport_status_ioctl =
 	_IOR('W', 0x02, WaveformTransportStatusIoctl);
+
+/*
+ * Session outcomes are journaled here, where the state transitions happen:
+ * half of them (gap intersection, epoch reset) never reach the writer, so
+ * they otherwise leave no trace anywhere — a capture could fail with every
+ * failure counter still reading zero.
+ */
+const mnc::logging::Logger capture_log{"fpga-acquisition", "waveform"};
 
 [[noreturn]] void throw_errno(const std::string &operation)
 {
@@ -142,6 +152,7 @@ struct WaveformCapture::AsyncWriter {
 		std::uint64_t session_id = 0;
 		bool success = false;
 		std::string filename;
+		std::string error;
 	};
 
 	AsyncWriter() : worker([this] { run(); }) {}
@@ -257,10 +268,16 @@ private:
 					"write waveform file " + temporary);
 			std::filesystem::rename(temporary, path);
 			result.success = true;
+		} catch (const std::exception &failure) {
+			std::error_code ignored;
+			std::filesystem::remove(temporary, ignored);
+			result.success = false;
+			result.error = failure.what();
 		} catch (...) {
 			std::error_code ignored;
 			std::filesystem::remove(temporary, ignored);
 			result.success = false;
+			result.error = "unidentified write failure";
 		}
 		return result;
 	}
@@ -377,8 +394,16 @@ void WaveformCapture::begin_stream_epoch() noexcept
 {
 	for (auto &session : sessions_) {
 		if (session.summary.state == WaveformSessionState::capturing &&
-		    !session.materialization_queued)
+		    !session.materialization_queued) {
 			session.summary.state = WaveformSessionState::incomplete;
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(session.summary.id)}};
+			(void)capture_log.write(mnc::logging::Priority::warning,
+				"waveform capture incomplete: acquisition "
+				"stream epoch reset while capturing",
+				"waveform_session_incomplete", fields);
+		}
 	}
 	have_history_ = false;
 	oldest_sequence_ = 0;
@@ -661,6 +686,21 @@ void WaveformCapture::accept_block(const WaveformBlock &block)
 			    }),
 		    gaps_.end());
 	sample_rate_hz_ = header.measured_sample_rate_hz;
+	/*
+	 * The PL reports its own cumulative drop counter in every block
+	 * header; an increase means the elasticity FIFO overflowed because
+	 * the DMA stopped draining — loss upstream of everything the
+	 * transport counters can see.
+	 */
+	if (header.dropped_frames > pl_dropped_frames_) {
+		const std::array fields{
+			mnc::logging::Field{"MNC_PL_DROPPED_FRAMES",
+				std::to_string(header.dropped_frames)}};
+		(void)capture_log.write(mnc::logging::Priority::warning,
+			"PL waveform branch dropped frames upstream of the DMA",
+			"waveform_pl_drops", fields);
+	}
+	pl_dropped_frames_ = header.dropped_frames;
 	++blocks_;
 	frames_ += waveform_frames_per_block;
 }
@@ -680,6 +720,19 @@ WaveformSessionSummary WaveformCapture::trigger(
 			999u) /
 			1000u;
 	};
+	const auto budget = max_capture_frames();
+	const auto requested =
+		frames_for(pretrigger_ms) + frames_for(posttrigger_ms) + 1u;
+	if (requested > budget) {
+		const auto maximum_ms = budget * 1000u / sample_rate_hz_;
+		std::ostringstream message;
+		message << "waveform window of "
+			<< (pretrigger_ms + posttrigger_ms)
+			<< " ms does not fit the history buffer at "
+			<< sample_rate_hz_ << " frame/s; pre+post may total "
+			<< maximum_ms << " ms";
+		throw std::invalid_argument(message.str());
+	}
 	const auto anchor = latest_sequence_;
 	const auto requested_first =
 		anchor > frames_for(pretrigger_ms)
@@ -764,6 +817,22 @@ bool WaveformCapture::intersects_gap(std::uint64_t first,
 		});
 }
 
+std::uint64_t WaveformCapture::max_capture_frames() const noexcept
+{
+	/*
+	 * The history ring is sized in frames, so its span in seconds shrinks
+	 * as the sample rate rises; a fixed millisecond limit silently stops
+	 * fitting when the rate changes. Frames also keep arriving between
+	 * the post-trigger window closing and the session being materialized
+	 * (up to one 250 ms poll plus queueing), so hold back two seconds of
+	 * frames as margin against the oldest frames being evicted mid-copy.
+	 */
+	const auto margin = static_cast<std::uint64_t>(sample_rate_hz_) * 2u;
+	if (margin >= history_.size())
+		return 0;
+	return history_.size() - margin;
+}
+
 void WaveformCapture::finish_sessions()
 {
 	for (auto &session : sessions_) {
@@ -771,17 +840,54 @@ void WaveformCapture::finish_sessions()
 		    session.materialization_queued ||
 		    latest_sequence_ < session.summary.last_sequence)
 			continue;
-		if (session.summary.first_sequence < oldest_sequence_ ||
-		    intersects_gap(session.summary.first_sequence,
-				   session.summary.last_sequence)) {
+		const bool evicted =
+			session.summary.first_sequence < oldest_sequence_;
+		if (evicted || intersects_gap(session.summary.first_sequence,
+					      session.summary.last_sequence)) {
 			session.summary.state = WaveformSessionState::incomplete;
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(session.summary.id)},
+				mnc::logging::Field{"MNC_FIRST_SEQUENCE",
+					std::to_string(
+						session.summary.first_sequence)},
+				mnc::logging::Field{"MNC_LAST_SEQUENCE",
+					std::to_string(
+						session.summary.last_sequence)},
+				mnc::logging::Field{"MNC_SEQUENCE_GAPS",
+					std::to_string(sequence_gaps_)}};
+			(void)capture_log.write(mnc::logging::Priority::warning,
+				evicted ? "waveform capture incomplete: window "
+					  "evicted from history before "
+					  "materialization"
+					: "waveform capture incomplete: window "
+					  "intersects a sequence gap (frames "
+					  "lost between PL and daemon)",
+				"waveform_session_incomplete", fields);
 			continue;
 		}
 		try {
 			enqueue_materialization(session);
+		} catch (const std::exception &failure) {
+			session.summary.state = WaveformSessionState::incomplete;
+			++materialization_failures_;
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(session.summary.id)}};
+			(void)capture_log.write(mnc::logging::Priority::error,
+				std::string("waveform capture incomplete: ") +
+					failure.what(),
+				"waveform_session_incomplete", fields);
 		} catch (...) {
 			session.summary.state = WaveformSessionState::incomplete;
 			++materialization_failures_;
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(session.summary.id)}};
+			(void)capture_log.write(mnc::logging::Priority::error,
+				"waveform capture incomplete: materialization "
+				"could not be queued",
+				"waveform_session_incomplete", fields);
 		}
 	}
 }
@@ -826,8 +932,23 @@ void WaveformCapture::collect_materialization_results()
 			session->summary.state =
 				WaveformSessionState::incomplete;
 			++materialization_failures_;
+			const std::array fields{
+				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+					std::to_string(result.session_id)}};
+			(void)capture_log.write(mnc::logging::Priority::error,
+				"waveform capture file write failed: " +
+					result.error,
+				"waveform_write_failed", fields);
 			continue;
 		}
+		const std::array fields{
+			mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+				std::to_string(result.session_id)},
+			mnc::logging::Field{"MNC_WAVEFORM_FILE",
+				result.filename}};
+		(void)capture_log.write(mnc::logging::Priority::notice,
+			"waveform capture materialized: " + result.filename,
+			"waveform_session_complete", fields);
 		std::copy_n(
 			result.filename.c_str(),
 			std::min(result.filename.size(),
@@ -861,6 +982,8 @@ WaveformStatus WaveformCapture::status()
 	result.sequence_gaps = sequence_gaps_;
 	result.transport_overrun_blocks = transport_overrun_blocks_;
 	result.materialization_failures = materialization_failures_;
+	result.pl_dropped_frames = pl_dropped_frames_;
+	result.max_capture_frames = max_capture_frames();
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
 	result.correlation = correlation_;

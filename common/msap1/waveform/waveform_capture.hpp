@@ -111,6 +111,19 @@ struct WaveformStatus {
 	std::uint64_t sequence_gaps = 0;
 	std::uint64_t transport_overrun_blocks = 0;
 	std::uint64_t materialization_failures = 0;
+	/**
+	 * Latest cumulative PL-side drop counter, copied from the most recent
+	 * WFM1 block header. Non-zero means the PL elasticity FIFO overflowed
+	 * because the DMA stopped draining it — loss upstream of the kernel
+	 * transport, invisible to transport_overrun_blocks.
+	 */
+	std::uint32_t pl_dropped_frames = 0;
+	/**
+	 * Largest pre+post trigger window trigger() currently accepts, in
+	 * frames. Rate-dependent: the history ring is sized in frames, so its
+	 * span in seconds shrinks as the sample rate rises.
+	 */
+	std::uint64_t max_capture_frames = 0;
 	std::uint64_t history_oldest_sequence = 0;
 	std::uint64_t history_latest_sequence = 0;
 	std::uint64_t history_capacity_frames = waveform_history_frames;
@@ -227,6 +240,7 @@ private:
 	void collect_materialization_results();
 	void discover_persisted_sessions();
 	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
+	std::uint64_t max_capture_frames() const noexcept;
 	void update_transport_status() noexcept;
 	std::optional<WaveformCorrelation> correlate() const noexcept;
 
@@ -249,6 +263,7 @@ private:
 	std::uint64_t transport_last_overrun_blocks_ = 0;
 	std::uint64_t materialization_failures_ = 0;
 	std::uint32_t transport_ring_blocks_ = 0;
+	std::uint32_t pl_dropped_frames_ = 0;
 	std::uint32_t sample_rate_hz_ = 0;
 	std::optional<std::uint32_t> configuration_generation_;
 	std::uint64_t next_session_id_ = 1;
