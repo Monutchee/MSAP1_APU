@@ -31,6 +31,13 @@ public:
 		batch.bytes = sizeof(msap1::MeterRecord);
 		return batch;
 	}
+	/* Only the whole-status accessor is overridden: transport_overruns()
+	 * must keep working by projecting out of it, which is what lets a
+	 * source implement the kernel accounting exactly once. */
+	msap1::acquisition::MeterTransportStatus transport_status() noexcept override
+	{
+		return {12345, 12340, 5, 12290, 64};
+	}
 	bool started = false;
 };
 
@@ -74,6 +81,15 @@ void device_interfaces_are_substitutable()
 	require(meter.started, "meter source did not start");
 	require(source.native_handle() == 17, "wrong fake descriptor");
 	require(source.read_available().count == 1, "wrong fake batch");
+	const auto transport = source.transport_status();
+	require(transport.produced_blocks == 12345 &&
+			transport.consumed_blocks == 12340 &&
+			transport.overrun_blocks == 5 &&
+			transport.callbacks == 12290 &&
+			transport.ring_blocks == 64,
+		"wrong fake transport status");
+	require(source.transport_overruns() == 5,
+		"transport_overruns did not project out of transport_status");
 	source.stop();
 	require(!meter.started, "meter source did not stop");
 

@@ -36,6 +36,17 @@ struct MeterHealth {
 	std::vector<HealthReason> adc_degraded_reasons;
 };
 
+/**
+ * Period completions the driver folded into a neighbouring interrupt.
+ *
+ * The Xilinx cyclic callback fires per interrupt, not per period, so
+ * produced_blocks minus callbacks counts the period completions that were
+ * coalesced.  Purely diagnostic: no health verdict, transport decision, or
+ * record accounting depends on it.  Clamped at zero because the driver's
+ * callback counter is 32-bit and can wrap past the 64-bit produced total.
+ */
+std::uint64_t transport_callback_deficit(const InfoResponse &response);
+
 std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health);
 MeterHealth evaluate_meter_health(const InfoResponse &response);

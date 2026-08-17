@@ -28,6 +28,23 @@ struct HealthReasonDto {
 	std::string message;
 };
 
+/**
+ * Kernel DMA transport accounting, as reported by the driver.
+ *
+ * callback_deficit is produced_blocks minus callbacks: the Xilinx cyclic
+ * callback fires per interrupt, not per period, so it counts the period
+ * completions that were coalesced.  Diagnostic only — no health verdict
+ * depends on it.
+ */
+struct TransportHealthDto {
+	std::uint64_t produced_blocks;
+	std::uint64_t consumed_blocks;
+	std::uint64_t overrun_blocks;
+	std::uint64_t callbacks;
+	std::uint64_t callback_deficit;
+	std::uint32_t ring_blocks;
+};
+
 /** Acquisition daemon transport and meter-record freshness health. */
 struct AcquisitionHealthDto {
 	bool running;
@@ -42,6 +59,7 @@ struct AcquisitionHealthDto {
 	std::uint64_t read_errors;
 	std::uint64_t invalid_records;
 	std::uint64_t sequence_gaps;
+	TransportHealthDto dma_transport;
 	std::uint32_t configuration_generation;
 };
 

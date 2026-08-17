@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -246,6 +247,24 @@ struct MeterHealthResult {
 	bool full = false;
 };
 
+/*
+ * Kernel DMA transport counters as one value line, shared by the short and
+ * full reports so the two can never drift apart. The deficit is the derived
+ * number worth reading: the Xilinx cyclic callback fires per interrupt, not
+ * per period, so it counts the period completions that were coalesced into a
+ * neighbouring interrupt. Diagnostic only — nothing depends on it.
+ */
+std::string transport_counters(const InfoResponse &response)
+{
+	return "produced " + std::to_string(response.transport_produced_blocks) +
+	       ", consumed " + std::to_string(response.transport_consumed_blocks) +
+	       ", overruns " + std::to_string(response.transport_overrun_blocks) +
+	       ", callbacks " + std::to_string(response.transport_callbacks) +
+	       " (deficit " +
+	       std::to_string(transport_callback_deficit(response)) +
+	       "), ring " + std::to_string(response.transport_ring_blocks);
+}
+
 int write_meter_health_text(const MeterHealthResult &result,
 			    std::ostream &output)
 {
@@ -279,6 +298,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 		       << response.sequence_gaps << ", FIFO "
 		       << health.overflow_count << ", headers "
 		       << health.header_error_count << '\n'
+		       << "  DMA transport:       "
+		       << transport_counters(response) << '\n'
 		       << "  Health audit:        ";
 		if (response.health_probe_pending) {
 			if (response.health_probe_failures == 0u)
@@ -336,6 +357,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << "  DMA read errors:      " << response.dma_read_errors << '\n'
 	       << "  Invalid records:      " << response.invalid_records << '\n'
 	       << "  Sequence gaps:        " << response.sequence_gaps << '\n'
+	       << "  DMA transport:        " << transport_counters(response)
+	       << '\n'
 	       << "  Configuration gen:    0x" << std::hex
 	       << response.configuration_generation << std::dec << '\n'
 	       << "  PL generation match:  "
@@ -364,11 +387,55 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << health.spi_protocol_error_count << '\n'
 	       << "  SPI retry recoveries: "
 	       << health.spi_retry_recovery_count << '\n'
+	       << "  Config mismatches:    "
+	       << health.spi_config_read_mismatch_count << '\n'
+	       << "  GEN_ERR_REG_1 events: "
+	       << health.spi_general_error_1_events << '\n'
 	       << "  Last SPI failure:     register 0x" << std::hex
 	       << static_cast<unsigned int>(health.spi_last_failed_register)
 	       << ", header 0x"
 	       << static_cast<unsigned int>(health.spi_last_received_header)
-	       << std::dec << '\n'
+	       << std::dec << '\n';
+	/* Only the shape of the bad-header distribution distinguishes a
+	 * systematic corruption from random mis-sampling, so print the
+	 * populated buckets rather than a single most-recent sample.
+	 * Silent when the bus is clean. */
+	{
+		std::ostringstream buckets;
+		for (std::size_t bucket = 0; bucket < 16; ++bucket) {
+			if (health.spi_header_histogram[bucket] == 0)
+				continue;
+			if (!buckets.str().empty())
+				buckets << "  ";
+			buckets << "0x" << std::hex << bucket << "_" << std::dec
+				<< "=" << health.spi_header_histogram[bucket];
+		}
+		if (!buckets.str().empty())
+			output << "  Bad header buckets:   " << buckets.str()
+			       << '\n';
+	}
+	/* GEN_ERR_REG_1 is clear-on-read, so the sweep that samples it also
+	 * destroys it. Name whichever bits were ever seen; silent if none. */
+	if (health.spi_general_error_1_sticky != 0u) {
+		static constexpr std::array<const char *, 8> gen_err_1_bits{
+			nullptr, "SPI_CRC_ERR", "SPI_INVALID_WRITE_ERR",
+			"SPI_INVALID_READ_ERR", "SPI_CLK_COUNT_ERR",
+			"ROM_CRC_ERR", "MEMMAP_CRC_ERR", nullptr};
+		std::ostringstream bits;
+		for (std::size_t bit = 0; bit < gen_err_1_bits.size(); ++bit) {
+			if (gen_err_1_bits[bit] == nullptr ||
+			    (health.spi_general_error_1_sticky &
+			     (1u << bit)) == 0u)
+				continue;
+			if (!bits.str().empty())
+				bits << ", ";
+			bits << gen_err_1_bits[bit];
+		}
+		if (bits.str().empty())
+			bits << "reserved bits only";
+		output << "  ADC latched SPI errs: " << bits.str() << '\n';
+	}
+	output
 	       << "  Conversion status:   0x" << std::hex << health.conversion_status
 	       << '\n'
 	       << "  Processing status:   0x" << health.processing_status << std::dec
@@ -399,6 +466,17 @@ struct RegisterDto {
 	std::uint32_t value = 0;
 };
 
+/* Machine form of the "DMA transport" text line, including the derived
+ * callback deficit so a consumer never has to re-derive it. */
+struct TransportHealthDto {
+	std::uint64_t produced_blocks = 0;
+	std::uint64_t consumed_blocks = 0;
+	std::uint64_t overrun_blocks = 0;
+	std::uint64_t callbacks = 0;
+	std::uint64_t callback_deficit = 0;
+	std::uint32_t ring_blocks = 0;
+};
+
 struct AcquisitionHealthDto {
 	bool healthy = false;
 	bool running = false;
@@ -410,6 +488,7 @@ struct AcquisitionHealthDto {
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
+	TransportHealthDto dma_transport;
 };
 
 struct AdcHealthDto {
@@ -429,6 +508,21 @@ struct AdcHealthDto {
 	std::uint32_t fifo_overflows = 0;
 	std::uint32_t header_errors = 0;
 	std::uint32_t spi_error = 0;
+	std::uint32_t spi_protocol_errors = 0;
+	std::uint32_t spi_retry_recoveries = 0;
+	/* Configuration reads whose two samples disagreed: the data-byte
+	 * corruption the protocol header check cannot detect. */
+	std::uint32_t spi_config_mismatches = 0;
+	/* Sticky OR of GEN_ERR_REG_1, and how many polls saw it non-zero.
+	 * The register clears on read, so this is the only lasting record
+	 * of the ADC's own view of an SPI fault. */
+	std::uint32_t spi_general_error_1_sticky = 0;
+	std::uint32_t spi_general_error_1_events = 0;
+	/* Malformed reply headers bucketed by high nibble; index is the
+	 * nibble. All-zero on a healthy bus (the only valid header is
+	 * 0x20). Exported as a fixed 16-slot array so a consumer can
+	 * difference two samples without matching up sparse keys. */
+	std::array<std::uint16_t, 16> spi_header_histogram{};
 	std::vector<HealthReasonDto> degraded_reasons;
 	std::vector<RegisterDto> registers;
 };
@@ -547,6 +641,18 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.dma_read_errors = response.dma_read_errors,
 			.invalid_records = response.invalid_records,
 			.sequence_gaps = response.sequence_gaps,
+			.dma_transport = {
+				.produced_blocks =
+					response.transport_produced_blocks,
+				.consumed_blocks =
+					response.transport_consumed_blocks,
+				.overrun_blocks =
+					response.transport_overrun_blocks,
+				.callbacks = response.transport_callbacks,
+				.callback_deficit =
+					transport_callback_deficit(response),
+				.ring_blocks = response.transport_ring_blocks,
+			},
 		},
 		.adc = {
 			.healthy = status.adc_healthy,
@@ -565,10 +671,22 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.fifo_overflows = health.overflow_count,
 			.header_errors = health.header_error_count,
 			.spi_error = health.spi_error,
+			.spi_protocol_errors = health.spi_protocol_error_count,
+			.spi_retry_recoveries = health.spi_retry_recovery_count,
+			.spi_config_mismatches =
+				health.spi_config_read_mismatch_count,
+			.spi_general_error_1_sticky =
+				health.spi_general_error_1_sticky,
+			.spi_general_error_1_events =
+				health.spi_general_error_1_events,
 			.degraded_reasons = {},
 			.registers = {},
 		},
 	};
+	for (std::size_t bucket = 0;
+	     bucket < dto.adc.spi_header_histogram.size(); ++bucket)
+		dto.adc.spi_header_histogram[bucket] =
+			health.spi_header_histogram[bucket];
 	for (const auto &reason : status.adc_degraded_reasons)
 		dto.adc.degraded_reasons.push_back({reason.code, reason.message});
 	if (result.full && status.spi_responsive)

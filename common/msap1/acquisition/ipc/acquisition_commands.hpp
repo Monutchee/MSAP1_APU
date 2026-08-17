@@ -43,8 +43,12 @@ inline constexpr const char *acquisition_socket_path =
  * raw MeterRecord remains confined to the legacy diagnostic info reply.
  * 21: Snapshot diagnostics follow the v3 record envelope: the transport
  * drop counters are emit_drops/result_drops and the configured-window echo
- * is replaced by the block's actual sample count. */
-inline constexpr std::uint16_t acquisition_ipc_version = 21;
+ * is replaced by the block's actual sample count.
+ * 22: InfoResponse carries the kernel DMA transport counters (produced,
+ * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
+ * counters, so health output distinguishes a PL-side loss from a kernel
+ * ring overrun without reading the device. */
+inline constexpr std::uint16_t acquisition_ipc_version = 22;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -157,6 +161,17 @@ struct InfoResponse {
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
+	/* Kernel DMA transport accounting, sampled as a whole at reply time.
+	 * These are the driver's own totals, not ingest counters: they say
+	 * what the ring produced and how much of it userspace took, which is
+	 * what separates a PL-side loss from a consumer stall. Grouped by
+	 * meaning rather than by width — the ring depth belongs with the
+	 * counters it bounds. Observability only. */
+	std::uint64_t transport_produced_blocks = 0;
+	std::uint64_t transport_consumed_blocks = 0;
+	std::uint64_t transport_overrun_blocks = 0;
+	std::uint64_t transport_callbacks = 0;
+	std::uint32_t transport_ring_blocks = 0;
 	/* UTC synchronization state of the measurement timebase RIGHT NOW,
 	 * at the moment this reply was built. Reported beside — never inside
 	 * — the electrical health fields. It describes the daemon's live

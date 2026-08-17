@@ -54,7 +54,26 @@ void RpuHealthMonitor::refresh()
 		(health.health_flags & MSAP1_ADC_HEALTH_SPI_RESPONSIVE) != 0u &&
 		health.spi_error == MSAP1_ADC_SPI_HEALTH_OK;
 
-	if (spi_snapshot_valid) {
+	/*
+	 * A sweep can report success and still carry a corrupted register
+	 * value. The reply's protocol header and its data byte are separate
+	 * bytes of one transfer: the RPU validates the header and retries,
+	 * but a corruption confined to the data byte leaves a valid header,
+	 * so the read succeeds and the wrong value reaches the health flags.
+	 * Only the register-derived flags can be falsified that way, and
+	 * only losing one is consequential -- gaining one back is always
+	 * good news. Treat a lost flag exactly like a transport failure and
+	 * make the next audit agree before it reaches the cache; otherwise
+	 * one bad byte publishes a degraded ADC that was never degraded.
+	 */
+	constexpr std::uint32_t confirmable_health_flags =
+		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH;
+	const bool lost_verified_flag =
+		has_cached_health_ &&
+		((cached_health_.health_flags & ~health.health_flags) &
+		 confirmable_health_flags) != 0u;
+
+	if (spi_snapshot_valid && !lost_verified_flag) {
 		probe_failures_ = 0;
 		cached_health_ = health;
 		has_cached_health_ = true;
@@ -70,13 +89,17 @@ void RpuHealthMonitor::refresh()
 	if (probe_failures_ < failures_before_degraded) {
 		log_message(
 			health_log, mnc::logging::Priority::notice,
-			"transient ADC SPI health audit failure; confirmation scheduled",
+			spi_snapshot_valid ?
+				"ADC register health flag lost on an otherwise clean SPI sweep; confirmation scheduled" :
+				"transient ADC SPI health audit failure; confirmation scheduled",
 			"rpu_health_confirmation_pending",
 			{{"MNC_CONSECUTIVE_FAILURES",
 			  std::to_string(probe_failures_)},
 			 {"MNC_SPI_ERROR", std::to_string(health.spi_error)},
 			 {"MNC_SPI_PROTOCOL_ERRORS",
 			  std::to_string(health.spi_protocol_error_count)},
+			 {"MNC_SPI_CONFIG_MISMATCHES",
+			  std::to_string(health.spi_config_read_mismatch_count)},
 			 {"MNC_SPI_REGISTER",
 			  std::to_string(health.spi_last_failed_register)},
 			 {"MNC_SPI_RECEIVED_HEADER",
@@ -158,10 +181,18 @@ void RpuHealthMonitor::merge_operational_fields(
 		health.spi_protocol_error_count;
 	cached_health_.spi_retry_recovery_count =
 		health.spi_retry_recovery_count;
+	cached_health_.spi_config_read_mismatch_count =
+		health.spi_config_read_mismatch_count;
 	cached_health_.spi_last_failed_register =
 		health.spi_last_failed_register;
 	cached_health_.spi_last_received_header =
 		health.spi_last_received_header;
+	for (std::size_t bucket = 0;
+	     bucket < sizeof(cached_health_.spi_header_histogram) /
+			      sizeof(cached_health_.spi_header_histogram[0]);
+	     ++bucket)
+		cached_health_.spi_header_histogram[bucket] =
+			health.spi_header_histogram[bucket];
 }
 
 void RpuHealthMonitor::observe_spi_recovery(
