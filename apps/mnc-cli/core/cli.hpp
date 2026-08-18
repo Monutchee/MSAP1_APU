@@ -42,6 +42,9 @@ struct Options {
 	std::array<std::optional<double>, 7> simulator_dc{};
 	std::array<std::optional<double>, 7> simulator_noise_rms{};
 	std::optional<bool> simulator_preserve_phase;
+	/* Raw --harmonics spec ("none" or "order:pct[:phase[:lanes]],..."),
+	 * parsed by the adc command. */
+	std::optional<std::string> simulator_harmonics;
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;

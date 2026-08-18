@@ -346,3 +346,41 @@ Prerequisite: SCYC-v3 records (PowerCore) and the matched image. All cases via
    PA gains +5 W (dc_v x dc_i) on top of the AC term.
 5. **Zero current.** `--ia-rms 0`: PA reads 0 within tolerance; no spurious
    power from noise (noise is uncorrelated between lanes).
+
+## 12. Fundamental phasors and harmonic rejection (metrology M5)
+
+Prerequisite: SCYC-v4 records (PhasorCore), simulator core 1.2 (harmonic
+slots, `devmem2 0xB0080004` reads `0x00010002`), wire v4, and the matched
+image. All cases via `mnc meter single-cycle` (or the single-cycle readout on
+the ADC Simulator tab), simulator source, capture active, frequency
+measurement enabled. Golden values from `tests/support/waveform_golden.hpp`:
+`fundamental_rms` equals the configured RMS regardless of injected
+harmonics; `ac_rms` grows by the harmonic energy.
+
+1. **Pure tone baseline.** Default balanced configuration, no harmonics:
+   every lane's fundamental RMS must equal its total RMS within the 1-cycle
+   golden tolerance, and `Status` must show 0x0 (phasor valid).
+2. **Harmonic rejection.** `mnc adc simulator configure --harmonics 3:10`
+   (10% 3rd on the voltage lanes): each voltage lane's TOTAL RMS must rise
+   to sqrt(1 + 0.1^2) x configured (~120.6 V at 120 V) while its
+   FUNDAMENTAL RMS stays at the configured value within tolerance — the
+   synchronous correlation must reject the distortion. Current lanes are
+   untouched.
+3. **Multi-slot.** `--harmonics 3:5,5:3,7:2` : total RMS follows the
+   quadrature sum of all three slots; fundamental still unchanged. Then
+   `--harmonics none` restores the pure tone.
+4. **Off-nominal frequency.** `--frequency-hz 49.5` (nominal staying 50) or
+   62.3 at nominal 60: fundamental RMS must stay within tolerance — theta
+   comes from the MEASURED frequency, so an off-nominal grid must not leak
+   fundamental energy. Restore afterwards.
+5. **Invalid reference.** Stop and restart capture; the first records
+   before frequency lock may report `Status` bit 1 (phasor invalid) with
+   zeroed fundamental sections — the readout must say so rather than show
+   stale numbers. After lock, bit 1 must clear and stay clear.
+6. **Physical rule.** `--harmonics 3:10:0:all` on the balanced set: the
+   3rd harmonic lands zero-sequence (identical phase on all three phases)
+   by construction. Phase A active power gains
+   0.01 x Vrms x Irms x cos(3 x displacement) — at aligned phases (+1%)
+   this is +3.6 W on 360 W, at the -60 deg case the harmonic term is
+   cos(-180 deg) = -1 so PA drops by 3.6 W. Verify against the golden
+   model rather than by hand.

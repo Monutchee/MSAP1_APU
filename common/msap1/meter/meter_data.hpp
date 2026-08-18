@@ -216,6 +216,12 @@ struct SingleCycleSnapshot {
 	/* Per-phase one-cycle active power, picowatts; import positive
 	 * (sign conventions: PL metering_types.hpp). */
 	std::array<std::int64_t, 3> active_power_picowatts{};
+	/* Fundamental (phasor-magnitude) RMS per lane, micro-units.
+	 * Meaningful only while phasor_valid(): the engine zeroes the
+	 * section and sets status bit 1 when its frequency reference was
+	 * invalid at the cycle start. */
+	std::array<std::uint64_t, 7> fundamental_rms_micro_units{};
+	[[nodiscard]] bool phasor_valid() const { return (status & 0x2u) == 0u; }
 };
 
 [[nodiscard]] SingleCycleSnapshot decode_single_cycle_record(

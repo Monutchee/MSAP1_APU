@@ -62,6 +62,18 @@ std::uint32_t frequency_mode(const std::string &mode)
 	throw std::runtime_error("unsupported frequency measurement mode");
 }
 
+std::uint32_t harmonic_channel_mask(const std::string &channels)
+{
+	if (channels == "voltage")
+		return 0x70u;
+	if (channels == "current")
+		return 0x0fu;
+	if (channels == "all")
+		return 0x7fu;
+	throw std::runtime_error(
+		"simulator harmonic channels must be voltage, current, or all");
+}
+
 std::uint32_t phase_q32(double phase_degrees)
 {
 	if (!std::isfinite(phase_degrees))
@@ -413,6 +425,30 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	result.wire.simulator_flags = simulator.preserve_phase
 		? static_cast<std::uint32_t>(MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE)
 		: 0u;
+	if (simulator.harmonics.size() > 4u)
+		throw std::runtime_error(
+			"simulator supports at most 4 harmonic slots");
+	for (std::size_t slot = 0; slot < simulator.harmonics.size(); ++slot) {
+		const auto &harmonic = simulator.harmonics[slot];
+		if (harmonic.order < 2u || harmonic.order > 63u)
+			throw std::runtime_error(
+				"simulator harmonic order must be 2 through 63");
+		if (!std::isfinite(harmonic.percent) ||
+		    harmonic.percent < 0.0 || harmonic.percent > 99.9)
+			throw std::runtime_error(
+				"simulator harmonic percent must be 0 through 99.9");
+		if (harmonic.order * simulator.frequency_hz >=
+		    static_cast<double>(sample_rate_hz) / 2.0)
+			throw std::runtime_error(
+				"simulator harmonic exceeds the Nyquist limit");
+		const auto fraction = static_cast<std::uint32_t>(
+			std::llround(harmonic.percent / 100.0 * q16_scale));
+		result.wire.simulator_harmonics[slot * 2] = harmonic.order |
+			(harmonic_channel_mask(harmonic.channels) << 8) |
+			(fraction << 16);
+		result.wire.simulator_harmonics[slot * 2 + 1] =
+			phase_q32(harmonic.phase_degrees);
+	}
 
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;

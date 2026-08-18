@@ -16,12 +16,17 @@
  * systematic arithmetic error cannot cancel out between model and DUT.
  *
  * Modelled per enabled channel:
- *   sample(t) = rms*sqrt(2) * sin(2*pi*f*t + phase) + dc + noise
- * with noise uniform white of RMS noise_rms. Quantities derived over an
- * integer number of cycles:
+ *   sample(t) = rms*sqrt(2) * sin(2*pi*f*t + phase)
+ *             + sum_slots frac * rms*sqrt(2) * sin(order*(2*pi*f*t + phase)
+ *                                                  + slot_phase)
+ *             + dc + noise
+ * with noise uniform white of RMS noise_rms and each harmonic slot applied
+ * only to the lanes its channel selector names. Distinct-frequency terms
+ * are orthogonal over an integer number of cycles, so:
  *   mean               = dc
- *   ac_rms             = sqrt(rms^2 + noise_rms^2)     (dc removed)
- *   total_rms          = sqrt(rms^2 + noise_rms^2 + dc^2)
+ *   fundamental_rms    = rms                            (harmonics rejected)
+ *   ac_rms             = sqrt(rms^2*(1 + sum frac^2) + noise_rms^2)
+ *   total_rms          = sqrt(ac_rms^2 + dc^2)
  * The PL's own quantization/interpolation error is bounded well below
  * one part in 10^4 of full scale, so tolerances here are dominated by
  * the metrology engine under test, not by the source.
@@ -39,13 +44,20 @@ struct GoldenChannelExpectation {
 	double mean = 0.0;
 	double ac_rms = 0.0;
 	double total_rms = 0.0;
+	/* RMS of the fundamental alone: what the phasor path (SCYC words
+	 * 50..63) must report, unchanged by injected harmonics. */
+	double fundamental_rms = 0.0;
 	bool enabled = false;
 };
 
 /* Per-phase active power expectation, watts; import positive (the shared
  * sign conventions). P = Vrms * Irms * cos(phase_v - phase_i) for the
  * fundamental plus the DC product; simulator noise is uncorrelated
- * between channels and contributes no mean power. */
+ * between channels and contributes no mean power. A harmonic slot that
+ * lands on BOTH lanes of a phase ("all") adds frac^2 * Vrms * Irms *
+ * cos(order * (phase_v - phase_i)) — the simulator scales each lane's
+ * fundamental offset by the order, and the slot phase cancels in the
+ * V-I difference. */
 struct GoldenPowerExpectation {
 	double active_power_watts = 0.0;
 };
@@ -58,6 +70,17 @@ struct GoldenExpectation {
 	std::array<GoldenPowerExpectation, 3> power{};
 };
 
+/* Mirrors harmonic_channel_mask in meter_config.cpp (lanes 0..3 current,
+ * 4..6 voltage). */
+inline unsigned golden_harmonic_mask(const std::string &channels)
+{
+	if (channels == "voltage")
+		return 0x70u;
+	if (channels == "current")
+		return 0x0fu;
+	return 0x7fu; /* "all" */
+}
+
 inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config)
 {
 	GoldenExpectation result;
@@ -65,18 +88,27 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 	std::array<double, 8> rms{};
 	std::array<double, 8> phase_degrees{};
 	std::array<double, 8> dc{};
+	std::array<double, 8> harmonic_energy{}; /* sum of frac^2 per lane */
+	for (const auto &harmonic : config.harmonics) {
+		const unsigned mask = golden_harmonic_mask(harmonic.channels);
+		const double fraction = harmonic.percent / 100.0;
+		for (std::size_t lane = 0; lane < 8; ++lane)
+			if (mask & (1u << lane))
+				harmonic_energy[lane] += fraction * fraction;
+	}
 	for (const auto &channel : config.channels) {
 		if (channel.channel >= result.channels.size())
 			continue;
 		auto &expectation = result.channels[channel.channel];
 		expectation.enabled = true;
 		expectation.mean = channel.dc;
+		expectation.fundamental_rms = channel.rms;
 		expectation.ac_rms = std::sqrt(
-			channel.rms * channel.rms +
+			channel.rms * channel.rms *
+				(1.0 + harmonic_energy[channel.channel]) +
 			channel.noise_rms * channel.noise_rms);
 		expectation.total_rms = std::sqrt(
-			channel.rms * channel.rms +
-			channel.noise_rms * channel.noise_rms +
+			expectation.ac_rms * expectation.ac_rms +
 			channel.dc * channel.dc);
 		rms[channel.channel] = channel.rms;
 		phase_degrees[channel.channel] = channel.phase_degrees;
@@ -89,8 +121,17 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 		const int i = current_lane[phase];
 		const double angle = (phase_degrees[v] - phase_degrees[i]) *
 				     M_PI / 180.0;
-		result.power[phase].active_power_watts =
-			rms[v] * rms[i] * std::cos(angle) + dc[v] * dc[i];
+		double power = rms[v] * rms[i] * std::cos(angle) + dc[v] * dc[i];
+		for (const auto &harmonic : config.harmonics) {
+			const unsigned mask =
+				golden_harmonic_mask(harmonic.channels);
+			if (!(mask & (1u << v)) || !(mask & (1u << i)))
+				continue;
+			const double fraction = harmonic.percent / 100.0;
+			power += fraction * fraction * rms[v] * rms[i] *
+				 std::cos(harmonic.order * angle);
+		}
+		result.power[phase].active_power_watts = power;
 	}
 	return result;
 }

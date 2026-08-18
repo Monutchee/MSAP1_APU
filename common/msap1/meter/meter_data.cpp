@@ -591,7 +591,7 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
 {
 	/* Word map: PL contract in MSAP1_PL .../common/include/
-	 * measurement_record.hpp (SCYC-v2). */
+	 * measurement_record.hpp (SCYC-v4). */
 	SingleCycleSnapshot snapshot;
 	snapshot.sequence = record.word(3);
 	snapshot.configuration_generation = record.word(4);
@@ -630,6 +630,13 @@ SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
 			static_cast<std::int64_t>(
 				record.word(base) |
 				(std::uint64_t{record.word(base + 1)} << 32));
+	}
+	for (std::size_t lane = 0;
+	     lane < snapshot.fundamental_rms_micro_units.size(); ++lane) {
+		const std::size_t base = 50 + lane * 2;
+		snapshot.fundamental_rms_micro_units[lane] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
 	}
 	return snapshot;
 }

@@ -973,7 +973,7 @@ public:
 			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
 		static constexpr std::array<const char *, 3> pairs{
 			"Vab", "Vbc", "Vca"};
-		output << "Single-cycle diagnostic (SCYC-v2)\n"
+		output << "Single-cycle diagnostic (SCYC-v4)\n"
 		       << "  Records accepted:   " << result.records << '\n';
 		if (!result.has_snapshot) {
 			output << "  No snapshot yet (cycle timing unlocked or "
@@ -1007,6 +1007,16 @@ public:
 			output << "  P" << phases[phase] << ": "
 			       << s.active_power_picowatts[phase]
 			       << " pW\n";
+		if (!s.phasor_valid()) {
+			output << "  Fundamental RMS:    invalid (no frequency "
+				  "reference this cycle)\n";
+			return 0;
+		}
+		for (std::size_t lane = 0; lane < names.size(); ++lane)
+			output << "  CH" << lane << ' ' << names[lane]
+			       << " fund RMS: "
+			       << s.fundamental_rms_micro_units[lane]
+			       << " micro-units\n";
 		return 0;
 	}
 };

@@ -84,6 +84,11 @@ msap1::SimulatorIpcConfiguration simulator_ipc(
 		result.channels[channel.channel].dc = channel.dc;
 		result.channels[channel.channel].noise_rms = channel.noise_rms;
 	}
+	result.harmonics.reserve(simulator.harmonics.size());
+	for (const auto &harmonic : simulator.harmonics)
+		result.harmonics.push_back({harmonic.order, harmonic.percent,
+					    harmonic.phase_degrees,
+					    harmonic.channels});
 	return result;
 }
 

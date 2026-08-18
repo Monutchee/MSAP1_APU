@@ -421,7 +421,7 @@ webengine::Response get_meter_readings(AppContext &app,
  *         unreachable, reports a failure status, or cached a malformed
  *         aggregate record.
  */
-/** JSON body of GET /api/v1/meter/single-cycle (SCYC-v3 diagnostics). */
+/** JSON body of GET /api/v1/meter/single-cycle (SCYC-v4 diagnostics). */
 struct SingleCycleDto {
 	bool running = false;
 	bool has_snapshot = false;
@@ -439,6 +439,10 @@ struct SingleCycleDto {
 	std::array<std::uint64_t, 7> rms_micro_units{};
 	std::array<std::uint64_t, 3> vll_rms_micro_units{};
 	std::array<std::int64_t, 3> active_power_picowatts{};
+	/* Fundamental (phasor) RMS per lane; meaningful only when
+	 * phasor_valid (status bit 1 clear). */
+	std::array<std::uint64_t, 7> fundamental_rms_micro_units{};
+	bool phasor_valid = false;
 };
 
 webengine::Response get_meter_single_cycle(AppContext &app,
@@ -465,6 +469,9 @@ webengine::Response get_meter_single_cycle(AppContext &app,
 		dto.rms_micro_units = snapshot.rms_micro_units;
 		dto.vll_rms_micro_units = snapshot.vll_rms_micro_units;
 		dto.active_power_picowatts = snapshot.active_power_picowatts;
+		dto.fundamental_rms_micro_units =
+			snapshot.fundamental_rms_micro_units;
+		dto.phasor_valid = snapshot.phasor_valid();
 		return json_response(webengine::http::status::ok, dto);
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/meter/single-cycle", error);

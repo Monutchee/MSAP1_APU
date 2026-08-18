@@ -49,7 +49,7 @@ inline constexpr const char *acquisition_socket_path =
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
  * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 26;
+inline constexpr std::uint16_t acquisition_ipc_version = 27;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -123,12 +123,25 @@ struct SimulatorIpcChannel {
 	double noise_rms = 0.0;
 };
 
+struct SimulatorIpcHarmonic {
+	/* Harmonic order (2..63); 0 marks an unused slot. */
+	std::uint32_t order = 0;
+	/* Amplitude, percent of each receiving lane's fundamental peak. */
+	double percent = 0.0;
+	/* Extra phase (degrees) on top of the physical order*lane rule. */
+	double phase_degrees = 0.0;
+	/* "voltage", "current", or "all". */
+	std::string channels = "voltage";
+};
+
 struct SimulatorIpcConfiguration {
 	std::uint32_t frequency_millihz = 60000;
 	/* Keep the waveform's phase/framing across the configuration
 	 * commit instead of restarting at 0 degrees. */
 	std::uint32_t preserve_phase = 0;
 	std::array<SimulatorIpcChannel, 8> channels{};
+	/* Active harmonic slots (at most 4), echoing the settings. */
+	std::vector<SimulatorIpcHarmonic> harmonics{};
 };
 
 struct WaveformSessionIpc {

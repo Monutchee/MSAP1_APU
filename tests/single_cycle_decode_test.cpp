@@ -65,9 +65,15 @@ int main()
 	record.words[47] = static_cast<std::uint32_t>(negative_bits >> 32);
 	record.words[48] = 0;
 	record.words[49] = 0;
+	/* Fundamental (phasor) RMS, words 50..63: distinct per-lane values
+	 * with a non-zero high word on the last lane. */
+	for (std::size_t lane = 0; lane < 7; ++lane) {
+		record.words[50 + lane * 2] = 900000u + lane;
+		record.words[50 + lane * 2 + 1] = lane == 6 ? 1u : 0u;
+	}
 
 	require(record.header_valid(),
-		"SCYC-v2 must pass the shared header check");
+		"SCYC-v4 must pass the shared header check");
 
 	const auto snapshot = msap1::decode_single_cycle_record(record);
 	require(snapshot.sequence == 4242, "sequence");
@@ -96,6 +102,21 @@ int main()
 	require(snapshot.active_power_picowatts[1] == -180000000,
 		"phase B P sign extension");
 	require(snapshot.active_power_picowatts[2] == 0, "phase C P");
+	for (std::size_t lane = 0; lane < 7; ++lane)
+		require(snapshot.fundamental_rms_micro_units[lane] ==
+				((lane == 6 ? (std::uint64_t{1} << 32) : 0ull) |
+				 (900000u + lane)),
+			"fundamental RMS");
+	/* Status bit 1 marks the phasor sections invalid; bit 0 (arithmetic
+	 * saturation) alone must not. */
+	require(!snapshot.phasor_valid() == false, "phasor valid at status 0x1");
+	{
+		auto invalid = record;
+		invalid.words[8] = 0x2;
+		require(!msap1::decode_single_cycle_record(invalid)
+				 .phasor_valid(),
+			"status bit 1 must mark the phasor invalid");
+	}
 
 	if (failures != 0) {
 		std::fprintf(stderr, "FAILED: %d check(s)\n", failures);

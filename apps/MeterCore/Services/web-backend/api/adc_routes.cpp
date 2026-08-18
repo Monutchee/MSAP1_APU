@@ -48,12 +48,25 @@ struct AdcSimulatorChannelDto {
 	double noise_rms = 0.0;
 };
 
+/** One harmonic slot in GET/PUT /api/v1/adc/simulator (at most 4). */
+struct AdcSimulatorHarmonicDto {
+	/** Harmonic order, 2..63. */
+	std::uint32_t order = 0;
+	/** Amplitude, percent of each receiving lane's fundamental. */
+	double percent = 0.0;
+	/** Extra phase (degrees) on top of the physical order*lane rule. */
+	double phase_degrees = 0.0;
+	/** "voltage", "current", or "all". */
+	std::string channels = "voltage";
+};
+
 /** Body of GET/PUT /api/v1/adc/simulator. */
 struct AdcSimulatorDto {
 	double frequency_hz = 60.0;
 	/** Keep waveform phase/framing across the configuration commit. */
 	bool preserve_phase = false;
 	std::array<AdcSimulatorChannelDto, 8> channels{};
+	std::vector<AdcSimulatorHarmonicDto> harmonics{};
 	std::string active_source = "physical";
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t active_generation = 0;
@@ -105,6 +118,11 @@ AdcSimulatorDto adc_simulator(const msap1::SimulatorResponse &response)
 			response.simulator.channels[index].noise_rms,
 		};
 	}
+	result.harmonics.reserve(response.simulator.harmonics.size());
+	for (const auto &harmonic : response.simulator.harmonics)
+		result.harmonics.push_back({harmonic.order, harmonic.percent,
+					    harmonic.phase_degrees,
+					    harmonic.channels});
 	result.active_source = adc_source_name(response.adc_source);
 	result.configuration_generation = response.configuration_generation;
 	result.active_generation = response.simulator_active_generation;
@@ -155,6 +173,25 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 			channel.rms, channel.phase_degrees, channel.dc,
 			channel.noise_rms};
 	}
+	if (configuration.harmonics.size() > 4u)
+		throw std::invalid_argument(
+			"simulator supports at most 4 harmonic slots");
+	for (const auto &harmonic : configuration.harmonics) {
+		if (harmonic.order < 2u || harmonic.order > 63u ||
+		    !std::isfinite(harmonic.percent) ||
+		    harmonic.percent < 0.0 || harmonic.percent > 99.9 ||
+		    !std::isfinite(harmonic.phase_degrees) ||
+		    (harmonic.channels != "voltage" &&
+		     harmonic.channels != "current" &&
+		     harmonic.channels != "all"))
+			throw std::invalid_argument(
+				"simulator harmonics need order 2-63, percent "
+				"0-99.9, finite phase, and voltage/current/all "
+				"channels");
+		result.harmonics.push_back({harmonic.order, harmonic.percent,
+					    harmonic.phase_degrees,
+					    harmonic.channels});
+	}
 	return result;
 }
 
@@ -173,6 +210,12 @@ msap1::SimulatorConfig adc_simulator_settings(
 		result.channels.push_back(
 			{channel.channel, channel.rms, channel.phase_degrees,
 			 channel.dc, channel.noise_rms});
+	result.harmonics.clear();
+	result.harmonics.reserve(configuration.harmonics.size());
+	for (const auto &harmonic : configuration.harmonics)
+		result.harmonics.push_back({harmonic.order, harmonic.percent,
+					    harmonic.phase_degrees,
+					    harmonic.channels});
 	return result;
 }
 

@@ -189,12 +189,12 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Coordinated APU/RPU ABI, wire version 3: the simulator DC-offset,
-	 * noise-level, and flags fields sit between the phase step and the
-	 * trailing nominal_frequency_hz, growing the packed payload from 176
-	 * to 244 bytes (frame 16+244 = 260 <= 384). */
-	static_assert(sizeof(msap1_meter_config_payload) == 244,
-		      "meter config payload must be 244 packed bytes");
+	/* Coordinated APU/RPU ABI, wire version 4: the four packed harmonic
+	 * slots (8 words) sit between the noise levels and the simulator
+	 * flags, growing the packed payload from 244 to 276 bytes
+	 * (frame 16+276 = 292 <= 384). */
+	static_assert(sizeof(msap1_meter_config_payload) == 276,
+		      "meter config payload must be 276 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_dc_offset_counts) == 172,
 		      "DC offsets must follow the simulator phase step");
@@ -202,16 +202,21 @@ void meter_config_wire_layout()
 			       simulator_noise_level_counts) == 204,
 		      "noise levels must follow the DC offsets");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       simulator_flags) == 236,
-		      "simulator flags must follow the noise levels");
+			       simulator_harmonics) == 236,
+		      "harmonic slots must follow the noise levels");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       nominal_frequency_hz) == 240,
+			       simulator_flags) == 268,
+		      "simulator flags must follow the harmonic slots");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       nominal_frequency_hz) == 272,
 		      "nominal_frequency_hz must be the trailing field");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
 	payload.simulator_dc_offset_counts[2] = -12345;
 	payload.simulator_noise_level_counts[6] = 777;
+	/* Slot 1 word0: 5% (0x0ccd Q16) 3rd harmonic on the voltage lanes. */
+	payload.simulator_harmonics[2] = 0x0ccd7003u;
 	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
@@ -219,7 +224,7 @@ void meter_config_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"meter config payload size changed on the wire");
 	std::uint32_t nominal = 0;
-	std::memcpy(&nominal, decoded.payload.data() + 240, sizeof(nominal));
+	std::memcpy(&nominal, decoded.payload.data() + 272, sizeof(nominal));
 	require(nominal == 50,
 		"nominal frequency was not encoded at the trailing offset");
 	std::int32_t dc = 0;
@@ -230,8 +235,13 @@ void meter_config_wire_layout()
 	std::memcpy(&noise, decoded.payload.data() + 204 + 6 * 4, sizeof(noise));
 	require(noise == 777,
 		"noise level was not encoded at its normative offset");
+	std::uint32_t harmonic = 0;
+	std::memcpy(&harmonic, decoded.payload.data() + 236 + 2 * 4,
+		    sizeof(harmonic));
+	require(harmonic == 0x0ccd7003u,
+		"harmonic slot was not encoded at its normative offset");
 	std::uint32_t flags = 0;
-	std::memcpy(&flags, decoded.payload.data() + 236, sizeof(flags));
+	std::memcpy(&flags, decoded.payload.data() + 268, sizeof(flags));
 	require(flags == MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE,
 		"simulator flags were not encoded at their normative offset");
 }

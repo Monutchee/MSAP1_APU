@@ -14,10 +14,12 @@
 #include <iomanip>
 #include <limits>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace msap1::cli {
 namespace {
@@ -356,6 +358,7 @@ struct AdcSimulatorResult {
 	std::array<double, 7> phase_degrees{};
 	std::array<double, 7> dc{};
 	std::array<double, 7> noise_rms{};
+	std::vector<msap1::SimulatorIpcHarmonic> harmonics{};
 	bool active = false;
 	std::uint32_t generation = 0;
 };
@@ -383,6 +386,11 @@ public:
 			       << result.phase_degrees[channel] << " deg, "
 			       << result.dc[channel] << " DC, "
 			       << result.noise_rms[channel] << " noise RMS\n";
+		for (const auto &harmonic : result.harmonics)
+			output << "  Harmonic " << harmonic.order << ": "
+			       << harmonic.percent << " %, "
+			       << harmonic.phase_degrees << " deg, "
+			       << harmonic.channels << " lanes\n";
 		return 0;
 	}
 };
@@ -397,6 +405,44 @@ public:
 		return 0;
 	}
 };
+
+/* "none" clears; otherwise "ORDER:PERCENT[:PHASE[:CHANNELS]]" slots
+ * separated by commas, e.g. "3:5,5:3:0:current". Range checking stays in
+ * the settings authority (prepare_meter_configuration). */
+std::vector<msap1::SimulatorHarmonicConfig> parse_harmonics(
+	const std::string &specification)
+{
+	std::vector<msap1::SimulatorHarmonicConfig> result;
+	if (specification == "none")
+		return result;
+	std::istringstream slots(specification);
+	std::string slot;
+	while (std::getline(slots, slot, ',')) {
+		std::istringstream fields(slot);
+		std::string field;
+		std::array<std::string, 4> parts{};
+		std::size_t count = 0;
+		while (std::getline(fields, field, ':')) {
+			if (count >= parts.size())
+				throw std::invalid_argument(
+					"--harmonics slot has too many fields");
+			parts[count++] = field;
+		}
+		if (count < 2)
+			throw std::invalid_argument(
+				"--harmonics slot needs at least ORDER:PERCENT");
+		msap1::SimulatorHarmonicConfig harmonic;
+		harmonic.order = static_cast<std::uint32_t>(
+			std::stoul(parts[0]));
+		harmonic.percent = std::stod(parts[1]);
+		if (count > 2 && !parts[2].empty())
+			harmonic.phase_degrees = std::stod(parts[2]);
+		if (count > 3 && !parts[3].empty())
+			harmonic.channels = parts[3];
+		result.push_back(harmonic);
+	}
+	return result;
+}
 
 int run_simulator(const Options &options, std::ostream &output)
 {
@@ -413,7 +459,8 @@ int run_simulator(const Options &options, std::ostream &output)
 		any_set(options.simulator_rms) ||
 		any_set(options.simulator_phase_degrees) ||
 		any_set(options.simulator_dc) ||
-		any_set(options.simulator_noise_rms);
+		any_set(options.simulator_noise_rms) ||
+		options.simulator_harmonics.has_value();
 	if (configure) {
 		update_persistent_settings(options,
 			[&](auto &settings) {
@@ -423,6 +470,10 @@ int run_simulator(const Options &options, std::ostream &output)
 				if (options.simulator_preserve_phase)
 					settings.adc.simulator.preserve_phase =
 						*options.simulator_preserve_phase;
+				if (options.simulator_harmonics)
+					settings.adc.simulator.harmonics =
+						parse_harmonics(*options
+							.simulator_harmonics);
 				for (std::size_t channel = 0; channel < 7u; ++channel) {
 					auto &target = settings.adc.simulator.channels[channel];
 					if (options.simulator_rms[channel])
@@ -453,6 +504,7 @@ int run_simulator(const Options &options, std::ostream &output)
 		result.noise_rms[channel] =
 			response.simulator.channels[channel].noise_rms;
 	}
+	result.harmonics = response.simulator.harmonics;
 	result.active = response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
 	result.generation = response.configuration_generation;
 	return render_result(options, result, output, AdcSimulatorTextGenerator{},
@@ -799,6 +851,16 @@ void register_adc_commands(Application &application)
 			},
 		});
 	}
+	simulator_configure.add_option({
+		"harmonics", "SPEC",
+		"Harmonic slots: none, or ORDER:PERCENT[:PHASE[:CHANNELS]] "
+		"comma-separated (channels: voltage, current, all)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.simulator_harmonics = value;
+		},
+		true,
+	});
 	simulator_configure.add_option({
 		"preserve-phase", "BOOL",
 		"Keep waveform phase/framing across the reconfiguration",
