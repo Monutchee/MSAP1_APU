@@ -197,6 +197,8 @@ private:
 	std::uint64_t dma_read_errors_ = 0;
 	std::uint64_t invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
+	/* Single-cycle diagnostic records accepted (not yet consumed). */
+	std::uint64_t single_cycle_records_ = 0;
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	/* Kernel transport-overrun total at the last sequence-gap log. The
 	 * delta at gap time is what attributes the loss: it either matches the

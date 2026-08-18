@@ -372,6 +372,19 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 
 	/*
+	 * Single-cycle diagnostic records (metrology M2) interleave on the
+	 * same DMA stream with their own sequence space. They are accepted
+	 * and counted here but neither continuity-tracked against the
+	 * basic/aggregate counters nor published: host-side consumption is
+	 * a later milestone. Falling through would poison the basic-record
+	 * gap accounting at ~60 records/s.
+	 */
+	if (record.record_format() == msap1::meter_single_cycle_format) {
+		++single_cycle_records_;
+		return;
+	}
+
+	/*
 	 * The stream interleaves two record formats with INDEPENDENT
 	 * sequence counters, so continuity is tracked per format.
 	 */
