@@ -253,3 +253,48 @@ deterministic. The simulator frequency is set through the settings document
 7. Disable the simulator output on CH6 (zero peak) while capturing: records
    must keep flowing with `cycle_locked: false` and `free_run_fallback:
    true`, still gapless; restoring CH6 must re-lock within one block.
+
+## 9. Simulator fidelity features (M0 verification framework)
+
+Prerequisite: a PL image with ADC simulator version `0x00010001`
+(interpolated sine, DC offset, noise, preserve-phase, counter clears) and
+the matching RPU/APU build (RPMsg wire version 3). All cases run with
+`adc.source: simulator` and capture active unless stated otherwise; every
+numeric expectation comes from the host golden model
+(`tests/support/waveform_golden.hpp` conventions).
+
+1. **Scenario counters.** Every simulator reconfiguration commit clears the
+   simulator frame/saturation/missed counters. After
+   `mnc adc simulator configure --frequency-hz 60` and a capture restart,
+   `mnc adc health --full` must show the simulator counters restarting from
+   zero, with `missed_sample_count` remaining 0 during nominal operation.
+2. **DC offset with dc_remove.** Configure
+   `mnc adc simulator configure --va-dc 5.0` (5 V offset on VA, default
+   120 V RMS). With `metering.remove_dc: true`, `GET /api/v1/meter/readings`
+   VA RMS must match the golden ac_rms (120 V within the golden tolerance);
+   the channel mean must report ~5 V. With `remove_dc: false` the reported
+   RMS must move to the golden total_rms sqrt(120^2 + 5^2) = 120.104 V.
+   Restore `--va-dc 0` afterwards.
+3. **Inter-channel phase accuracy.** Configure a 0.5-degree imbalance:
+   `--vb-phase-degrees -120.5`. The basic records must keep all channels'
+   RMS unchanged (phase never changes RMS), proving phase registers commit
+   independently; full phasor verification arrives with the PhasorCore
+   milestone. Restore -120 afterwards.
+4. **Noise fluctuation.** Configure `--va-noise-rms 0.5` (0.5 V of
+   fluctuation on VA). Poll >= 10 basic records: VA RMS must jitter from
+   record to record (a bit-flat sequence is a failure), the mean of the
+   reported RMS must match golden ac_rms sqrt(120^2 + 0.5^2) within the
+   golden tolerance, and no other channel's jitter may change. Saturation
+   count must stay 0. Restore `--va-noise-rms 0` afterwards.
+5. **Preserve-phase commit.** With `--preserve-phase true`, change only
+   `--va-rms` between two captures; the acquisition gap counters must stay
+   zero across the stop/configure/start transaction and the first
+   post-restart block must be flagged first-block exactly once. (Full
+   discontinuity-free runtime events arrive with the event sequencer
+   milestone; this case pins the PL contract bit end to end.)
+6. **Fidelity floor.** With the default balanced configuration and no noise,
+   record 30 consecutive basic records: each channel's RMS must sit inside
+   the golden tolerance of its configured value, and record-to-record RMS
+   spread must be below the golden quantization term - the interpolated
+   sine table must not contribute visible jitter (the legacy 8-bit table
+   failed this at the -48 dBc spur floor).

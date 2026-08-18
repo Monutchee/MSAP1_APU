@@ -48,7 +48,7 @@ inline constexpr const char *acquisition_socket_path =
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
  * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 23;
+inline constexpr std::uint16_t acquisition_ipc_version = 24;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -115,10 +115,18 @@ struct FrequencyIpcConfiguration {
 struct SimulatorIpcChannel {
 	double rms = 0.0;
 	double phase_degrees = 0.0;
+	/* Constant offset in engineering units (volts/amps). */
+	double dc = 0.0;
+	/* RMS of the uniform white fluctuation the PL adds, engineering
+	 * units; 0 keeps the channel noise-free. */
+	double noise_rms = 0.0;
 };
 
 struct SimulatorIpcConfiguration {
 	std::uint32_t frequency_millihz = 60000;
+	/* Keep the waveform's phase/framing across the configuration
+	 * commit instead of restarting at 0 degrees. */
+	std::uint32_t preserve_phase = 0;
 	std::array<SimulatorIpcChannel, 8> channels{};
 };
 

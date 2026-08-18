@@ -351,8 +351,11 @@ int run_source(const Options &options, std::ostream &output)
 
 struct AdcSimulatorResult {
 	double frequency_hz = 0.0;
+	bool preserve_phase = false;
 	std::array<double, 7> rms{};
 	std::array<double, 7> phase_degrees{};
+	std::array<double, 7> dc{};
+	std::array<double, 7> noise_rms{};
 	bool active = false;
 	std::uint32_t generation = 0;
 };
@@ -371,11 +374,15 @@ public:
 		       << "  Frequency:            " << std::fixed
 		       << std::setprecision(3) << result.frequency_hz << " Hz\n"
 		       << "  Configuration gen:    0x" << std::hex
-		       << result.generation << std::dec << '\n';
+		       << result.generation << std::dec << '\n'
+		       << "  Preserve phase:       "
+		       << (result.preserve_phase ? "yes" : "no") << '\n';
 		for (std::size_t channel = 0; channel < names.size(); ++channel)
 			output << "  CH" << channel << ' ' << names[channel]
 			       << ": " << result.rms[channel] << " RMS, "
-			       << result.phase_degrees[channel] << " deg\n";
+			       << result.phase_degrees[channel] << " deg, "
+			       << result.dc[channel] << " DC, "
+			       << result.noise_rms[channel] << " noise RMS\n";
 		return 0;
 	}
 };
@@ -397,20 +404,25 @@ int run_simulator(const Options &options, std::ostream &output)
 	auto response = client.request(SimulatorGetRequest{},
 		options.timeout_ms);
 	require_daemon_ok(response.status);
-	const bool configure = options.simulator_frequency_hz.has_value() ||
-		std::any_of(options.simulator_rms.begin(),
-			options.simulator_rms.end(), [](const auto &value) {
-				return value.has_value();
-			}) ||
-		std::any_of(options.simulator_phase_degrees.begin(),
-			options.simulator_phase_degrees.end(),
+	const auto any_set = [](const auto &values) {
+		return std::any_of(values.begin(), values.end(),
 			[](const auto &value) { return value.has_value(); });
+	};
+	const bool configure = options.simulator_frequency_hz.has_value() ||
+		options.simulator_preserve_phase.has_value() ||
+		any_set(options.simulator_rms) ||
+		any_set(options.simulator_phase_degrees) ||
+		any_set(options.simulator_dc) ||
+		any_set(options.simulator_noise_rms);
 	if (configure) {
 		update_persistent_settings(options,
 			[&](auto &settings) {
 				if (options.simulator_frequency_hz)
 					settings.adc.simulator.frequency_hz =
 						*options.simulator_frequency_hz;
+				if (options.simulator_preserve_phase)
+					settings.adc.simulator.preserve_phase =
+						*options.simulator_preserve_phase;
 				for (std::size_t channel = 0; channel < 7u; ++channel) {
 					auto &target = settings.adc.simulator.channels[channel];
 					if (options.simulator_rms[channel])
@@ -418,6 +430,11 @@ int run_simulator(const Options &options, std::ostream &output)
 					if (options.simulator_phase_degrees[channel])
 						target.phase_degrees =
 							*options.simulator_phase_degrees[channel];
+					if (options.simulator_dc[channel])
+						target.dc = *options.simulator_dc[channel];
+					if (options.simulator_noise_rms[channel])
+						target.noise_rms =
+							*options.simulator_noise_rms[channel];
 				}
 			});
 		response = client.request(SimulatorGetRequest{},
@@ -427,10 +444,14 @@ int run_simulator(const Options &options, std::ostream &output)
 	AdcSimulatorResult result{};
 	result.frequency_hz =
 		static_cast<double>(response.simulator.frequency_millihz) / 1000.0;
+	result.preserve_phase = response.simulator.preserve_phase != 0u;
 	for (std::size_t channel = 0; channel < 7u; ++channel) {
 		result.rms[channel] = response.simulator.channels[channel].rms;
 		result.phase_degrees[channel] =
 			response.simulator.channels[channel].phase_degrees;
+		result.dc[channel] = response.simulator.channels[channel].dc;
+		result.noise_rms[channel] =
+			response.simulator.channels[channel].noise_rms;
 	}
 	result.active = response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
 	result.generation = response.configuration_generation;
@@ -749,7 +770,49 @@ void register_adc_commands(Application &application)
 						("--" + phase_option).c_str());
 			},
 		});
+		const std::string dc_option =
+			std::string(channel_options[channel]) + "-dc";
+		simulator_configure.add_option({
+			dc_option, "VALUE", "Channel DC offset (engineering units)",
+			CompletionKind::none,
+			[channel, dc_option](Options &options,
+					     const std::string &value) {
+				options.simulator_dc[channel] =
+					parse_finite_double(
+						value, ("--" + dc_option).c_str());
+			},
+		});
+		const std::string noise_option =
+			std::string(channel_options[channel]) + "-noise-rms";
+		simulator_configure.add_option({
+			noise_option, "VALUE",
+			"Channel fluctuation RMS (engineering units)",
+			CompletionKind::none,
+			[channel, noise_option](Options &options,
+						const std::string &value) {
+				const auto parsed = parse_finite_double(
+					value, ("--" + noise_option).c_str());
+				if (parsed < 0.0)
+					throw std::invalid_argument(
+						"simulator noise RMS must not be negative");
+				options.simulator_noise_rms[channel] = parsed;
+			},
+		});
 	}
+	simulator_configure.add_option({
+		"preserve-phase", "BOOL",
+		"Keep waveform phase/framing across the reconfiguration",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			if (value == "true" || value == "1")
+				options.simulator_preserve_phase = true;
+			else if (value == "false" || value == "0")
+				options.simulator_preserve_phase = false;
+			else
+				throw std::invalid_argument(
+					"--preserve-phase requires true or false");
+		},
+	});
 	simulator.add_subcommand(std::move(simulator_configure));
 	adc.add_subcommand(std::move(simulator));
 	adc.add_subcommand(Command(

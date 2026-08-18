@@ -15,8 +15,12 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 2u
-#define MSAP1_RPU_MAX_FRAME_SIZE 256u
+#define MSAP1_RPU_VERSION 3u
+/*
+ * Stack-buffer bound for one protocol frame on both sides. Must stay
+ * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
+ */
+#define MSAP1_RPU_MAX_FRAME_SIZE 384u
 
 enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_PING = 1,
@@ -129,6 +133,16 @@ enum msap1_frequency_config_flag {
 	MSAP1_FREQUENCY_CONFIG_ENABLE = 1u << 0,
 };
 
+enum msap1_simulator_config_flag {
+	/*
+	 * Keep the simulator's phase accumulator, fractional scheduler, and
+	 * packet framing across the configuration APPLY, so the generated
+	 * waveform continues seamlessly instead of restarting at 0 degrees
+	 * (no phase discontinuity into the metrology engines).
+	 */
+	MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE = 1u << 0,
+};
+
 enum msap1_frequency_mode {
 	MSAP1_FREQUENCY_MODE_SINGLE_CYCLE = 0,
 	MSAP1_FREQUENCY_MODE_ROLLING_CYCLES = 1,
@@ -197,6 +211,14 @@ struct msap1_meter_config_payload {
 	int32_t simulator_peak_counts[8];
 	uint32_t simulator_phase_q32[8];
 	uint32_t simulator_phase_step_q32;
+	/* Signed DC offset per channel, ADC counts. */
+	int32_t simulator_dc_offset_counts[8];
+	/* Uniform fluctuation amplitude per channel, ADC counts: the PL adds
+	 * white noise in +/- level (RMS contribution level/sqrt(3)); 0 keeps
+	 * the channel noise-free. */
+	uint32_t simulator_noise_level_counts[8];
+	/* MSAP1_SIMULATOR_FLAG_* bits. */
+	uint32_t simulator_flags;
 	/*
 	 * Declared nominal grid frequency in hertz. Only 50 or 60 is valid. This
 	 * is configuration, not the measured frequency; it selects the Class A

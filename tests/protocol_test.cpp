@@ -189,26 +189,51 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Coordinated APU/RPU ABI: nominal_frequency_hz is the appended
-	 * trailing field, growing the packed payload from 172 to 176 bytes
-	 * (frame 16+176 = 192 <= 256). Wire version stays 2. */
-	static_assert(sizeof(msap1_meter_config_payload) == 176,
-		      "meter config payload must be 176 packed bytes");
+	/* Coordinated APU/RPU ABI, wire version 3: the simulator DC-offset,
+	 * noise-level, and flags fields sit between the phase step and the
+	 * trailing nominal_frequency_hz, growing the packed payload from 176
+	 * to 244 bytes (frame 16+244 = 260 <= 384). */
+	static_assert(sizeof(msap1_meter_config_payload) == 244,
+		      "meter config payload must be 244 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       nominal_frequency_hz) == 172,
+			       simulator_dc_offset_counts) == 172,
+		      "DC offsets must follow the simulator phase step");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_noise_level_counts) == 204,
+		      "noise levels must follow the DC offsets");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_flags) == 236,
+		      "simulator flags must follow the noise levels");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       nominal_frequency_hz) == 240,
 		      "nominal_frequency_hz must be the trailing field");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
+	payload.simulator_dc_offset_counts[2] = -12345;
+	payload.simulator_noise_level_counts[6] = 777;
+	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
 	const auto decoded = msap1::decode_message(wire.data(), wire.size());
 	require(decoded.payload.size() == sizeof(payload),
 		"meter config payload size changed on the wire");
 	std::uint32_t nominal = 0;
-	std::memcpy(&nominal, decoded.payload.data() + 172, sizeof(nominal));
+	std::memcpy(&nominal, decoded.payload.data() + 240, sizeof(nominal));
 	require(nominal == 50,
 		"nominal frequency was not encoded at the trailing offset");
+	std::int32_t dc = 0;
+	std::memcpy(&dc, decoded.payload.data() + 172 + 2 * 4, sizeof(dc));
+	require(dc == -12345,
+		"DC offset was not encoded at its normative offset");
+	std::uint32_t noise = 0;
+	std::memcpy(&noise, decoded.payload.data() + 204 + 6 * 4, sizeof(noise));
+	require(noise == 777,
+		"noise level was not encoded at its normative offset");
+	std::uint32_t flags = 0;
+	std::memcpy(&flags, decoded.payload.data() + 236, sizeof(flags));
+	require(flags == MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE,
+		"simulator flags were not encoded at their normative offset");
 }
 
 void meter_record_contract()

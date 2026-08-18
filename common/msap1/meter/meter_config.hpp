@@ -51,18 +51,27 @@ struct SimulatorChannelConfig {
 	std::uint32_t channel = 0;
 	double rms = 0.0;
 	double phase_degrees = 0.0;
+	/* Constant offset in engineering units (volts/amps); default flat. */
+	double dc = 0.0;
+	/* RMS of the uniform white fluctuation the PL adds, engineering
+	 * units. Real grid inputs never sit bit-flat; a small value here
+	 * makes simulated readings jitter realistically. 0 disables. */
+	double noise_rms = 0.0;
 };
 
 struct SimulatorConfig {
 	double frequency_hz = 60.0;
+	/* Keep the generated waveform's phase/framing across a
+	 * reconfiguration commit instead of restarting at 0 degrees. */
+	bool preserve_phase = false;
 	std::vector<SimulatorChannelConfig> channels{
-		{0u, 5.0, 0.0},
-		{1u, 5.0, -120.0},
-		{2u, 5.0, 120.0},
-		{3u, 0.0, 0.0},
-		{4u, 120.0, 120.0},
-		{5u, 120.0, -120.0},
-		{6u, 120.0, 0.0},
+		{0u, 5.0, 0.0, 0.0, 0.0},
+		{1u, 5.0, -120.0, 0.0, 0.0},
+		{2u, 5.0, 120.0, 0.0, 0.0},
+		{3u, 0.0, 0.0, 0.0, 0.0},
+		{4u, 120.0, 120.0, 0.0, 0.0},
+		{5u, 120.0, -120.0, 0.0, 0.0},
+		{6u, 120.0, 0.0, 0.0, 0.0},
 	};
 };
 

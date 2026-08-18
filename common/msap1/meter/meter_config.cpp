@@ -19,6 +19,9 @@ constexpr double adc_positive_codes = 8388608.0;
 constexpr double q16_scale = 65536.0;
 constexpr double q32_scale = 4294967296.0;
 constexpr double square_root_two = 1.4142135623730950488;
+/* A uniform distribution in +/- L has RMS L/sqrt(3), so an engineering
+ * noise RMS converts to the PL's amplitude register via sqrt(3). */
+constexpr double square_root_three = 1.7320508075688772935;
 
 bool valid_pga_gain(std::uint32_t gain)
 {
@@ -334,7 +337,9 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	for (const auto &channel : simulator.channels) {
 		if (channel.channel > 6u ||
 		    (simulator_mask & (1u << channel.channel)) != 0u ||
-		    !std::isfinite(channel.rms) || channel.rms < 0.0)
+		    !std::isfinite(channel.rms) || channel.rms < 0.0 ||
+		    !std::isfinite(channel.dc) ||
+		    !std::isfinite(channel.noise_rms) || channel.noise_rms < 0.0)
 			throw std::runtime_error(
 				"simulator channel configuration is invalid");
 		const auto coefficient =
@@ -350,21 +355,43 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			result.wire.simulator_peak_counts[channel.channel] = 0;
 			result.wire.simulator_phase_q32[channel.channel] =
 				phase_q32(channel.phase_degrees);
+			result.wire.simulator_dc_offset_counts[channel.channel] = 0;
+			result.wire.simulator_noise_level_counts[channel.channel] = 0;
 			simulator_mask |= 1u << channel.channel;
 			continue;
 		}
-		const double raw_peak = channel.rms * 1000000.0 *
-			square_root_two * q16_scale /
+		const double counts_per_unit = 1000000.0 * q16_scale /
 			static_cast<double>(coefficient);
+		const double raw_peak =
+			channel.rms * square_root_two * counts_per_unit;
 		if (!std::isfinite(raw_peak) || raw_peak < 0.0 ||
 		    raw_peak > 8388607.0)
 			throw std::runtime_error("simulator CH" +
 				std::to_string(channel.channel) +
 				" amplitude exceeds signed 24-bit range");
+		/* DC is an instantaneous level: no sqrt(2) peak conversion. */
+		const double raw_dc = channel.dc * counts_per_unit;
+		if (!std::isfinite(raw_dc) || raw_dc < -8388608.0 ||
+		    raw_dc > 8388607.0)
+			throw std::runtime_error("simulator CH" +
+				std::to_string(channel.channel) +
+				" DC offset exceeds signed 24-bit range");
+		/* Uniform noise amplitude register = RMS * sqrt(3). */
+		const double raw_noise =
+			channel.noise_rms * square_root_three * counts_per_unit;
+		if (!std::isfinite(raw_noise) || raw_noise < 0.0 ||
+		    raw_noise > 8388607.0)
+			throw std::runtime_error("simulator CH" +
+				std::to_string(channel.channel) +
+				" noise amplitude exceeds signed 24-bit range");
 		result.wire.simulator_peak_counts[channel.channel] =
 			static_cast<std::int32_t>(std::llround(raw_peak));
 		result.wire.simulator_phase_q32[channel.channel] =
 			phase_q32(channel.phase_degrees);
+		result.wire.simulator_dc_offset_counts[channel.channel] =
+			static_cast<std::int32_t>(std::llround(raw_dc));
+		result.wire.simulator_noise_level_counts[channel.channel] =
+			static_cast<std::uint32_t>(std::llround(raw_noise));
 		simulator_mask |= 1u << channel.channel;
 	}
 	if (simulator_mask != 0x7fu)
@@ -383,6 +410,9 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			static_cast<double>(sample_rate_hz)));
 	if (result.wire.simulator_phase_step_q32 == 0u)
 		throw std::runtime_error("simulator phase step is zero");
+	result.wire.simulator_flags = simulator.preserve_phase
+		? static_cast<std::uint32_t>(MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE)
+		: 0u;
 
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;

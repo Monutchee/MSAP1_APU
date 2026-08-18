@@ -41,11 +41,18 @@ struct AdcSimulatorChannelDto {
 	std::uint32_t channel = 0;
 	double rms = 0.0;
 	double phase_degrees = 0.0;
+	/** Constant offset, engineering units (volts/amps). */
+	double dc = 0.0;
+	/** RMS of the uniform white fluctuation the PL adds, engineering
+	 *  units; 0 keeps the channel noise-free. */
+	double noise_rms = 0.0;
 };
 
 /** Body of GET/PUT /api/v1/adc/simulator. */
 struct AdcSimulatorDto {
 	double frequency_hz = 60.0;
+	/** Keep waveform phase/framing across the configuration commit. */
+	bool preserve_phase = false;
 	std::array<AdcSimulatorChannelDto, 8> channels{};
 	std::string active_source = "physical";
 	std::uint32_t configuration_generation = 0;
@@ -88,11 +95,14 @@ AdcSimulatorDto adc_simulator(const msap1::SimulatorResponse &response)
 	result.frequency_hz =
 		static_cast<double>(response.simulator.frequency_millihz) /
 		1000.0;
+	result.preserve_phase = response.simulator.preserve_phase != 0u;
 	for (std::size_t index = 0; index < result.channels.size(); ++index) {
 		result.channels[index] = {
 			static_cast<std::uint32_t>(index),
 			response.simulator.channels[index].rms,
 			response.simulator.channels[index].phase_degrees,
+			response.simulator.channels[index].dc,
+			response.simulator.channels[index].noise_rms,
 		};
 	}
 	result.active_source = adc_source_name(response.adc_source);
@@ -126,6 +136,7 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 	msap1::SimulatorIpcConfiguration result;
 	result.frequency_millihz = static_cast<std::uint32_t>(
 		std::llround(configuration.frequency_hz * 1000.0));
+	result.preserve_phase = configuration.preserve_phase ? 1u : 0u;
 	std::array<bool, 8> seen{};
 	for (const auto &channel : configuration.channels) {
 		if (channel.channel >= result.channels.size() ||
@@ -133,12 +144,16 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 			throw std::invalid_argument(
 				"simulator channel indices must contain CH0 through CH7 once");
 		if (!std::isfinite(channel.rms) || channel.rms < 0.0 ||
-		    !std::isfinite(channel.phase_degrees))
+		    !std::isfinite(channel.phase_degrees) ||
+		    !std::isfinite(channel.dc) ||
+		    !std::isfinite(channel.noise_rms) || channel.noise_rms < 0.0)
 			throw std::invalid_argument(
-				"simulator RMS and phase values must be finite");
+				"simulator RMS, phase, DC, and noise values must be finite "
+				"(RMS and noise non-negative)");
 		seen[channel.channel] = true;
 		result.channels[channel.channel] = {
-			channel.rms, channel.phase_degrees};
+			channel.rms, channel.phase_degrees, channel.dc,
+			channel.noise_rms};
 	}
 	return result;
 }
@@ -151,11 +166,13 @@ msap1::SimulatorConfig adc_simulator_settings(
 	(void)adc_simulator_ipc(configuration);
 	msap1::SimulatorConfig result;
 	result.frequency_hz = configuration.frequency_hz;
+	result.preserve_phase = configuration.preserve_phase;
 	result.channels.clear();
 	result.channels.reserve(configuration.channels.size());
 	for (const auto &channel : configuration.channels)
 		result.channels.push_back(
-			{channel.channel, channel.rms, channel.phase_degrees});
+			{channel.channel, channel.rms, channel.phase_degrees,
+			 channel.dc, channel.noise_rms});
 	return result;
 }
 

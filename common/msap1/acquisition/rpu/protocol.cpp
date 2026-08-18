@@ -10,8 +10,9 @@ static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
 static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
-/* 172 legacy bytes + the trailing nominal_frequency_hz field (wire v2). */
-static_assert(sizeof(msap1_meter_config_payload) == 176,
+/* Wire v3: simulator DC offsets, noise levels, and flags precede the
+ * trailing nominal_frequency_hz field. */
+static_assert(sizeof(msap1_meter_config_payload) == 244,
 	      "unexpected meter configuration payload layout");
 static_assert(sizeof(msap1_meter_config_ack_payload) == 28,
 	      "unexpected meter configuration acknowledgement layout");

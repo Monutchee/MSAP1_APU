@@ -39,6 +39,9 @@ struct Options {
 	std::optional<double> simulator_frequency_hz;
 	std::array<std::optional<double>, 7> simulator_rms{};
 	std::array<std::optional<double>, 7> simulator_phase_degrees{};
+	std::array<std::optional<double>, 7> simulator_dc{};
+	std::array<std::optional<double>, 7> simulator_noise_rms{};
+	std::optional<bool> simulator_preserve_phase;
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
