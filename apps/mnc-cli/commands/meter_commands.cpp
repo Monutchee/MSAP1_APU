@@ -1001,6 +1001,12 @@ public:
 			output << "  " << pairs[pair]
 			       << " RMS: " << s.vll_rms_micro_units[pair]
 			       << " micro-units\n";
+		static constexpr std::array<const char *, 3> phases{"A", "B",
+								    "C"};
+		for (std::size_t phase = 0; phase < phases.size(); ++phase)
+			output << "  P" << phases[phase] << ": "
+			       << s.active_power_picowatts[phase]
+			       << " pW\n";
 		return 0;
 	}
 };

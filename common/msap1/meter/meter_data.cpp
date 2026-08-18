@@ -623,6 +623,14 @@ SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
 			record.word(base) |
 			(std::uint64_t{record.word(base + 1)} << 32);
 	}
+	for (std::size_t phase = 0;
+	     phase < snapshot.active_power_picowatts.size(); ++phase) {
+		const std::size_t base = 44 + phase * 2;
+		snapshot.active_power_picowatts[phase] =
+			static_cast<std::int64_t>(
+				record.word(base) |
+				(std::uint64_t{record.word(base + 1)} << 32));
+	}
 	return snapshot;
 }
 

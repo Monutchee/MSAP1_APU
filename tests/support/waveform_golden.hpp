@@ -42,16 +42,29 @@ struct GoldenChannelExpectation {
 	bool enabled = false;
 };
 
+/* Per-phase active power expectation, watts; import positive (the shared
+ * sign conventions). P = Vrms * Irms * cos(phase_v - phase_i) for the
+ * fundamental plus the DC product; simulator noise is uncorrelated
+ * between channels and contributes no mean power. */
+struct GoldenPowerExpectation {
+	double active_power_watts = 0.0;
+};
+
 /** Expected steady-state readings for one simulator configuration. */
 struct GoldenExpectation {
 	double frequency_hz = 0.0;
 	std::array<GoldenChannelExpectation, 8> channels{};
+	/* Phases A/B/C pair voltage lanes 6/5/4 with current lanes 0/1/2. */
+	std::array<GoldenPowerExpectation, 3> power{};
 };
 
 inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config)
 {
 	GoldenExpectation result;
 	result.frequency_hz = config.frequency_hz;
+	std::array<double, 8> rms{};
+	std::array<double, 8> phase_degrees{};
+	std::array<double, 8> dc{};
 	for (const auto &channel : config.channels) {
 		if (channel.channel >= result.channels.size())
 			continue;
@@ -65,6 +78,19 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 			channel.rms * channel.rms +
 			channel.noise_rms * channel.noise_rms +
 			channel.dc * channel.dc);
+		rms[channel.channel] = channel.rms;
+		phase_degrees[channel.channel] = channel.phase_degrees;
+		dc[channel.channel] = channel.dc;
+	}
+	static constexpr int voltage_lane[3] = {6, 5, 4};
+	static constexpr int current_lane[3] = {0, 1, 2};
+	for (std::size_t phase = 0; phase < result.power.size(); ++phase) {
+		const int v = voltage_lane[phase];
+		const int i = current_lane[phase];
+		const double angle = (phase_degrees[v] - phase_degrees[i]) *
+				     M_PI / 180.0;
+		result.power[phase].active_power_watts =
+			rms[v] * rms[i] * std::cos(angle) + dc[v] * dc[i];
 	}
 	return result;
 }

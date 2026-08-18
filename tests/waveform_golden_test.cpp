@@ -98,6 +98,12 @@ void golden_expectation_composition()
 		"sine and noise combine in quadrature");
 	require(!expectation.channels[5].enabled,
 		"unconfigured channel stays disabled");
+
+	/* Power: phase A pairs Va (lane 6, 120 V @ 0 deg) with Ia (lane 0,
+	 * 10 A @ -60 deg): P = 1200 * cos(60 deg) = 600 W (the handover's
+	 * own worked example). */
+	require(near(expectation.power[0].active_power_watts, 600.0, 1e-9),
+		"phase A active power via displacement angle");
 }
 
 void wire_conversion_round_trip()

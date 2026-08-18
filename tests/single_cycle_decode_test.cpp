@@ -55,6 +55,16 @@ int main()
 		record.words[38 + pair * 2] = 2000000u + pair;
 		record.words[38 + pair * 2 + 1] = 0;
 	}
+	/* Phase A: positive import; phase B: negative (export) as the
+	 * sign-extension pin; phase C: zero. */
+	record.words[44] = 360000000u;
+	record.words[45] = 0;
+	const std::uint64_t negative_bits =
+		static_cast<std::uint64_t>(std::int64_t{-180000000});
+	record.words[46] = static_cast<std::uint32_t>(negative_bits);
+	record.words[47] = static_cast<std::uint32_t>(negative_bits >> 32);
+	record.words[48] = 0;
+	record.words[49] = 0;
 
 	require(record.header_valid(),
 		"SCYC-v2 must pass the shared header check");
@@ -82,6 +92,10 @@ int main()
 	for (std::size_t pair = 0; pair < 3; ++pair)
 		require(snapshot.vll_rms_micro_units[pair] == 2000000u + pair,
 			"VLL RMS");
+	require(snapshot.active_power_picowatts[0] == 360000000, "phase A P");
+	require(snapshot.active_power_picowatts[1] == -180000000,
+		"phase B P sign extension");
+	require(snapshot.active_power_picowatts[2] == 0, "phase C P");
 
 	if (failures != 0) {
 		std::fprintf(stderr, "FAILED: %d check(s)\n", failures);

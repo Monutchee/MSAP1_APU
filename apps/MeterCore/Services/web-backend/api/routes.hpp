@@ -74,6 +74,10 @@ webengine::Response get_meter_health(AppContext &,
 /** @brief GET /api/v1/meter/readings — latest RMS/frequency record. */
 webengine::Response get_meter_readings(AppContext &,
 				       const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/single-cycle — SCYC diagnostic snapshot. */
+webengine::Response get_meter_single_cycle(AppContext &,
+					   const webengine::RequestContext &);
+
 /** @brief GET /api/v1/meter/aggregate — newest 150/180-cycle aggregate. */
 webengine::Response get_meter_aggregate(AppContext &,
 					const webengine::RequestContext &);
@@ -225,6 +229,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/aggregate",
 	 webengine::Role::Viewer, &get_meter_aggregate,
 	 "Newest 150/180-cycle aggregate RMS values"},
+	{webengine::http::verb::get, "/api/v1/meter/single-cycle",
+	 webengine::Role::Viewer, &get_meter_single_cycle,
+	 "Latest single-cycle diagnostic (RMS, VLL, per-phase power)"},
 	{webengine::http::verb::get, "/api/v1/meter/configuration/frequency",
 	 webengine::Role::Viewer, &get_frequency_configuration,
 	 "Active frequency measurement configuration"},

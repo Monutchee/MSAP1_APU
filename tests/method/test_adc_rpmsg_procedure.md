@@ -326,3 +326,23 @@ StatisticsCore) and the `mnc meter single-cycle` command. All cases run with
    moves to sqrt(AC² + DC²). Restore defaults afterwards.
 5. **Status flag.** Normal scenarios must show `Status: 0x0`; any nonzero
    arithmetic flag at product amplitudes is a defect.
+
+## 11. Single-cycle power (metrology M4)
+
+Prerequisite: SCYC-v3 records (PowerCore) and the matched image. All cases via
+`mnc meter single-cycle`, simulator source, capture active. Golden values from
+`tests/support/waveform_golden.hpp`: P = Vrms x Irms x cos(phase_v - phase_i)
++ Vdc x Idc, per phase; import positive.
+
+1. **Unity PF.** Balanced default (120 V / 3 A, aligned phases per pair):
+   PA = PB = PC = 360 W = 360e12 pW within the golden tolerance.
+2. **Displacement.** `--ia-phase-degrees -60` (voltage at 0): PA drops to
+   180 W while PB/PC stay at 360 W. The handover's worked example
+   (120 V, 10 A, -60 deg -> 600 W) can be run with `--ia-rms 10`.
+3. **Reverse power.** `--ia-phase-degrees 180` (current fully anti-phase to
+   Va at 0 deg): PA = -360 W — the record word must carry the sign (export
+   negative). Restore defaults afterwards.
+4. **DC power.** `--va-dc 5 --ia-dc 1` with remove_dc irrelevant to power:
+   PA gains +5 W (dc_v x dc_i) on top of the AC term.
+5. **Zero current.** `--ia-rms 0`: PA reads 0 within tolerance; no spurious
+   power from noise (noise is uncorrelated between lanes).

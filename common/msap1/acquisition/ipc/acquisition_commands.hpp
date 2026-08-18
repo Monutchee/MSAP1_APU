@@ -49,7 +49,7 @@ inline constexpr const char *acquisition_socket_path =
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
  * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 25;
+inline constexpr std::uint16_t acquisition_ipc_version = 26;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();

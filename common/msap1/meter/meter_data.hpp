@@ -213,6 +213,9 @@ struct SingleCycleSnapshot {
 	std::uint32_t frequency_status = 0;
 	std::array<std::uint64_t, 7> rms_micro_units{};
 	std::array<std::uint64_t, 3> vll_rms_micro_units{};
+	/* Per-phase one-cycle active power, picowatts; import positive
+	 * (sign conventions: PL metering_types.hpp). */
+	std::array<std::int64_t, 3> active_power_picowatts{};
 };
 
 [[nodiscard]] SingleCycleSnapshot decode_single_cycle_record(

@@ -421,6 +421,59 @@ webengine::Response get_meter_readings(AppContext &app,
  *         unreachable, reports a failure status, or cached a malformed
  *         aggregate record.
  */
+/** JSON body of GET /api/v1/meter/single-cycle (SCYC-v3 diagnostics). */
+struct SingleCycleDto {
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	std::uint32_t sequence = 0;
+	std::uint32_t cycle_sequence = 0;
+	std::uint32_t sample_count = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint64_t processing_tick = 0;
+	std::uint32_t nominal_hz = 0;
+	std::uint32_t flags = 0;
+	std::uint32_t status = 0;
+	std::uint32_t frequency_millihz = 0;
+	std::array<std::uint64_t, 7> rms_micro_units{};
+	std::array<std::uint64_t, 3> vll_rms_micro_units{};
+	std::array<std::int64_t, 3> active_power_picowatts{};
+};
+
+webengine::Response get_meter_single_cycle(AppContext &app,
+					   const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.single_cycle();
+		require_acquisition_ok(response.status);
+		SingleCycleDto dto;
+		dto.running = response.running;
+		dto.has_snapshot = response.has_snapshot;
+		dto.records = response.records;
+		const auto &snapshot = response.snapshot;
+		dto.sequence = snapshot.sequence;
+		dto.cycle_sequence = snapshot.cycle_sequence;
+		dto.sample_count = snapshot.sample_count;
+		dto.first_sample = snapshot.first_sample;
+		dto.last_sample = snapshot.last_sample;
+		dto.processing_tick = snapshot.processing_tick;
+		dto.nominal_hz = snapshot.nominal_hz;
+		dto.flags = snapshot.flags;
+		dto.status = snapshot.status;
+		dto.frequency_millihz = snapshot.frequency_millihz;
+		dto.rms_micro_units = snapshot.rms_micro_units;
+		dto.vll_rms_micro_units = snapshot.vll_rms_micro_units;
+		dto.active_power_picowatts = snapshot.active_power_picowatts;
+		return json_response(webengine::http::status::ok, dto);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/single-cycle", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
 webengine::Response get_meter_aggregate(AppContext &app,
 					const webengine::RequestContext &)
 {

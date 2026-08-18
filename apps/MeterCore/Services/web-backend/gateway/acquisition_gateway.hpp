@@ -34,6 +34,7 @@ public:
 	[[nodiscard]] AdcSourceResponse adc_source(int timeout_ms = 1000);
 	[[nodiscard]] SimulatorResponse simulator_configuration(
 		int timeout_ms = 1000);
+	[[nodiscard]] SingleCycleResponse single_cycle(int timeout_ms = 1000);
 	[[nodiscard]] CaptureResponse set_capture(
 		bool enabled, int timeout_ms = 3000);
 
