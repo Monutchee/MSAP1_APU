@@ -107,6 +107,7 @@ public:
 	[[nodiscard]] msap1::WaveformResponse waveform_response();
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
+	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;
 	[[nodiscard]] msap1::MeterSnapshotResponse meter_snapshot_response(
 		const msap1::MeterSnapshotRequest &request) const;
 

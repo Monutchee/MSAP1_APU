@@ -598,6 +598,18 @@ msap1::DiagnosticResponse CaptureCoordinator::diagnostic_response() const
 	return response;
 }
 
+msap1::SingleCycleResponse CaptureCoordinator::single_cycle_response() const
+{
+	msap1::SingleCycleResponse response{};
+	response.running = running_;
+	response.records = ingest_.single_cycle_records();
+	const auto &latest = ingest_.latest_single_cycle();
+	response.has_snapshot = latest.has_value();
+	if (latest)
+		response.snapshot = *latest;
+	return response;
+}
+
 msap1::WaveformResponse CaptureCoordinator::waveform_response()
 {
 	msap1::WaveformResponse response{};

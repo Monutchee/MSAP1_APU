@@ -587,4 +587,43 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 	return result;
 }
 
+
+SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (SCYC-v2). */
+	SingleCycleSnapshot snapshot;
+	snapshot.sequence = record.word(3);
+	snapshot.configuration_generation = record.word(4);
+	snapshot.sample_count = record.word(6);
+	snapshot.valid_mask = record.word(7);
+	snapshot.status = record.word(8);
+	snapshot.first_sample =
+		record.word(9) | (std::uint64_t{record.word(10)} << 32);
+	snapshot.nominal_hz = record.word(13) & 0xffu;
+	snapshot.flags = (record.word(13) >> 16) & 0x7u;
+	snapshot.cycle_sequence = record.word(14);
+	snapshot.last_sample =
+		record.word(16) | (std::uint64_t{record.word(17)} << 32);
+	snapshot.processing_tick =
+		record.word(18) | (std::uint64_t{record.word(19)} << 32);
+	snapshot.frequency_millihz = record.word(20);
+	snapshot.frequency_status = record.word(21);
+	for (std::size_t lane = 0; lane < snapshot.rms_micro_units.size();
+	     ++lane) {
+		const std::size_t base = 24 + lane * 2;
+		snapshot.rms_micro_units[lane] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
+	}
+	for (std::size_t pair = 0; pair < snapshot.vll_rms_micro_units.size();
+	     ++pair) {
+		const std::size_t base = 38 + pair * 2;
+		snapshot.vll_rms_micro_units[pair] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
+	}
+	return snapshot;
+}
+
 } // namespace msap1

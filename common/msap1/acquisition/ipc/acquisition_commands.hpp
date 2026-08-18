@@ -14,6 +14,7 @@
  */
 
 #include "msap1/meter/meter_record.hpp"
+#include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_timing.hpp"
 #include "mnc/MeterDataProvider/snapshot/meter_snapshot.hpp"
 #include "msap1/acquisition/rpu/rpu_control_protocol.h"
@@ -48,7 +49,7 @@ inline constexpr const char *acquisition_socket_path =
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
  * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 24;
+inline constexpr std::uint16_t acquisition_ipc_version = 25;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -321,6 +322,14 @@ struct ApplyResponse {
 	std::uint32_t configuration_generation = 0;
 };
 
+struct SingleCycleResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	msap1::SingleCycleSnapshot snapshot{};
+};
+
 /* ---- requests --------------------------------------------------------- */
 
 struct InfoRequest {
@@ -427,6 +436,13 @@ struct SimulatorGetRequest {
 	std::uint16_t version = acquisition_ipc_version;
 };
 
+/** Latest single-cycle diagnostic snapshot (SCYC records, roadmap M3). */
+struct SingleCycleRequest {
+	static constexpr std::string_view command = "meter-single-cycle";
+	using Response = SingleCycleResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
 /** Applies one complete settings snapshot (sent by the settings service). */
 struct ConfigurationApplyRequest {
 	static constexpr std::string_view command = "configuration-apply";
@@ -441,7 +457,7 @@ using AcquisitionCommandList = std::tuple<
 	StopRequest, FrequencyGetRequest, SampleRateSetRequest,
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
-	SimulatorGetRequest, ConfigurationApplyRequest>;
+	SimulatorGetRequest, SingleCycleRequest, ConfigurationApplyRequest>;
 
 namespace detail {
 

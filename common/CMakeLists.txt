@@ -403,6 +403,14 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME waveform_golden_test COMMAND waveform_golden_test)
 
+    # SCYC-v2 single-cycle diagnostic decode pinned against the PL word map.
+    add_executable(single_cycle_decode_test
+        ${PROJECT_SOURCE_DIR}/tests/single_cycle_decode_test.cpp)
+    target_link_libraries(single_cycle_decode_test PRIVATE msap1::meter)
+    target_compile_options(single_cycle_decode_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME single_cycle_decode_test COMMAND single_cycle_decode_test)
+
     # GET /api/v1/meter/aggregate is pinned by its JSON payload, and the
     # projection that renders it is deliberately WebEngine-free, so the
     # contract is tested without linking the HTTP stack.

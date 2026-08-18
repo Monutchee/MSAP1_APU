@@ -190,6 +190,34 @@ private:
  * Future power, energy, demand, and PQ records can register new decoders
  * without modifying the existing MTR1 fundamental decoder.
  */
+/*
+ * Decoded view of one SCYC-v2 single-cycle diagnostic record (PL
+ * metrology roadmap M3). Deliberately OUTSIDE the MeterUpdate/period
+ * store: these are diagnostic readings for verification tooling; the
+ * authoritative single-cycle outputs are the mergeable statistics on the
+ * PL-internal result stream. All RMS values are micro-units (uV/uA).
+ */
+struct SingleCycleSnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t valid_mask = 0;
+	std::uint32_t status = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t cycle_sequence = 0;
+	std::uint32_t nominal_hz = 0;
+	std::uint32_t flags = 0;
+	std::uint64_t processing_tick = 0;
+	std::uint32_t frequency_millihz = 0;
+	std::uint32_t frequency_status = 0;
+	std::array<std::uint64_t, 7> rms_micro_units{};
+	std::array<std::uint64_t, 3> vll_rms_micro_units{};
+};
+
+[[nodiscard]] SingleCycleSnapshot decode_single_cycle_record(
+	const MeterRecord &record);
+
 class MeterDecoderRegistry {
 public:
 	using Decoder = std::function<MeterUpdate(const MeterRecord &, SystemTime)>;

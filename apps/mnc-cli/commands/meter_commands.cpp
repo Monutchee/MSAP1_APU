@@ -957,6 +957,77 @@ public:
 	}
 };
 
+struct SingleCycleResult {
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	msap1::SingleCycleSnapshot snapshot{};
+};
+
+class SingleCycleTextGenerator final : public ResultGenerator<SingleCycleResult> {
+public:
+	int write(const SingleCycleResult &result,
+		  std::ostream &output) const override
+	{
+		static constexpr std::array<const char *, 7> names{
+			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		static constexpr std::array<const char *, 3> pairs{
+			"Vab", "Vbc", "Vca"};
+		output << "Single-cycle diagnostic (SCYC-v2)\n"
+		       << "  Records accepted:   " << result.records << '\n';
+		if (!result.has_snapshot) {
+			output << "  No snapshot yet (cycle timing unlocked or "
+				  "acquisition stopped)\n";
+			return 0;
+		}
+		const auto &s = result.snapshot;
+		output << "  Sequence:           " << s.sequence << '\n'
+		       << "  Cycle sequence:     " << s.cycle_sequence << '\n'
+		       << "  Samples:            " << s.sample_count << '\n'
+		       << "  Sample range:       " << s.first_sample << ".."
+		       << s.last_sample << '\n'
+		       << "  Processing tick:    " << s.processing_tick << '\n'
+		       << "  Nominal / flags:    " << s.nominal_hz << " Hz / 0x"
+		       << std::hex << s.flags << std::dec << '\n'
+		       << "  Frequency:          " << s.frequency_millihz
+		       << " mHz\n"
+		       << "  Status:             0x" << std::hex << s.status
+		       << std::dec << '\n';
+		for (std::size_t lane = 0; lane < names.size(); ++lane)
+			output << "  CH" << lane << ' ' << names[lane]
+			       << " RMS: " << s.rms_micro_units[lane]
+			       << " micro-units\n";
+		for (std::size_t pair = 0; pair < pairs.size(); ++pair)
+			output << "  " << pairs[pair]
+			       << " RMS: " << s.vll_rms_micro_units[pair]
+			       << " micro-units\n";
+		return 0;
+	}
+};
+
+class SingleCycleJsonGenerator final : public ResultGenerator<SingleCycleResult> {
+public:
+	int write(const SingleCycleResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_single_cycle(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(
+		msap1::SingleCycleRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	SingleCycleResult result{response.running, response.has_snapshot,
+				 response.records, response.snapshot};
+	return render_result(options, result, output,
+			     SingleCycleTextGenerator{},
+			     SingleCycleJsonGenerator{});
+}
+
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -1007,6 +1078,16 @@ void register_meter_commands(Application &application)
 		false,
 	});
 	meter.add_subcommand(std::move(health));
+	meter.add_subcommand(Command(
+		"single-cycle", "Show the latest single-cycle diagnostic",
+		run_meter_single_cycle,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
 	meter.add_subcommand(Command(
 		"snapshot", "Read one coherent meter result",
 		run_meter_snapshot,

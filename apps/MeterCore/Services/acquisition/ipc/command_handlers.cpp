@@ -151,6 +151,10 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.simulator_response();
 		});
+	registry.on<msap1::SingleCycleRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const auto &) {
+			return coordinator.single_cycle_response();
+		});
 	registry.on<msap1::ConfigurationApplyRequest>(
 		AcquisitionStatus::configuration_error,
 		[&coordinator](const msap1::ConfigurationApplyRequest &request) {

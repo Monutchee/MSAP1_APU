@@ -381,6 +381,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	 */
 	if (record.record_format() == msap1::meter_single_cycle_format) {
 		++single_cycle_records_;
+		latest_single_cycle_ = msap1::decode_single_cycle_record(record);
 		return;
 	}
 

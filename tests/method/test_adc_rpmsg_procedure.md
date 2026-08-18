@@ -298,3 +298,31 @@ numeric expectation comes from the host golden model
    spread must be below the golden quantization term - the interpolated
    sine table must not contribute visible jitter (the legacy 8-bit table
    failed this at the -48 dBc spur floor).
+
+## 10. Single-cycle statistics (metrology M3)
+
+Prerequisite: a matched image with SCYC-v2 records (single-cycle engine with
+StatisticsCore) and the `mnc meter single-cycle` command. All cases run with
+`adc.source: simulator`, capture active, cycle timing locked.
+
+1. **Cadence and provenance.** `mnc meter single-cycle` twice, one second
+   apart: `Records accepted` must advance by the nominal frequency (~60/s at
+   60 Hz), `sequence` and `cycle_sequence` advance together, and
+   `first_sample..last_sample` spans one cycle (sample_rate / frequency
+   samples within ±1).
+2. **Per-lane RMS vs golden.** With the default balanced configuration, each
+   voltage lane must read its configured RMS (micro-units = volts × 1e6)
+   within the golden tolerance for a 1-cycle block
+   (`golden_rms_tolerance(rms, 1)`); currents likewise. The single-cycle
+   values are noisier than the 12-cycle basic records — that is expected
+   windowing, not error.
+3. **Line-line RMS.** With balanced 120 V phases at 120° spacing, Vab/Vbc/Vca
+   must read √3 × 120 V ≈ 207.85 V within tolerance. Then configure an
+   unbalanced case (e.g. `--va-rms 100`): the three VLL values must match the
+   golden phasor differences, NOT √3 × VLN — this is the case that proves the
+   instantaneous-difference implementation.
+4. **dc_remove semantics.** Add `--va-dc 5` and toggle `metering.remove_dc`:
+   with removal the VA lane RMS stays at the AC value; without it the RMS
+   moves to sqrt(AC² + DC²). Restore defaults afterwards.
+5. **Status flag.** Normal scenarios must show `Status: 0x0`; any nonzero
+   arithmetic flag at product amplitudes is a defect.

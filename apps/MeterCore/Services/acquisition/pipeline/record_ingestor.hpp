@@ -151,6 +151,15 @@ public:
 	[[nodiscard]] std::uint64_t invalid_records() const { return invalid_records_; }
 	/** @brief Missing BASIC records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t sequence_gaps() const { return sequence_gaps_; }
+	[[nodiscard]] std::uint64_t single_cycle_records() const
+	{
+		return single_cycle_records_;
+	}
+	[[nodiscard]] const std::optional<msap1::SingleCycleSnapshot> &
+	latest_single_cycle() const
+	{
+		return latest_single_cycle_;
+	}
 	/** @brief Missing AGGREGATE records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
 	{
@@ -197,8 +206,11 @@ private:
 	std::uint64_t dma_read_errors_ = 0;
 	std::uint64_t invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
-	/* Single-cycle diagnostic records accepted (not yet consumed). */
+	/* Single-cycle diagnostic records: acceptance count and the latest
+	 * decoded snapshot (verification tooling; never published to the
+	 * WAL/period stores). */
 	std::uint64_t single_cycle_records_ = 0;
+	std::optional<msap1::SingleCycleSnapshot> latest_single_cycle_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	/* Kernel transport-overrun total at the last sequence-gap log. The
 	 * delta at gap time is what attributes the loss: it either matches the
