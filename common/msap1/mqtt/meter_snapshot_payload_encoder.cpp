@@ -87,6 +87,12 @@ std::pair<double, std::string> engineering(std::int64_t value,
 		return {static_cast<double>(value) / 1'000'000.0, "V"};
 	case mnc::meter::MeterUnit::MicroAmperes:
 		return {static_cast<double>(value) / 1'000'000.0, "A"};
+	case mnc::meter::MeterUnit::Picowatts:
+		return {static_cast<double>(value) / 1e12, "W"};
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		return {static_cast<double>(value) / 1e12, "VA"};
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		return {static_cast<double>(value) / 1'000'000.0, "PF"};
 	}
 	return {0.0, "unknown"};
 }

@@ -19,6 +19,12 @@ constexpr std::array catalog{
 	key(Id::VcnRms), key(Id::VabRms), key(Id::VbcRms),
 	key(Id::VcaRms), key(Id::IaRms), key(Id::IbRms),
 	key(Id::IcRms), key(Id::InRms),
+	key(Id::ActivePowerA), key(Id::ActivePowerB), key(Id::ActivePowerC),
+	key(Id::ActivePowerTotal),
+	key(Id::ApparentPowerA), key(Id::ApparentPowerB),
+	key(Id::ApparentPowerC), key(Id::ApparentPowerTotal),
+	key(Id::PowerFactorA), key(Id::PowerFactorB), key(Id::PowerFactorC),
+	key(Id::PowerFactorTotal),
 };
 
 } // namespace
@@ -48,6 +54,38 @@ MeterAttributeDescriptor describe(MeterAttributeKey attribute)
 		return {attribute, "current.c.rms", MeterUnit::MicroAmperes};
 	case Id::InRms:
 		return {attribute, "current.n.rms", MeterUnit::MicroAmperes};
+	case Id::ActivePowerA:
+		return {attribute, "power.active.a", MeterUnit::Picowatts};
+	case Id::ActivePowerB:
+		return {attribute, "power.active.b", MeterUnit::Picowatts};
+	case Id::ActivePowerC:
+		return {attribute, "power.active.c", MeterUnit::Picowatts};
+	case Id::ActivePowerTotal:
+		return {attribute, "power.active.total", MeterUnit::Picowatts};
+	case Id::ApparentPowerA:
+		return {attribute, "power.apparent.a",
+			MeterUnit::PicoVoltAmperes};
+	case Id::ApparentPowerB:
+		return {attribute, "power.apparent.b",
+			MeterUnit::PicoVoltAmperes};
+	case Id::ApparentPowerC:
+		return {attribute, "power.apparent.c",
+			MeterUnit::PicoVoltAmperes};
+	case Id::ApparentPowerTotal:
+		return {attribute, "power.apparent.total",
+			MeterUnit::PicoVoltAmperes};
+	case Id::PowerFactorA:
+		return {attribute, "power.factor.a",
+			MeterUnit::PowerFactorMillionths};
+	case Id::PowerFactorB:
+		return {attribute, "power.factor.b",
+			MeterUnit::PowerFactorMillionths};
+	case Id::PowerFactorC:
+		return {attribute, "power.factor.c",
+			MeterUnit::PowerFactorMillionths};
+	case Id::PowerFactorTotal:
+		return {attribute, "power.factor.total",
+			MeterUnit::PowerFactorMillionths};
 	}
 	throw std::invalid_argument("unknown meter attribute");
 }

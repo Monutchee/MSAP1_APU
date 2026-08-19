@@ -768,6 +768,16 @@ struct MeterSnapshot {
 	std::uint32_t result_drops = 0;
 	std::vector<MeterChannelDto> channels;
 	MeterFrequencyDto frequency;
+	/* Non-channel attributes (VLL, power, PF, ...): engineering value
+	 * plus the catalog's stable key, printed generically so new PL
+	 * quantities appear without new plumbing. */
+	struct Extra {
+		std::string key;
+		std::string unit;
+		bool valid = false;
+		double value = 0.0;
+	};
+	std::vector<Extra> readings;
 };
 
 MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
@@ -839,7 +849,39 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			result.channels[*index].valid = valid;
 			result.channels[*index].rms_micro_units = valid
 				? reading.value : 0;
+			continue;
 		}
+		const auto descriptor = mnc::meter::describe(reading.attribute);
+		double value = 0.0;
+		const char *unit = "";
+		switch (reading.unit) {
+		case mnc::meter::MeterUnit::MilliHertz:
+			value = static_cast<double>(reading.value) / 1e3;
+			unit = "Hz";
+			break;
+		case mnc::meter::MeterUnit::MicroVolts:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "V";
+			break;
+		case mnc::meter::MeterUnit::MicroAmperes:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "A";
+			break;
+		case mnc::meter::MeterUnit::Picowatts:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "W";
+			break;
+		case mnc::meter::MeterUnit::PicoVoltAmperes:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "VA";
+			break;
+		case mnc::meter::MeterUnit::PowerFactorMillionths:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "PF";
+			break;
+		}
+		result.readings.push_back({std::string(descriptor.key),
+					   unit, valid, value});
 	}
 	return result;
 }
@@ -943,6 +985,18 @@ public:
 			       << " Hz\n";
 		else
 			output << "unavailable\n";
+		for (const auto &reading : snapshot.readings) {
+			output << "  " << std::setw(20) << std::left
+			       << reading.key << std::right << ' ';
+			if (!reading.valid)
+				output << "unavailable\n";
+			else
+				output << std::fixed << std::setprecision(
+					       reading.unit == std::string("PF")
+						       ? 4 : 3)
+				       << reading.value << ' ' << reading.unit
+				       << '\n';
+		}
 		return 0;
 	}
 };

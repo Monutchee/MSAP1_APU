@@ -46,6 +46,20 @@ enum class MeterAttributeId : std::uint16_t {
 	IbRms,
 	IcRms,
 	InRms,
+	/* M8, the 10/12-cycle power tier. Appended: attribute ids are a
+	 * stable external contract and must never be renumbered. */
+	ActivePowerA,
+	ActivePowerB,
+	ActivePowerC,
+	ActivePowerTotal,
+	ApparentPowerA,
+	ApparentPowerB,
+	ApparentPowerC,
+	ApparentPowerTotal,
+	PowerFactorA,
+	PowerFactorB,
+	PowerFactorC,
+	PowerFactorTotal,
 };
 
 /**
@@ -76,6 +90,9 @@ enum class MeterAttributeGroup : std::uint8_t {
 	VoltageLlRms,
 	CurrentRms,
 	Fundamental,
+	ActivePower,
+	ApparentPower,
+	PowerFactor,
 	AllDefined,
 };
 
@@ -83,6 +100,11 @@ enum class MeterUnit : std::uint8_t {
 	MilliHertz,
 	MicroVolts,
 	MicroAmperes,
+	Picowatts,
+	PicoVoltAmperes,
+	/* True power factor, signed millionths; undefined (Unavailable
+	 * quality) when the apparent power is zero. */
+	PowerFactorMillionths,
 };
 
 enum class ReadingQuality : std::uint8_t {

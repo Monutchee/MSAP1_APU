@@ -36,6 +36,12 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
  * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
  * 32-bit), and status bit 2 = first block after a discontinuity. */
 inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
+/* POWER v1 (metrology M8): emitted by the 10/12-cycle tier on the same
+ * stream immediately after each BASIC-v4 record, same sequence and
+ * anchors. Per phase P (s64 pW), S (u64 pVA), true PF (s32 millionths,
+ * 0 = undefined when S is 0); arithmetic totals; per-lane crest factors
+ * (u32 ten-thousandths, 0 when RMS is 0). */
+inline constexpr std::uint32_t meter_power_format = 0x00070001u;
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
@@ -128,6 +134,7 @@ struct MeterRecord {
 	{
 		return word(0) == meter_record_magic &&
 		       (record_format() == meter_periodic_format ||
+		        record_format() == meter_power_format ||
 			record_format() == meter_aggregate_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;

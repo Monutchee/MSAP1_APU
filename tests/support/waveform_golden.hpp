@@ -60,6 +60,12 @@ struct GoldenChannelExpectation {
  * V-I difference. */
 struct GoldenPowerExpectation {
 	double active_power_watts = 0.0;
+	/* S = Vrms_total x Irms_total (TOTAL RMS: harmonics and noise
+	 * included -- that is what makes the PF below the TRUE power
+	 * factor rather than the displacement factor). */
+	double apparent_power_va = 0.0;
+	/* True PF = P / S, sign of P; NAN when S is 0 (undefined). */
+	double power_factor = 0.0;
 };
 
 /** Expected steady-state readings for one simulator configuration. */
@@ -132,6 +138,11 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 				 std::cos(harmonic.order * angle);
 		}
 		result.power[phase].active_power_watts = power;
+		const double s_va = result.channels[v].ac_rms *
+				    result.channels[i].ac_rms;
+		result.power[phase].apparent_power_va = s_va;
+		result.power[phase].power_factor =
+			s_va > 0.0 ? power / s_va : 0.0;
 	}
 	return result;
 }

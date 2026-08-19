@@ -453,3 +453,38 @@ nominal cadence and blocks are flagged fallback).
    voltage RMS at the noise floor. Restore the voltages: records relock
    (one gap-marked block) and the fallback flag clears. This replaces the
    retired sample-window fallback and is the case that proves it.
+
+## 15. 10/12-cycle power tier (metrology M8)
+
+Prerequisite: POWER-v1 records (0x00070001, emitted after every BASIC-v4
+record on the same stream) and the matched image. All cases via
+`mnc meter snapshot` (the derived quantities print below the channels),
+the web dashboard's "Derived quantities" panel, or
+`GET /api/v1/meter/readings` `attributes[]`. Golden values from
+`tests/support/waveform_golden.hpp`: per phase P = Vrms x Irms x
+cos(displacement) + DC product, S = Vrms x Irms (total RMS), true
+PF = P / S.
+
+1. **Unity PF baseline.** Balanced 120 V / 3 A aligned: each phase shows
+   P = 360 W, S = 360 VA, PF = 1.0000; totals P = S = 1080, PF = 1.0000.
+   Line-line voltages read 207.85 V in the same panel.
+2. **Displacement.** `--ia-phase-degrees -60`: PA = 180 W, SA stays
+   360 VA, PFA = 0.5000 — S must NOT follow P. PB/PC unchanged. The
+   TOTAL PF must read P_total / S_total = 900/1080 = 0.8333, NOT the
+   average of the phase PFs (0.8333 vs 0.8333... distinguish with an
+   unbalanced case: `--ia-rms 1 --ia-phase-degrees -60` gives phase PFs
+   {0.5, 1, 1} whose average is 0.8333 while the correct
+   P_total/S_total = (60+360+360)/(120+360+360) = 0.9286).
+3. **True PF under distortion.** `--harmonics 3:10` (voltage lanes):
+   P and the displacement stay put, S rises with the total RMS, so PF
+   drops to 1/sqrt(1.01) = 0.9950 at unity displacement — the case that
+   separates TRUE PF from displacement PF (which M9 adds separately).
+   `--harmonics none` restores.
+4. **Reverse power sign.** `--ia-phase-degrees 180`: PA = -360 W and
+   PFA = -1.0000; S stays positive. Restore afterwards.
+5. **Undefined PF.** `--ia-rms 0`: SA = 0 and PFA must show as
+   unavailable/dash — never a confident 0.0 or 1.0. Crest factors of the
+   silent lane read 0; live sine lanes read ~1.414.
+6. **Continuity.** `mnc meter health` over 10 minutes: zero gaps, zero
+   invalid — the doubled record rate (10/s at 60 Hz) must not disturb
+   the transport accounting.

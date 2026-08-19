@@ -104,6 +104,38 @@ void golden_expectation_composition()
 	 * own worked example). */
 	require(near(expectation.power[0].active_power_watts, 600.0, 1e-9),
 		"phase A active power via displacement angle");
+	require(near(expectation.power[0].apparent_power_va, 1200.0, 1e-9),
+		"phase A apparent power is Vrms x Irms");
+	require(near(expectation.power[0].power_factor, 0.5, 1e-12),
+		"phase A true PF is P / S");
+}
+
+void true_pf_differs_from_displacement_under_distortion()
+{
+	/* 10% 3rd harmonic on the voltage only: P keeps its fundamental
+	 * value (no matching current harmonic), S grows with the total
+	 * RMS, so the TRUE PF drops below the displacement factor -- the
+	 * property that distinguishes it. */
+	msap1::SimulatorConfig config;
+	config.frequency_hz = 60.0;
+	config.channels = {
+		{0u, 10.0, 0.0, 0.0, 0.0},
+		{1u, 0.0, 0.0, 0.0, 0.0},
+		{2u, 0.0, 0.0, 0.0, 0.0},
+		{3u, 0.0, 0.0, 0.0, 0.0},
+		{4u, 0.0, 0.0, 0.0, 0.0},
+		{5u, 0.0, 0.0, 0.0, 0.0},
+		{6u, 120.0, 0.0, 0.0, 0.0},
+	};
+	config.harmonics = {{3u, 10.0, 0.0, "voltage"}};
+	const auto expectation = msap1::test::golden_expectation(config);
+	const double displacement = 1.0;  /* aligned phases */
+	require(expectation.power[0].power_factor < displacement &&
+			near(expectation.power[0].power_factor,
+			     1.0 / std::sqrt(1.01), 1e-9),
+		"true PF sinks with voltage distortion while displacement stays 1");
+	require(near(expectation.power[0].active_power_watts, 1200.0, 1e-9),
+		"voltage-only distortion adds no mean power");
 }
 
 void harmonic_expectation_composition()
@@ -274,6 +306,7 @@ void tolerance_scales_with_block_length()
 int main()
 {
 	golden_expectation_composition();
+	true_pf_differs_from_displacement_under_distortion();
 	harmonic_expectation_composition();
 	harmonic_wire_packing();
 	wire_conversion_round_trip();

@@ -382,6 +382,84 @@ SampleWindow sample_window(std::uint32_t sample_count,
 
 } // namespace
 
+MeterUpdate decode_power_meter_record(const MeterRecord &record,
+				      SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_power_format)
+		throw std::invalid_argument("invalid power record");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument("power record has a zero sample count");
+	if (record.first_sample_index() == 0u)
+		throw std::invalid_argument(
+			"power record has a zero first-sample index");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const auto valid_mask = record.valid_mask();
+	const auto lane_valid = [&](unsigned lane) {
+		return (valid_mask & (1u << lane)) != 0u;
+	};
+	const auto word_s64 = [&](std::size_t low) {
+		return static_cast<std::int64_t>(
+			record.word(low) |
+			(std::uint64_t{record.word(low + 1)} << 32));
+	};
+
+	/* Hardware lane order: Ia..In = 0..3, Vc/Vb/Va = 4/5/6; phases pair
+	 * Va/Ia, Vb/Ib, Vc/Ic (the PL power core's mapping). */
+	static constexpr unsigned voltage_lane[3] = {6, 5, 4};
+	static constexpr unsigned current_lane[3] = {0, 1, 2};
+	PowerValues values{};
+	Reading<Picowatts> phase_p[3];
+	Reading<PicoVoltAmperes> phase_s[3];
+	Reading<PowerFactorMillionths> phase_pf[3];
+	for (std::size_t phase = 0; phase < 3; ++phase) {
+		const std::size_t base = 16u + phase * 5u;
+		const bool valid = lane_valid(voltage_lane[phase]) &&
+				   lane_valid(current_lane[phase]);
+		const auto p = word_s64(base);
+		const auto s_va = word_s64(base + 2);
+		const auto pf = static_cast<std::int32_t>(record.word(base + 4));
+		phase_p[phase] = reading<Picowatts>(p, valid, sequence,
+						     received_at, window);
+		phase_s[phase] = reading<PicoVoltAmperes>(s_va, valid, sequence,
+							   received_at, window);
+		/* PF is undefined at S == 0: publish it as unavailable, not
+		 * as a confident zero. */
+		phase_pf[phase] = reading<PowerFactorMillionths>(
+			pf, valid && s_va != 0, sequence, received_at, window);
+	}
+	values.active_power = {phase_p[0], phase_p[1], phase_p[2]};
+	values.apparent_power = {phase_s[0], phase_s[1], phase_s[2]};
+	values.power_factor = {phase_pf[0], phase_pf[1], phase_pf[2]};
+	const bool totals_valid = lane_valid(6) && lane_valid(0);
+	const auto total_s = word_s64(33);
+	values.total_active_power = reading<Picowatts>(
+		word_s64(31), totals_valid, sequence, received_at, window);
+	values.total_apparent_power = reading<PicoVoltAmperes>(
+		total_s, totals_valid, sequence, received_at, window);
+	values.total_power_factor = reading<PowerFactorMillionths>(
+		static_cast<std::int32_t>(record.word(35)),
+		totals_valid && total_s != 0, sequence, received_at, window);
+	const auto crest = [&](unsigned lane) {
+		return reading<CrestTenThousandths>(record.word(36u + lane),
+						     lane_valid(lane), sequence,
+						     received_at, window);
+	};
+	values.current_crest = {crest(0), crest(1), crest(2), crest(3)};
+	values.voltage_crest = {crest(6), crest(5), crest(4)};
+
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Basic;
+	update.kind = RecordKind::power;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.power = values;
+	return update;
+}
+
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 					 SystemTime received_at)
 {
@@ -582,6 +660,10 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
+	result.register_decoder(meter_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_power_meter_record(record, received_at);
+		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record(record,

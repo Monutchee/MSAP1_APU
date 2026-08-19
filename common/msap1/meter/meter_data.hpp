@@ -42,6 +42,13 @@ enum class MeasurementQuality : std::uint8_t {
 
 struct MilliHertz {};
 struct MicroVolts {};
+struct Picowatts {};
+struct PicoVoltAmperes {};
+/* True power factor, millionths, sign follows P; 0 when S is 0 (PF
+ * undefined -- gate on S). */
+struct PowerFactorMillionths {};
+/* Crest factor, ten-thousandths; 0 when the lane RMS is 0. */
+struct CrestTenThousandths {};
 struct MicroAmperes {};
 struct MicroWatts {};
 struct MicroWattHours {};
@@ -97,9 +104,20 @@ struct FundamentalValues {
 	PhaseABC<Reading<MicroVolts>> voltage_ll{};
 };
 
-/* These typed groups intentionally start empty. New PL record decoders add
- * concrete readings here without changing the transport or period store. */
-struct PowerValues {};
+/* Decoded from the POWER-v1 record (M8): the 10/12-cycle tier's
+ * finalized power quantities, sign conventions normative in the PL's
+ * metering_types.hpp (P import positive; S arithmetic, unsigned; PF true
+ * P/S with P's sign, never averaged across phases). */
+struct PowerValues {
+	PhaseABC<Reading<Picowatts>> active_power{};
+	PhaseABC<Reading<PicoVoltAmperes>> apparent_power{};
+	PhaseABC<Reading<PowerFactorMillionths>> power_factor{};
+	Reading<Picowatts> total_active_power{};
+	Reading<PicoVoltAmperes> total_apparent_power{};
+	Reading<PowerFactorMillionths> total_power_factor{};
+	PhaseABC<Reading<CrestTenThousandths>> voltage_crest{};
+	PhaseABCN<Reading<CrestTenThousandths>> current_crest{};
+};
 struct EnergyValues {};
 struct DemandValues {};
 struct PowerQualityValues {};
@@ -252,6 +270,13 @@ public:
 private:
 	std::map<std::uint32_t, Decoder> decoders_;
 };
+
+/**
+ * Decode a POWER-v1 (0x00070001) record into PowerValues on the Basic
+ * period (it describes the same block as its BASIC-v4 sibling).
+ */
+MeterUpdate decode_power_meter_record(const MeterRecord &record,
+				      SystemTime received_at);
 
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the

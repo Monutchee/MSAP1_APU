@@ -79,6 +79,69 @@ msap1::MeterRecord periodic_record()
 	return record;
 }
 
+msap1::MeterRecord power_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_power_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 42;
+	record.words[4] = 0x12345678;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	/* Phase A: import; B: export (sign pin); C: zero S -> PF undefined. */
+	record.words[16] = 360;  record.words[17] = 0;      /* P_A = 360 pW */
+	record.words[18] = 720;  record.words[19] = 0;      /* S_A */
+	record.words[20] = 500000;                          /* PF_A = 0.5 */
+	const auto negative =
+		static_cast<std::uint64_t>(std::int64_t{-180});
+	record.words[21] = static_cast<std::uint32_t>(negative);
+	record.words[22] = static_cast<std::uint32_t>(negative >> 32);
+	record.words[23] = 360;  record.words[24] = 0;
+	record.words[25] = static_cast<std::uint32_t>(-500000);
+	/* words 26..30 stay zero: S_C = 0. */
+	record.words[31] = 180;  record.words[32] = 0;
+	record.words[33] = 1080; record.words[34] = 0;
+	record.words[35] = 166666;
+	for (std::size_t lane = 0; lane != 7; ++lane)
+		record.words[36 + lane] = 14142 + lane;
+	return record;
+}
+
+void decode_power_record_pins()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{124s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(power_record(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+			update.kind == msap1::RecordKind::power &&
+			update.sequence == 42 && update.power.has_value(),
+		"POWER-v1 did not decode as a basic power update");
+	const auto &values = *update.power;
+	require(values.active_power.phase_a.value == 360 &&
+			values.apparent_power.phase_a.value == 720 &&
+			values.power_factor.phase_a.value == 500000 &&
+			values.power_factor.phase_a.valid(),
+		"phase A power words");
+	require(values.active_power.phase_b.value == -180 &&
+			values.power_factor.phase_b.value == -500000,
+		"phase B sign extension");
+	require(values.apparent_power.phase_c.value == 0 &&
+			!values.power_factor.phase_c.valid(),
+		"PF is unavailable when S is zero");
+	require(values.total_active_power.value == 180 &&
+			values.total_apparent_power.value == 1080 &&
+			values.total_power_factor.value == 166666,
+		"totals decode");
+	require(values.current_crest.phase_a.value == 14142 &&
+			values.voltage_crest.phase_a.value == 14142 + 6 &&
+			values.voltage_crest.phase_c.value == 14142 + 4,
+		"crest lanes map hardware order to phases");
+}
+
 void decode_and_period_independence()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
@@ -375,6 +438,7 @@ int main()
 {
 	try {
 		decode_and_period_independence();
+	decode_power_record_pins();
 		decode_block_timing();
 		decode_rejects_malformed_timing();
 		decode_rejects_retired_formats();

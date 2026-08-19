@@ -46,6 +46,12 @@ float engineering_value(const MeterAttributeValue *value)
 	case mnc::meter::MeterUnit::MicroVolts:
 	case mnc::meter::MeterUnit::MicroAmperes:
 		return static_cast<float>(value->value) / 1'000'000.0f;
+	case mnc::meter::MeterUnit::Picowatts:
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		/* pico -> base units (W / VA). */
+		return static_cast<float>(value->value) / 1e12f;
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		return static_cast<float>(value->value) / 1'000'000.0f;
 	}
 	return std::numeric_limits<float>::quiet_NaN();
 }

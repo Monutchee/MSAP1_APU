@@ -84,6 +84,17 @@ struct MeterTimingDto {
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
+/** One catalog attribute in GET /api/v1/meter/readings: quantities that
+ * are not per-channel RMS values (line-line voltages, power, PF, ...),
+ * published generically so new PL quantities appear without new fields.
+ * `value` is in base engineering units (V, W, VA, PF as a ratio). */
+struct MeterAttributeDto {
+	std::string key;
+	std::string unit;
+	bool valid;
+	double value;
+};
+
 /** Body of GET /api/v1/meter/readings. */
 struct MeterReadingsDto {
 	std::uint64_t sequence;
@@ -98,9 +109,47 @@ struct MeterReadingsDto {
 	std::uint32_t result_drops;
 	FrequencyReadingDto frequency;
 	std::array<MeterChannelDto, 8> channels;
+	std::vector<MeterAttributeDto> attributes;
 	/* Absent (omitted from the JSON) until timing provenance exists. */
 	std::optional<MeterTimingDto> timing;
 };
+
+/** Engineering projection of one snapshot attribute for the DTO. */
+inline MeterAttributeDto attribute_dto(
+	const mnc::meter::MeterAttributeValue &reading)
+{
+	const auto descriptor = mnc::meter::describe(reading.attribute);
+	double value = 0.0;
+	const char *unit = "";
+	switch (reading.unit) {
+	case mnc::meter::MeterUnit::MilliHertz:
+		value = static_cast<double>(reading.value) / 1e3;
+		unit = "Hz";
+		break;
+	case mnc::meter::MeterUnit::MicroVolts:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "V";
+		break;
+	case mnc::meter::MeterUnit::MicroAmperes:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "A";
+		break;
+	case mnc::meter::MeterUnit::Picowatts:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "W";
+		break;
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "VA";
+		break;
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "PF";
+		break;
+	}
+	return {std::string(descriptor.key), unit,
+		reading.quality == mnc::meter::ReadingQuality::Valid, value};
+}
 
 /* time_quality_name(), the channel name table, the per-channel unit, and the
  * micro-unit scaling are shared with the aggregate endpoint; they live in
@@ -133,6 +182,20 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 		{},
 		{},
 	};
+	/* Non-channel catalog attributes (VLL, power, PF): everything the
+	 * provider supplies beyond the per-channel RMS and frequency. */
+	using Id = mnc::meter::MeterAttributeId;
+	for (const auto &reading : response.snapshot.values) {
+		switch (reading.attribute.id) {
+		case Id::Frequency: case Id::VanRms: case Id::VbnRms:
+		case Id::VcnRms: case Id::IaRms: case Id::IbRms:
+		case Id::IcRms: case Id::InRms:
+			continue;
+		default:
+			result.attributes.push_back(attribute_dto(reading));
+		}
+	}
+
 	/* Prefer the timing carried by the typed snapshot. The diagnostics timing
 	 * is retained as a compatibility fallback and supplies the product-specific
 	 * cycle-lock flags. Both are populated from the same ingestion-time

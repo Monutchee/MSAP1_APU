@@ -101,9 +101,22 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 		{Id::IbRms, std::nullopt}, {Id::IcRms, std::nullopt},
 		{Id::InRms, std::nullopt},
 	};
-	if (period == msap1::MeasurementPeriod::Basic)
+	if (period == msap1::MeasurementPeriod::Basic) {
 		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
 							       std::nullopt});
+		/* The basic tier carries line-line RMS (BASIC-v4) and the
+		 * finalized power quantities (POWER-v1) since M7/M8. The
+		 * aggregate tier gains them in M11. */
+		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
+				      Id::ActivePowerA, Id::ActivePowerB,
+				      Id::ActivePowerC, Id::ActivePowerTotal,
+				      Id::ApparentPowerA, Id::ApparentPowerB,
+				      Id::ApparentPowerC,
+				      Id::ApparentPowerTotal,
+				      Id::PowerFactorA, Id::PowerFactorB,
+				      Id::PowerFactorC, Id::PowerFactorTotal})
+			result.push_back({id, std::nullopt});
+	}
 	return result;
 }
 
@@ -189,9 +202,72 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 				view.values.fundamental.current.neutral));
 			break;
 		case MeterAttributeId::VabRms:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_a));
+			break;
 		case MeterAttributeId::VbcRms:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_b));
+			break;
 		case MeterAttributeId::VcaRms:
-			result.values.push_back(unavailable(attribute));
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_c));
+			break;
+		case MeterAttributeId::ActivePowerA:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_a));
+			break;
+		case MeterAttributeId::ActivePowerB:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_b));
+			break;
+		case MeterAttributeId::ActivePowerC:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_c));
+			break;
+		case MeterAttributeId::ActivePowerTotal:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.total_active_power));
+			break;
+		case MeterAttributeId::ApparentPowerA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_a));
+			break;
+		case MeterAttributeId::ApparentPowerB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_b));
+			break;
+		case MeterAttributeId::ApparentPowerC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_c));
+			break;
+		case MeterAttributeId::ApparentPowerTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.total_apparent_power));
+			break;
+		case MeterAttributeId::PowerFactorA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_a));
+			break;
+		case MeterAttributeId::PowerFactorB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_b));
+			break;
+		case MeterAttributeId::PowerFactorC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_c));
+			break;
+		case MeterAttributeId::PowerFactorTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.total_power_factor));
 			break;
 		}
 	}
