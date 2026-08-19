@@ -104,8 +104,9 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 	if (period == msap1::MeasurementPeriod::Basic) {
 		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
 							       std::nullopt});
-		/* The basic tier carries line-line RMS (BASIC-v4) and the
-		 * finalized power quantities (POWER-v1) since M7/M8. The
+		/* The basic tier carries line-line RMS (BASIC-v4), the
+		 * finalized power quantities (POWER-v1) and the fundamental
+		 * phasor quantities (PHASOR-v1) since M7/M8/M9. The
 		 * aggregate tier gains them in M11. */
 		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
 				      Id::ActivePowerA, Id::ActivePowerB,
@@ -114,7 +115,20 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 				      Id::ApparentPowerC,
 				      Id::ApparentPowerTotal,
 				      Id::PowerFactorA, Id::PowerFactorB,
-				      Id::PowerFactorC, Id::PowerFactorTotal})
+				      Id::PowerFactorC, Id::PowerFactorTotal,
+				      Id::ReactivePowerA, Id::ReactivePowerB,
+				      Id::ReactivePowerC,
+				      Id::ReactivePowerTotal,
+				      Id::DisplacementPowerFactorA,
+				      Id::DisplacementPowerFactorB,
+				      Id::DisplacementPowerFactorC,
+				      Id::DisplacementPowerFactorTotal,
+				      Id::VoltagePhaseAngleA,
+				      Id::VoltagePhaseAngleB,
+				      Id::VoltagePhaseAngleC,
+				      Id::CurrentPhaseAngleA,
+				      Id::CurrentPhaseAngleB,
+				      Id::CurrentPhaseAngleC})
 			result.push_back({id, std::nullopt});
 	}
 	return result;
@@ -268,6 +282,72 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			result.values.push_back(value(attribute,
 				MeterUnit::PowerFactorMillionths,
 				view.values.power.total_power_factor));
+			break;
+		case MeterAttributeId::ReactivePowerA:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_a));
+			break;
+		case MeterAttributeId::ReactivePowerB:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_b));
+			break;
+		case MeterAttributeId::ReactivePowerC:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_c));
+			break;
+		case MeterAttributeId::ReactivePowerTotal:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.total_reactive_power));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_a));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_b));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_c));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.total_displacement_power_factor));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleA:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_a));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleB:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_b));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleC:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_c));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleA:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_a));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleB:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_b));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleC:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_c));
 			break;
 		}
 	}

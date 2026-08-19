@@ -42,6 +42,17 @@ inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
  * 0 = undefined when S is 0); arithmetic totals; per-lane crest factors
  * (u32 ten-thousandths, 0 when RMS is 0). */
 inline constexpr std::uint32_t meter_power_format = 0x00070001u;
+/* PHASOR v1 (metrology M9): third record of each 10/12-cycle block, same
+ * sequence and anchors. Fundamental (synchronous-correlation) quantities:
+ * per lane fundamental RMS (u32 micro-units) + angle (s32 millidegrees,
+ * RELATIVE TO Va which reads exactly 0; range [-180000, 180000)); VLL
+ * phasors (complex differences); per phase the V-I displacement angle,
+ * Q1 (s64 picovars, lagging/inductive positive), P1 (s64 picowatts),
+ * displacement PF (s32 millionths, 0 = undefined when S1 is 0), and a
+ * 2-bit load-nature code; arithmetic totals. Word 51 packs the natures
+ * and bit 8 = angle-reference-valid. Status bit 1 = at least one merged
+ * cycle had no usable frequency reference (every phasor word suspect). */
+inline constexpr std::uint32_t meter_phasor_format = 0x00080001u;
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
@@ -135,6 +146,7 @@ struct MeterRecord {
 		return word(0) == meter_record_magic &&
 		       (record_format() == meter_periodic_format ||
 		        record_format() == meter_power_format ||
+			record_format() == meter_phasor_format ||
 			record_format() == meter_aggregate_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;

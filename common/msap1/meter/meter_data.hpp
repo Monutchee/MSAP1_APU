@@ -29,6 +29,7 @@ enum class RecordKind : std::uint16_t {
 	energy = 3,
 	demand = 4,
 	power_quality = 5,
+	phasor = 6,
 };
 
 enum class MeasurementQuality : std::uint8_t {
@@ -49,6 +50,13 @@ struct PicoVoltAmperes {};
 struct PowerFactorMillionths {};
 /* Crest factor, ten-thousandths; 0 when the lane RMS is 0. */
 struct CrestTenThousandths {};
+/* Fundamental reactive power Q1, picovars; lagging/inductive positive
+ * (sign conventions: PL metering_types.hpp). */
+struct Picovars {};
+/* Phase angle in millidegrees, [-180000, 180000), relative to the Va
+ * fundamental (Va reads exactly 0). Meaningless when the record's
+ * angle-reference flag is clear or the lane's fundamental is zero. */
+struct Millidegrees {};
 struct MicroAmperes {};
 struct MicroWatts {};
 struct MicroWattHours {};
@@ -118,6 +126,42 @@ struct PowerValues {
 	PhaseABC<Reading<CrestTenThousandths>> voltage_crest{};
 	PhaseABCN<Reading<CrestTenThousandths>> current_crest{};
 };
+/* Load nature classified from Q1's sign under the S1 = 0 gate (the PL's
+ * MET_NATURE_* codes, never inferred from a PF magnitude). */
+enum class LoadNature : std::uint8_t {
+	undefined = 0, /* S1 = 0 — nothing to classify */
+	unity = 1,     /* Q1 = 0 exactly */
+	lagging = 2,   /* Q1 > 0, inductive */
+	leading = 3,   /* Q1 < 0, capacitive */
+};
+
+/* Decoded from the PHASOR-v1 record (M9): the 10/12-cycle tier's
+ * fundamental quantities from the synchronous correlation. True PF (in
+ * PowerValues) and displacement PF here are DISTINCT and diverge under
+ * distortion. Angles are relative to Va; only differences are specified.
+ * When the block carried the phasor-invalid status bit every reading here
+ * decodes with MeasurementQuality::invalid. */
+struct PhasorValues {
+	PhaseABC<Reading<MicroVolts>> fundamental_voltage{};
+	PhaseABCN<Reading<MicroAmperes>> fundamental_current{};
+	PhaseABC<Reading<MicroVolts>> fundamental_voltage_ll{};
+	PhaseABC<Reading<Millidegrees>> voltage_angle{};
+	PhaseABCN<Reading<Millidegrees>> current_angle{};
+	PhaseABC<Reading<Millidegrees>> voltage_ll_angle{};
+	/* phi1 = angle(V1) - angle(I1); positive = current lags. */
+	PhaseABC<Reading<Millidegrees>> displacement_angle{};
+	PhaseABC<Reading<Picovars>> reactive_power{};
+	Reading<Picovars> total_reactive_power{};
+	PhaseABC<Reading<Picowatts>> fundamental_active_power{};
+	Reading<Picowatts> total_fundamental_active_power{};
+	PhaseABC<Reading<PowerFactorMillionths>> displacement_power_factor{};
+	Reading<PowerFactorMillionths> total_displacement_power_factor{};
+	PhaseABC<LoadNature> load_nature{};
+	LoadNature total_load_nature = LoadNature::undefined;
+	bool angle_reference_valid = false;
+	/* Status bit 1: a merged cycle had no usable frequency reference. */
+	bool phasor_invalid = false;
+};
 struct EnergyValues {};
 struct DemandValues {};
 struct PowerQualityValues {};
@@ -125,6 +169,7 @@ struct PowerQualityValues {};
 struct MeterValues {
 	FundamentalValues fundamental{};
 	PowerValues power{};
+	PhasorValues phasor{};
 	EnergyValues energy{};
 	DemandValues demand{};
 	PowerQualityValues power_quality{};
@@ -137,6 +182,7 @@ struct MeterUpdate {
 	std::uint32_t configuration_generation = 0;
 	std::optional<FundamentalValues> fundamental;
 	std::optional<PowerValues> power;
+	std::optional<PhasorValues> phasor;
 	std::optional<EnergyValues> energy;
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
@@ -277,6 +323,13 @@ private:
  */
 MeterUpdate decode_power_meter_record(const MeterRecord &record,
 				      SystemTime received_at);
+
+/**
+ * Decode a PHASOR-v1 (0x00080001) record into PhasorValues on the Basic
+ * period (the third record of the same block as its BASIC-v4 sibling).
+ */
+MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
+				       SystemTime received_at);
 
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the

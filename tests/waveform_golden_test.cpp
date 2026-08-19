@@ -136,6 +136,45 @@ void true_pf_differs_from_displacement_under_distortion()
 		"true PF sinks with voltage distortion while displacement stays 1");
 	require(near(expectation.power[0].active_power_watts, 1200.0, 1e-9),
 		"voltage-only distortion adds no mean power");
+	/* M9: the displacement quantities are fundamental-only, so the
+	 * injected harmonic leaves every one of them untouched. */
+	require(near(expectation.power[0].displacement_power_factor, 1.0, 1e-12),
+		"displacement PF ignores distortion");
+	require(near(expectation.power[0].fundamental_active_watts, 1200.0,
+		     1e-9) &&
+			near(expectation.power[0].reactive_power_vars, 0.0,
+			     1e-9),
+		"fundamental P1/Q1 ignore distortion");
+}
+
+void reactive_sign_follows_lag()
+{
+	/* Ia lags Va by 30 degrees: Q1 positive (inductive), phi1 = +30.
+	 * Ib LEADS Vb by 90: Q1 = -S1 exactly, dPF 0. */
+	msap1::SimulatorConfig config;
+	config.frequency_hz = 60.0;
+	config.channels = {
+		{0u, 10.0, -30.0, 0.0, 0.0}, {1u, 5.0, -30.0, 0.0, 0.0},
+		{2u, 0.0, 0.0, 0.0, 0.0},    {3u, 0.0, 0.0, 0.0, 0.0},
+		{4u, 0.0, 0.0, 0.0, 0.0},    {5u, 120.0, -120.0, 0.0, 0.0},
+		{6u, 120.0, 0.0, 0.0, 0.0},
+	};
+	const auto expectation = msap1::test::golden_expectation(config);
+	require(near(expectation.power[0].reactive_power_vars,
+		     1200.0 * 0.5, 1e-9) &&
+			near(expectation.power[0].displacement_angle_degrees,
+			     30.0, 1e-12),
+		"a 30-degree lag gives Q1 = S1*sin(30) positive");
+	require(near(expectation.power[0].displacement_power_factor,
+		     std::cos(30.0 * M_PI / 180.0), 1e-12),
+		"displacement PF is cos(phi1)");
+	/* Phase B: Vb at -120, Ib at -30 -> phi1 = -90 (current leads). */
+	require(near(expectation.power[1].reactive_power_vars, -600.0, 1e-9) &&
+			near(expectation.power[1].displacement_angle_degrees,
+			     -90.0, 1e-12) &&
+			near(expectation.power[1].displacement_power_factor,
+			     0.0, 1e-9),
+		"a quadrature lead gives Q1 = -S1 and dPF 0");
 }
 
 void harmonic_expectation_composition()
@@ -307,6 +346,7 @@ int main()
 {
 	golden_expectation_composition();
 	true_pf_differs_from_displacement_under_distortion();
+	reactive_sign_follows_lag();
 	harmonic_expectation_composition();
 	harmonic_wire_packing();
 	wire_conversion_round_trip();

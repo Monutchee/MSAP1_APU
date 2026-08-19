@@ -387,17 +387,18 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 
 	/*
 	 * The stream interleaves record formats with INDEPENDENT sequence
-	 * counters, so continuity is tracked per format. POWER records
-	 * share their BASIC sibling's sequence by design (same block), so
-	 * they must not touch the basic tracker: they would read as a
-	 * repeat and be dropped. The basic tracker already measures the
+	 * counters, so continuity is tracked per format. POWER and PHASOR
+	 * records share their BASIC sibling's sequence by design (same
+	 * block), so they must not touch the basic tracker: they would read
+	 * as repeats and be dropped. The basic tracker already measures the
 	 * shared transport's health.
 	 */
-	const bool power =
-		record.record_format() == msap1::meter_power_format;
+	const bool sibling =
+		record.record_format() == msap1::meter_power_format ||
+		record.record_format() == msap1::meter_phasor_format;
 	const bool aggregate =
 		record.record_format() == msap1::meter_aggregate_format;
-	if (!power &&
+	if (!sibling &&
 	    (aggregate ? !track_aggregate_continuity(record)
 		       : !track_basic_continuity(record)))
 		return;

@@ -93,6 +93,10 @@ std::pair<double, std::string> engineering(std::int64_t value,
 		return {static_cast<double>(value) / 1e12, "VA"};
 	case mnc::meter::MeterUnit::PowerFactorMillionths:
 		return {static_cast<double>(value) / 1'000'000.0, "PF"};
+	case mnc::meter::MeterUnit::Picovars:
+		return {static_cast<double>(value) / 1e12, "var"};
+	case mnc::meter::MeterUnit::Millidegrees:
+		return {static_cast<double>(value) / 1000.0, "deg"};
 	}
 	return {0.0, "unknown"};
 }

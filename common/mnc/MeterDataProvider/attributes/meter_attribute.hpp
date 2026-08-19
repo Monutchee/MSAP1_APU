@@ -60,6 +60,23 @@ enum class MeterAttributeId : std::uint16_t {
 	PowerFactorB,
 	PowerFactorC,
 	PowerFactorTotal,
+	/* M9, the 10/12-cycle phasor tier (fundamental quantities from the
+	 * synchronous correlation). Appended — never renumber. */
+	ReactivePowerA,
+	ReactivePowerB,
+	ReactivePowerC,
+	ReactivePowerTotal,
+	DisplacementPowerFactorA,
+	DisplacementPowerFactorB,
+	DisplacementPowerFactorC,
+	DisplacementPowerFactorTotal,
+	/* Fundamental phase angles, millidegrees relative to Va (Va = 0). */
+	VoltagePhaseAngleA,
+	VoltagePhaseAngleB,
+	VoltagePhaseAngleC,
+	CurrentPhaseAngleA,
+	CurrentPhaseAngleB,
+	CurrentPhaseAngleC,
 };
 
 /**
@@ -93,6 +110,9 @@ enum class MeterAttributeGroup : std::uint8_t {
 	ActivePower,
 	ApparentPower,
 	PowerFactor,
+	ReactivePower,
+	DisplacementPowerFactor,
+	PhaseAngle,
 	AllDefined,
 };
 
@@ -105,6 +125,11 @@ enum class MeterUnit : std::uint8_t {
 	/* True power factor, signed millionths; undefined (Unavailable
 	 * quality) when the apparent power is zero. */
 	PowerFactorMillionths,
+	/* Fundamental reactive power Q1, signed picovars; lagging positive. */
+	Picovars,
+	/* Phase angle, signed millidegrees in [-180000, 180000), relative to
+	 * the Va fundamental. */
+	Millidegrees,
 };
 
 enum class ReadingQuality : std::uint8_t {

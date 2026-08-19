@@ -66,6 +66,19 @@ struct GoldenPowerExpectation {
 	double apparent_power_va = 0.0;
 	/* True PF = P / S, sign of P; NAN when S is 0 (undefined). */
 	double power_factor = 0.0;
+	/* Fundamental-only quantities (M9 PHASOR record): the synchronous
+	 * correlation rejects DC, harmonics, and noise, so these use the
+	 * configured fundamental RMS values alone.
+	 *   phi1 = phase_v - phase_i (positive = current lags)
+	 *   P1 = V1*I1*cos(phi1)   (no DC term, unlike the true P above)
+	 *   Q1 = V1*I1*sin(phi1)   (lagging/inductive positive)
+	 *   displacement PF = cos(phi1) = P1/S1 — diverges from the true PF
+	 *   under distortion; 0 when S1 = 0 (undefined). */
+	double fundamental_active_watts = 0.0;
+	double reactive_power_vars = 0.0;
+	double displacement_power_factor = 0.0;
+	/* Degrees, wrapped to [-180, 180). */
+	double displacement_angle_degrees = 0.0;
 };
 
 /** Expected steady-state readings for one simulator configuration. */
@@ -143,6 +156,19 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 		result.power[phase].apparent_power_va = s_va;
 		result.power[phase].power_factor =
 			s_va > 0.0 ? power / s_va : 0.0;
+		const double s1_va = rms[v] * rms[i];
+		result.power[phase].fundamental_active_watts =
+			s1_va * std::cos(angle);
+		result.power[phase].reactive_power_vars =
+			s1_va * std::sin(angle);
+		result.power[phase].displacement_power_factor =
+			s1_va > 0.0 ? std::cos(angle) : 0.0;
+		double disp = phase_degrees[v] - phase_degrees[i];
+		while (disp >= 180.0)
+			disp -= 360.0;
+		while (disp < -180.0)
+			disp += 360.0;
+		result.power[phase].displacement_angle_degrees = disp;
 	}
 	return result;
 }

@@ -66,6 +66,8 @@ std::string unit_name(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::Picowatts: return "pW";
 	case mnc::meter::MeterUnit::PicoVoltAmperes: return "pVA";
 	case mnc::meter::MeterUnit::PowerFactorMillionths: return "pf_e6";
+	case mnc::meter::MeterUnit::Picovars: return "pvar";
+	case mnc::meter::MeterUnit::Millidegrees: return "mdeg";
 	}
 	return "unknown";
 }

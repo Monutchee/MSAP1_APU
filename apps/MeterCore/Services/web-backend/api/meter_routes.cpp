@@ -146,6 +146,14 @@ inline MeterAttributeDto attribute_dto(
 		value = static_cast<double>(reading.value) / 1e6;
 		unit = "PF";
 		break;
+	case mnc::meter::MeterUnit::Picovars:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "var";
+		break;
+	case mnc::meter::MeterUnit::Millidegrees:
+		value = static_cast<double>(reading.value) / 1000.0;
+		unit = "deg";
+		break;
 	}
 	return {std::string(descriptor.key), unit,
 		reading.quality == mnc::meter::ReadingQuality::Valid, value};

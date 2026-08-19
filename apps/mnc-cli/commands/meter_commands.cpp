@@ -879,6 +879,14 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			value = static_cast<double>(reading.value) / 1e6;
 			unit = "PF";
 			break;
+		case mnc::meter::MeterUnit::Picovars:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "var";
+			break;
+		case mnc::meter::MeterUnit::Millidegrees:
+			value = static_cast<double>(reading.value) / 1000.0;
+			unit = "deg";
+			break;
 		}
 		result.readings.push_back({std::string(descriptor.key),
 					   unit, valid, value});

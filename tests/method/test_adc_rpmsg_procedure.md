@@ -488,3 +488,38 @@ PF = P / S.
 6. **Continuity.** `mnc meter health` over 10 minutes: zero gaps, zero
    invalid — the doubled record rate (10/s at 60 Hz) must not disturb
    the transport accounting.
+
+## 16. 10/12-cycle phasor tier (metrology M9)
+
+Prerequisite: PHASOR-v1 records (0x00080001, the third record of every
+block on the same stream) and the matched image. Readings surface as
+`power.reactive.*` (var), `power.factor.displacement.*` (PF), and
+`phase.angle.{voltage,current}.*` (degrees, relative to Va = 0) in
+`mnc meter snapshot`, the web "Derived quantities" panel, and
+`GET /api/v1/meter/readings` `attributes[]`. Golden values from
+`tests/support/waveform_golden.hpp`: per phase Q1 = V1 x I1 x sin(phi1)
+with phi1 = phase_v - phase_i (lagging current positive), displacement
+PF = cos(phi1); both use the FUNDAMENTAL RMS only.
+
+1. **Angle baseline.** Balanced 120 V / 3 A aligned: voltage angles read
+   {0, -120, +120} deg, current angles match their voltages, all
+   displacement-related readings show Q ~ 0 var, dPF = 1.0000.
+2. **Lagging sign.** `--ia-phase-degrees -30` (current lags): QA =
+   360 x sin(30) = +180 var (POSITIVE = inductive), dPF_A = 0.8660, the
+   current.a angle reads -30 deg. PA (true, §15) reads 311.77 W =
+   360 x cos(30).
+3. **Leading sign.** `--ia-phase-degrees 30`: QA = -180 var (NEGATIVE =
+   capacitive), dPF_A still 0.8660 — lead/lag comes from Q's sign, never
+   from the PF magnitude.
+4. **Quadrature.** `--ia-phase-degrees -90`: QA = +360 var = S1, PA ~ 0,
+   dPF_A ~ 0 — pure reactive load.
+5. **Displacement vs true PF under distortion.** `--harmonics 3:10`
+   (voltage lanes) with `--ia-phase-degrees -30`: the §15 TRUE PF drops
+   below 0.8660 x (1/sqrt(1.01)) while the displacement PF stays at
+   0.8660 and QA stays +180 var — the fundamental-only separation this
+   tier exists for. `--harmonics none` restores.
+6. **Undefined dPF.** `--ia-rms 0 --ia-noise-rms 0`: S1_A = 0, so
+   dPF_A and QA-derived readings show unavailable/dash; the phase A
+   load nature is undefined. Restore the noise floor afterwards.
+7. **Continuity.** `mnc meter health` over 10 minutes with the tripled
+   record rate (15/s at 60 Hz): zero gaps, zero invalid.
