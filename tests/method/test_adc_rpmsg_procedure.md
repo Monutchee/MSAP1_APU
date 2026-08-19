@@ -547,8 +547,12 @@ rotation).
    ABC and stays balanced — the two sets must move independently.
    Restore `--vb-phase-degrees -120 --vc-phase-degrees 120`.
 4. **Undefined ratios.** All three voltages at 0 (`--va-rms 0 --vb-rms 0
-   --vc-rms 0 --va-noise-rms 0 --vb-noise-rms 0 --vc-noise-rms 0`): V1 =
-   0, so the voltage ratios print unavailable/dash — never a confident
-   0. Current ratios stay live. Restore the voltages.
+   --vc-rms 0 --va-noise-rms 0 --vb-noise-rms 0 --vc-noise-rms 0`):
+   EVERY unbalance reading prints unavailable/dash — never a confident
+   0. The voltage ratios are undefined (V1 = 0), and the current ratios
+   fall with them because dead voltages take the grid frequency
+   reference down, which sets the phasor-invalid status bit and poisons
+   the whole correlation domain (the M6/M9 gating cascade — verified on
+   target 2026-08-19). Restore the voltages: ratios return.
 5. **Continuity.** `mnc meter health`: zero gaps/invalid at the
    quadrupled record rate (20/s at 60 Hz).
