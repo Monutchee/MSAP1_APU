@@ -541,9 +541,9 @@ MeterUpdate decode_phasor_payload(const MeterRecord &record,
 	const auto fund_of = [&](unsigned lane) {
 		return static_cast<std::int64_t>(record.word(16u + lane * 2u));
 	};
+	/* Angles are u32 millidegrees in [0, 360000) since PHASOR-v2. */
 	const auto angle_of = [&](unsigned lane) {
-		return static_cast<std::int64_t>(
-			static_cast<std::int32_t>(record.word(17u + lane * 2u)));
+		return static_cast<std::int64_t>(record.word(17u + lane * 2u));
 	};
 	/* An angle is meaningful only against a live Va reference and for a
 	 * nonzero phasor; differences (displacement) need neither reference. */
@@ -589,8 +589,7 @@ MeterUpdate decode_phasor_payload(const MeterRecord &record,
 		vll_fund[pair] = {fund, quality(pair_valid), sequence,
 				  received_at, window};
 		vll_angle[pair] = {
-			static_cast<std::int64_t>(static_cast<std::int32_t>(
-				record.word(31u + pair * 2u))),
+			static_cast<std::int64_t>(record.word(31u + pair * 2u)),
 			quality(pair_valid && reference_valid && fund != 0),
 			sequence, received_at, window};
 	}
@@ -616,8 +615,7 @@ MeterUpdate decode_phasor_payload(const MeterRecord &record,
 		const bool defined =
 			pair_valid && nature[phase] != LoadNature::undefined;
 		disp[phase] = {
-			static_cast<std::int64_t>(static_cast<std::int32_t>(
-				record.word(36u + phase))),
+			static_cast<std::int64_t>(record.word(36u + phase)),
 			quality(pair_valid && fund_of(v) != 0 &&
 				fund_of(i) != 0),
 			sequence, received_at, window};
@@ -727,11 +725,11 @@ MeterUpdate decode_unbalance_payload(const MeterRecord &record,
 			static_cast<std::int64_t>(record.word(base)),
 			quality(lanes_ok)};
 	};
+	/* Angles are u32 millidegrees in [0, 360000) since UNBAL-v2. */
 	const auto angle_of = [&](std::size_t base, bool lanes_ok,
 				  std::int64_t rms) {
 		return Reading<Millidegrees>{
-			static_cast<std::int64_t>(
-				static_cast<std::int32_t>(record.word(base + 1))),
+			static_cast<std::int64_t>(record.word(base + 1)),
 			quality(lanes_ok && reference_valid && rms != 0),
 			sequence, received_at, window};
 	};

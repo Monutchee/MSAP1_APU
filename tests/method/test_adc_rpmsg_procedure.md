@@ -502,12 +502,15 @@ with phi1 = phase_v - phase_i (lagging current positive), displacement
 PF = cos(phi1); both use the FUNDAMENTAL RMS only.
 
 1. **Angle baseline.** Balanced 120 V / 3 A aligned: voltage angles read
-   {0, -120, +120} deg, current angles match their voltages, all
-   displacement-related readings show Q ~ 0 var, dPF = 1.0000.
+   {0, 240, 120} deg (the PL publishes the industry 0..359.999
+   convention on the wire since PHASOR-v2, relative to Va), current
+   angles match their voltages, all displacement-related readings show
+   Q ~ 0 var, dPF = 1.0000.
 2. **Lagging sign.** `--ia-phase-degrees -30` (current lags): QA =
    360 x sin(30) = +180 var (POSITIVE = inductive), dPF_A = 0.8660, the
-   current.a angle reads -30 deg. PA (true, §15) reads 311.77 W =
-   360 x cos(30).
+   current.a angle reads 330 deg (the PL publishes the 0..359.999
+   convention directly since PHASOR-v2). PA (true, §15) reads
+   311.77 W = 360 x cos(30).
 3. **Leading sign.** `--ia-phase-degrees 30`: QA = -180 var (NEGATIVE =
    capacitive), dPF_A still 0.8660 — lead/lag comes from Q's sign, never
    from the PF magnitude.

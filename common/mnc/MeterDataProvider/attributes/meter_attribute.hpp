@@ -141,8 +141,8 @@ enum class MeterUnit : std::uint8_t {
 	PowerFactorMillionths,
 	/* Fundamental reactive power Q1, signed picovars; lagging positive. */
 	Picovars,
-	/* Phase angle, signed millidegrees in [-180000, 180000), relative to
-	 * the Va fundamental. */
+	/* Phase angle, millidegrees in [0, 360000) (the PL publishes the
+	 * industry convention directly), relative to the Va fundamental. */
 	Millidegrees,
 	/* Unsigned ratio in millionths of the positive-sequence magnitude
 	 * (20000 = 2%); undefined (Unavailable) when that magnitude is 0. */

@@ -884,6 +884,7 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			unit = "var";
 			break;
 		case mnc::meter::MeterUnit::Millidegrees:
+			/* The PL publishes the 0..359.999-degree convention directly. */
 			value = static_cast<double>(reading.value) / 1000.0;
 			unit = "deg";
 			break;

@@ -56,6 +56,7 @@ float engineering_value(const MeterAttributeValue *value)
 		/* pico -> base units (var). */
 		return static_cast<float>(value->value) / 1e12f;
 	case mnc::meter::MeterUnit::Millidegrees:
+		/* The PL publishes the 0..359.999-degree convention directly. */
 		return static_cast<float>(value->value) / 1000.0f;
 	case mnc::meter::MeterUnit::RatioMillionths:
 		/* millionths -> percent (the human unit for unbalance). */

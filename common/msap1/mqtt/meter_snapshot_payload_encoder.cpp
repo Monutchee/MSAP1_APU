@@ -96,6 +96,7 @@ std::pair<double, std::string> engineering(std::int64_t value,
 	case mnc::meter::MeterUnit::Picovars:
 		return {static_cast<double>(value) / 1e12, "var"};
 	case mnc::meter::MeterUnit::Millidegrees:
+		/* The PL publishes the 0..359.999-degree convention directly. */
 		return {static_cast<double>(value) / 1000.0, "deg"};
 	case mnc::meter::MeterUnit::RatioMillionths:
 		/* millionths of the positive sequence -> percent. */

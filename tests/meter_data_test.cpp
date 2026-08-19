@@ -164,16 +164,16 @@ msap1::MeterRecord phasor_record()
 		record.words[16 + lane * 2] =
 			lane == 3 ? 0u : 1'000'000u + static_cast<std::uint32_t>(lane);
 		record.words[17 + lane * 2] = static_cast<std::uint32_t>(
-			lane == 6 ? 0 : -30000 - static_cast<std::int32_t>(lane));
+			lane == 6 ? 0 : 330000 + lane);
 	}
 	/* VLL pairs AB/BC/CA. */
 	record.words[30] = 2'000'000; record.words[31] = 30000;
 	record.words[32] = 2'000'001;
-	record.words[33] = static_cast<std::uint32_t>(-90000);
+	record.words[33] = 270000;
 	record.words[34] = 2'000'002; record.words[35] = 150000;
-	/* Displacement angles: A +30 deg, B -15 deg, C 0. */
+	/* Displacement angles: A 30 deg, B 345 deg (a 15-degree lead), C 0. */
 	record.words[36] = 30000;
-	record.words[37] = static_cast<std::uint32_t>(-15000);
+	record.words[37] = 345000;
 	/* Q1: A positive, B negative, C zero. */
 	record.words[39] = 500; record.words[40] = 0;
 	signed64(record, 41, -250);
@@ -212,16 +212,16 @@ void decode_phasor_record_pins()
 		"fundamental lanes map hardware order to phases");
 	require(values.voltage_angle.phase_a.value == 0 &&
 			values.voltage_angle.phase_a.valid() &&
-			values.current_angle.phase_a.value == -30000 &&
-			values.voltage_angle.phase_c.value == -30004,
-		"angle words decode signed relative to Va");
+			values.current_angle.phase_a.value == 330000 &&
+			values.voltage_angle.phase_c.value == 330004,
+		"angle words decode in the [0, 360000) convention");
 	require(!values.current_angle.neutral.valid(),
 		"a zero-fundamental lane has no meaningful angle");
 	require(values.fundamental_voltage_ll.phase_a.value == 2'000'000 &&
-			values.voltage_ll_angle.phase_b.value == -90000,
+			values.voltage_ll_angle.phase_b.value == 270000,
 		"line-line phasor words");
 	require(values.displacement_angle.phase_a.value == 30000 &&
-			values.displacement_angle.phase_b.value == -15000,
+			values.displacement_angle.phase_b.value == 345000,
 		"displacement angles");
 	require(values.reactive_power.phase_a.value == 500 &&
 			values.reactive_power.phase_b.value == -250 &&
@@ -274,16 +274,16 @@ msap1::MeterRecord unbalance_record()
 	record.words[7] = 0x7f;
 	record.words[9] = 0x00000010u;
 	record.words[13] = 60u | (12u << 8) | (1u << 16);
-	/* V0 = 0 @ 0; V1 = 1000000 @ 0; V2 = 20000 @ -90 deg. */
+	/* V0 = 0 @ 0; V1 = 1000000 @ 0; V2 = 20000 @ 270 deg. */
 	record.words[16] = 0; record.words[17] = 0;
 	record.words[18] = 1'000'000; record.words[19] = 0;
 	record.words[20] = 20'000;
-	record.words[21] = static_cast<std::uint32_t>(-90000);
+	record.words[21] = 270000;
 	/* I components present but the I ratios are undefined. */
 	record.words[22] = 5; record.words[23] = 15000;
 	record.words[24] = 0; record.words[25] = 0;
 	record.words[26] = 7;
-	record.words[27] = static_cast<std::uint32_t>(-45000);
+	record.words[27] = 315000;
 	record.words[28] = 0;      /* V0/V1 */
 	record.words[29] = 20000;  /* UNBL_V = 2% */
 	record.words[30] = 0;
@@ -306,7 +306,7 @@ void decode_unbalance_record_pins()
 		"clean record flags");
 	require(values.voltage_positive_sequence.value == 1'000'000 &&
 			values.voltage_negative_sequence.value == 20'000 &&
-			values.voltage_negative_angle.value == -90000,
+			values.voltage_negative_angle.value == 270000,
 		"voltage sequence components decode");
 	require(!values.voltage_zero_angle.valid(),
 		"a zero-magnitude component has no meaningful angle");
@@ -319,8 +319,8 @@ void decode_unbalance_record_pins()
 		"current ratios unavailable when |I1| = 0 upstream");
 	require(values.current_zero_sequence.value == 5 &&
 			values.current_zero_angle.value == 15000 &&
-			values.current_negative_angle.value == -45000,
-		"current components decode signed");
+			values.current_negative_angle.value == 315000,
+		"current components decode in the [0, 360000) convention");
 
 	/* The block-invalid status bit downgrades every reading. */
 	auto poisoned = unbalance_record();

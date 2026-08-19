@@ -42,27 +42,28 @@ inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
  * 0 = undefined when S is 0); arithmetic totals; per-lane crest factors
  * (u32 ten-thousandths, 0 when RMS is 0). */
 inline constexpr std::uint32_t meter_power_format = 0x00070001u;
-/* PHASOR v1 (metrology M9): third record of each 10/12-cycle block, same
- * sequence and anchors. Fundamental (synchronous-correlation) quantities:
- * per lane fundamental RMS (u32 micro-units) + angle (s32 millidegrees,
- * RELATIVE TO Va which reads exactly 0; range [-180000, 180000)); VLL
+/* PHASOR v2 (metrology M9; angle convention finalized with M11): third
+ * record of each 10/12-cycle block, same sequence and anchors.
+ * Fundamental (synchronous-correlation) quantities: per lane fundamental
+ * RMS (u32 micro-units) + angle (u32 millidegrees in the industry
+ * [0, 360000) convention, RELATIVE TO Va which reads exactly 0); VLL
  * phasors (complex differences); per phase the V-I displacement angle,
  * Q1 (s64 picovars, lagging/inductive positive), P1 (s64 picowatts),
  * displacement PF (s32 millionths, 0 = undefined when S1 is 0), and a
  * 2-bit load-nature code; arithmetic totals. Word 51 packs the natures
  * and bit 8 = angle-reference-valid. Status bit 1 = at least one merged
  * cycle had no usable frequency reference (every phasor word suspect). */
-inline constexpr std::uint32_t meter_phasor_format = 0x00080001u;
+inline constexpr std::uint32_t meter_phasor_format = 0x00080002u;
 /* UNBALANCE v1 (metrology M10): fourth record of each 10/12-cycle block,
  * same sequence and anchors. Symmetrical components of the fundamental
  * phasors: zero/positive/negative sequence RMS (u32 micro-units) + angle
- * (s32 millidegrees, relative to Va) for voltage (words 16..21) and
+ * (u32 millidegrees, [0, 360000), relative to Va) for voltage (16..21) and
  * current (22..27, IA/IB/IC never IN); |X0|/|X1| and UNBL = |X2|/|X1| in
  * millionths at words 28..31 (0 + flags-word validity bit clear =
  * undefined when |X1| = 0, clamped at the u32 rail). Word 32 flags: bit
  * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
  * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
-inline constexpr std::uint32_t meter_unbalance_format = 0x00090001u;
+inline constexpr std::uint32_t meter_unbalance_format = 0x00090002u;
 /* AGG v3 (metrology M11): the 150/180-cycle tier record from
  * Agg150_180CycleEngine (Mtr2Engine retired). MTR2-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
@@ -76,8 +77,8 @@ inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
  * IDENTICAL to the basic-period POWER/PHASOR/UNBAL v1 maps. Word 13
  * carries the MTR2 shape word and 14/15 the folded basic-sequence range. */
 inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
-inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110001u;
-inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120001u;
+inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
+inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 

@@ -77,7 +77,7 @@ struct GoldenPowerExpectation {
 	double fundamental_active_watts = 0.0;
 	double reactive_power_vars = 0.0;
 	double displacement_power_factor = 0.0;
-	/* Degrees, wrapped to [-180, 180). */
+	/* Degrees, wrapped to [0, 360) — the PL's published convention. */
 	double displacement_angle_degrees = 0.0;
 };
 
@@ -178,9 +178,9 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 		result.power[phase].displacement_power_factor =
 			s1_va > 0.0 ? std::cos(angle) : 0.0;
 		double disp = phase_degrees[v] - phase_degrees[i];
-		while (disp >= 180.0)
+		while (disp >= 360.0)
 			disp -= 360.0;
-		while (disp < -180.0)
+		while (disp < 0.0)
 			disp += 360.0;
 		result.power[phase].displacement_angle_degrees = disp;
 	}

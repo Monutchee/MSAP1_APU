@@ -171,7 +171,7 @@ void reactive_sign_follows_lag()
 	/* Phase B: Vb at -120, Ib at -30 -> phi1 = -90 (current leads). */
 	require(near(expectation.power[1].reactive_power_vars, -600.0, 1e-9) &&
 			near(expectation.power[1].displacement_angle_degrees,
-			     -90.0, 1e-12) &&
+			     270.0, 1e-12) &&
 			near(expectation.power[1].displacement_power_factor,
 			     0.0, 1e-9),
 		"a quadrature lead gives Q1 = -S1 and dPF 0");

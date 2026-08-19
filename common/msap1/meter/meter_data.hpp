@@ -54,9 +54,11 @@ struct CrestTenThousandths {};
 /* Fundamental reactive power Q1, picovars; lagging/inductive positive
  * (sign conventions: PL metering_types.hpp). */
 struct Picovars {};
-/* Phase angle in millidegrees, [-180000, 180000), relative to the Va
- * fundamental (Va reads exactly 0). Meaningless when the record's
- * angle-reference flag is clear or the lane's fundamental is zero. */
+/* Phase angle in millidegrees, [0, 360000) — the industry convention,
+ * published this way by the PL itself (PHASOR/UNBAL v2) — relative to
+ * the Va fundamental (Va reads exactly 0; a 120-degree lag reads
+ * 240000). Meaningless when the record's angle-reference flag is clear
+ * or the lane's fundamental is zero. */
 struct Millidegrees {};
 /* Unsigned ratio in millionths of the positive-sequence magnitude
  * (20000 = 2%); undefined (Unavailable quality) when |X1| = 0, clamped
