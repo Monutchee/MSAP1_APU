@@ -110,10 +110,10 @@ struct FundamentalValues {
 	Reading<MilliHertz> frequency{};
 	PhaseABC<Reading<MicroVolts>> voltage_ln{};
 	PhaseABCN<Reading<MicroAmperes>> current{};
-	/* BASIC-v4 (M7): Vab/Vbc/Vca merged from the single-cycle tier's
-	 * instantaneous difference statistics (never |Va|-|Vb|). Valid only
-	 * when both contributing lanes are; default-invalid on aggregate
-	 * (MTR2) updates until that tier carries VLL (M11). */
+	/* Vab/Vbc/Vca merged from the single-cycle tier's instantaneous
+	 * difference statistics (never |Va|-|Vb|). Valid only when both
+	 * contributing lanes are. Basic since M7 (BASIC-v4 words 51..53);
+	 * aggregate since M11 (AGG-v3 words 38..40). */
 	PhaseABC<Reading<MicroVolts>> voltage_ll{};
 };
 
@@ -373,6 +373,18 @@ MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
 					  SystemTime received_at);
 
 /**
+ * The aggregate tier's sibling records (M11): identical payload maps to
+ * the basic-period POWER/PHASOR/UNBAL decoders, published on the
+ * Cycles150_180 period with the AGG record's sequence.
+ */
+MeterUpdate decode_aggregate_power_meter_record(const MeterRecord &record,
+						SystemTime received_at);
+MeterUpdate decode_aggregate_phasor_meter_record(const MeterRecord &record,
+						 SystemTime received_at);
+MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
+						    SystemTime received_at);
+
+/**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
  * TimeQuality and utc_start are NOT in the record — the PL does not know
@@ -385,7 +397,7 @@ MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
 					     std::chrono::system_clock::now());
 
 /**
- * Decode an MTR2 aggregate (0x00020002) record: 150/180-cycle fundamental
+ * Decode an AGG-v3 aggregate (0x00020003) record: 150/180-cycle fundamental
  * values plus the AggregateTiming identity. The PL is the authoritative
  * aggregator — this only DECODES what the PL computed; the APU never
  * recomputes aggregate values. As for MTR1, TimeQuality and utc_start are

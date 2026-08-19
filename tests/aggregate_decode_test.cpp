@@ -116,7 +116,76 @@ msap1::MeterRecord aggregate_record(const AggregateSpec &spec)
 			static_cast<std::uint32_t>(bits >> 32);
 	}
 	record.words[32] = spec.frequency_millihz;
+	/* AGG-v3 additions: interval last-sample anchor + line-line RMS. */
+	record.words[36] =
+		static_cast<std::uint32_t>(spec.first_sample_index + 384'014);
+	record.words[37] = static_cast<std::uint32_t>(
+		(spec.first_sample_index + 384'014) >> 32);
+	record.words[38] = 12'000'000;
+	record.words[39] = 11'000'000;
+	record.words[40] = 13'000'000;
 	return record;
+}
+
+/* AGG-v3 (M11): the line-line words decode with pair validity. */
+void aggregate_decodes_line_line()
+{
+	AggregateSpec spec{};
+	spec.rms_micro_units.fill(1'000'000);
+	const auto update = msap1::decode_aggregate_meter_record(
+		aggregate_record(spec), std::chrono::system_clock::now());
+	const auto &fundamental = *update.fundamental;
+	require(fundamental.voltage_ll.phase_a.valid() &&
+			fundamental.voltage_ll.phase_a.value == 12'000'000 &&
+			fundamental.voltage_ll.phase_b.value == 11'000'000 &&
+			fundamental.voltage_ll.phase_c.value == 13'000'000,
+		"AGG-v3 line-line words 38..40 were not decoded");
+}
+
+/* The aggregate sibling records (M11) decode on the Cycles150_180 period
+ * with the payload maps shared with the basic-period decoders. */
+void aggregate_siblings_decode()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_aggregate_power_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 7;
+	record.words[4] = 0x12345678u;
+	record.words[5] = 128'000;
+	record.words[6] = 384'015;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x10;
+	record.words[13] = 15u | (60u << 8) | (180u << 16);
+	record.words[14] = 100;
+	record.words[15] = 114;
+	record.words[16] = 360; /* P_A pW */
+	record.words[18] = 720; /* S_A pVA */
+	record.words[20] = 500000;
+	const auto update = msap1::decode_aggregate_power_meter_record(
+		record, std::chrono::system_clock::now());
+	require(update.period == msap1::MeasurementPeriod::Cycles150_180 &&
+			update.kind == msap1::RecordKind::power &&
+			update.sequence == 7 && update.power.has_value(),
+		"AGG-POWER did not decode as an aggregate power update");
+	require(update.power->active_power.phase_a.value == 360 &&
+			update.power->power_factor.phase_a.value == 500000,
+		"AGG-POWER payload map must match POWER-v1");
+
+	record.words[1] = msap1::meter_aggregate_phasor_format;
+	record.words[17] = 0; /* keep angle words clean */
+	const auto phasor = msap1::decode_aggregate_phasor_meter_record(
+		record, std::chrono::system_clock::now());
+	require(phasor.period == msap1::MeasurementPeriod::Cycles150_180 &&
+			phasor.phasor.has_value(),
+		"AGG-PHASOR did not decode on the aggregate period");
+
+	record.words[1] = msap1::meter_aggregate_unbalance_format;
+	const auto unbalance = msap1::decode_aggregate_unbalance_meter_record(
+		record, std::chrono::system_clock::now());
+	require(unbalance.period == msap1::MeasurementPeriod::Cycles150_180 &&
+			unbalance.unbalance.has_value(),
+		"AGG-UNBAL did not decode on the aggregate period");
 }
 
 /*
@@ -490,6 +559,8 @@ void decode_rejects_malformed_aggregates()
 int main()
 {
 	try {
+		aggregate_decodes_line_line();
+		aggregate_siblings_decode();
 		reference_reproduces_constant_inputs();
 		reference_matches_hand_computed_vectors();
 		decode_reference_built_record_60hz();

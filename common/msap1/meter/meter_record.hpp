@@ -63,7 +63,21 @@ inline constexpr std::uint32_t meter_phasor_format = 0x00080001u;
  * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
  * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
 inline constexpr std::uint32_t meter_unbalance_format = 0x00090001u;
-inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
+/* AGG v3 (metrology M11): the 150/180-cycle tier record from
+ * Agg150_180CycleEngine (Mtr2Engine retired). MTR2-v2 interior plus:
+ * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
+ * aggregate RMS (u32 micro-units). SEMANTIC upgrade: per-lane RMS is the
+ * whole-interval finalize of the summed raw accumulators (mean-corrected
+ * under the committed dc_remove, sample-weighted), no longer sqrt(mean
+ * of 15 block-RMS squares). */
+inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
+/* AGG-POWER/PHASOR/UNBAL v1 (M11): the aggregate tier's siblings, same
+ * sequence/anchors as their AGG-v3 record; payload word maps (16+)
+ * IDENTICAL to the basic-period POWER/PHASOR/UNBAL v1 maps. Word 13
+ * carries the MTR2 shape word and 14/15 the folded basic-sequence range. */
+inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
+inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110001u;
+inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120001u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 
@@ -159,6 +173,9 @@ struct MeterRecord {
 			record_format() == meter_phasor_format ||
 			record_format() == meter_unbalance_format ||
 			record_format() == meter_aggregate_format ||
+			record_format() == meter_aggregate_power_format ||
+			record_format() == meter_aggregate_phasor_format ||
+			record_format() == meter_aggregate_unbalance_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}

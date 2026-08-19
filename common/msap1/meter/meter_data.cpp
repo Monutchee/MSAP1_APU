@@ -366,6 +366,19 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va, debug. */
 	fundamental.current = {current(0), current(1), current(2), current(3)};
 	fundamental.voltage_ln = {voltage(6), voltage(5), voltage(4)};
+	/* AGG-v3 (M11): line-line RMS at words 38..40, pair-valid when both
+	 * contributing lanes are (with the arithmetic gate above). */
+	const auto voltage_pair = [&](std::size_t word, unsigned lane_a,
+				      unsigned lane_b) {
+		return aggregate_reading<MicroVolts>(
+			static_cast<std::int64_t>(record.word(word)),
+			(valid_mask & (1u << lane_a)) != 0u &&
+				(valid_mask & (1u << lane_b)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
+	};
+	fundamental.voltage_ll = {voltage_pair(38, 6, 5), voltage_pair(39, 5, 4),
+				  voltage_pair(40, 4, 6)};
 	return fundamental;
 }
 
@@ -386,11 +399,17 @@ SampleWindow sample_window(std::uint32_t sample_count,
 
 } // namespace
 
-MeterUpdate decode_power_meter_record(const MeterRecord &record,
-				      SystemTime received_at)
+namespace {
+
+/* The POWER payload map (words 16+) is shared verbatim by the basic
+ * (0x0007) and aggregate (0x0010) periods — one decoder, two wrappers. */
+MeterUpdate decode_power_payload(const MeterRecord &record,
+				 SystemTime received_at,
+				 std::uint32_t expected_format,
+				 MeasurementPeriod period)
 {
 	if (!record.header_valid() ||
-	    record.record_format() != meter_power_format)
+	    record.record_format() != expected_format)
 		throw std::invalid_argument("invalid power record");
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
@@ -456,7 +475,7 @@ MeterUpdate decode_power_meter_record(const MeterRecord &record,
 	values.voltage_crest = {crest(6), crest(5), crest(4)};
 
 	MeterUpdate update{};
-	update.period = MeasurementPeriod::Basic;
+	update.period = period;
 	update.kind = RecordKind::power;
 	update.sequence = sequence;
 	update.configuration_generation = record.configuration_generation();
@@ -464,13 +483,34 @@ MeterUpdate decode_power_meter_record(const MeterRecord &record,
 	return update;
 }
 
-MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
-				       SystemTime received_at)
+} // namespace
+
+MeterUpdate decode_power_meter_record(const MeterRecord &record,
+				      SystemTime received_at)
+{
+	return decode_power_payload(record, received_at, meter_power_format,
+				    MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_power_meter_record(const MeterRecord &record,
+						SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_aggregate_power_format,
+				    MeasurementPeriod::Cycles150_180);
+}
+
+namespace {
+
+MeterUpdate decode_phasor_payload(const MeterRecord &record,
+				  SystemTime received_at,
+				  std::uint32_t expected_format,
+				  MeasurementPeriod period)
 {
 	/* Word map: PL contract in MSAP1_PL .../common/include/
-	 * measurement_record.hpp (PHASOR-v1). */
+	 * measurement_record.hpp (PHASOR-v1 / AGG-PHASOR-v1). */
 	if (!record.header_valid() ||
-	    record.record_format() != meter_phasor_format)
+	    record.record_format() != expected_format)
 		throw std::invalid_argument("invalid phasor record");
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
@@ -614,7 +654,7 @@ MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
 		sequence, received_at, window};
 
 	MeterUpdate update{};
-	update.period = MeasurementPeriod::Basic;
+	update.period = period;
 	update.kind = RecordKind::phasor;
 	update.sequence = sequence;
 	update.configuration_generation = record.configuration_generation();
@@ -622,13 +662,34 @@ MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
 	return update;
 }
 
-MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
-					  SystemTime received_at)
+} // namespace
+
+MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
+				       SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at, meter_phasor_format,
+				     MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_phasor_meter_record(const MeterRecord &record,
+						 SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_aggregate_phasor_format,
+				     MeasurementPeriod::Cycles150_180);
+}
+
+namespace {
+
+MeterUpdate decode_unbalance_payload(const MeterRecord &record,
+				     SystemTime received_at,
+				     std::uint32_t expected_format,
+				     MeasurementPeriod period)
 {
 	/* Word map: PL contract in MSAP1_PL .../common/include/
-	 * measurement_record.hpp (UNBALANCE-v1). */
+	 * measurement_record.hpp (UNBALANCE-v1 / AGG-UNBAL-v1). */
 	if (!record.header_valid() ||
-	    record.record_format() != meter_unbalance_format)
+	    record.record_format() != expected_format)
 		throw std::invalid_argument("invalid unbalance record");
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
@@ -714,12 +775,30 @@ MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
 	values.current_unbalance = ratio(31u, i_lanes && i_ratios_valid);
 
 	MeterUpdate update{};
-	update.period = MeasurementPeriod::Basic;
+	update.period = period;
 	update.kind = RecordKind::unbalance;
 	update.sequence = sequence;
 	update.configuration_generation = record.configuration_generation();
 	update.unbalance = values;
 	return update;
+}
+
+} // namespace
+
+MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
+					  SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_unbalance_format,
+					MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
+						    SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_aggregate_unbalance_format,
+					MeasurementPeriod::Cycles150_180);
 }
 
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
@@ -934,6 +1013,21 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_unbalance_meter_record(record,
 							     received_at);
+		});
+	result.register_decoder(meter_aggregate_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_power_meter_record(
+				record, received_at);
+		});
+	result.register_decoder(meter_aggregate_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_phasor_meter_record(
+				record, received_at);
+		});
+	result.register_decoder(meter_aggregate_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_unbalance_meter_record(
+				record, received_at);
 		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {

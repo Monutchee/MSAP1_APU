@@ -211,7 +211,7 @@ struct InfoResponse {
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};
-	/* Newest 150/180-cycle aggregate (MTR2, 0x00020002). Meaningful only
+	/* Newest 150/180-cycle aggregate (AGG-v3, 0x00020003). Meaningful only
 	 * when has_aggregate_record is set; the basic latest_record above is
 	 * unaffected by, and never replaced with, an aggregate. */
 	MeterRecord latest_aggregate_record{};

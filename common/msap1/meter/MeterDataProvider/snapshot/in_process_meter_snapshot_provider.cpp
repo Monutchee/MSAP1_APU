@@ -104,11 +104,14 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 	if (period == msap1::MeasurementPeriod::Basic) {
 		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
 							       std::nullopt});
-		/* The basic tier carries line-line RMS (BASIC-v4), the
-		 * finalized power quantities (POWER-v1), the fundamental
-		 * phasor quantities (PHASOR-v1) and the symmetrical
-		 * components (UNBALANCE-v1) since M7/M8/M9/M10. The
-		 * aggregate tier gains them in M11. */
+	}
+	{
+		/* Both tiers carry line-line RMS, the finalized power
+		 * quantities, the fundamental phasors, and the symmetrical
+		 * components since M11 (the basic tier since M7..M10; the
+		 * aggregate tier's AGG record quad). Frequency stays
+		 * basic-only: the aggregate's mean frequency is informative,
+		 * not a Class A product. */
 		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
 				      Id::ActivePowerA, Id::ActivePowerB,
 				      Id::ActivePowerC, Id::ActivePowerTotal,

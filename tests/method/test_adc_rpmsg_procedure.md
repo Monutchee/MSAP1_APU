@@ -556,3 +556,32 @@ rotation).
    target 2026-08-19). Restore the voltages: ratios return.
 5. **Continuity.** `mnc meter health`: zero gaps/invalid at the
    quadrupled record rate (20/s at 60 Hz).
+
+## 18. 150/180-cycle tier rebuild (metrology M11)
+
+Prerequisite: the Agg150_180CycleEngine build (Mtr2Engine retired): AGG-v3
+records (0x00020003) plus the AGG-POWER/PHASOR/UNBAL siblings
+(0x00100001/0x00110001/0x00120001), four records per ~3 s on the
+aggregate stream. The aggregate is now the whole-interval finalize of
+the summed accumulators (sample-weighted, mean-corrected) — golden
+equivalence with the retired engine for steady inputs, not bit identity.
+
+1. **Cadence + value baseline.** Balanced 120 V / 3 A:
+   `GET /api/v1/meter/aggregate` updates every ~3 s and its per-channel
+   RMS equals the basic readings (steady input ⇒ whole-interval RMS =
+   block RMS). Sequence increments by exactly 1 per record.
+2. **Register path.** devmem 0xB005007C (AGG_RECORD_COUNT) advances 1
+   per 3 s; 0xB0080..90 diagnostics stable: resets 0x80 / ineligible
+   0x84 / continuity 0x88 unchanged during steady state — the AGG-v3
+   format-gated record tap (the sibling records must NOT disturb these
+   registers; that gating is new in M11).
+3. **APPLY discipline.** One `mnc adc simulator configure` reconfigure:
+   ineligible count rises by exactly the first-block-flagged blocks (+1)
+   and the open aggregate resets once; the aggregate stream resumes
+   within ~6 s with a clean sequence.
+4. **Continuity.** `mnc meter health --full` over 10 minutes: zero
+   aggregate gaps at the new 4-records-per-3s rate; basic-stream
+   accounting unchanged.
+5. **Follow-up (not in this milestone):** aggregate power/phasor/
+   unbalance readings surface in the store/historian; a period-aware
+   snapshot IPC + web panel exposes them later.

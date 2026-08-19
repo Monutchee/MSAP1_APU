@@ -396,7 +396,11 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	const bool sibling =
 		record.record_format() == msap1::meter_power_format ||
 		record.record_format() == msap1::meter_phasor_format ||
-		record.record_format() == msap1::meter_unbalance_format;
+		record.record_format() == msap1::meter_unbalance_format ||
+		record.record_format() == msap1::meter_aggregate_power_format ||
+		record.record_format() == msap1::meter_aggregate_phasor_format ||
+		record.record_format() ==
+			msap1::meter_aggregate_unbalance_format;
 	const bool aggregate =
 		record.record_format() == msap1::meter_aggregate_format;
 	if (!sibling &&
