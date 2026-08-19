@@ -33,6 +33,12 @@ constexpr std::array catalog{
 	key(Id::VoltagePhaseAngleC),
 	key(Id::CurrentPhaseAngleA), key(Id::CurrentPhaseAngleB),
 	key(Id::CurrentPhaseAngleC),
+	key(Id::VoltageUnbalance), key(Id::CurrentUnbalance),
+	key(Id::VoltageZeroSequenceRatio), key(Id::CurrentZeroSequenceRatio),
+	key(Id::ZeroSequenceVoltage), key(Id::PositiveSequenceVoltage),
+	key(Id::NegativeSequenceVoltage),
+	key(Id::ZeroSequenceCurrent), key(Id::PositiveSequenceCurrent),
+	key(Id::NegativeSequenceCurrent),
 };
 
 } // namespace
@@ -132,6 +138,36 @@ MeterAttributeDescriptor describe(MeterAttributeKey attribute)
 	case Id::CurrentPhaseAngleC:
 		return {attribute, "phase.angle.current.c",
 			MeterUnit::Millidegrees};
+	case Id::VoltageUnbalance:
+		return {attribute, "unbalance.voltage",
+			MeterUnit::RatioMillionths};
+	case Id::CurrentUnbalance:
+		return {attribute, "unbalance.current",
+			MeterUnit::RatioMillionths};
+	case Id::VoltageZeroSequenceRatio:
+		return {attribute, "unbalance.voltage.zero",
+			MeterUnit::RatioMillionths};
+	case Id::CurrentZeroSequenceRatio:
+		return {attribute, "unbalance.current.zero",
+			MeterUnit::RatioMillionths};
+	case Id::ZeroSequenceVoltage:
+		return {attribute, "sequence.voltage.zero.rms",
+			MeterUnit::MicroVolts};
+	case Id::PositiveSequenceVoltage:
+		return {attribute, "sequence.voltage.positive.rms",
+			MeterUnit::MicroVolts};
+	case Id::NegativeSequenceVoltage:
+		return {attribute, "sequence.voltage.negative.rms",
+			MeterUnit::MicroVolts};
+	case Id::ZeroSequenceCurrent:
+		return {attribute, "sequence.current.zero.rms",
+			MeterUnit::MicroAmperes};
+	case Id::PositiveSequenceCurrent:
+		return {attribute, "sequence.current.positive.rms",
+			MeterUnit::MicroAmperes};
+	case Id::NegativeSequenceCurrent:
+		return {attribute, "sequence.current.negative.rms",
+			MeterUnit::MicroAmperes};
 	}
 	throw std::invalid_argument("unknown meter attribute");
 }
@@ -186,6 +222,17 @@ std::vector<MeterAttributeKey> attributes_in(MeterAttributeGroup group)
 		return {key(Id::VoltagePhaseAngleA), key(Id::VoltagePhaseAngleB),
 			key(Id::VoltagePhaseAngleC), key(Id::CurrentPhaseAngleA),
 			key(Id::CurrentPhaseAngleB), key(Id::CurrentPhaseAngleC)};
+	case MeterAttributeGroup::Unbalance:
+		return {key(Id::VoltageUnbalance), key(Id::CurrentUnbalance),
+			key(Id::VoltageZeroSequenceRatio),
+			key(Id::CurrentZeroSequenceRatio)};
+	case MeterAttributeGroup::SequenceComponents:
+		return {key(Id::ZeroSequenceVoltage),
+			key(Id::PositiveSequenceVoltage),
+			key(Id::NegativeSequenceVoltage),
+			key(Id::ZeroSequenceCurrent),
+			key(Id::PositiveSequenceCurrent),
+			key(Id::NegativeSequenceCurrent)};
 	case MeterAttributeGroup::Fundamental:
 	case MeterAttributeGroup::AllDefined:
 		return {key(Id::Frequency), key(Id::VanRms), key(Id::VbnRms),

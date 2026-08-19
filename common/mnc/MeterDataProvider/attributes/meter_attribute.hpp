@@ -77,6 +77,18 @@ enum class MeterAttributeId : std::uint16_t {
 	CurrentPhaseAngleA,
 	CurrentPhaseAngleB,
 	CurrentPhaseAngleC,
+	/* M10, symmetrical components + unbalance. Appended — never
+	 * renumber. Ratios are millionths of the positive sequence. */
+	VoltageUnbalance,
+	CurrentUnbalance,
+	VoltageZeroSequenceRatio,
+	CurrentZeroSequenceRatio,
+	ZeroSequenceVoltage,
+	PositiveSequenceVoltage,
+	NegativeSequenceVoltage,
+	ZeroSequenceCurrent,
+	PositiveSequenceCurrent,
+	NegativeSequenceCurrent,
 };
 
 /**
@@ -113,6 +125,8 @@ enum class MeterAttributeGroup : std::uint8_t {
 	ReactivePower,
 	DisplacementPowerFactor,
 	PhaseAngle,
+	Unbalance,
+	SequenceComponents,
 	AllDefined,
 };
 
@@ -130,6 +144,9 @@ enum class MeterUnit : std::uint8_t {
 	/* Phase angle, signed millidegrees in [-180000, 180000), relative to
 	 * the Va fundamental. */
 	Millidegrees,
+	/* Unsigned ratio in millionths of the positive-sequence magnitude
+	 * (20000 = 2%); undefined (Unavailable) when that magnitude is 0. */
+	RatioMillionths,
 };
 
 enum class ReadingQuality : std::uint8_t {

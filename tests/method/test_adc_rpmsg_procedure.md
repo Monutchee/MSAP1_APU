@@ -523,3 +523,32 @@ PF = cos(phi1); both use the FUNDAMENTAL RMS only.
    load nature is undefined. Restore the noise floor afterwards.
 7. **Continuity.** `mnc meter health` over 10 minutes with the tripled
    record rate (15/s at 60 Hz): zero gaps, zero invalid.
+
+## 17. 10/12-cycle unbalance tier (metrology M10)
+
+Prerequisite: UNBALANCE-v1 records (0x00090001, fourth record of every
+block) and the matched image. Readings surface as `unbalance.*` (%,
+millionths/1e4) and `sequence.{voltage,current}.{zero,positive,negative}.rms`
+in `mnc meter snapshot`, the web panel, and `attributes[]`. Golden
+values from `tests/support/waveform_golden.hpp` (a-operator, ABC
+rotation).
+
+1. **Balanced baseline.** Balanced 120 V / 3 A: V1 = 120 V, I1 = 3 A,
+   V0/V2/I0/I2 at the noise floor, `unbalance.voltage` well below 0.1%.
+2. **Amplitude unbalance.** `--vb-rms 108` (a 10% single-phase sag):
+   V1 = 116 V and V0 = V2 = 4 V — the sag splits EQUALLY into the zero
+   and negative sequences — so `unbalance.voltage` = 4/116 = 3.45% and
+   `unbalance.voltage.zero` reads the same. Currents unaffected.
+   Restore `--vb-rms 120`.
+3. **ACB rotation (the sequence swap).** Swap the B and C voltage
+   phases: `--vb-phase-degrees 120 --vc-phase-degrees -120`. V2 jumps to
+   ~120 V while V1 collapses to ~0: `unbalance.voltage` reads off-scale
+   (clamped) or unavailable if V1 floored to zero. The current set keeps
+   ABC and stays balanced — the two sets must move independently.
+   Restore `--vb-phase-degrees -120 --vc-phase-degrees 120`.
+4. **Undefined ratios.** All three voltages at 0 (`--va-rms 0 --vb-rms 0
+   --vc-rms 0 --va-noise-rms 0 --vb-noise-rms 0 --vc-noise-rms 0`): V1 =
+   0, so the voltage ratios print unavailable/dash — never a confident
+   0. Current ratios stay live. Restore the voltages.
+5. **Continuity.** `mnc meter health`: zero gaps/invalid at the
+   quadrupled record rate (20/s at 60 Hz).

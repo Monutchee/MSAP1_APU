@@ -30,6 +30,7 @@ enum class RecordKind : std::uint16_t {
 	demand = 4,
 	power_quality = 5,
 	phasor = 6,
+	unbalance = 7,
 };
 
 enum class MeasurementQuality : std::uint8_t {
@@ -57,6 +58,10 @@ struct Picovars {};
  * fundamental (Va reads exactly 0). Meaningless when the record's
  * angle-reference flag is clear or the lane's fundamental is zero. */
 struct Millidegrees {};
+/* Unsigned ratio in millionths of the positive-sequence magnitude
+ * (20000 = 2%); undefined (Unavailable quality) when |X1| = 0, clamped
+ * at the u32 rail (an ACB feed drives it off scale by design). */
+struct RatioMillionths {};
 struct MicroAmperes {};
 struct MicroWatts {};
 struct MicroWattHours {};
@@ -162,6 +167,33 @@ struct PhasorValues {
 	/* Status bit 1: a merged cycle had no usable frequency reference. */
 	bool phasor_invalid = false;
 };
+/* Decoded from the UNBALANCE-v1 record (M10): symmetrical components of
+ * the fundamental phasors (a-operator conventions normative in the PL's
+ * metering_types.hpp). Sequence magnitudes publish as RMS like the
+ * fundamentals; angles follow the relative-to-Va convention. When the
+ * block carried the phasor-invalid status bit every reading decodes with
+ * MeasurementQuality::invalid. */
+struct UnbalanceValues {
+	Reading<MicroVolts> voltage_zero_sequence{};
+	Reading<MicroVolts> voltage_positive_sequence{};
+	Reading<MicroVolts> voltage_negative_sequence{};
+	Reading<Millidegrees> voltage_zero_angle{};
+	Reading<Millidegrees> voltage_positive_angle{};
+	Reading<Millidegrees> voltage_negative_angle{};
+	Reading<MicroAmperes> current_zero_sequence{};
+	Reading<MicroAmperes> current_positive_sequence{};
+	Reading<MicroAmperes> current_negative_sequence{};
+	Reading<Millidegrees> current_zero_angle{};
+	Reading<Millidegrees> current_positive_angle{};
+	Reading<Millidegrees> current_negative_angle{};
+	/* |X0|/|X1| and UNBL = |X2|/|X1|, gated on |X1| != 0. */
+	Reading<RatioMillionths> voltage_zero_ratio{};
+	Reading<RatioMillionths> voltage_unbalance{};
+	Reading<RatioMillionths> current_zero_ratio{};
+	Reading<RatioMillionths> current_unbalance{};
+	bool angle_reference_valid = false;
+	bool phasor_invalid = false;
+};
 struct EnergyValues {};
 struct DemandValues {};
 struct PowerQualityValues {};
@@ -170,6 +202,7 @@ struct MeterValues {
 	FundamentalValues fundamental{};
 	PowerValues power{};
 	PhasorValues phasor{};
+	UnbalanceValues unbalance{};
 	EnergyValues energy{};
 	DemandValues demand{};
 	PowerQualityValues power_quality{};
@@ -183,6 +216,7 @@ struct MeterUpdate {
 	std::optional<FundamentalValues> fundamental;
 	std::optional<PowerValues> power;
 	std::optional<PhasorValues> phasor;
+	std::optional<UnbalanceValues> unbalance;
 	std::optional<EnergyValues> energy;
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
@@ -330,6 +364,13 @@ MeterUpdate decode_power_meter_record(const MeterRecord &record,
  */
 MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
 				       SystemTime received_at);
+
+/**
+ * Decode an UNBALANCE-v1 (0x00090001) record into UnbalanceValues on the
+ * Basic period (the fourth record of the same block).
+ */
+MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
+					  SystemTime received_at);
 
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the

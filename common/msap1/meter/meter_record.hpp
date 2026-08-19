@@ -53,6 +53,16 @@ inline constexpr std::uint32_t meter_power_format = 0x00070001u;
  * and bit 8 = angle-reference-valid. Status bit 1 = at least one merged
  * cycle had no usable frequency reference (every phasor word suspect). */
 inline constexpr std::uint32_t meter_phasor_format = 0x00080001u;
+/* UNBALANCE v1 (metrology M10): fourth record of each 10/12-cycle block,
+ * same sequence and anchors. Symmetrical components of the fundamental
+ * phasors: zero/positive/negative sequence RMS (u32 micro-units) + angle
+ * (s32 millidegrees, relative to Va) for voltage (words 16..21) and
+ * current (22..27, IA/IB/IC never IN); |X0|/|X1| and UNBL = |X2|/|X1| in
+ * millionths at words 28..31 (0 + flags-word validity bit clear =
+ * undefined when |X1| = 0, clamped at the u32 rail). Word 32 flags: bit
+ * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
+ * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
+inline constexpr std::uint32_t meter_unbalance_format = 0x00090001u;
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
@@ -147,6 +157,7 @@ struct MeterRecord {
 		       (record_format() == meter_periodic_format ||
 		        record_format() == meter_power_format ||
 			record_format() == meter_phasor_format ||
+			record_format() == meter_unbalance_format ||
 			record_format() == meter_aggregate_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;

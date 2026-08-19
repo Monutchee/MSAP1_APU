@@ -105,8 +105,9 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
 							       std::nullopt});
 		/* The basic tier carries line-line RMS (BASIC-v4), the
-		 * finalized power quantities (POWER-v1) and the fundamental
-		 * phasor quantities (PHASOR-v1) since M7/M8/M9. The
+		 * finalized power quantities (POWER-v1), the fundamental
+		 * phasor quantities (PHASOR-v1) and the symmetrical
+		 * components (UNBALANCE-v1) since M7/M8/M9/M10. The
 		 * aggregate tier gains them in M11. */
 		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
 				      Id::ActivePowerA, Id::ActivePowerB,
@@ -128,7 +129,16 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 				      Id::VoltagePhaseAngleC,
 				      Id::CurrentPhaseAngleA,
 				      Id::CurrentPhaseAngleB,
-				      Id::CurrentPhaseAngleC})
+				      Id::CurrentPhaseAngleC,
+				      Id::VoltageUnbalance, Id::CurrentUnbalance,
+				      Id::VoltageZeroSequenceRatio,
+				      Id::CurrentZeroSequenceRatio,
+				      Id::ZeroSequenceVoltage,
+				      Id::PositiveSequenceVoltage,
+				      Id::NegativeSequenceVoltage,
+				      Id::ZeroSequenceCurrent,
+				      Id::PositiveSequenceCurrent,
+				      Id::NegativeSequenceCurrent})
 			result.push_back({id, std::nullopt});
 	}
 	return result;
@@ -348,6 +358,56 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			result.values.push_back(value(attribute,
 				MeterUnit::Millidegrees,
 				view.values.phasor.current_angle.phase_c));
+			break;
+		case MeterAttributeId::VoltageUnbalance:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.voltage_unbalance));
+			break;
+		case MeterAttributeId::CurrentUnbalance:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.current_unbalance));
+			break;
+		case MeterAttributeId::VoltageZeroSequenceRatio:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.voltage_zero_ratio));
+			break;
+		case MeterAttributeId::CurrentZeroSequenceRatio:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.current_zero_ratio));
+			break;
+		case MeterAttributeId::ZeroSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_zero_sequence));
+			break;
+		case MeterAttributeId::PositiveSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_positive_sequence));
+			break;
+		case MeterAttributeId::NegativeSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_negative_sequence));
+			break;
+		case MeterAttributeId::ZeroSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_zero_sequence));
+			break;
+		case MeterAttributeId::PositiveSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_positive_sequence));
+			break;
+		case MeterAttributeId::NegativeSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_negative_sequence));
 			break;
 		}
 	}

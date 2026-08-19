@@ -68,6 +68,7 @@ std::string unit_name(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::PowerFactorMillionths: return "pf_e6";
 	case mnc::meter::MeterUnit::Picovars: return "pvar";
 	case mnc::meter::MeterUnit::Millidegrees: return "mdeg";
+	case mnc::meter::MeterUnit::RatioMillionths: return "ratio_e6";
 	}
 	return "unknown";
 }

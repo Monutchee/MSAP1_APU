@@ -257,6 +257,81 @@ void decode_phasor_record_pins()
 		"phasor-invalid block decodes as invalid, not silently valid");
 }
 
+/* UNBALANCE-v1 fixture: V set with a zero-magnitude zero-sequence (angle
+ * gating), a dominant positive sequence and a 2% negative sequence; I
+ * ratios flagged invalid (|I1| = 0 upstream). Flags: V valid (bit 0),
+ * reference valid (bit 8), I NOT valid. */
+msap1::MeterRecord unbalance_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_unbalance_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 42;
+	record.words[4] = 0x12345678;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	/* V0 = 0 @ 0; V1 = 1000000 @ 0; V2 = 20000 @ -90 deg. */
+	record.words[16] = 0; record.words[17] = 0;
+	record.words[18] = 1'000'000; record.words[19] = 0;
+	record.words[20] = 20'000;
+	record.words[21] = static_cast<std::uint32_t>(-90000);
+	/* I components present but the I ratios are undefined. */
+	record.words[22] = 5; record.words[23] = 15000;
+	record.words[24] = 0; record.words[25] = 0;
+	record.words[26] = 7;
+	record.words[27] = static_cast<std::uint32_t>(-45000);
+	record.words[28] = 0;      /* V0/V1 */
+	record.words[29] = 20000;  /* UNBL_V = 2% */
+	record.words[30] = 0;
+	record.words[31] = 0;
+	record.words[32] = (1u << 0) | (1u << 8);  /* V valid + ref, I not */
+	return record;
+}
+
+void decode_unbalance_record_pins()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{126s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(unbalance_record(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+			update.kind == msap1::RecordKind::unbalance &&
+			update.sequence == 42 && update.unbalance.has_value(),
+		"UNBALANCE-v1 did not decode as a basic unbalance update");
+	const auto &values = *update.unbalance;
+	require(!values.phasor_invalid && values.angle_reference_valid,
+		"clean record flags");
+	require(values.voltage_positive_sequence.value == 1'000'000 &&
+			values.voltage_negative_sequence.value == 20'000 &&
+			values.voltage_negative_angle.value == -90000,
+		"voltage sequence components decode");
+	require(!values.voltage_zero_angle.valid(),
+		"a zero-magnitude component has no meaningful angle");
+	require(values.voltage_unbalance.value == 20000 &&
+			values.voltage_unbalance.valid() &&
+			values.voltage_zero_ratio.valid(),
+		"voltage ratios valid under the flag");
+	require(!values.current_unbalance.valid() &&
+			!values.current_zero_ratio.valid(),
+		"current ratios unavailable when |I1| = 0 upstream");
+	require(values.current_zero_sequence.value == 5 &&
+			values.current_zero_angle.value == 15000 &&
+			values.current_negative_angle.value == -45000,
+		"current components decode signed");
+
+	/* The block-invalid status bit downgrades every reading. */
+	auto poisoned = unbalance_record();
+	poisoned.words[8] = 0x2u;
+	const auto bad = registry.decode(poisoned, timestamp);
+	require(bad.unbalance->phasor_invalid &&
+			bad.unbalance->voltage_unbalance.quality ==
+				msap1::MeasurementQuality::invalid,
+		"phasor-invalid block decodes as invalid");
+}
+
 void decode_and_period_independence()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
@@ -555,6 +630,7 @@ int main()
 		decode_and_period_independence();
 	decode_power_record_pins();
 	decode_phasor_record_pins();
+	decode_unbalance_record_pins();
 		decode_block_timing();
 		decode_rejects_malformed_timing();
 		decode_rejects_retired_formats();

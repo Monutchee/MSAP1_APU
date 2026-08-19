@@ -887,6 +887,10 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			value = static_cast<double>(reading.value) / 1000.0;
 			unit = "deg";
 			break;
+		case mnc::meter::MeterUnit::RatioMillionths:
+			value = static_cast<double>(reading.value) / 10000.0;
+			unit = "%";
+			break;
 		}
 		result.readings.push_back({std::string(descriptor.key),
 					   unit, valid, value});

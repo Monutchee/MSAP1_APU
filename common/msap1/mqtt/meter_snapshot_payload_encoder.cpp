@@ -97,6 +97,9 @@ std::pair<double, std::string> engineering(std::int64_t value,
 		return {static_cast<double>(value) / 1e12, "var"};
 	case mnc::meter::MeterUnit::Millidegrees:
 		return {static_cast<double>(value) / 1000.0, "deg"};
+	case mnc::meter::MeterUnit::RatioMillionths:
+		/* millionths of the positive sequence -> percent. */
+		return {static_cast<double>(value) / 10000.0, "%"};
 	}
 	return {0.0, "unknown"};
 }

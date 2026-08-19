@@ -47,6 +47,8 @@ void MeterLatestStore::apply(const MeterUpdate &update)
 		slot->values.power = *update.power;
 	if (update.phasor)
 		slot->values.phasor = *update.phasor;
+	if (update.unbalance)
+		slot->values.unbalance = *update.unbalance;
 	if (update.energy)
 		slot->values.energy = *update.energy;
 	if (update.demand)
@@ -620,6 +622,106 @@ MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
 	return update;
 }
 
+MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
+					  SystemTime received_at)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (UNBALANCE-v1). */
+	if (!record.header_valid() ||
+	    record.record_format() != meter_unbalance_format)
+		throw std::invalid_argument("invalid unbalance record");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"unbalance record has a zero sample count");
+	if (record.first_sample_index() == 0u)
+		throw std::invalid_argument(
+			"unbalance record has a zero first-sample index");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool block_invalid = (record.word(8) & 0x2u) != 0u;
+	const auto flags = record.word(32);
+	const bool v_ratios_valid = (flags & 0x1u) != 0u;
+	const bool i_ratios_valid = (flags & 0x2u) != 0u;
+	const bool reference_valid = (flags & 0x100u) != 0u;
+	const auto valid_mask = record.valid_mask();
+	/* A sequence set is meaningful only when all three of its phase
+	 * lanes contributed (the components mix every phase). */
+	const bool v_lanes = (valid_mask & 0x70u) == 0x70u; /* Vc/Vb/Va */
+	const bool i_lanes = (valid_mask & 0x07u) == 0x07u; /* Ia/Ib/Ic */
+	const auto quality = [&](bool available) {
+		if (block_invalid)
+			return MeasurementQuality::invalid;
+		return available ? MeasurementQuality::valid
+				 : MeasurementQuality::unavailable;
+	};
+
+	UnbalanceValues values{};
+	values.phasor_invalid = block_invalid;
+	values.angle_reference_valid = reference_valid;
+
+	const auto magnitude = [&](std::size_t base, bool lanes_ok) {
+		return std::pair<std::int64_t, MeasurementQuality>{
+			static_cast<std::int64_t>(record.word(base)),
+			quality(lanes_ok)};
+	};
+	const auto angle_of = [&](std::size_t base, bool lanes_ok,
+				  std::int64_t rms) {
+		return Reading<Millidegrees>{
+			static_cast<std::int64_t>(
+				static_cast<std::int32_t>(record.word(base + 1))),
+			quality(lanes_ok && reference_valid && rms != 0),
+			sequence, received_at, window};
+	};
+	/* Voltage components: zero/positive/negative at words 16/18/20. */
+	Reading<MicroVolts> v_seq[3];
+	Reading<Millidegrees> v_angle[3];
+	for (std::size_t k = 0; k < 3; ++k) {
+		const auto [value, grade] = magnitude(16u + k * 2u, v_lanes);
+		v_seq[k] = {value, grade, sequence, received_at, window};
+		v_angle[k] = angle_of(16u + k * 2u, v_lanes, value);
+	}
+	values.voltage_zero_sequence = v_seq[0];
+	values.voltage_positive_sequence = v_seq[1];
+	values.voltage_negative_sequence = v_seq[2];
+	values.voltage_zero_angle = v_angle[0];
+	values.voltage_positive_angle = v_angle[1];
+	values.voltage_negative_angle = v_angle[2];
+	/* Current components at words 22/24/26. */
+	Reading<MicroAmperes> i_seq[3];
+	Reading<Millidegrees> i_angle[3];
+	for (std::size_t k = 0; k < 3; ++k) {
+		const auto [value, grade] = magnitude(22u + k * 2u, i_lanes);
+		i_seq[k] = {value, grade, sequence, received_at, window};
+		i_angle[k] = angle_of(22u + k * 2u, i_lanes, value);
+	}
+	values.current_zero_sequence = i_seq[0];
+	values.current_positive_sequence = i_seq[1];
+	values.current_negative_sequence = i_seq[2];
+	values.current_zero_angle = i_angle[0];
+	values.current_positive_angle = i_angle[1];
+	values.current_negative_angle = i_angle[2];
+
+	const auto ratio = [&](std::size_t word, bool available) {
+		return Reading<RatioMillionths>{
+			static_cast<std::int64_t>(record.word(word)),
+			quality(available), sequence, received_at, window};
+	};
+	values.voltage_zero_ratio = ratio(28u, v_lanes && v_ratios_valid);
+	values.voltage_unbalance = ratio(29u, v_lanes && v_ratios_valid);
+	values.current_zero_ratio = ratio(30u, i_lanes && i_ratios_valid);
+	values.current_unbalance = ratio(31u, i_lanes && i_ratios_valid);
+
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Basic;
+	update.kind = RecordKind::unbalance;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.unbalance = values;
+	return update;
+}
+
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 					 SystemTime received_at)
 {
@@ -827,6 +929,11 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 	result.register_decoder(meter_phasor_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_phasor_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_unbalance_meter_record(record,
+							     received_at);
 		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {

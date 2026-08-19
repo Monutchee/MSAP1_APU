@@ -81,12 +81,26 @@ struct GoldenPowerExpectation {
 	double displacement_angle_degrees = 0.0;
 };
 
+/* Symmetrical components of the configured fundamentals (M10 UNBALANCE
+ * record): a-operator convention (a = 1 at +120 deg, ABC rotation),
+ * X0/X1/X2 as RMS magnitudes, unbalance = |X2|/|X1| and zero ratio =
+ * |X0|/|X1| as plain fractions (0 when |X1| = 0 — undefined). */
+struct GoldenSequenceExpectation {
+	double zero_rms = 0.0;
+	double positive_rms = 0.0;
+	double negative_rms = 0.0;
+	double unbalance = 0.0;
+	double zero_ratio = 0.0;
+};
+
 /** Expected steady-state readings for one simulator configuration. */
 struct GoldenExpectation {
 	double frequency_hz = 0.0;
 	std::array<GoldenChannelExpectation, 8> channels{};
 	/* Phases A/B/C pair voltage lanes 6/5/4 with current lanes 0/1/2. */
 	std::array<GoldenPowerExpectation, 3> power{};
+	GoldenSequenceExpectation voltage_sequence{};
+	GoldenSequenceExpectation current_sequence{};
 };
 
 /* Mirrors harmonic_channel_mask in meter_config.cpp (lanes 0..3 current,
@@ -170,6 +184,40 @@ inline GoldenExpectation golden_expectation(const msap1::SimulatorConfig &config
 			disp += 360.0;
 		result.power[phase].displacement_angle_degrees = disp;
 	}
+	const auto sequence_of = [&](const int lanes[3]) {
+		GoldenSequenceExpectation out{};
+		double re[3], im[3];
+		for (int k = 0; k < 3; ++k) {
+			const double rad =
+				phase_degrees[lanes[k]] * M_PI / 180.0;
+			re[k] = rms[lanes[k]] * std::cos(rad);
+			im[k] = rms[lanes[k]] * std::sin(rad);
+		}
+		const double c = -0.5, s = std::sqrt(3.0) / 2.0;
+		const auto rotate = [&](double xr, double xi, double sign,
+					double &orr, double &oi) {
+			orr = xr * c - sign * xi * s;
+			oi = sign * xr * s + xi * c;
+		};
+		double bar, bai, ba2r, ba2i, car, cai, ca2r, ca2i;
+		rotate(re[1], im[1], 1.0, bar, bai);    /* a * B */
+		rotate(re[1], im[1], -1.0, ba2r, ba2i); /* a^2 * B */
+		rotate(re[2], im[2], 1.0, car, cai);
+		rotate(re[2], im[2], -1.0, ca2r, ca2i);
+		out.zero_rms = std::hypot(re[0] + re[1] + re[2],
+					  im[0] + im[1] + im[2]) / 3.0;
+		out.positive_rms = std::hypot(re[0] + bar + ca2r,
+					      im[0] + bai + ca2i) / 3.0;
+		out.negative_rms = std::hypot(re[0] + ba2r + car,
+					      im[0] + ba2i + cai) / 3.0;
+		if (out.positive_rms > 0.0) {
+			out.unbalance = out.negative_rms / out.positive_rms;
+			out.zero_ratio = out.zero_rms / out.positive_rms;
+		}
+		return out;
+	};
+	result.voltage_sequence = sequence_of(voltage_lane);
+	result.current_sequence = sequence_of(current_lane);
 	return result;
 }
 

@@ -18,6 +18,7 @@ std::string unit_id(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::PowerFactorMillionths: return "PF";
 	case mnc::meter::MeterUnit::Picovars: return "var";
 	case mnc::meter::MeterUnit::Millidegrees: return "deg";
+	case mnc::meter::MeterUnit::RatioMillionths: return "%";
 	}
 	return "unknown";
 }

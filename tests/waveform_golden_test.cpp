@@ -177,6 +177,45 @@ void reactive_sign_follows_lag()
 		"a quadrature lead gives Q1 = -S1 and dPF 0");
 }
 
+void sequence_components_swap_under_acb()
+{
+	/* Balanced ABC: everything in the positive sequence. */
+	msap1::SimulatorConfig config;
+	config.frequency_hz = 60.0;
+	config.channels = {
+		{0u, 3.0, 0.0, 0.0, 0.0},    {1u, 3.0, -120.0, 0.0, 0.0},
+		{2u, 3.0, 120.0, 0.0, 0.0},  {3u, 0.0, 0.0, 0.0, 0.0},
+		{4u, 120.0, 120.0, 0.0, 0.0}, {5u, 120.0, -120.0, 0.0, 0.0},
+		{6u, 120.0, 0.0, 0.0, 0.0},
+	};
+	auto expectation = msap1::test::golden_expectation(config);
+	require(near(expectation.voltage_sequence.positive_rms, 120.0, 1e-9) &&
+			near(expectation.voltage_sequence.negative_rms, 0.0,
+			     1e-9) &&
+			near(expectation.voltage_sequence.unbalance, 0.0, 1e-12),
+		"balanced ABC: V1 = 120, V2 = 0, unbalance 0");
+	/* ACB (swap the B and C phases): the sequences swap. */
+	config.channels[4].phase_degrees = -120.0; /* Vc */
+	config.channels[5].phase_degrees = 120.0;  /* Vb */
+	expectation = msap1::test::golden_expectation(config);
+	require(near(expectation.voltage_sequence.negative_rms, 120.0, 1e-9) &&
+			near(expectation.voltage_sequence.positive_rms, 0.0,
+			     1e-9),
+		"ACB: V2 takes everything, V1 collapses");
+	require(near(expectation.current_sequence.positive_rms, 3.0, 1e-9),
+		"currents kept ABC: I1 unchanged");
+	/* Amplitude unbalance: a 10% sag on Vb splits (10/3)% into both
+	 * the negative and zero sequences. */
+	config.channels[4].phase_degrees = 120.0;
+	config.channels[5].phase_degrees = -120.0;
+	config.channels[5].rms = 108.0;
+	expectation = msap1::test::golden_expectation(config);
+	require(near(expectation.voltage_sequence.unbalance, 4.0 / 116.0, 1e-9) &&
+			near(expectation.voltage_sequence.zero_ratio,
+			     4.0 / 116.0, 1e-9),
+		"a single-phase sag splits equally into V2 and V0");
+}
+
 void harmonic_expectation_composition()
 {
 	msap1::SimulatorConfig config;
@@ -347,6 +386,7 @@ int main()
 	golden_expectation_composition();
 	true_pf_differs_from_displacement_under_distortion();
 	reactive_sign_follows_lag();
+	sequence_components_swap_under_acb();
 	harmonic_expectation_composition();
 	harmonic_wire_packing();
 	wire_conversion_round_trip();
