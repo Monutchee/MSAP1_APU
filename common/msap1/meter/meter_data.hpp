@@ -90,6 +90,11 @@ struct FundamentalValues {
 	Reading<MilliHertz> frequency{};
 	PhaseABC<Reading<MicroVolts>> voltage_ln{};
 	PhaseABCN<Reading<MicroAmperes>> current{};
+	/* BASIC-v4 (M7): Vab/Vbc/Vca merged from the single-cycle tier's
+	 * instantaneous difference statistics (never |Va|-|Vb|). Valid only
+	 * when both contributing lanes are; default-invalid on aggregate
+	 * (MTR2) updates until that tier carries VLL (M11). */
+	PhaseABC<Reading<MicroVolts>> voltage_ll{};
 };
 
 /* These typed groups intentionally start empty. New PL record decoders add

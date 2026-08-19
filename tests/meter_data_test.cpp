@@ -65,6 +65,12 @@ msap1::MeterRecord periodic_record()
 			 channel == 3 ? 0 : static_cast<std::int64_t>(channel + 1) *
 					       1'000'000);
 	}
+	/* BASIC-v4: block last-sample anchor and merged line-line RMS. */
+	record.words[14] = 0x00001a0fu;
+	record.words[15] = 0x00000001u;
+	record.words[51] = 12'000'000;
+	record.words[52] = 11'000'000;
+	record.words[53] = 13'000'000;
 	record.words[56] = 60001;
 	record.words[57] = (1u << 0) | (1u << 1) | (1u << 2) |
 			   (1u << 8) | (6u << 12) | (10u << 16);
@@ -97,6 +103,11 @@ void decode_and_period_independence()
 	require(values.current.neutral.valid() &&
 		values.current.neutral.value == 0,
 		"valid zero current was confused with unavailable current");
+	require(values.voltage_ll.phase_a.valid() &&
+		values.voltage_ll.phase_a.value == 12'000'000 &&
+		values.voltage_ll.phase_b.value == 11'000'000 &&
+		values.voltage_ll.phase_c.value == 13'000'000,
+		"BASIC-v4 line-line words 51..53 were not decoded");
 
 	msap1::MeterLatestStore store;
 	store.apply(update);

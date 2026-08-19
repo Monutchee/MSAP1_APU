@@ -418,3 +418,38 @@ semantics must hold.
    and the SCYC-v5 word map are frozen; M7's merge tier consumes them
    unchanged. Any later change requires a new format version and a
    deliberate decision.
+
+## 14. 10/12-cycle merge tier — Mtr1 retirement (metrology M7)
+
+Prerequisite: BASIC-v4 records (0x00010004, the Agg10_12CycleEngine merge
+tier) and the matched image. The legacy Mtr1Engine is gone: basic records
+are now finalized from merged SingleCycleResults, so the single-cycle and
+basic tiers must agree by construction, and basic records REQUIRE grid
+cycle timing (there is no sample-count window mode anymore; on lock loss
+the timing authority keeps cycle boundaries running synthetically at the
+nominal cadence and blocks are flagged fallback).
+
+1. **Value continuity across the retirement.** With the default balanced
+   simulator configuration, `mnc meter view` (basic records) must show the
+   same RMS values as before the upgrade, within the golden tolerance —
+   the merge tier reconstructs the retired engine's block accumulators
+   bit-identically. Cross-check: each basic RMS must sit within the
+   1-cycle scatter of `mnc meter single-cycle` readings.
+2. **Cadence and provenance.** Basic records advance at ~5/s (10 cycles at
+   50 Hz, 12 at 60 Hz); `mnc meter health` shows zero sequence gaps and
+   zero invalid records over a 10-minute soak. The 3-second aggregate
+   (MTR2) cadence and values must be unchanged.
+3. **VLL in the basic tier.** The basic record now carries Vab/Vbc/Vca
+   (words 51..53) merged from the single-cycle difference statistics:
+   207.85 V balanced; with `--va-rms 100` the three values must match the
+   golden phasor differences, NOT sqrt(3) x VLN.
+4. **Discontinuity marking.** After any reconfiguration exactly one basic
+   record carries status bit 2 (first block after a gap) and the
+   first-block flag, then the stream runs clean — and the aggregate tier
+   counts exactly the flagged blocks as ineligible.
+5. **Fallback continuation (dead reference).** Set `--va-rms 0 --vb-rms 0
+   --vc-rms 0` (no zero crossings): basic records MUST keep flowing at
+   the nominal cadence, flagged fallback (timing word bit 17), with
+   voltage RMS at the noise floor. Restore the voltages: records relock
+   (one gap-marked block) and the fallback flag clears. This replaces the
+   retired sample-window fallback and is the case that proves it.

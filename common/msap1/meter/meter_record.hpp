@@ -30,7 +30,12 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 /* Record type rides in [31:16] of word 1, version in [15:0]. The
  * reservation table (energy/demand/harmonics/PQ) lives with the PL
  * contract header; allocate there, never ad hoc. */
-inline constexpr std::uint32_t meter_periodic_format = 0x00010003u;
+/* BASIC-v4 (metrology M7): the 10/12-cycle merge tier that retired the
+ * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
+ * word, per-lane slots, and words 56..63; additions: block last-sample
+ * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
+ * 32-bit), and status bit 2 = first block after a discontinuity. */
+inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
@@ -154,7 +159,7 @@ struct MeterRecord {
 	std::uint32_t emit_drops() const { return word(11); }
 	std::uint32_t result_drops() const { return word(12); }
 
-	/* ---- periodic (MTR1, 0x00010003) fields -------------------------- */
+	/* ---- periodic (BASIC-v4, 0x00010004) fields ----------------------- */
 
 	MeterTimingWord timing() const
 	{

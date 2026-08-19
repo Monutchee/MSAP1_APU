@@ -283,6 +283,16 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
 		reading<MicroVolts>(vc.rms_micro_units, vc.valid, sequence,
 				      received_at, window),
 	};
+	/* BASIC-v4 words 51..53: Vab, Vbc, Vca micro-units (32-bit). A pair
+	 * is valid only when both of its lanes are. */
+	fundamental.voltage_ll = {
+		reading<MicroVolts>(record.word(51), va.valid && vb.valid,
+				      sequence, received_at, window),
+		reading<MicroVolts>(record.word(52), vb.valid && vc.valid,
+				      sequence, received_at, window),
+		reading<MicroVolts>(record.word(53), vc.valid && va.valid,
+				      sequence, received_at, window),
+	};
 	return fundamental;
 }
 
@@ -377,7 +387,7 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 {
 	if (!record.header_valid() ||
 	    record.record_format() != meter_periodic_format)
-		throw std::invalid_argument("invalid MTR1 record");
+		throw std::invalid_argument("invalid basic record");
 	/*
 	 * Validate the timing identity before building anything: malformed
 	 * timing must never silently become a valid basic measurement block.
