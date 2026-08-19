@@ -222,6 +222,12 @@ struct SingleCycleSnapshot {
 	 * invalid at the cycle start. */
 	std::array<std::uint64_t, 7> fundamental_rms_micro_units{};
 	[[nodiscard]] bool phasor_valid() const { return (status & 0x2u) == 0u; }
+	/* SCYC-v5 status bits 2..4: every result is a whole cycle; the first
+	 * one emitted after a discontinuity (reset, APPLY, malformed input,
+	 * dropped beat, timing loss) is marked, with its cause. */
+	[[nodiscard]] bool first_after_gap() const { return (status & 0x4u) != 0u; }
+	[[nodiscard]] bool gap_was_malformed() const { return (status & 0x8u) != 0u; }
+	[[nodiscard]] bool gap_was_timing() const { return (status & 0x10u) != 0u; }
 };
 
 [[nodiscard]] SingleCycleSnapshot decode_single_cycle_record(

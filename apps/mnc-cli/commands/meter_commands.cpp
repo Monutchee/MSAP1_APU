@@ -973,7 +973,7 @@ public:
 			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
 		static constexpr std::array<const char *, 3> pairs{
 			"Vab", "Vbc", "Vca"};
-		output << "Single-cycle diagnostic (SCYC-v4)\n"
+		output << "Single-cycle diagnostic (SCYC-v5)\n"
 		       << "  Records accepted:   " << result.records << '\n';
 		if (!result.has_snapshot) {
 			output << "  No snapshot yet (cycle timing unlocked or "
@@ -993,6 +993,13 @@ public:
 		       << " mHz\n"
 		       << "  Status:             0x" << std::hex << s.status
 		       << std::dec << '\n';
+		if (s.first_after_gap())
+			output << "  Note: first whole cycle after a "
+				  "discontinuity ("
+			       << (s.gap_was_malformed() ? "malformed/dropped input"
+			           : s.gap_was_timing() ? "cycle timing loss"
+							: "reset or APPLY")
+			       << ")\n";
 		for (std::size_t lane = 0; lane < names.size(); ++lane)
 			output << "  CH" << lane << ' ' << names[lane]
 			       << " RMS: " << s.rms_micro_units[lane]

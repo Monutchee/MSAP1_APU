@@ -591,7 +591,7 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
 {
 	/* Word map: PL contract in MSAP1_PL .../common/include/
-	 * measurement_record.hpp (SCYC-v4). */
+	 * measurement_record.hpp (SCYC-v5). */
 	SingleCycleSnapshot snapshot;
 	snapshot.sequence = record.word(3);
 	snapshot.configuration_generation = record.word(4);

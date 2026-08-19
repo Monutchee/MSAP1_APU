@@ -73,7 +73,7 @@ int main()
 	}
 
 	require(record.header_valid(),
-		"SCYC-v4 must pass the shared header check");
+		"SCYC-v5 must pass the shared header check");
 
 	const auto snapshot = msap1::decode_single_cycle_record(record);
 	require(snapshot.sequence == 4242, "sequence");
@@ -116,6 +116,18 @@ int main()
 		require(!msap1::decode_single_cycle_record(invalid)
 				 .phasor_valid(),
 			"status bit 1 must mark the phasor invalid");
+	}
+	/* SCYC-v5 discontinuity marks: bit 2 first-after-gap, bit 3 cause
+	 * malformed/dropped, bit 4 cause timing loss. */
+	{
+		auto gapped = record;
+		gapped.words[8] = 0x4u | 0x10u;
+		const auto decoded = msap1::decode_single_cycle_record(gapped);
+		require(decoded.first_after_gap() && !decoded.gap_was_malformed() &&
+				decoded.gap_was_timing(),
+			"status bits 2/4 must decode as gap + timing cause");
+		require(decoded.phasor_valid(),
+			"gap marks must not disturb the phasor validity bit");
 	}
 
 	if (failures != 0) {

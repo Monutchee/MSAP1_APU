@@ -384,3 +384,37 @@ harmonics; `ac_rms` grows by the harmonic energy.
    this is +3.6 W on 360 W, at the -60 deg case the harmonic term is
    cos(-180 deg) = -1 so PA drops by 3.6 W. Verify against the golden
    model rather than by hand.
+
+## 13. Single-cycle integration freeze (metrology M6)
+
+Prerequisite: SCYC-v5 records and the matched image. All cases via
+`mnc meter single-cycle` (or the web readout), simulator source, capture
+active. This is the on-target golden sweep that freezes the SingleCycleResult
+contract for the 10/12-cycle tier: every reported field must match
+`tests/support/waveform_golden.hpp` (1-cycle tolerance,
+`golden_rms_tolerance(rms, 1)`) for each scenario, and the discontinuity
+semantics must hold.
+
+1. **Whole-cycle-only emission.** Reconfigure anything (e.g. a new Va RMS):
+   the first snapshot under the new generation must carry status bit 2
+   (`first whole cycle after a discontinuity — reset or APPLY` in the mnc
+   note) exactly once, then clear. `sample_count` must always equal
+   sample_rate / frequency (a whole cycle) — never a partial count.
+2. **Golden scenario sweep.** Run each scenario and compare per-lane RMS,
+   VLL, per-phase P, and fundamental RMS against the golden model:
+   balanced ABC; unbalanced (`--va-rms 100 --ic-rms 1`); lagging
+   (`--ia-phase-degrees -60`) and leading (`+60`); reverse power (`180`);
+   missing phase (`--vb-rms 0`); 50 Hz and 60 Hz nominal; off-nominal
+   (e.g. `--frequency-hz 61.7`). Every field, every scenario, within
+   tolerance — this is the §41 (handover) success definition restricted to
+   the single-cycle tier.
+3. **Sequence-gap accounting.** Over a 10-minute soak at 60 Hz the
+   `Records accepted` counter must advance by ~36000 with zero acquisition
+   sequence gaps and no status bits 3/4 — on a healthy system dropped-beat
+   and timing-loss marks must never appear.
+4. **Timing-loss recovery.** Stop capture, restart: the first snapshot
+   after re-lock must carry bits 2 (and possibly 4), then run clean.
+5. **Contract freeze.** After this section passes, `single_cycle_result.hpp`
+   and the SCYC-v5 word map are frozen; M7's merge tier consumes them
+   unchanged. Any later change requires a new format version and a
+   deliberate decision.

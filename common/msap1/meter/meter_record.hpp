@@ -33,7 +33,7 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 inline constexpr std::uint32_t meter_periodic_format = 0x00010003u;
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
-inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0004u;
+inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 
 struct MeterChannelReading {
 	bool valid = false;
