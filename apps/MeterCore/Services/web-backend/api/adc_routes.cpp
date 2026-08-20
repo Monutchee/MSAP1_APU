@@ -331,6 +331,29 @@ std::uint32_t event_channel_mask(const std::string &channels)
 	return mask;
 }
 
+/* Inverse of event_channel_mask(): the coarse group when the mask matches
+ * one exactly, otherwise the explicit lane list. */
+std::string event_channel_names(std::uint32_t mask)
+{
+	static constexpr std::array<const char *, 7> lane_names{
+		"ia", "ib", "ic", "in", "vc", "vb", "va"};
+	if (mask == 0x70u)
+		return "voltage";
+	if (mask == 0x0fu)
+		return "current";
+	if (mask == 0x7fu)
+		return "all";
+	std::string names;
+	for (std::size_t lane = 0; lane < lane_names.size(); ++lane) {
+		if ((mask & (1u << lane)) == 0u)
+			continue;
+		if (!names.empty())
+			names += ',';
+		names += lane_names[lane];
+	}
+	return names;
+}
+
 std::uint32_t event_action_value(const std::string &action)
 {
 	if (action == "arm")
@@ -351,6 +374,9 @@ AdcSimulatorEventDto adc_simulator_event(
 {
 	AdcSimulatorEventDto dto;
 	dto.action = action;
+	/* Echo the COMMITTED channel mask back as the same vocabulary the
+	 * request uses, so a GET round-trips into a POST unchanged. */
+	dto.channels = event_channel_names(response.active_control & 0xffu);
 	dto.armed = (response.sequencer_status & 0x1u) != 0u;
 	dto.running = (response.sequencer_status & 0x2u) != 0u;
 	dto.holding = (response.sequencer_status & 0x4u) != 0u;
