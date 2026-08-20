@@ -506,10 +506,15 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 				? update.aggregate_timing->time_quality
 				: msap1::meter::TimeQuality::Unsynchronized;
 		last_aggregate_record_time_ = Clock::now();
-	} else {
-		/* Only basic records refresh the instantaneous-readings
-		 * cache; aggregates are published through the typed store
-		 * under MeasurementPeriod::Cycles150_180. */
+	} else if (record.record_format() == msap1::meter_periodic_format) {
+		/* ONLY the BASIC record refreshes the instantaneous-readings
+		 * cache and the basic continuity baseline. Sibling records
+		 * must not: the basic-period siblings share their BASIC
+		 * record's sequence (harmless but redundant), while the
+		 * AGGREGATE-period siblings carry the aggregate sequence —
+		 * letting one become latest_record_ poisoned the basic
+		 * baseline every 3 s and inflated sequence_gaps by a whole
+		 * aggregate window (found on target the day M11 first ran). */
 		latest_record_ = record;
 	}
 	last_record_time_ = Clock::now();
