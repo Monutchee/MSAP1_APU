@@ -74,6 +74,10 @@ webengine::Response get_meter_health(AppContext &,
 /** @brief GET /api/v1/meter/readings — latest RMS/frequency record. */
 webengine::Response get_meter_readings(AppContext &,
 				       const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/power-quality — Urms(1/2) record and event. */
+webengine::Response get_meter_power_quality(AppContext &,
+					    const webengine::RequestContext &);
+
 /** @brief GET /api/v1/meter/single-cycle — SCYC diagnostic snapshot. */
 webengine::Response get_meter_single_cycle(AppContext &,
 					   const webengine::RequestContext &);
@@ -104,6 +108,14 @@ webengine::Response get_adc_simulator(AppContext &,
 /** @brief PUT /api/v1/adc/simulator — persist and apply simulator config. */
 webengine::Response put_adc_simulator(AppContext &,
 				      const webengine::RequestContext &);
+/** @brief POST /api/v1/adc/simulator/event — arm/cancel an amplitude event. */
+webengine::Response post_adc_simulator_event(AppContext &,
+					     const webengine::RequestContext &);
+
+/** @brief GET /api/v1/adc/simulator/event — event sequencer state. */
+webengine::Response get_adc_simulator_event(AppContext &,
+					    const webengine::RequestContext &);
+
 /** @brief GET /api/v1/adc/capture — report whether capture is running. */
 webengine::Response get_adc_capture(AppContext &,
 				    const webengine::RequestContext &);
@@ -232,6 +244,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/single-cycle",
 	 webengine::Role::Viewer, &get_meter_single_cycle,
 	 "Latest single-cycle diagnostic (RMS, VLL, per-phase power)"},
+	{webengine::http::verb::get, "/api/v1/meter/power-quality",
+	 webengine::Role::Viewer, &get_meter_power_quality,
+	 "Latest Urms(1/2) record and the newest sag/swell/interruption"},
 	{webengine::http::verb::get, "/api/v1/meter/configuration/frequency",
 	 webengine::Role::Viewer, &get_frequency_configuration,
 	 "Active frequency measurement configuration"},
@@ -252,6 +267,12 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::put, "/api/v1/adc/simulator",
 	 webengine::Role::Admin, &put_adc_simulator,
 	 "Persist and hot-apply simulator configuration"},
+	{webengine::http::verb::get, "/api/v1/adc/simulator/event",
+	 webengine::Role::Viewer, &get_adc_simulator_event,
+	 "Simulator amplitude-event sequencer state"},
+	{webengine::http::verb::post, "/api/v1/adc/simulator/event",
+	 webengine::Role::Admin, &post_adc_simulator_event,
+	 "Arm, cancel, or clear a simulator sag/swell/interruption"},
 	{webengine::http::verb::get, "/api/v1/adc/capture",
 	 webengine::Role::Viewer, &get_adc_capture,
 	 "Report whether ADC capture is running"},

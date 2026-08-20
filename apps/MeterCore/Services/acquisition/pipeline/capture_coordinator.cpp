@@ -7,6 +7,8 @@
 #include "support/utc_clock.hpp"
 
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -607,6 +609,112 @@ msap1::SingleCycleResponse CaptureCoordinator::single_cycle_response() const
 	response.has_snapshot = latest.has_value();
 	if (latest)
 		response.snapshot = *latest;
+	return response;
+}
+
+namespace {
+
+/* Project one decoded PQEVT record onto the IPC's plain-scalar shape. */
+msap1::PowerQualityIpcSnapshot power_quality_ipc(
+	const msap1::PowerQualitySnapshot &snapshot)
+{
+	const auto &values = snapshot.values;
+	msap1::PowerQualityIpcSnapshot wire{};
+	wire.sequence = snapshot.sequence;
+	wire.configuration_generation = snapshot.configuration_generation;
+	wire.sample_rate_hz = snapshot.sample_rate_hz;
+	wire.first_sample = snapshot.first_sample;
+	wire.last_sample = snapshot.last_sample;
+	wire.sample_count = snapshot.sample_count;
+	wire.status = snapshot.status;
+	wire.valid_mask = snapshot.valid_mask;
+	wire.kind = static_cast<std::uint8_t>(values.kind);
+	wire.event_type = static_cast<std::uint8_t>(values.event_type);
+	wire.affected_phases = values.affected_phases;
+	wire.armed = values.armed;
+	wire.cycle_locked = values.cycle_locked;
+	wire.synthetic_half_cycle = values.synthetic_half_cycle;
+	wire.event_sequence = values.event_sequence;
+	wire.duration_samples = values.duration_samples;
+	wire.half_cycle_updates = values.half_cycle_updates;
+	wire.reference_microvolts = values.reference_micro_volts;
+	wire.sag_threshold_e4 = values.sag_threshold_e4;
+	wire.swell_threshold_e4 = values.swell_threshold_e4;
+	wire.interruption_threshold_e4 = values.interruption_threshold_e4;
+	wire.hysteresis_e4 = values.hysteresis_e4;
+	const msap1::Reading<msap1::MicroVolts> *voltage[3] = {
+		&values.voltage.phase_a, &values.voltage.phase_b,
+		&values.voltage.phase_c};
+	const msap1::Reading<msap1::MicroVolts> *minimum[3] = {
+		&values.voltage_minimum.phase_a, &values.voltage_minimum.phase_b,
+		&values.voltage_minimum.phase_c};
+	const msap1::Reading<msap1::MicroVolts> *maximum[3] = {
+		&values.voltage_maximum.phase_a, &values.voltage_maximum.phase_b,
+		&values.voltage_maximum.phase_c};
+	const msap1::Reading<msap1::MicroAmperes> *current[3] = {
+		&values.current.phase_a, &values.current.phase_b,
+		&values.current.phase_c};
+	for (std::size_t phase = 0; phase < wire.phases.size(); ++phase) {
+		wire.phases[phase] = {
+			voltage[phase]->value, minimum[phase]->value,
+			maximum[phase]->value, current[phase]->value,
+			static_cast<std::uint8_t>(voltage[phase]->quality)};
+	}
+	return wire;
+}
+
+} // namespace
+
+msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
+{
+	msap1::PowerQualityResponse response{};
+	response.running = running_;
+	response.records = ingest_.pq_event_records();
+	response.events = ingest_.pq_events();
+	const auto &latest = ingest_.latest_power_quality();
+	response.has_latest = latest.has_value();
+	if (latest)
+		response.latest = power_quality_ipc(*latest);
+	const auto &event = ingest_.latest_power_quality_event();
+	response.has_event = event.has_value();
+	if (event)
+		response.event = power_quality_ipc(*event);
+	return response;
+}
+
+msap1::SimulatorEventResponse CaptureCoordinator::simulator_event_response(
+	const msap1::SimulatorEventRequest &request)
+{
+	if (!std::isfinite(request.scale_percent) ||
+	    request.scale_percent < 0.0 || request.scale_percent > 400.0)
+		throw std::runtime_error(
+			"simulator event amplitude must be 0..400 percent");
+
+	msap1_simulator_event_payload wire{};
+	wire.action = request.action;
+	wire.channel_mask = request.channel_mask;
+	/* Percent of nominal to the PL's Q16 multiplier; 100 % must land on
+	 * exactly unity, which the PL treats as a bit-exact no-op. */
+	wire.scale_q16 = static_cast<std::uint32_t>(
+		std::llround(request.scale_percent * 65536.0 / 100.0));
+	wire.duration_half_cycles = request.duration_half_cycles;
+	wire.period_half_cycles = request.period_half_cycles;
+	wire.flags = request.repeat
+		? static_cast<std::uint32_t>(MSAP1_SIMULATOR_EVENT_FLAG_REPEAT)
+		: 0u;
+
+	const auto reply = rpu_.transact(MSAP1_RPU_MSG_SIMULATOR_EVENT_SET,
+		&wire, sizeof(wire), 1000ms);
+	const auto acknowledgement = msap1::decode_simulator_event_ack(reply);
+
+	msap1::SimulatorEventResponse response{};
+	response.running = running_;
+	response.adc_source = configuration_.wire.adc_source;
+	response.sequencer_status = acknowledgement.status;
+	response.remaining = acknowledgement.remaining;
+	response.active_control = acknowledgement.active_control;
+	response.active_scale = acknowledgement.active_scale;
+	response.active_timing = acknowledgement.active_timing;
 	return response;
 }
 

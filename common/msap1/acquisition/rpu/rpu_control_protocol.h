@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 4u
+#define MSAP1_RPU_VERSION 5u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -38,6 +38,7 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_METER_CONFIG_SET = 13,
 	MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN = 14,
 	MSAP1_RPU_MSG_ADC_DIAGNOSTIC = 15,
+	MSAP1_RPU_MSG_SIMULATOR_EVENT_SET = 16,
 };
 
 enum msap1_rpu_status_code {
@@ -143,6 +144,31 @@ enum msap1_simulator_config_flag {
 	MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE = 1u << 0,
 };
 
+/*
+ * Simulator event sequencer actions (metrology M12). Deliberately a
+ * message of its own rather than fields in the configuration payload: a
+ * configuration commit stops and restarts capture, which would destroy
+ * the phase continuity the event exists to preserve. An event is armed
+ * against a running, unchanged configuration.
+ */
+enum msap1_simulator_event_action {
+	/* Commit the burst description below and start it at the
+	 * generator's next half-cycle boundary. */
+	MSAP1_SIMULATOR_EVENT_ARM = 0,
+	/* Drop the envelope immediately; the burst is not counted. */
+	MSAP1_SIMULATOR_EVENT_CANCEL = 1,
+	/* Zero the completed-burst counter (bookkeeping between
+	 * scenarios); leaves any running burst alone. */
+	MSAP1_SIMULATOR_EVENT_CLEAR_COUNT = 2,
+	/* Read the sequencer state without changing anything. */
+	MSAP1_SIMULATOR_EVENT_QUERY = 3,
+};
+
+enum msap1_simulator_event_flag {
+	/* Re-fire the burst every period_half_cycles until cancelled. */
+	MSAP1_SIMULATOR_EVENT_FLAG_REPEAT = 1u << 0,
+};
+
 enum msap1_frequency_mode {
 	MSAP1_FREQUENCY_MODE_SINGLE_CYCLE = 0,
 	MSAP1_FREQUENCY_MODE_ROLLING_CYCLES = 1,
@@ -230,6 +256,51 @@ struct msap1_meter_config_payload {
 	 * that the RPU programs into the PL grid-cycle timing registers.
 	 */
 	uint32_t nominal_frequency_hz;
+	/*
+	 * IEC 61000-4-30 Urms(1/2) event detection (metrology M12).
+	 * pq_reference_microvolts is the declared reference Udin; ZERO
+	 * DISABLES DETECTION -- the PL keeps publishing Urms(1/2)
+	 * snapshots but never declares an event, so an unconfigured
+	 * reference cannot invent dips. The four thresholds are fractions
+	 * of that reference in units of 1e-4 (9000 = 90.00 %).
+	 */
+	uint32_t pq_reference_microvolts;
+	uint32_t pq_sag_threshold_e4;
+	uint32_t pq_swell_threshold_e4;
+	uint32_t pq_interruption_threshold_e4;
+	uint32_t pq_hysteresis_e4;
+} __attribute__((packed));
+
+/*
+ * One event-sequencer command. The burst description is ignored for
+ * every action but ARM.
+ */
+struct msap1_simulator_event_payload {
+	uint32_t action;                /* msap1_simulator_event_action */
+	uint32_t channel_mask;          /* [7:0] lanes the envelope scales */
+	/* Unsigned Q16 amplitude multiplier: 0x10000 unity, 0 a full
+	 * interruption, 0xE666 a 10 % sag. Clamped at 4.0 by the PL. */
+	uint32_t scale_q16;
+	/* Burst length in HALF CYCLES of the generated waveform; 1..65535
+	 * (zero is rejected). Half-cycle units because Urms(1/2) refreshes
+	 * every half cycle. */
+	uint32_t duration_half_cycles;
+	/* Repeat period in half cycles, measured start to start; at or
+	 * below the duration the bursts run back to back. */
+	uint32_t period_half_cycles;
+	uint32_t flags;                 /* MSAP1_SIMULATOR_EVENT_FLAG_* */
+} __attribute__((packed));
+
+/* The sequencer state after the command, read straight from the PL. */
+struct msap1_simulator_event_ack_payload {
+	/* [0] armed, [1] running, [2] holding, [31:16] bursts completed. */
+	uint32_t status;
+	/* Half cycles left in the burst [15:0] and until the next repeat
+	 * [31:16]. */
+	uint32_t remaining;
+	uint32_t active_control;
+	uint32_t active_scale;
+	uint32_t active_timing;
 } __attribute__((packed));
 
 struct msap1_meter_config_ack_payload {

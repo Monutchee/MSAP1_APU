@@ -73,6 +73,27 @@ struct SimulatorHarmonicConfig {
 	std::string channels = "voltage";
 };
 
+/*
+ * IEC 61000-4-30 Urms(1/2) event detection (metrology M12). Everything
+ * here is in engineering units like the rest of this file; the PL wants
+ * micro-volts and 1e-4 fractions and gets them at prepare time.
+ */
+struct PowerQualityConfig {
+	/* Declared reference voltage Udin, VOLTS. ZERO DISABLES DETECTION:
+	 * the PL keeps publishing Urms(1/2) snapshots but never declares an
+	 * event, so a meter whose reference has not been set cannot invent
+	 * dips. Set it to the nominal line-neutral voltage. */
+	double reference_volts = 0.0;
+	/* Thresholds as a PERCENT of the reference. The band must be
+	 * ordered interruption < sag < swell, and the hysteresis (added on
+	 * recovery from a sag, subtracted on recovery from a swell) must be
+	 * smaller than the sag threshold. */
+	double sag_percent = 90.0;
+	double swell_percent = 110.0;
+	double interruption_percent = 10.0;
+	double hysteresis_percent = 2.0;
+};
+
 struct SimulatorConfig {
 	double frequency_hz = 60.0;
 	/* Keep the generated waveform's phase/framing across a
@@ -110,6 +131,9 @@ struct MeterConversionFile {
 	// before frequency measurement was introduced.
 	FrequencyConfig frequency;
 	SimulatorConfig simulator;
+	/* Optional-by-default like `frequency`: profiles written before
+	 * event detection existed keep loading with detection disarmed. */
+	PowerQualityConfig power_quality;
 };
 
 struct PreparedMeterConfiguration {

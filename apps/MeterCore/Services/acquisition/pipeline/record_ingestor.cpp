@@ -386,6 +386,39 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 
 	/*
+	 * Power-quality records (metrology M12) arrive from a separate PL
+	 * producer port onto the same DMA stream, with their own sequence
+	 * space and their own cadence (a heartbeat every ~100 half cycles
+	 * plus an edge record per event). Same rule as the single-cycle
+	 * stream: counted and cached, never allowed near the basic or
+	 * aggregate continuity trackers. Unlike the diagnostic stream this
+	 * one is a product record, so a malformed one is a counted, logged
+	 * fault rather than a silent decode.
+	 */
+	if (record.record_format() == msap1::meter_pq_event_format) {
+		try {
+			const auto snapshot =
+				msap1::decode_pq_event_record(record);
+			++pq_event_records_;
+			latest_power_quality_ = snapshot;
+			if (snapshot.values.kind !=
+			    msap1::PowerQualityRecordKind::periodic) {
+				latest_power_quality_event_ = snapshot;
+				if (snapshot.values.kind ==
+				    msap1::PowerQualityRecordKind::event_start)
+					++pq_events_;
+			}
+		} catch (const std::exception &error) {
+			++invalid_records_;
+			log_rejected_record(
+				std::string("power-quality record: ") +
+					error.what(),
+				"meter_record_decode_rejected", record);
+		}
+		return;
+	}
+
+	/*
 	 * The stream interleaves record formats with INDEPENDENT sequence
 	 * counters, so continuity is tracked per format. POWER and PHASOR
 	 * records share their BASIC sibling's sequence by design (same

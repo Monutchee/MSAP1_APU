@@ -332,6 +332,40 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			std::llround(frequency.hysteresis_volts * 1000000.0));
 
 	/*
+	 * Urms(1/2) event detection. A zero reference is the documented
+	 * DISARMED state and is left unchecked against the band; anything
+	 * else must describe a usable band, because thresholds that cross
+	 * would declare events that mean nothing.
+	 */
+	const auto &pq = result.source.power_quality;
+	const auto pq_fraction = [](double percent) {
+		return static_cast<std::uint32_t>(std::llround(percent * 100.0));
+	};
+	if (!std::isfinite(pq.reference_volts) || pq.reference_volts < 0.0 ||
+	    pq.reference_volts > 1000000.0 ||
+	    !std::isfinite(pq.sag_percent) || !std::isfinite(pq.swell_percent) ||
+	    !std::isfinite(pq.interruption_percent) ||
+	    !std::isfinite(pq.hysteresis_percent) ||
+	    pq.interruption_percent < 0.0 || pq.swell_percent > 655.0 ||
+	    pq.hysteresis_percent < 0.0)
+		throw std::runtime_error(
+			"power-quality configuration values are out of range");
+	if (pq.reference_volts > 0.0 &&
+	    (pq.interruption_percent >= pq.sag_percent ||
+	     pq.sag_percent >= pq.swell_percent ||
+	     pq.hysteresis_percent >= pq.sag_percent))
+		throw std::runtime_error(
+			"power-quality thresholds must be ordered "
+			"interruption < sag < swell with a smaller hysteresis");
+	result.wire.pq_reference_microvolts = static_cast<std::uint32_t>(
+		std::llround(pq.reference_volts * 1000000.0));
+	result.wire.pq_sag_threshold_e4 = pq_fraction(pq.sag_percent);
+	result.wire.pq_swell_threshold_e4 = pq_fraction(pq.swell_percent);
+	result.wire.pq_interruption_threshold_e4 =
+		pq_fraction(pq.interruption_percent);
+	result.wire.pq_hysteresis_e4 = pq_fraction(pq.hysteresis_percent);
+
+	/*
 	 * Convert engineering RMS values back through the same per-channel
 	 * coefficient used by the PL conversion stage. The generated raw samples
 	 * therefore exercise conversion, RMS, frequency, meter, and waveform logic.

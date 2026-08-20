@@ -1096,4 +1096,93 @@ SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
 	return snapshot;
 }
 
+namespace {
+
+/* Lane bits in the record's valid mask (PL metering_types.hpp lane
+ * numbering): voltages Va/Vb/Vc are lanes 6/5/4, currents Ia/Ib/Ic 0/1/2. */
+constexpr std::uint8_t pq_voltage_lane_bit[3] = {0x40u, 0x20u, 0x10u};
+constexpr std::uint8_t pq_current_lane_bit[3] = {0x01u, 0x02u, 0x04u};
+
+} // namespace
+
+PowerQualitySnapshot decode_pq_event_record(const MeterRecord &record)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (PQEVT-v1). */
+	if (record.record_format() != meter_pq_event_format)
+		throw std::invalid_argument("invalid power-quality record");
+	const auto kind_word = record.word(13);
+	const auto kind = kind_word & 0xffu;
+	const auto event_type = (kind_word >> 8) & 0xffu;
+	if (kind > 2u || event_type > 3u)
+		throw std::invalid_argument(
+			"power-quality record has an unknown kind or event type");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"power-quality record has a zero sample count");
+
+	PowerQualitySnapshot snapshot;
+	snapshot.sequence = record.sequence();
+	snapshot.configuration_generation = record.configuration_generation();
+	snapshot.sample_rate_hz = record.sample_rate_hz();
+	snapshot.sample_count = sample_count;
+	snapshot.valid_mask = record.valid_mask();
+	snapshot.status = record.status();
+	snapshot.first_sample = record.first_sample_index();
+	snapshot.last_sample = record.unsigned64(14);
+	if (snapshot.last_sample < snapshot.first_sample)
+		throw std::invalid_argument(
+			"power-quality record spans a negative sample range");
+
+	auto &values = snapshot.values;
+	values.kind = static_cast<PowerQualityRecordKind>(kind);
+	values.event_type = static_cast<PowerQualityEventType>(event_type);
+	values.affected_phases = static_cast<std::uint8_t>((kind_word >> 16) & 0x7u);
+	values.cycle_locked = (kind_word & (1u << 24)) != 0u;
+	values.synthetic_half_cycle = (kind_word & (1u << 25)) != 0u;
+	values.armed = (kind_word & (1u << 26)) != 0u;
+	values.event_sequence = record.word(28);
+	values.duration_samples = record.unsigned64(29);
+	values.half_cycle_updates = record.word(31);
+	values.reference_micro_volts = record.word(32);
+	values.sag_threshold_e4 = record.word(33);
+	values.swell_threshold_e4 = record.word(34);
+	values.interruption_threshold_e4 = record.word(35);
+	values.hysteresis_e4 = record.word(36);
+
+	const auto sequence = static_cast<std::uint64_t>(snapshot.sequence);
+	const auto received_at = std::chrono::system_clock::now();
+	const auto window = sample_window(sample_count, snapshot.sample_rate_hz);
+	/* A lane outside the configured valid mask was never measured; a
+	 * saturated accumulator makes every lane's root untrustworthy. */
+	const auto quality = [&](std::uint8_t lane_bit) {
+		if ((snapshot.valid_mask & lane_bit) == 0u)
+			return MeasurementQuality::unavailable;
+		return snapshot.arithmetic_error()
+			       ? MeasurementQuality::arithmetic_error
+			       : MeasurementQuality::valid;
+	};
+	const auto voltage = [&](std::size_t word, std::size_t phase) {
+		return Reading<MicroVolts>{
+			static_cast<std::int64_t>(record.word(word)),
+			quality(pq_voltage_lane_bit[phase]), sequence,
+			received_at, window};
+	};
+	values.voltage = {voltage(16, 0), voltage(17, 1), voltage(18, 2)};
+	values.voltage_minimum = {voltage(19, 0), voltage(20, 1), voltage(21, 2)};
+	values.voltage_maximum = {voltage(22, 0), voltage(23, 1), voltage(24, 2)};
+	values.current = {
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(25)),
+				      quality(pq_current_lane_bit[0]), sequence,
+				      received_at, window},
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(26)),
+				      quality(pq_current_lane_bit[1]), sequence,
+				      received_at, window},
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(27)),
+				      quality(pq_current_lane_bit[2]), sequence,
+				      received_at, window}};
+	return snapshot;
+}
+
 } // namespace msap1

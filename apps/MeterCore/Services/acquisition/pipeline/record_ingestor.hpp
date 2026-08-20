@@ -160,6 +160,30 @@ public:
 	{
 		return latest_single_cycle_;
 	}
+	/** @brief Accepted PQEVT records (heartbeats and event edges). */
+	[[nodiscard]] std::uint64_t pq_event_records() const
+	{
+		return pq_event_records_;
+	}
+	/** @brief Events DECLARED, counted on the START edge. */
+	[[nodiscard]] std::uint64_t pq_events() const { return pq_events_; }
+	/** @brief Latest PQEVT record of any kind: live Urms(1/2). */
+	[[nodiscard]] const std::optional<msap1::PowerQualitySnapshot> &
+	latest_power_quality() const
+	{
+		return latest_power_quality_;
+	}
+	/**
+	 * @brief Latest PQEVT record that was an event edge.
+	 *
+	 * Held apart from latest_power_quality() so the heartbeat stream
+	 * cannot erase a short event before anything reads it.
+	 */
+	[[nodiscard]] const std::optional<msap1::PowerQualitySnapshot> &
+	latest_power_quality_event() const
+	{
+		return latest_power_quality_event_;
+	}
 	/** @brief Missing AGGREGATE records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
 	{
@@ -211,6 +235,13 @@ private:
 	 * WAL/period stores). */
 	std::uint64_t single_cycle_records_ = 0;
 	std::optional<msap1::SingleCycleSnapshot> latest_single_cycle_{};
+	/* Power-quality records (metrology M12): the sliding tier runs its
+	 * OWN sequence space on the shared DMA stream, so it is counted and
+	 * cached here and never continuity-tracked against basic/aggregate. */
+	std::uint64_t pq_event_records_ = 0;
+	std::uint64_t pq_events_ = 0;
+	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_{};
+	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	/* Kernel transport-overrun total at the last sequence-gap log. The
 	 * delta at gap time is what attributes the loss: it either matches the

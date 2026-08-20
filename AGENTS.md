@@ -158,12 +158,19 @@
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
-- The prototype wire version remains 2. Keep the coordinated APU/RPU copies
-  byte-identical when adding configuration fields or acknowledgements.
-- `msap1_meter_config_payload` carries the trailing `nominal_frequency_hz`
-  field (50 or 60; 176 packed bytes total). It selects the cycles-per-block
-  rule (50→10, 60→12) and the derived PL free-run fallback window; it is
-  configuration, never inferred from measured frequency.
+- The prototype wire version is 5 (`MSAP1_RPU_VERSION`). Keep the coordinated
+  APU/RPU copies byte-identical when adding configuration fields or
+  acknowledgements.
+- `msap1_meter_config_payload` is 296 packed bytes. `nominal_frequency_hz`
+  (50 or 60) selects the cycles-per-block rule (50→10, 60→12) and the derived
+  PL free-run fallback window; it is configuration, never inferred from
+  measured frequency. The five trailing `pq_*` fields are the IEC 61000-4-30
+  Urms(1/2) detection band: a reference in micro-volts (ZERO DISARMS
+  detection) plus four thresholds as 1e-4 fractions of it.
+- `MSAP1_RPU_MSG_SIMULATOR_EVENT_SET` drives the simulator's amplitude-event
+  sequencer and is deliberately NOT part of the configuration snapshot: a
+  configuration commit stops and restarts capture, which would destroy the
+  phase continuity a sag/swell/interruption test depends on.
 - MTR1 record format `0x00010002` (v2) is the cycle-timing block format:
   word 6 = actual sample count, word 15 = timing word, words 60–61 =
   64-bit first-sample index. Keep the v1 (`0x00010001`) decoder registered

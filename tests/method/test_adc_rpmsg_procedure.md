@@ -588,3 +588,83 @@ equivalence with the retired engine for steady inputs, not bit identity.
 5. **Follow-up (not in this milestone):** aggregate power/phasor/
    unbalance readings surface in the store/historian; a period-aware
    snapshot IPC + web panel exposes them later.
+
+## 19. Sliding Urms(1/2) and voltage events (metrology M12)
+
+Prerequisite: the SlidingOneCycleRmsEngine build. PQEVT-v1 records
+(0x000B0001) arrive on their own PL producer port with their OWN sequence
+space — never continuity-tracked against the basic or aggregate streams.
+Three kinds share the format: a periodic heartbeat every 100 half-cycle
+updates, an event START the moment an event is declared, and an event END
+carrying the finished event's exact duration and residual/peak.
+
+Detection is DISARMED until a reference voltage is configured. Set it
+first, or every step below reports live Urms(1/2) with no events:
+
+```
+mnc settings get   # or the web Settings page
+# metering.power_quality.reference_volts = 120   (sag 90 %, swell 110 %,
+# interruption 10 %, hysteresis 2 % are the defaults)
+```
+
+1. **Heartbeat baseline.** Balanced 120 V / 3 A, simulator selected and
+   running. `mnc meter power-quality` reports records advancing and
+   `UA/UB/UC` within a few mV of the basic tier's RMS, with
+   `Detection: reference 120 V, sag 90 %…`. The min/max span each
+   heartbeat window; on a steady input they collapse onto the same value.
+   Zero events. `mnc meter health` stays clean — the PQ stream must not
+   move `gaps`, `invalid`, or the DMA counters (its independent sequence
+   space is the thing this proves).
+2. **Programmed sag.** Arm a 70 % sag on the voltage lanes for 20 half
+   cycles (~167 ms at 60 Hz):
+
+   ```
+   mnc adc simulator event --action arm --channels voltage \
+       --scale-percent 70 --duration 20
+   ```
+
+   The command echoes `armed`; the burst starts at the generator's next
+   half-cycle boundary — no APPLY, no phase restart, so the amplitude
+   step is the ONLY discontinuity in the stream. Within ~1 s
+   `mnc meter power-quality` shows `Last event: sag`, `Kind: ended`,
+   `Phases: A, B, C`, and a duration of 20 half cycles' worth of samples
+   (**21333 samples ±1 half cycle at 128 kSPS/60 Hz**; the count is exact
+   from the PL sample counter, not a wall-clock estimate). The residual
+   (`min`) reads ~84 V = 0.70 × 120. Repeat with `--scale-percent 95`:
+   inside the 90 % threshold, so NO event is declared while Urms(1/2)
+   still moves — that separates measurement from detection.
+3. **Half-cycle resolution and hysteresis.** `--duration 1` (one half
+   cycle) must still declare and end an event: Urms(1/2) refreshes every
+   half cycle, so a one-half-cycle dip is the shortest detectable event.
+   Then `--scale-percent 89.5` (just below the sag threshold, above
+   `sag + hysteresis` = 92 %): the event declares and ends only after the
+   voltage recovers past 92 %, not at 90 % — the hysteresis is what stops
+   a marginal input from chattering.
+4. **Polyphase rule.** `--channels va` for 20 half cycles: the event
+   declares (ANY phase crossing begins it) with `Phases: A` only, and
+   `UB`/`UC` stay at nominal. Then `--channels va,vb`: `Phases: A, B`.
+   This is the IEC 61000-4-30 §5.4 begin/end rule — it begins on any
+   phase and ends only when EVERY phase has recovered.
+5. **Severity escalation.** `--scale-percent 5 --duration 20` (below the
+   10 % interruption threshold): the event reports `interruption`, not
+   `sag`, even though it crossed the sag threshold on the way down — a
+   single event keeps the most severe type it reached.
+6. **Swell.** `--scale-percent 115 --duration 20` reports `swell` with a
+   peak (`max`) of ~138 V. Check `mnc adc simulator show`: the saturation
+   counter must not move — a 15 % swell on a 120 V nominal is far from
+   the ADC rails, so any saturation means the configured peak was already
+   near full scale.
+7. **Repeating burst.** `--action arm --channels voltage
+   --scale-percent 70 --duration 20 --period 200 --repeat true` fires a
+   sag every ~1.7 s. `mnc adc simulator event --action query` shows
+   `holding` between bursts and the completed count advancing; the event
+   count in `mnc meter power-quality` advances in step. `--action cancel`
+   drops the envelope immediately and does NOT count the aborted burst.
+8. **No disturbance to the 10/12 tier.** Throughout steps 2–7 the basic
+   and aggregate streams must stay clean: `mnc meter health --full` shows
+   zero gaps on both, and the aggregate cadence stays 1 per 3 s. A voltage
+   event is a measurement, not a fault — it must not reset a block.
+9. **Web check.** Developer → ADC Simulator: the Power quality panel
+   shows live Urms(1/2) per phase and, after an event, its type, affected
+   phases, duration in ms, and residual/peak. Arming from that panel must
+   produce the same record the CLI produced.

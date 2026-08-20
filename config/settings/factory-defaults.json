@@ -17,6 +17,13 @@
       "maximum_hz": 70.0,
       "hysteresis_volts": 1.0
     },
+    "power_quality": {
+      "reference_volts": 0.0,
+      "sag_percent": 90.0,
+      "swell_percent": 110.0,
+      "interruption_percent": 10.0,
+      "hysteresis_percent": 2.0
+    },
     "conversion": {
       "profile_id": "msap1-sensor-board-5a",
       "adc_reference_volts": 1.0,

@@ -198,7 +198,55 @@ struct UnbalanceValues {
 };
 struct EnergyValues {};
 struct DemandValues {};
-struct PowerQualityValues {};
+/* Power-quality event kinds and types, mirroring the PL's
+ * metering_types.hpp (MET_PQ_KIND_* / MET_PQ_EVENT_*). */
+enum class PowerQualityRecordKind : std::uint8_t {
+	periodic = 0,   /* heartbeat snapshot, no event */
+	event_start = 1,
+	event_end = 2,
+};
+enum class PowerQualityEventType : std::uint8_t {
+	none = 0,
+	sag = 1,
+	swell = 2,
+	interruption = 3,
+};
+
+/* Decoded from the PQEVT-v1 record (M12): the sliding Urms(1/2) tier.
+ * Detection conventions (thresholds as fractions of a declared reference,
+ * the polyphase begin/end rule, severity, residual/peak selection) are
+ * normative in the PL's metering_types.hpp. Measurement and detection are
+ * independent: Urms(1/2) is measured on every enabled lane whether or not
+ * `armed` is set — arming (a nonzero declared reference) only gates event
+ * declaration, so a disarmed meter still reports live half-cycle RMS. */
+struct PowerQualityValues {
+	PowerQualityRecordKind kind = PowerQualityRecordKind::periodic;
+	PowerQualityEventType event_type = PowerQualityEventType::none;
+	/* Phases affected by the event, bit 0 = A, 1 = B, 2 = C. */
+	std::uint8_t affected_phases = 0;
+	bool armed = false;      /* a reference voltage is configured */
+	bool cycle_locked = false;
+	bool synthetic_half_cycle = false;
+	/* Latest Urms(1/2) and the span's extremes; the span is the
+	 * heartbeat window for a periodic record and the whole event for an
+	 * event-end record. */
+	PhaseABC<Reading<MicroVolts>> voltage{};
+	PhaseABC<Reading<MicroVolts>> voltage_minimum{};
+	PhaseABC<Reading<MicroVolts>> voltage_maximum{};
+	PhaseABC<Reading<MicroAmperes>> current{};
+	/* Ties an event START record to its END; 0 on a heartbeat. */
+	std::uint32_t event_sequence = 0;
+	/* Event duration in CONVERSION SAMPLES — exact, not a wall-clock
+	 * estimate; divide by the record's sample rate for seconds. */
+	std::uint64_t duration_samples = 0;
+	std::uint32_t half_cycle_updates = 0;
+	/* Threshold configuration echo, so a stored event stays readable. */
+	std::uint32_t reference_micro_volts = 0;
+	std::uint32_t sag_threshold_e4 = 0;
+	std::uint32_t swell_threshold_e4 = 0;
+	std::uint32_t interruption_threshold_e4 = 0;
+	std::uint32_t hysteresis_e4 = 0;
+};
 
 struct MeterValues {
 	FundamentalValues fundamental{};
@@ -336,6 +384,38 @@ struct SingleCycleSnapshot {
 };
 
 [[nodiscard]] SingleCycleSnapshot decode_single_cycle_record(
+	const MeterRecord &record);
+
+/*
+ * Decoded view of one PQEVT-v1 power-quality record (metrology M12).
+ * Deliberately OUTSIDE the MeterUpdate/period store, like
+ * SingleCycleSnapshot and for a sharper reason: the sliding tier has its
+ * OWN sequence space, so feeding it through the period store would fight
+ * the basic tier's monotone-sequence guard — and a latest-only store
+ * would silently drop the START record of any event that ends before the
+ * next read. Records are self-describing: `values` carries the decoded
+ * measurement, the fields here its provenance.
+ */
+struct PowerQualitySnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	/* Span covered by this record: the heartbeat window for a periodic
+	 * record, the event so far for a START, the whole event for an END. */
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint8_t valid_mask = 0;
+	std::uint32_t status = 0;
+	/* Status bit 2: first record after a discontinuity (reset, APPLY,
+	 * malformed input, dropped beat) — its span does not chain onto the
+	 * previous record's. */
+	[[nodiscard]] bool first_after_gap() const { return (status & 0x4u) != 0u; }
+	[[nodiscard]] bool arithmetic_error() const { return (status & 0x1u) != 0u; }
+	PowerQualityValues values{};
+};
+
+[[nodiscard]] PowerQualitySnapshot decode_pq_event_record(
 	const MeterRecord &record);
 
 class MeterDecoderRegistry {

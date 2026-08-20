@@ -79,6 +79,17 @@ inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
 inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
 inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
 inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
+/* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
+ * OWN producer port with its own sequence space. Word 13 selects the
+ * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
+ * event type (0 none, 1 sag, 2 swell, 3 interruption), the affected phase
+ * mask, and the locked/fallback/armed flags. Words 16..27: latest
+ * Urms(1/2), the span's min and max (micro-volts), and Irms(1/2)
+ * (micro-amperes), all per phase A/B/C. Word 28 ties an event START to
+ * its END; 29/30 the event duration in samples; 31 the half-cycle update
+ * count. Words 32..36 echo the reference and thresholds the record was
+ * evaluated against, so a stored event stays interpretable. */
+inline constexpr std::uint32_t meter_pq_event_format = 0x000B0001u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 
@@ -177,6 +188,7 @@ struct MeterRecord {
 			record_format() == meter_aggregate_power_format ||
 			record_format() == meter_aggregate_phasor_format ||
 			record_format() == meter_aggregate_unbalance_format ||
+			record_format() == meter_pq_event_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}

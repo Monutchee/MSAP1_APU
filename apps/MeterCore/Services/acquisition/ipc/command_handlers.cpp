@@ -155,6 +155,17 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.single_cycle_response();
 		});
+	registry.on<msap1::PowerQualityRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const auto &) {
+			return coordinator.power_quality_response();
+		});
+	/* Not a configuration path: arming a burst must not restart the
+	 * generator, so this never touches the apply/restart machinery. */
+	registry.on<msap1::SimulatorEventRequest>(
+		AcquisitionStatus::configuration_error,
+		[&coordinator](const msap1::SimulatorEventRequest &request) {
+			return coordinator.simulator_event_response(request);
+		});
 	registry.on<msap1::ConfigurationApplyRequest>(
 		AcquisitionStatus::configuration_error,
 		[&coordinator](const msap1::ConfigurationApplyRequest &request) {

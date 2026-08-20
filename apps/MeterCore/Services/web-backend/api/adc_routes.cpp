@@ -271,7 +271,189 @@ webengine::Response capture_command(AppContext &app,
 	}
 }
 
+/** Body of POST /api/v1/adc/simulator/event, and of both responses. */
+struct AdcSimulatorEventDto {
+	/* arm | cancel | clear | query. */
+	std::string action = "query";
+	/* voltage | current | all, or a comma-separated lane list
+	 * (ia, ib, ic, in, vc, vb, va). Required to arm. */
+	std::string channels;
+	/* Amplitude during the burst: 100 unity, 0 a full interruption,
+	 * 110 a 10 % swell. */
+	double scale_percent = 100.0;
+	/* Burst length in HALF CYCLES -- Urms(1/2) refreshes every half
+	 * cycle, so half-cycle resolution is what the detector can see. */
+	std::uint32_t duration_half_cycles = 0;
+	std::uint32_t period_half_cycles = 0;
+	bool repeat = false;
+	/* Response-only state, read back from the PL. */
+	bool armed = false;
+	bool running = false;
+	bool holding = false;
+	std::uint32_t completed = 0;
+	std::uint32_t remaining_half_cycles = 0;
+	std::uint32_t until_repeat_half_cycles = 0;
+	bool simulator_active = false;
+};
+
+std::uint32_t event_channel_mask(const std::string &channels)
+{
+	static constexpr std::array<const char *, 7> lane_names{
+		"ia", "ib", "ic", "in", "vc", "vb", "va"};
+	if (channels == "voltage")
+		return 0x70u;
+	if (channels == "current")
+		return 0x0fu;
+	if (channels == "all")
+		return 0x7fu;
+	std::uint32_t mask = 0;
+	std::size_t start = 0;
+	while (start <= channels.size()) {
+		const auto comma = channels.find(',', start);
+		const auto name = channels.substr(start,
+			comma == std::string::npos ? std::string::npos
+						   : comma - start);
+		const auto found = std::find_if(lane_names.begin(),
+			lane_names.end(), [&](const char *lane) {
+				return name == lane;
+			});
+		if (name.empty() || found == lane_names.end())
+			throw std::invalid_argument(
+				"channels must be voltage, current, all, or lane "
+				"names (ia, ib, ic, in, vc, vb, va)");
+		mask |= 1u << std::distance(lane_names.begin(), found);
+		if (comma == std::string::npos)
+			break;
+		start = comma + 1;
+	}
+	if (mask == 0u)
+		throw std::invalid_argument("channels selected no channels");
+	return mask;
+}
+
+std::uint32_t event_action_value(const std::string &action)
+{
+	if (action == "arm")
+		return MSAP1_SIMULATOR_EVENT_ARM;
+	if (action == "cancel")
+		return MSAP1_SIMULATOR_EVENT_CANCEL;
+	if (action == "clear")
+		return MSAP1_SIMULATOR_EVENT_CLEAR_COUNT;
+	if (action == "query")
+		return MSAP1_SIMULATOR_EVENT_QUERY;
+	throw std::invalid_argument(
+		"action must be arm, cancel, clear, or query");
+}
+
+AdcSimulatorEventDto adc_simulator_event(
+	const std::string &action,
+	const msap1::SimulatorEventResponse &response)
+{
+	AdcSimulatorEventDto dto;
+	dto.action = action;
+	dto.armed = (response.sequencer_status & 0x1u) != 0u;
+	dto.running = (response.sequencer_status & 0x2u) != 0u;
+	dto.holding = (response.sequencer_status & 0x4u) != 0u;
+	dto.completed = response.sequencer_status >> 16;
+	dto.remaining_half_cycles = response.remaining & 0xffffu;
+	dto.until_repeat_half_cycles = response.remaining >> 16;
+	/* Echo the COMMITTED burst, not the request: what the PL will run. */
+	dto.scale_percent =
+		static_cast<double>(response.active_scale) * 100.0 / 65536.0;
+	dto.duration_half_cycles = response.active_timing & 0xffffu;
+	dto.period_half_cycles = response.active_timing >> 16;
+	dto.repeat = (response.active_control & (1u << 8)) != 0u;
+	dto.simulator_active =
+		response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	return dto;
+}
+
 } // namespace
+
+/**
+ * @brief GET /api/v1/adc/simulator/event (Viewer)
+ *
+ * Reports the amplitude-event sequencer's state and the burst currently
+ * committed to it. Changes nothing.
+ *
+ * @return 200 with the sequencer document, or 503 when the acquisition
+ *         daemon is unreachable.
+ */
+webengine::Response get_adc_simulator_event(AppContext &app,
+					    const webengine::RequestContext &)
+{
+	try {
+		msap1::SimulatorEventRequest request{};
+		request.action = MSAP1_SIMULATOR_EVENT_QUERY;
+		const auto response = app.acquisition.simulator_event(request);
+		require_acquisition_ok(response.status);
+		return json_response(webengine::http::status::ok,
+			adc_simulator_event("query", response));
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/adc/simulator/event", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+/**
+ * @brief POST /api/v1/adc/simulator/event (Admin)
+ *
+ * Arms, cancels, or clears one simulator amplitude-envelope burst -- the
+ * sag/swell/interruption a power-quality test needs. NOT a configuration
+ * change and deliberately not persisted: the burst starts on the
+ * generator's own half-cycle boundary against the running configuration,
+ * so the programmed amplitude step is the only discontinuity in the
+ * stream. A configuration commit would restart the waveform and destroy
+ * exactly the continuity under test.
+ *
+ * @return 200 with the sequencer state, 400 for invalid JSON or an
+ *         out-of-range burst, or 503 when the daemon rejects it.
+ */
+webengine::Response post_adc_simulator_event(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	const auto correlation = request_id();
+	try {
+		AdcSimulatorEventDto body;
+		if (const auto error =
+			    glz::read_json(body, context.request.body()))
+			return error_response(
+				webengine::http::status::bad_request,
+				"invalid simulator event JSON");
+		msap1::SimulatorEventRequest request{};
+		request.action = event_action_value(body.action);
+		if (request.action == MSAP1_SIMULATOR_EVENT_ARM) {
+			if (body.duration_half_cycles == 0u)
+				throw std::invalid_argument(
+					"arming requires a nonzero "
+					"duration_half_cycles");
+			request.channel_mask = event_channel_mask(body.channels);
+			request.scale_percent = body.scale_percent;
+			request.duration_half_cycles = body.duration_half_cycles;
+			request.period_half_cycles = body.period_half_cycles;
+			request.repeat = body.repeat;
+		}
+		const auto response = app.acquisition.simulator_event(request);
+		require_acquisition_ok(response.status);
+		log_api_event(mnc::logging::Priority::notice,
+			"simulator event " + body.action,
+			"simulator_event_requested",
+			{{"MNC_REQUEST_ID", correlation},
+			 {"MNC_EVENT_ACTION", body.action}});
+		return json_response(webengine::http::status::ok,
+			adc_simulator_event(body.action, response));
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+				      error.what());
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/adc/simulator/event", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
 
 /**
  * @brief GET /api/v1/adc/source (Viewer)

@@ -444,6 +444,188 @@ std::vector<msap1::SimulatorHarmonicConfig> parse_harmonics(
 	return result;
 }
 
+/*
+ * Channel selection for an event burst. The coarse groups match the
+ * harmonic spec's vocabulary; individual lanes are accepted by name so a
+ * single-phase sag -- the case the polyphase begin/end rule exists for --
+ * is expressible.
+ */
+std::uint32_t event_channel_mask(const std::string &channels)
+{
+	static constexpr std::array<const char *, 7> lane_names{
+		"ia", "ib", "ic", "in", "vc", "vb", "va"};
+	if (channels == "voltage")
+		return 0x70u;
+	if (channels == "current")
+		return 0x0fu;
+	if (channels == "all")
+		return 0x7fu;
+	std::uint32_t mask = 0;
+	std::size_t start = 0;
+	while (start <= channels.size()) {
+		const auto comma = channels.find(',', start);
+		const auto name = channels.substr(start,
+			comma == std::string::npos ? std::string::npos
+						   : comma - start);
+		if (name.empty())
+			throw std::invalid_argument(
+				"--channels has an empty channel name");
+		const auto found = std::find_if(lane_names.begin(),
+			lane_names.end(), [&](const char *lane) {
+				return name == lane;
+			});
+		if (found == lane_names.end())
+			throw std::invalid_argument(
+				"--channels accepts voltage, current, all, or "
+				"lane names (ia, ib, ic, in, vc, vb, va)");
+		mask |= 1u << std::distance(lane_names.begin(), found);
+		if (comma == std::string::npos)
+			break;
+		start = comma + 1;
+	}
+	if (mask == 0u)
+		throw std::invalid_argument("--channels selected no channels");
+	return mask;
+}
+
+std::uint32_t parse_half_cycles(const std::string &value, const char *option)
+{
+	std::size_t end = 0;
+	unsigned long long parsed = 0;
+	try {
+		parsed = std::stoull(value, &end, 10);
+	} catch (const std::exception &) {
+		end = 0;
+	}
+	if (end != value.size() || parsed > 65535ull)
+		throw std::invalid_argument(
+			std::string(option) + " requires 0..65535 half cycles");
+	return static_cast<std::uint32_t>(parsed);
+}
+
+std::uint32_t event_action_value(const std::string &action)
+{
+	if (action == "arm")
+		return MSAP1_SIMULATOR_EVENT_ARM;
+	if (action == "cancel")
+		return MSAP1_SIMULATOR_EVENT_CANCEL;
+	if (action == "clear")
+		return MSAP1_SIMULATOR_EVENT_CLEAR_COUNT;
+	if (action == "query")
+		return MSAP1_SIMULATOR_EVENT_QUERY;
+	throw std::invalid_argument(
+		"--action must be arm, cancel, clear, or query");
+}
+
+struct AdcSimulatorEventResult {
+	std::string action = "query";
+	bool armed = false;
+	bool running = false;
+	bool holding = false;
+	std::uint32_t completed = 0;
+	std::uint32_t remaining_half_cycles = 0;
+	std::uint32_t until_repeat_half_cycles = 0;
+	std::uint32_t channel_mask = 0;
+	double scale_percent = 100.0;
+	std::uint32_t duration_half_cycles = 0;
+	std::uint32_t period_half_cycles = 0;
+	bool repeat = false;
+	bool simulator_active = false;
+};
+
+class AdcSimulatorEventTextGenerator final :
+	public ResultGenerator<AdcSimulatorEventResult> {
+public:
+	int write(const AdcSimulatorEventResult &result,
+		  std::ostream &output) const override
+	{
+		output << "ADC simulator event sequencer\n"
+		       << "  Action:      " << result.action << '\n'
+		       << "  State:       "
+		       << (result.running ? "running"
+			   : result.holding ? "holding"
+			   : result.armed   ? "armed"
+					    : "idle")
+		       << '\n'
+		       << "  Completed:   " << result.completed << " burst(s)\n";
+		if (result.running)
+			output << "  Remaining:   "
+			       << result.remaining_half_cycles
+			       << " half cycle(s)\n";
+		if (result.repeat)
+			output << "  Next burst:  "
+			       << result.until_repeat_half_cycles
+			       << " half cycle(s)\n";
+		output << "  Committed:   channels 0x" << std::hex
+		       << result.channel_mask << std::dec << ", "
+		       << result.scale_percent << " %, "
+		       << result.duration_half_cycles << " half cycle(s)";
+		if (result.repeat)
+			output << ", repeating every "
+			       << result.period_half_cycles << " half cycle(s)";
+		output << '\n';
+		if (!result.simulator_active)
+			output << "  NOTE: the simulator is not the selected "
+				  "ADC source\n";
+		return 0;
+	}
+};
+
+class AdcSimulatorEventJsonGenerator final :
+	public ResultGenerator<AdcSimulatorEventResult> {
+public:
+	int write(const AdcSimulatorEventResult &result,
+		  std::ostream &output) const override
+	{
+		output << glz::write_json(result).value_or("{}");
+		return 0;
+	}
+};
+
+int run_simulator_event(const Options &options, std::ostream &output)
+{
+	msap1::SimulatorEventRequest request{};
+	const std::string action = options.event_action.value_or("query");
+	request.action = event_action_value(action);
+	if (request.action == MSAP1_SIMULATOR_EVENT_ARM) {
+		if (!options.event_channels || !options.event_scale_percent ||
+		    !options.event_duration_half_cycles)
+			throw std::invalid_argument(
+				"--action arm requires --channels, --scale-percent, "
+				"and --duration");
+		request.channel_mask = event_channel_mask(*options.event_channels);
+		request.scale_percent = *options.event_scale_percent;
+		request.duration_half_cycles = *options.event_duration_half_cycles;
+		request.period_half_cycles =
+			options.event_period_half_cycles.value_or(0u);
+		request.repeat = options.event_repeat.value_or(false);
+	}
+
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(request, options.timeout_ms);
+	require_daemon_ok(response.status);
+
+	AdcSimulatorEventResult result{};
+	result.action = action;
+	result.armed = (response.sequencer_status & 0x1u) != 0u;
+	result.running = (response.sequencer_status & 0x2u) != 0u;
+	result.holding = (response.sequencer_status & 0x4u) != 0u;
+	result.completed = response.sequencer_status >> 16;
+	result.remaining_half_cycles = response.remaining & 0xffffu;
+	result.until_repeat_half_cycles = response.remaining >> 16;
+	result.channel_mask = response.active_control & 0xffu;
+	result.repeat = (response.active_control & (1u << 8)) != 0u;
+	result.scale_percent =
+		static_cast<double>(response.active_scale) * 100.0 / 65536.0;
+	result.duration_half_cycles = response.active_timing & 0xffffu;
+	result.period_half_cycles = response.active_timing >> 16;
+	result.simulator_active =
+		response.adc_source == MSAP1_ADC_SOURCE_SIMULATOR;
+	return render_result(options, result, output,
+			     AdcSimulatorEventTextGenerator{},
+			     AdcSimulatorEventJsonGenerator{});
+}
+
 int run_simulator(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -876,6 +1058,92 @@ void register_adc_commands(Application &application)
 		},
 	});
 	simulator.add_subcommand(std::move(simulator_configure));
+
+	Command simulator_event(
+		"event", "Arm, cancel, or inspect a simulator amplitude event",
+		run_simulator_event,
+		{
+			.access = AccessLevel::operator_control,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {
+				{"--action query",
+				 AccessLevel::diagnostic,
+				 "Read the sequencer state without changing it"},
+			},
+		});
+	/* A query changes nothing, so it is a diagnostic read; arming,
+	 * cancelling, and clearing are operator control. */
+	simulator_event.set_access_resolver([](const Options &options) {
+		return options.event_action.value_or("query") == "query"
+			? AccessLevel::diagnostic
+			: AccessLevel::operator_control;
+	});
+	simulator_event.add_option({
+		"action", "ACTION", "arm, cancel, clear, or query",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			(void)event_action_value(value);
+			options.event_action = value;
+		},
+	});
+	simulator_event.add_option({
+		"channels", "SPEC",
+		"Lanes the envelope scales: voltage, current, all, or a "
+		"comma-separated lane list (ia, ib, ic, in, vc, vb, va)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			(void)event_channel_mask(value);
+			options.event_channels = value;
+		},
+	});
+	simulator_event.add_option({
+		"scale-percent", "PERCENT",
+		"Amplitude during the burst: 100 unity, 0 interruption",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			const auto parsed =
+				parse_finite_double(value, "--scale-percent");
+			if (parsed < 0.0 || parsed > 400.0)
+				throw std::invalid_argument(
+					"--scale-percent must be 0..400");
+			options.event_scale_percent = parsed;
+		},
+	});
+	simulator_event.add_option({
+		"duration", "HALFCYC",
+		"Burst length in half cycles (Urms(1/2) refreshes every half "
+		"cycle)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.event_duration_half_cycles =
+				parse_half_cycles(value, "--duration");
+		},
+	});
+	simulator_event.add_option({
+		"period", "HALFCYC",
+		"Repeat period in half cycles, measured start to start",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.event_period_half_cycles =
+				parse_half_cycles(value, "--period");
+		},
+	});
+	simulator_event.add_option({
+		"repeat", "BOOL", "Re-fire the burst on its period",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			if (value == "true" || value == "1")
+				options.event_repeat = true;
+			else if (value == "false" || value == "0")
+				options.event_repeat = false;
+			else
+				throw std::invalid_argument(
+					"--repeat requires true or false");
+		},
+	});
+	simulator.add_subcommand(std::move(simulator_event));
 	adc.add_subcommand(std::move(simulator));
 	adc.add_subcommand(Command(
 		"start", "Start ADC capture and meter acquisition",
