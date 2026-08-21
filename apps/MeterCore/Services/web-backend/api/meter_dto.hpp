@@ -3,12 +3,12 @@
 /**
  * @file meter_dto.hpp
  * @brief Meter channel identity shared by every metering endpoint, plus the
- *        150/180-cycle aggregate transfer objects and their projection.
+ *        finalized aggregate transfer objects and their projections.
  *
  * The channel naming, units, and micro-unit scaling live here because
- * GET /api/v1/meter/readings and GET /api/v1/meter/aggregate must present
- * the same channels the same way; duplicating the table would let the two
- * documents drift.
+ * GET /api/v1/meter/readings, GET /api/v1/meter/aggregate, and
+ * GET /api/v1/meter/minutes-10 must present the same channels and engineering
+ * units the same way; duplicating the table would let the documents drift.
  *
  * The aggregate projection is deliberately free of WebEngine: it maps one
  * acquisition InfoResponse onto the response DTO and nothing else, so the
@@ -21,11 +21,15 @@
 #include "msap1/meter/meter_timing.hpp"
 
 #include <array>
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace msap1::web::api {
 
@@ -48,6 +52,63 @@ inline constexpr std::array<const char *, msap1::meter_channel_count>
 [[nodiscard]] inline constexpr double meter_units(std::int64_t micro_units)
 {
 	return static_cast<double>(micro_units) / 1000000.0;
+}
+
+/** One catalog attribute in a meter snapshot, expressed in base units. */
+struct MeterAttributeDto {
+	std::string key;
+	std::string unit;
+	bool valid;
+	double value;
+};
+
+/** Convert a strongly typed provider reading to its public engineering unit. */
+[[nodiscard]] inline MeterAttributeDto attribute_dto(
+	const mnc::meter::MeterAttributeValue &reading)
+{
+	const auto descriptor = mnc::meter::describe(reading.attribute);
+	double value = 0.0;
+	const char *unit = "";
+	switch (reading.unit) {
+	case mnc::meter::MeterUnit::MilliHertz:
+		value = static_cast<double>(reading.value) / 1e3;
+		unit = "Hz";
+		break;
+	case mnc::meter::MeterUnit::MicroVolts:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "V";
+		break;
+	case mnc::meter::MeterUnit::MicroAmperes:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "A";
+		break;
+	case mnc::meter::MeterUnit::Picowatts:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "W";
+		break;
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "VA";
+		break;
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "PF";
+		break;
+	case mnc::meter::MeterUnit::Picovars:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "var";
+		break;
+	case mnc::meter::MeterUnit::Millidegrees:
+		value = static_cast<double>(reading.value) / 1000.0;
+		unit = "deg";
+		break;
+	case mnc::meter::MeterUnit::RatioMillionths:
+		value = static_cast<double>(reading.value) / 10000.0;
+		unit = "%";
+		break;
+	}
+	return {std::string(descriptor.key), unit,
+		reading.quality == mnc::meter::ReadingQuality::Valid, value};
 }
 
 /** JSON name for the acquisition daemon's measurement time quality. */
@@ -137,6 +198,100 @@ struct MeterAggregateDto {
 struct MeterAggregateUnavailableDto {
 	bool available = false;
 };
+
+/** Body of GET /api/v1/meter/minutes-10 when a finalized block exists. */
+struct MeterTenMinuteDto {
+	bool available;
+	std::uint64_t sequence;
+	std::uint32_t configuration_generation;
+	std::uint32_t sample_rate_hz;
+	std::uint32_t sample_count;
+	std::uint64_t first_sample_index;
+	std::uint32_t cycle_count;
+	std::uint32_t nominal_frequency_hz;
+	bool arithmetic_error;
+	std::string time_quality;
+	std::uint32_t age_ms;
+	std::array<MeterAggregateChannelDto, msap1::meter_channel_count> channels;
+	std::vector<MeterAttributeDto> attributes;
+};
+
+/** No aligned ten-minute interval has closed since acquisition started. */
+struct MeterTenMinuteUnavailableDto {
+	bool available = false;
+};
+
+/** Project the typed Min10 provider view without recomputing meter values. */
+[[nodiscard]] inline std::optional<MeterTenMinuteDto>
+meter_ten_minute_dto(const msap1::MeterSnapshotResponse &response)
+{
+	using Id = mnc::meter::MeterAttributeId;
+	using Quality = mnc::meter::ReadingQuality;
+	if (!response.running || !response.has_snapshot)
+		return std::nullopt;
+	const auto &snapshot = response.snapshot;
+	if (snapshot.period != mnc::meter::MeasurementPeriod::Min10)
+		throw std::invalid_argument("cached meter snapshot is not a ten-minute aggregate");
+	if (!snapshot.timing || !snapshot.timing->first_sample_index ||
+	    !snapshot.timing->sample_count || !snapshot.timing->cycle_count ||
+	    !snapshot.timing->nominal_frequency_hz)
+		throw std::invalid_argument("ten-minute aggregate has incomplete timing provenance");
+
+	const auto find = [&snapshot](Id id) -> const mnc::meter::MeterAttributeValue * {
+		const auto it = std::find_if(snapshot.values.begin(), snapshot.values.end(),
+			[id](const auto &value) {
+				return value.attribute.id == id && !value.attribute.index;
+			});
+		return it == snapshot.values.end() ? nullptr : &*it;
+	};
+	const std::array<Id, msap1::meter_channel_count> channel_ids{
+		Id::IaRms, Id::IbRms, Id::IcRms, Id::InRms,
+		Id::VcnRms, Id::VbnRms, Id::VanRms, Id::Frequency,
+	};
+
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	const auto age_ns = std::max<std::int64_t>(0, now - snapshot.updated_at_nanoseconds);
+	const auto age_ms64 = age_ns / 1'000'000;
+	MeterTenMinuteDto result{
+		true, snapshot.sequence, snapshot.configuration_generation,
+		response.diagnostics.sample_rate_hz, *snapshot.timing->sample_count,
+		*snapshot.timing->first_sample_index, *snapshot.timing->cycle_count,
+		*snapshot.timing->nominal_frequency_hz, false,
+		time_quality_name(snapshot.timing->quality),
+		static_cast<std::uint32_t>(std::min<std::int64_t>(
+			age_ms64, std::numeric_limits<std::uint32_t>::max())), {}, {},
+	};
+
+	for (std::size_t index = 0; index < result.channels.size(); ++index) {
+		const auto *reading = index == 7 ? nullptr : find(channel_ids[index]);
+		const bool valid = reading && reading->quality == Quality::Valid;
+		result.channels[index] = {
+			static_cast<std::uint32_t>(index), meter_channel_names[index],
+			meter_channel_unit(index), valid,
+			valid ? meter_units(reading->value) : 0.0,
+		};
+	}
+	for (const auto &reading : snapshot.values) {
+		if (reading.quality == Quality::ArithmeticError)
+			result.arithmetic_error = true;
+		switch (reading.attribute.id) {
+		case Id::Frequency:
+		case Id::VanRms:
+		case Id::VbnRms:
+		case Id::VcnRms:
+		case Id::IaRms:
+		case Id::IbRms:
+		case Id::IcRms:
+		case Id::InRms:
+			break;
+		default:
+			result.attributes.push_back(attribute_dto(reading));
+			break;
+		}
+	}
+	return result;
+}
 
 /**
  * @brief Project the cached MTR2 record of @p response onto the aggregate DTO.

@@ -435,6 +435,21 @@ if(BUILD_TESTING)
     add_test(NAME meter_aggregate_route_test
         COMMAND meter_aggregate_route_test)
 
+    # GET /api/v1/meter/minutes-10 projects the typed provider snapshot;
+    # pin that JSON contract without linking the HTTP stack.
+    add_executable(meter_ten_minute_route_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_ten_minute_route_test.cpp)
+    target_link_libraries(meter_ten_minute_route_test PRIVATE
+        msap1::acquisition
+        glaze::glaze
+    )
+    target_include_directories(meter_ten_minute_route_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
+    target_compile_options(meter_ten_minute_route_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_ten_minute_route_test
+        COMMAND meter_ten_minute_route_test)
+
     add_executable(meter_data_provider_test
         ${PROJECT_SOURCE_DIR}/tests/meter_data_provider_test.cpp)
     target_link_libraries(meter_data_provider_test PRIVATE msap1::meter)

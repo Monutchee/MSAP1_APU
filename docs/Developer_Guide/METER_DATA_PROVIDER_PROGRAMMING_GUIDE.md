@@ -46,10 +46,13 @@ The provider currently advertises:
 | --- | --- | --- |
 | `Basic` | 10 complete cycles at 50 Hz or 12 at 60 Hz | Supported |
 | `Cycles150_180` | 15 Basic blocks (150/180 cycles) | Supported |
-| `Min10` | Ten-minute aggregate | Reserved |
+| `Min10` | Clock-aligned ten-minute aggregate | Supported |
 | `Hour2` | Two-hour aggregate | Reserved |
 
 Reserved periods are not advertised until their PL record and decoder exist.
+The 10-minute view is independent of the Basic and 150/180-cycle views and
+retains the PL-provided target, actual boundary, overshoot, contamination,
+time-quality, and sample-window provenance.
 
 ## 2. Headers and linking
 

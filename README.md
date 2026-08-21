@@ -113,11 +113,11 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
 little-endian product payloads. Acquisition IPC version 20 adds typed meter
 snapshot selection by period and attribute set. `MeterDataProvider` currently
-publishes typed latest values for the Basic (10/12-cycle) and 150/180-cycle
-measurement periods. The generic period vocabulary reserves 10 min and 2 h
-for future PL products, but provider capabilities do not advertise them until
-measurements exist. Unavailable values are never represented as valid zero and
-values never inherit between periods. See
+publishes typed latest values for the Basic (10/12-cycle), 150/180-cycle, and
+clock-aligned 10-minute measurement periods. The generic period vocabulary
+reserves 2 h for a future PL product, but provider capabilities do not
+advertise a period until its measurements exist. Unavailable values are never
+represented as valid zero and values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
 Modbus, and telemetry publishers. Durable historian delivery is implemented
@@ -136,6 +136,9 @@ The authenticated external API is:
 - `GET /api/v1/meter/aggregate` (newest 150/180-cycle aggregate; always 200
   while acquisition answers, with `{"available": false}` until the first
   aggregate exists)
+- `GET /api/v1/meter/minutes-10` (newest finalized clock-aligned 10-minute
+  aggregate; always 200 while acquisition answers, with
+  `{"available": false}` until the first clean interval exists)
 - `GET /api/v1/meter/history/capabilities`
 - `POST /api/v1/meter/history/query`
 - `GET /api/v1/meter/history/health`
@@ -165,8 +168,10 @@ The authenticated external API is:
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate the PL
-folded from 15 basic blocks. The two never mix: the readings document always
-comes from a basic record. The aggregate's `frequency` object is
+folded from 15 basic blocks; and `GET /api/v1/meter/minutes-10` reports the
+independently aligned 10-minute aggregate produced by the PL. The periods
+never inherit from one another. The 150/180-cycle aggregate's `frequency`
+object is
 **informative only** — the standardized Class A frequency product is defined
 over its own 10 s interval, which is not implemented — so it carries
 `"informative": true` and deliberately no validity flag, and consumers must
@@ -175,7 +180,9 @@ never present it as a Class A frequency measurement. The aggregate's
 UTC synchronization state captured when that aggregate was measured, not the
 daemon's state when the request arrived: an aggregate measured while
 synchronized keeps reporting `"synchronized"` even if the clock has since
-dropped into holdover.
+dropped into holdover. Frequency is intentionally unavailable in the
+10-minute result because the standardized frequency product uses its own
+10-second interval.
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
