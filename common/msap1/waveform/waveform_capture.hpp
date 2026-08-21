@@ -191,10 +191,25 @@ struct WaveformTransportStatusIoctl {
 	/* Cyclic completion callbacks the driver saw; diagnostic only. */
 	std::uint32_t callbacks;
 };
+
+/**
+ * Programs the next UTC-aligned ten-minute boundary in the PL sample-counter
+ * domain.  The kernel writes the target and commit bit to the waveform AXI
+ * register bank; the metrology datapath consumes the committed value without
+ * involving the waveform DMA stream itself.
+ */
+struct WaveformTenMinuteBoundaryIoctl {
+	std::uint64_t target_sample_index;
+	std::uint32_t valid;
+	std::uint32_t reserved;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WaveformBlockHeader) == waveform_block_header_bytes);
 static_assert(sizeof(WaveformBlock) == waveform_block_bytes);
+static_assert(sizeof(WaveformCorrelationIoctl) == 32);
+static_assert(sizeof(WaveformTransportStatusIoctl) == 32);
+static_assert(sizeof(WaveformTenMinuteBoundaryIoctl) == 16);
 
 class WaveformCapture {
 public:
@@ -229,6 +244,16 @@ public:
 	 * is closed or the correlation read fails.
 	 */
 	std::optional<WaveformTimeSync> time_sync() const noexcept;
+
+	/**
+	 * Commit or invalidate the next ten-minute UTC boundary.
+	 *
+	 * The target is expressed in the same free-running PL sample-counter
+	 * domain returned by time_sync().  A disabled target is used during an
+	 * orderly capture stop so stale UTC mappings cannot survive a restart.
+	 */
+	void program_ten_minute_boundary(std::uint64_t target_sample_index,
+					 bool valid);
 
 private:
 	struct Event;

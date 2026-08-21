@@ -92,8 +92,7 @@ MeterAttributeValue unavailable(MeterAttributeKey attribute)
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
 	using Id = MeterAttributeId;
-	if (period == msap1::MeasurementPeriod::Min10 ||
-	    period == msap1::MeasurementPeriod::Hour2)
+	if (period == msap1::MeasurementPeriod::Hour2)
 		return {};
 	std::vector<MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
@@ -106,7 +105,7 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 							       std::nullopt});
 	}
 	{
-		/* Both tiers carry line-line RMS, the finalized power
+		/* All implemented tiers carry line-line RMS, the finalized power
 		 * quantities, the fundamental phasors, and the symmetrical
 		 * components since M11 (the basic tier since M7..M10; the
 		 * aggregate tier's AGG record quad). Frequency stays
@@ -156,6 +155,7 @@ InProcessMeterSnapshotProvider::capabilities() const
 		{MeasurementPeriod::Basic, supported(MeasurementPeriod::Basic)},
 		{MeasurementPeriod::Cycles150_180,
 		 supported(MeasurementPeriod::Cycles150_180)},
+		{MeasurementPeriod::Min10, supported(MeasurementPeriod::Min10)},
 	};
 }
 

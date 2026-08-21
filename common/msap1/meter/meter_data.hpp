@@ -466,6 +466,16 @@ MeterUpdate decode_aggregate_phasor_meter_record(const MeterRecord &record,
 MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
 						    SystemTime received_at);
 
+/** Ten-minute sibling payloads use the aggregate word maps and publish on
+ * the independently aligned Min10 period. Contaminated or unaligned
+ * intervals remain decodable for diagnostics but carry invalid quality. */
+MeterUpdate decode_ten_minute_power_meter_record(const MeterRecord &record,
+						 SystemTime received_at);
+MeterUpdate decode_ten_minute_phasor_meter_record(const MeterRecord &record,
+						  SystemTime received_at);
+MeterUpdate decode_ten_minute_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
@@ -487,6 +497,14 @@ MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
  * MeasurementTimebase after decoding.
  */
 [[nodiscard]] MeterUpdate decode_aggregate_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/** Decode a clock-aligned ten-minute aggregate and preserve both the target
+ * and actual close boundary. The first startup interval may be emitted as
+ * contaminated; callers can inspect its provenance, while every electrical
+ * reading is explicitly invalid. */
+[[nodiscard]] MeterUpdate decode_ten_minute_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

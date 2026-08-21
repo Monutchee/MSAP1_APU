@@ -79,6 +79,14 @@ inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
 inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
 inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
 inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
+/* TEN-MINUTE v1 (M13): UTC-boundary-aligned aggregation of complete basic
+ * blocks. The fundamental record carries the boundary target, actual close,
+ * overshoot, and contamination state. Its POWER/PHASOR/UNBAL siblings retain
+ * the corresponding aggregate payload maps. */
+inline constexpr std::uint32_t meter_ten_minute_format = 0x000C0001u;
+inline constexpr std::uint32_t meter_ten_minute_power_format = 0x00130001u;
+inline constexpr std::uint32_t meter_ten_minute_phasor_format = 0x00140002u;
+inline constexpr std::uint32_t meter_ten_minute_unbalance_format = 0x00150002u;
 /* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
  * OWN producer port with its own sequence space. Word 13 selects the
  * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
@@ -135,6 +143,23 @@ struct MeterAggregateComposition {
 	std::uint16_t cycle_count = 0;
 };
 
+/** Decoded TEN-MINUTE record word 8: interval-level status flags. */
+struct MeterTenMinuteStatus {
+	bool arithmetic_error = false;
+	bool complete = false;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+};
+
+/** Decoded TEN-MINUTE word 13 plus word 41 composition. */
+struct MeterTenMinuteComposition {
+	std::uint16_t basic_block_count = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t flags = 0;
+	std::uint32_t cycle_count = 0;
+};
+
 struct MeterFrequencyReading {
 	bool enabled = false;
 	bool valid = false;
@@ -185,9 +210,13 @@ struct MeterRecord {
 			record_format() == meter_phasor_format ||
 			record_format() == meter_unbalance_format ||
 			record_format() == meter_aggregate_format ||
-			record_format() == meter_aggregate_power_format ||
-			record_format() == meter_aggregate_phasor_format ||
-			record_format() == meter_aggregate_unbalance_format ||
+				record_format() == meter_aggregate_power_format ||
+				record_format() == meter_aggregate_phasor_format ||
+				record_format() == meter_aggregate_unbalance_format ||
+				record_format() == meter_ten_minute_format ||
+				record_format() == meter_ten_minute_power_format ||
+				record_format() == meter_ten_minute_phasor_format ||
+				record_format() == meter_ten_minute_unbalance_format ||
 			record_format() == meter_pq_event_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
@@ -327,6 +356,41 @@ struct MeterRecord {
 	std::uint32_t aggregate_reset_count() const { return word(33); }
 	std::uint32_t aggregate_ineligible_count() const { return word(34); }
 	std::uint32_t aggregate_continuity_count() const { return word(35); }
+
+	/* ---- clock-aligned ten-minute aggregate (M13) -------------------- */
+
+	MeterTenMinuteStatus ten_minute_status() const
+	{
+		const auto status_word = word(8);
+		return {
+			(status_word & (1u << 0)) != 0u,
+			(status_word & (1u << 1)) != 0u,
+			(status_word & (1u << 2)) != 0u,
+			(status_word & (1u << 3)) != 0u,
+			(status_word & (1u << 4)) != 0u,
+		};
+	}
+
+	MeterTenMinuteComposition ten_minute_composition() const
+	{
+		const auto shape = word(13);
+		return {
+			static_cast<std::uint16_t>(shape & 0xffffu),
+			static_cast<std::uint8_t>((shape >> 16) & 0xffu),
+			static_cast<std::uint8_t>((shape >> 24) & 0xffu),
+			word(41),
+		};
+	}
+
+	std::uint64_t ten_minute_actual_last_sample_index() const
+	{
+		return unsigned64(36);
+	}
+	std::uint64_t ten_minute_target_sample_index() const
+	{
+		return unsigned64(42);
+	}
+	std::uint32_t ten_minute_overshoot_samples() const { return word(44); }
 };
 
 static_assert(sizeof(MeterRecord) == meter_record_size,
