@@ -101,9 +101,49 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 		{Id::IbRms, std::nullopt}, {Id::IcRms, std::nullopt},
 		{Id::InRms, std::nullopt},
 	};
-	if (period == msap1::MeasurementPeriod::Basic)
+	if (period == msap1::MeasurementPeriod::Basic) {
 		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
 							       std::nullopt});
+	}
+	{
+		/* Both tiers carry line-line RMS, the finalized power
+		 * quantities, the fundamental phasors, and the symmetrical
+		 * components since M11 (the basic tier since M7..M10; the
+		 * aggregate tier's AGG record quad). Frequency stays
+		 * basic-only: the aggregate's mean frequency is informative,
+		 * not a Class A product. */
+		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
+				      Id::ActivePowerA, Id::ActivePowerB,
+				      Id::ActivePowerC, Id::ActivePowerTotal,
+				      Id::ApparentPowerA, Id::ApparentPowerB,
+				      Id::ApparentPowerC,
+				      Id::ApparentPowerTotal,
+				      Id::PowerFactorA, Id::PowerFactorB,
+				      Id::PowerFactorC, Id::PowerFactorTotal,
+				      Id::ReactivePowerA, Id::ReactivePowerB,
+				      Id::ReactivePowerC,
+				      Id::ReactivePowerTotal,
+				      Id::DisplacementPowerFactorA,
+				      Id::DisplacementPowerFactorB,
+				      Id::DisplacementPowerFactorC,
+				      Id::DisplacementPowerFactorTotal,
+				      Id::VoltagePhaseAngleA,
+				      Id::VoltagePhaseAngleB,
+				      Id::VoltagePhaseAngleC,
+				      Id::CurrentPhaseAngleA,
+				      Id::CurrentPhaseAngleB,
+				      Id::CurrentPhaseAngleC,
+				      Id::VoltageUnbalance, Id::CurrentUnbalance,
+				      Id::VoltageZeroSequenceRatio,
+				      Id::CurrentZeroSequenceRatio,
+				      Id::ZeroSequenceVoltage,
+				      Id::PositiveSequenceVoltage,
+				      Id::NegativeSequenceVoltage,
+				      Id::ZeroSequenceCurrent,
+				      Id::PositiveSequenceCurrent,
+				      Id::NegativeSequenceCurrent})
+			result.push_back({id, std::nullopt});
+	}
 	return result;
 }
 
@@ -189,9 +229,188 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 				view.values.fundamental.current.neutral));
 			break;
 		case MeterAttributeId::VabRms:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_a));
+			break;
 		case MeterAttributeId::VbcRms:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_b));
+			break;
 		case MeterAttributeId::VcaRms:
-			result.values.push_back(unavailable(attribute));
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.fundamental.voltage_ll.phase_c));
+			break;
+		case MeterAttributeId::ActivePowerA:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_a));
+			break;
+		case MeterAttributeId::ActivePowerB:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_b));
+			break;
+		case MeterAttributeId::ActivePowerC:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.active_power.phase_c));
+			break;
+		case MeterAttributeId::ActivePowerTotal:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.power.total_active_power));
+			break;
+		case MeterAttributeId::ApparentPowerA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_a));
+			break;
+		case MeterAttributeId::ApparentPowerB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_b));
+			break;
+		case MeterAttributeId::ApparentPowerC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.apparent_power.phase_c));
+			break;
+		case MeterAttributeId::ApparentPowerTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PicoVoltAmperes,
+				view.values.power.total_apparent_power));
+			break;
+		case MeterAttributeId::PowerFactorA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_a));
+			break;
+		case MeterAttributeId::PowerFactorB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_b));
+			break;
+		case MeterAttributeId::PowerFactorC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.power_factor.phase_c));
+			break;
+		case MeterAttributeId::PowerFactorTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.power.total_power_factor));
+			break;
+		case MeterAttributeId::ReactivePowerA:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_a));
+			break;
+		case MeterAttributeId::ReactivePowerB:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_b));
+			break;
+		case MeterAttributeId::ReactivePowerC:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.reactive_power.phase_c));
+			break;
+		case MeterAttributeId::ReactivePowerTotal:
+			result.values.push_back(value(attribute, MeterUnit::Picovars,
+				view.values.phasor.total_reactive_power));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorA:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_a));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorB:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_b));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorC:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.displacement_power_factor.phase_c));
+			break;
+		case MeterAttributeId::DisplacementPowerFactorTotal:
+			result.values.push_back(value(attribute,
+				MeterUnit::PowerFactorMillionths,
+				view.values.phasor.total_displacement_power_factor));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleA:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_a));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleB:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_b));
+			break;
+		case MeterAttributeId::VoltagePhaseAngleC:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.voltage_angle.phase_c));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleA:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_a));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleB:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_b));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleC:
+			result.values.push_back(value(attribute,
+				MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.phase_c));
+			break;
+		case MeterAttributeId::VoltageUnbalance:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.voltage_unbalance));
+			break;
+		case MeterAttributeId::CurrentUnbalance:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.current_unbalance));
+			break;
+		case MeterAttributeId::VoltageZeroSequenceRatio:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.voltage_zero_ratio));
+			break;
+		case MeterAttributeId::CurrentZeroSequenceRatio:
+			result.values.push_back(value(attribute,
+				MeterUnit::RatioMillionths,
+				view.values.unbalance.current_zero_ratio));
+			break;
+		case MeterAttributeId::ZeroSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_zero_sequence));
+			break;
+		case MeterAttributeId::PositiveSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_positive_sequence));
+			break;
+		case MeterAttributeId::NegativeSequenceVoltage:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroVolts,
+				view.values.unbalance.voltage_negative_sequence));
+			break;
+		case MeterAttributeId::ZeroSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_zero_sequence));
+			break;
+		case MeterAttributeId::PositiveSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_positive_sequence));
+			break;
+		case MeterAttributeId::NegativeSequenceCurrent:
+			result.values.push_back(value(attribute,
+				MeterUnit::MicroAmperes,
+				view.values.unbalance.current_negative_sequence));
 			break;
 		}
 	}

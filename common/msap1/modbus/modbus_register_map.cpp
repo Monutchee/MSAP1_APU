@@ -46,6 +46,21 @@ float engineering_value(const MeterAttributeValue *value)
 	case mnc::meter::MeterUnit::MicroVolts:
 	case mnc::meter::MeterUnit::MicroAmperes:
 		return static_cast<float>(value->value) / 1'000'000.0f;
+	case mnc::meter::MeterUnit::Picowatts:
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		/* pico -> base units (W / VA). */
+		return static_cast<float>(value->value) / 1e12f;
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		return static_cast<float>(value->value) / 1'000'000.0f;
+	case mnc::meter::MeterUnit::Picovars:
+		/* pico -> base units (var). */
+		return static_cast<float>(value->value) / 1e12f;
+	case mnc::meter::MeterUnit::Millidegrees:
+		/* The PL publishes the 0..359.999-degree convention directly. */
+		return static_cast<float>(value->value) / 1000.0f;
+	case mnc::meter::MeterUnit::RatioMillionths:
+		/* millionths -> percent (the human unit for unbalance). */
+		return static_cast<float>(value->value) / 10000.0f;
 	}
 	return std::numeric_limits<float>::quiet_NaN();
 }

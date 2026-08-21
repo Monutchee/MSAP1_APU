@@ -84,6 +84,17 @@ struct MeterTimingDto {
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
+/** One catalog attribute in GET /api/v1/meter/readings: quantities that
+ * are not per-channel RMS values (line-line voltages, power, PF, ...),
+ * published generically so new PL quantities appear without new fields.
+ * `value` is in base engineering units (V, W, VA, PF as a ratio). */
+struct MeterAttributeDto {
+	std::string key;
+	std::string unit;
+	bool valid;
+	double value;
+};
+
 /** Body of GET /api/v1/meter/readings. */
 struct MeterReadingsDto {
 	std::uint64_t sequence;
@@ -98,9 +109,60 @@ struct MeterReadingsDto {
 	std::uint32_t result_drops;
 	FrequencyReadingDto frequency;
 	std::array<MeterChannelDto, 8> channels;
+	std::vector<MeterAttributeDto> attributes;
 	/* Absent (omitted from the JSON) until timing provenance exists. */
 	std::optional<MeterTimingDto> timing;
 };
+
+/** Engineering projection of one snapshot attribute for the DTO. */
+inline MeterAttributeDto attribute_dto(
+	const mnc::meter::MeterAttributeValue &reading)
+{
+	const auto descriptor = mnc::meter::describe(reading.attribute);
+	double value = 0.0;
+	const char *unit = "";
+	switch (reading.unit) {
+	case mnc::meter::MeterUnit::MilliHertz:
+		value = static_cast<double>(reading.value) / 1e3;
+		unit = "Hz";
+		break;
+	case mnc::meter::MeterUnit::MicroVolts:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "V";
+		break;
+	case mnc::meter::MeterUnit::MicroAmperes:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "A";
+		break;
+	case mnc::meter::MeterUnit::Picowatts:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "W";
+		break;
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "VA";
+		break;
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		value = static_cast<double>(reading.value) / 1e6;
+		unit = "PF";
+		break;
+	case mnc::meter::MeterUnit::Picovars:
+		value = static_cast<double>(reading.value) / 1e12;
+		unit = "var";
+		break;
+	case mnc::meter::MeterUnit::Millidegrees:
+		/* The PL publishes the 0..359.999-degree convention directly. */
+		value = static_cast<double>(reading.value) / 1000.0;
+		unit = "deg";
+		break;
+	case mnc::meter::MeterUnit::RatioMillionths:
+		value = static_cast<double>(reading.value) / 10000.0;
+		unit = "%";
+		break;
+	}
+	return {std::string(descriptor.key), unit,
+		reading.quality == mnc::meter::ReadingQuality::Valid, value};
+}
 
 /* time_quality_name(), the channel name table, the per-channel unit, and the
  * micro-unit scaling are shared with the aggregate endpoint; they live in
@@ -133,6 +195,20 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 		{},
 		{},
 	};
+	/* Non-channel catalog attributes (VLL, power, PF): everything the
+	 * provider supplies beyond the per-channel RMS and frequency. */
+	using Id = mnc::meter::MeterAttributeId;
+	for (const auto &reading : response.snapshot.values) {
+		switch (reading.attribute.id) {
+		case Id::Frequency: case Id::VanRms: case Id::VbnRms:
+		case Id::VcnRms: case Id::IaRms: case Id::IbRms:
+		case Id::IcRms: case Id::InRms:
+			continue;
+		default:
+			result.attributes.push_back(attribute_dto(reading));
+		}
+	}
+
 	/* Prefer the timing carried by the typed snapshot. The diagnostics timing
 	 * is retained as a compatibility fallback and supplies the product-specific
 	 * cycle-lock flags. Both are populated from the same ingestion-time
@@ -421,6 +497,201 @@ webengine::Response get_meter_readings(AppContext &app,
  *         unreachable, reports a failure status, or cached a malformed
  *         aggregate record.
  */
+/** JSON body of GET /api/v1/meter/single-cycle (SCYC-v4 diagnostics). */
+struct SingleCycleDto {
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	std::uint32_t sequence = 0;
+	std::uint32_t cycle_sequence = 0;
+	std::uint32_t sample_count = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint64_t processing_tick = 0;
+	std::uint32_t nominal_hz = 0;
+	std::uint32_t flags = 0;
+	std::uint32_t status = 0;
+	std::uint32_t frequency_millihz = 0;
+	std::array<std::uint64_t, 7> rms_micro_units{};
+	std::array<std::uint64_t, 3> vll_rms_micro_units{};
+	std::array<std::int64_t, 3> active_power_picowatts{};
+	/* Fundamental (phasor) RMS per lane; meaningful only when
+	 * phasor_valid (status bit 1 clear). */
+	std::array<std::uint64_t, 7> fundamental_rms_micro_units{};
+	bool phasor_valid = false;
+};
+
+namespace {
+
+/** One voltage phase in GET /api/v1/meter/power-quality. */
+struct PowerQualityPhaseDto {
+	std::string phase;
+	/* Engineering units so the page never divides: volts and amperes. */
+	double urms_half = 0.0;
+	double urms_half_minimum = 0.0;
+	double urms_half_maximum = 0.0;
+	double irms_half = 0.0;
+	/* msap1::MeasurementQuality; anything but 1 means the reading is
+	 * not a live measurement (0 = the lane is not configured). */
+	std::uint8_t quality = 0;
+};
+
+/** One PQEVT record: a periodic heartbeat or an event edge. */
+struct PowerQualityRecordDto {
+	std::string kind;          /* periodic | event_start | event_end */
+	std::string event_type;    /* none | sag | swell | interruption */
+	std::vector<std::string> affected_phases;
+	std::uint32_t sequence = 0;
+	std::uint32_t event_sequence = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t half_cycle_updates = 0;
+	/* Exact event length from the PL sample counter, not a wall-clock
+	 * estimate; 0 on a heartbeat. */
+	std::uint64_t duration_samples = 0;
+	double duration_ms = 0.0;
+	bool armed = false;
+	bool cycle_locked = false;
+	bool synthetic_half_cycle = false;
+	/* The thresholds this record was evaluated against, so a stored
+	 * event stays interpretable without the settings of the day. */
+	double reference_volts = 0.0;
+	double sag_percent = 0.0;
+	double swell_percent = 0.0;
+	double interruption_percent = 0.0;
+	double hysteresis_percent = 0.0;
+	std::vector<PowerQualityPhaseDto> phases;
+};
+
+/** Body of GET /api/v1/meter/power-quality. */
+struct PowerQualityDto {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t events = 0;
+	bool has_latest = false;
+	bool has_event = false;
+	PowerQualityRecordDto latest;
+	PowerQualityRecordDto event;
+};
+
+PowerQualityRecordDto power_quality_record(
+	const msap1::PowerQualityIpcSnapshot &record)
+{
+	static constexpr std::array<const char *, 3> phase_names{"A", "B", "C"};
+	static constexpr std::array<const char *, 3> kinds{
+		"periodic", "event_start", "event_end"};
+	static constexpr std::array<const char *, 4> types{
+		"none", "sag", "swell", "interruption"};
+	PowerQualityRecordDto dto;
+	dto.kind = record.kind < kinds.size() ? kinds[record.kind] : "unknown";
+	dto.event_type = record.event_type < types.size()
+		? types[record.event_type] : "unknown";
+	for (std::size_t phase = 0; phase < phase_names.size(); ++phase) {
+		if ((record.affected_phases & (1u << phase)) != 0u)
+			dto.affected_phases.emplace_back(phase_names[phase]);
+	}
+	dto.sequence = record.sequence;
+	dto.event_sequence = record.event_sequence;
+	dto.first_sample = record.first_sample;
+	dto.last_sample = record.last_sample;
+	dto.sample_count = record.sample_count;
+	dto.half_cycle_updates = record.half_cycle_updates;
+	dto.duration_samples = record.duration_samples;
+	dto.duration_ms = record.sample_rate_hz == 0u
+		? 0.0
+		: static_cast<double>(record.duration_samples) * 1000.0 /
+			  static_cast<double>(record.sample_rate_hz);
+	dto.armed = record.armed;
+	dto.cycle_locked = record.cycle_locked;
+	dto.synthetic_half_cycle = record.synthetic_half_cycle;
+	dto.reference_volts =
+		static_cast<double>(record.reference_microvolts) / 1e6;
+	dto.sag_percent =
+		static_cast<double>(record.sag_threshold_e4) / 100.0;
+	dto.swell_percent =
+		static_cast<double>(record.swell_threshold_e4) / 100.0;
+	dto.interruption_percent =
+		static_cast<double>(record.interruption_threshold_e4) / 100.0;
+	dto.hysteresis_percent =
+		static_cast<double>(record.hysteresis_e4) / 100.0;
+	dto.phases.reserve(phase_names.size());
+	for (std::size_t phase = 0; phase < phase_names.size(); ++phase) {
+		const auto &lane = record.phases[phase];
+		dto.phases.push_back({
+			phase_names[phase],
+			static_cast<double>(lane.microvolts) / 1e6,
+			static_cast<double>(lane.minimum_microvolts) / 1e6,
+			static_cast<double>(lane.maximum_microvolts) / 1e6,
+			static_cast<double>(lane.microamperes) / 1e6,
+			lane.quality});
+	}
+	return dto;
+}
+
+} // namespace
+
+webengine::Response get_meter_power_quality(AppContext &app,
+					    const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.power_quality();
+		require_acquisition_ok(response.status);
+		PowerQualityDto dto;
+		dto.running = response.running;
+		dto.records = response.records;
+		dto.events = response.events;
+		dto.has_latest = response.has_latest;
+		dto.has_event = response.has_event;
+		if (response.has_latest)
+			dto.latest = power_quality_record(response.latest);
+		if (response.has_event)
+			dto.event = power_quality_record(response.event);
+		return json_response(webengine::http::status::ok, dto);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/power-quality", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_single_cycle(AppContext &app,
+					   const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.single_cycle();
+		require_acquisition_ok(response.status);
+		SingleCycleDto dto;
+		dto.running = response.running;
+		dto.has_snapshot = response.has_snapshot;
+		dto.records = response.records;
+		const auto &snapshot = response.snapshot;
+		dto.sequence = snapshot.sequence;
+		dto.cycle_sequence = snapshot.cycle_sequence;
+		dto.sample_count = snapshot.sample_count;
+		dto.first_sample = snapshot.first_sample;
+		dto.last_sample = snapshot.last_sample;
+		dto.processing_tick = snapshot.processing_tick;
+		dto.nominal_hz = snapshot.nominal_hz;
+		dto.flags = snapshot.flags;
+		dto.status = snapshot.status;
+		dto.frequency_millihz = snapshot.frequency_millihz;
+		dto.rms_micro_units = snapshot.rms_micro_units;
+		dto.vll_rms_micro_units = snapshot.vll_rms_micro_units;
+		dto.active_power_picowatts = snapshot.active_power_picowatts;
+		dto.fundamental_rms_micro_units =
+			snapshot.fundamental_rms_micro_units;
+		dto.phasor_valid = snapshot.phasor_valid();
+		return json_response(webengine::http::status::ok, dto);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/single-cycle", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
 webengine::Response get_meter_aggregate(AppContext &app,
 					const webengine::RequestContext &)
 {

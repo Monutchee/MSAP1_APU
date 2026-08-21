@@ -372,13 +372,73 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 
 	/*
-	 * The stream interleaves two record formats with INDEPENDENT
-	 * sequence counters, so continuity is tracked per format.
+	 * Single-cycle diagnostic records (metrology M2) interleave on the
+	 * same DMA stream with their own sequence space. They are accepted
+	 * and counted here but neither continuity-tracked against the
+	 * basic/aggregate counters nor published: host-side consumption is
+	 * a later milestone. Falling through would poison the basic-record
+	 * gap accounting at ~60 records/s.
 	 */
+	if (record.record_format() == msap1::meter_single_cycle_format) {
+		++single_cycle_records_;
+		latest_single_cycle_ = msap1::decode_single_cycle_record(record);
+		return;
+	}
+
+	/*
+	 * Power-quality records (metrology M12) arrive from a separate PL
+	 * producer port onto the same DMA stream, with their own sequence
+	 * space and their own cadence (a heartbeat every ~100 half cycles
+	 * plus an edge record per event). Same rule as the single-cycle
+	 * stream: counted and cached, never allowed near the basic or
+	 * aggregate continuity trackers. Unlike the diagnostic stream this
+	 * one is a product record, so a malformed one is a counted, logged
+	 * fault rather than a silent decode.
+	 */
+	if (record.record_format() == msap1::meter_pq_event_format) {
+		try {
+			const auto snapshot =
+				msap1::decode_pq_event_record(record);
+			++pq_event_records_;
+			latest_power_quality_ = snapshot;
+			if (snapshot.values.kind !=
+			    msap1::PowerQualityRecordKind::periodic) {
+				latest_power_quality_event_ = snapshot;
+				if (snapshot.values.kind ==
+				    msap1::PowerQualityRecordKind::event_start)
+					++pq_events_;
+			}
+		} catch (const std::exception &error) {
+			++invalid_records_;
+			log_rejected_record(
+				std::string("power-quality record: ") +
+					error.what(),
+				"meter_record_decode_rejected", record);
+		}
+		return;
+	}
+
+	/*
+	 * The stream interleaves record formats with INDEPENDENT sequence
+	 * counters, so continuity is tracked per format. POWER and PHASOR
+	 * records share their BASIC sibling's sequence by design (same
+	 * block), so they must not touch the basic tracker: they would read
+	 * as repeats and be dropped. The basic tracker already measures the
+	 * shared transport's health.
+	 */
+	const bool sibling =
+		record.record_format() == msap1::meter_power_format ||
+		record.record_format() == msap1::meter_phasor_format ||
+		record.record_format() == msap1::meter_unbalance_format ||
+		record.record_format() == msap1::meter_aggregate_power_format ||
+		record.record_format() == msap1::meter_aggregate_phasor_format ||
+		record.record_format() ==
+			msap1::meter_aggregate_unbalance_format;
 	const bool aggregate =
 		record.record_format() == msap1::meter_aggregate_format;
-	if (aggregate ? !track_aggregate_continuity(record)
-		      : !track_basic_continuity(record))
+	if (!sibling &&
+	    (aggregate ? !track_aggregate_continuity(record)
+		       : !track_basic_continuity(record)))
 		return;
 	/*
 	 * Decode-validate before publication: a record whose timing fields are
@@ -479,10 +539,15 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 				? update.aggregate_timing->time_quality
 				: msap1::meter::TimeQuality::Unsynchronized;
 		last_aggregate_record_time_ = Clock::now();
-	} else {
-		/* Only basic records refresh the instantaneous-readings
-		 * cache; aggregates are published through the typed store
-		 * under MeasurementPeriod::Cycles150_180. */
+	} else if (record.record_format() == msap1::meter_periodic_format) {
+		/* ONLY the BASIC record refreshes the instantaneous-readings
+		 * cache and the basic continuity baseline. Sibling records
+		 * must not: the basic-period siblings share their BASIC
+		 * record's sequence (harmless but redundant), while the
+		 * AGGREGATE-period siblings carry the aggregate sequence —
+		 * letting one become latest_record_ poisoned the basic
+		 * baseline every 3 s and inflated sequence_gaps by a whole
+		 * aggregate window (found on target the day M11 first ran). */
 		latest_record_ = record;
 	}
 	last_record_time_ = Clock::now();

@@ -47,6 +47,10 @@ struct MeteringSettings {
 	std::uint32_t nominal_frequency_hz = 60;
 	RmsSettings rms;
 	FrequencyConfig frequency;
+	/* IEC 61000-4-30 Urms(1/2) event detection. A zero reference is
+	 * the documented DISARMED state; the band ordering is enforced by
+	 * prepare_meter_configuration(), which owns the threshold math. */
+	PowerQualityConfig power_quality;
 	MeterConversionSettings conversion;
 
 	void validate() const

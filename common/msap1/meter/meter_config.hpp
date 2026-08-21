@@ -51,19 +51,65 @@ struct SimulatorChannelConfig {
 	std::uint32_t channel = 0;
 	double rms = 0.0;
 	double phase_degrees = 0.0;
+	/* Constant offset in engineering units (volts/amps); default flat. */
+	double dc = 0.0;
+	/* RMS of the uniform white fluctuation the PL adds, engineering
+	 * units. Real grid inputs never sit bit-flat; a small value here
+	 * makes simulated readings jitter realistically. 0 disables. */
+	double noise_rms = 0.0;
+};
+
+struct SimulatorHarmonicConfig {
+	/* Harmonic order, 2..63 (1 would silently double the fundamental). */
+	std::uint32_t order = 0;
+	/* Amplitude as a percentage of each receiving lane's fundamental
+	 * peak (0..99.9; the PL fraction register is Q16 < 1.0). */
+	double percent = 0.0;
+	/* Extra phase in degrees ON TOP of the physical rule (the PL
+	 * scales each lane's fundamental offset by the order, so a 3rd
+	 * harmonic on a balanced set lands zero-sequence by itself). */
+	double phase_degrees = 0.0;
+	/* Which lanes receive it: "voltage", "current", or "all". */
+	std::string channels = "voltage";
+};
+
+/*
+ * IEC 61000-4-30 Urms(1/2) event detection (metrology M12). Everything
+ * here is in engineering units like the rest of this file; the PL wants
+ * micro-volts and 1e-4 fractions and gets them at prepare time.
+ */
+struct PowerQualityConfig {
+	/* Declared reference voltage Udin, VOLTS. ZERO DISABLES DETECTION:
+	 * the PL keeps publishing Urms(1/2) snapshots but never declares an
+	 * event, so a meter whose reference has not been set cannot invent
+	 * dips. Set it to the nominal line-neutral voltage. */
+	double reference_volts = 0.0;
+	/* Thresholds as a PERCENT of the reference. The band must be
+	 * ordered interruption < sag < swell, and the hysteresis (added on
+	 * recovery from a sag, subtracted on recovery from a swell) must be
+	 * smaller than the sag threshold. */
+	double sag_percent = 90.0;
+	double swell_percent = 110.0;
+	double interruption_percent = 10.0;
+	double hysteresis_percent = 2.0;
 };
 
 struct SimulatorConfig {
 	double frequency_hz = 60.0;
+	/* Keep the generated waveform's phase/framing across a
+	 * reconfiguration commit instead of restarting at 0 degrees. */
+	bool preserve_phase = false;
 	std::vector<SimulatorChannelConfig> channels{
-		{0u, 5.0, 0.0},
-		{1u, 5.0, -120.0},
-		{2u, 5.0, 120.0},
-		{3u, 0.0, 0.0},
-		{4u, 120.0, 120.0},
-		{5u, 120.0, -120.0},
-		{6u, 120.0, 0.0},
+		{0u, 5.0, 0.0, 0.0, 0.0},
+		{1u, 5.0, -120.0, 0.0, 0.0},
+		{2u, 5.0, 120.0, 0.0, 0.0},
+		{3u, 0.0, 0.0, 0.0, 0.0},
+		{4u, 120.0, 120.0, 0.0, 0.0},
+		{5u, 120.0, -120.0, 0.0, 0.0},
+		{6u, 120.0, 0.0, 0.0, 0.0},
 	};
+	/* Up to four global harmonic slots; empty keeps a pure tone. */
+	std::vector<SimulatorHarmonicConfig> harmonics{};
 };
 
 struct MeterConversionFile {
@@ -85,6 +131,9 @@ struct MeterConversionFile {
 	// before frequency measurement was introduced.
 	FrequencyConfig frequency;
 	SimulatorConfig simulator;
+	/* Optional-by-default like `frequency`: profiles written before
+	 * event detection existed keep loading with detection disarmed. */
+	PowerQualityConfig power_quality;
 };
 
 struct PreparedMeterConfiguration {

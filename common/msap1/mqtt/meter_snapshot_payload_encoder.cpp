@@ -87,6 +87,20 @@ std::pair<double, std::string> engineering(std::int64_t value,
 		return {static_cast<double>(value) / 1'000'000.0, "V"};
 	case mnc::meter::MeterUnit::MicroAmperes:
 		return {static_cast<double>(value) / 1'000'000.0, "A"};
+	case mnc::meter::MeterUnit::Picowatts:
+		return {static_cast<double>(value) / 1e12, "W"};
+	case mnc::meter::MeterUnit::PicoVoltAmperes:
+		return {static_cast<double>(value) / 1e12, "VA"};
+	case mnc::meter::MeterUnit::PowerFactorMillionths:
+		return {static_cast<double>(value) / 1'000'000.0, "PF"};
+	case mnc::meter::MeterUnit::Picovars:
+		return {static_cast<double>(value) / 1e12, "var"};
+	case mnc::meter::MeterUnit::Millidegrees:
+		/* The PL publishes the 0..359.999-degree convention directly. */
+		return {static_cast<double>(value) / 1000.0, "deg"};
+	case mnc::meter::MeterUnit::RatioMillionths:
+		/* millionths of the positive sequence -> percent. */
+		return {static_cast<double>(value) / 10000.0, "%"};
 	}
 	return {0.0, "unknown"};
 }

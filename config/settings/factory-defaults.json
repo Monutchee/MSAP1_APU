@@ -17,6 +17,13 @@
       "maximum_hz": 70.0,
       "hysteresis_volts": 1.0
     },
+    "power_quality": {
+      "reference_volts": 0.0,
+      "sag_percent": 90.0,
+      "swell_percent": 110.0,
+      "interruption_percent": 10.0,
+      "hysteresis_percent": 2.0
+    },
     "conversion": {
       "profile_id": "msap1-sensor-board-5a",
       "adc_reference_volts": 1.0,
@@ -37,14 +44,15 @@
     "source": "physical",
     "simulator": {
       "frequency_hz": 60.0,
+      "preserve_phase": false,
       "channels": [
-        {"channel": 0, "rms": 5.0, "phase_degrees": 0.0},
-        {"channel": 1, "rms": 5.0, "phase_degrees": -120.0},
-        {"channel": 2, "rms": 5.0, "phase_degrees": 120.0},
-        {"channel": 3, "rms": 0.0, "phase_degrees": 0.0},
-        {"channel": 4, "rms": 120.0, "phase_degrees": 120.0},
-        {"channel": 5, "rms": 120.0, "phase_degrees": -120.0},
-        {"channel": 6, "rms": 120.0, "phase_degrees": 0.0}
+        {"channel": 0, "rms": 5.0, "phase_degrees": 0.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 1, "rms": 5.0, "phase_degrees": -120.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 2, "rms": 5.0, "phase_degrees": 120.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 3, "rms": 0.0, "phase_degrees": 0.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 4, "rms": 120.0, "phase_degrees": 120.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 5, "rms": 120.0, "phase_degrees": -120.0, "dc": 0.0, "noise_rms": 0.0},
+        {"channel": 6, "rms": 120.0, "phase_degrees": 0.0, "dc": 0.0, "noise_rms": 0.0}
       ]
     }
   },

@@ -107,6 +107,18 @@ public:
 	[[nodiscard]] msap1::WaveformResponse waveform_response();
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
+	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;
+	[[nodiscard]] msap1::PowerQualityResponse power_quality_response() const;
+	/**
+	 * @brief Drive the simulator's amplitude-envelope sequencer.
+	 *
+	 * Runs against the LIVE configuration and never restarts capture:
+	 * the burst starts on the generator's own half-cycle boundary, so
+	 * the programmed amplitude step is the only discontinuity the
+	 * metrology engines see.
+	 */
+	[[nodiscard]] msap1::SimulatorEventResponse simulator_event_response(
+		const msap1::SimulatorEventRequest &request);
 	[[nodiscard]] msap1::MeterSnapshotResponse meter_snapshot_response(
 		const msap1::MeterSnapshotRequest &request) const;
 

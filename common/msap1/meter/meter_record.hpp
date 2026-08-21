@@ -30,8 +30,68 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 /* Record type rides in [31:16] of word 1, version in [15:0]. The
  * reservation table (energy/demand/harmonics/PQ) lives with the PL
  * contract header; allocate there, never ad hoc. */
-inline constexpr std::uint32_t meter_periodic_format = 0x00010003u;
-inline constexpr std::uint32_t meter_aggregate_format = 0x00020002u;
+/* BASIC-v4 (metrology M7): the 10/12-cycle merge tier that retired the
+ * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
+ * word, per-lane slots, and words 56..63; additions: block last-sample
+ * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
+ * 32-bit), and status bit 2 = first block after a discontinuity. */
+inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
+/* POWER v1 (metrology M8): emitted by the 10/12-cycle tier on the same
+ * stream immediately after each BASIC-v4 record, same sequence and
+ * anchors. Per phase P (s64 pW), S (u64 pVA), true PF (s32 millionths,
+ * 0 = undefined when S is 0); arithmetic totals; per-lane crest factors
+ * (u32 ten-thousandths, 0 when RMS is 0). */
+inline constexpr std::uint32_t meter_power_format = 0x00070001u;
+/* PHASOR v2 (metrology M9; angle convention finalized with M11): third
+ * record of each 10/12-cycle block, same sequence and anchors.
+ * Fundamental (synchronous-correlation) quantities: per lane fundamental
+ * RMS (u32 micro-units) + angle (u32 millidegrees in the industry
+ * [0, 360000) convention, RELATIVE TO Va which reads exactly 0); VLL
+ * phasors (complex differences); per phase the V-I displacement angle,
+ * Q1 (s64 picovars, lagging/inductive positive), P1 (s64 picowatts),
+ * displacement PF (s32 millionths, 0 = undefined when S1 is 0), and a
+ * 2-bit load-nature code; arithmetic totals. Word 51 packs the natures
+ * and bit 8 = angle-reference-valid. Status bit 1 = at least one merged
+ * cycle had no usable frequency reference (every phasor word suspect). */
+inline constexpr std::uint32_t meter_phasor_format = 0x00080002u;
+/* UNBALANCE v1 (metrology M10): fourth record of each 10/12-cycle block,
+ * same sequence and anchors. Symmetrical components of the fundamental
+ * phasors: zero/positive/negative sequence RMS (u32 micro-units) + angle
+ * (u32 millidegrees, [0, 360000), relative to Va) for voltage (16..21) and
+ * current (22..27, IA/IB/IC never IN); |X0|/|X1| and UNBL = |X2|/|X1| in
+ * millionths at words 28..31 (0 + flags-word validity bit clear =
+ * undefined when |X1| = 0, clamped at the u32 rail). Word 32 flags: bit
+ * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
+ * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
+inline constexpr std::uint32_t meter_unbalance_format = 0x00090002u;
+/* AGG v3 (metrology M11): the 150/180-cycle tier record from
+ * Agg150_180CycleEngine (Mtr2Engine retired). MTR2-v2 interior plus:
+ * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
+ * aggregate RMS (u32 micro-units). SEMANTIC upgrade: per-lane RMS is the
+ * whole-interval finalize of the summed raw accumulators (mean-corrected
+ * under the committed dc_remove, sample-weighted), no longer sqrt(mean
+ * of 15 block-RMS squares). */
+inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
+/* AGG-POWER/PHASOR/UNBAL v1 (M11): the aggregate tier's siblings, same
+ * sequence/anchors as their AGG-v3 record; payload word maps (16+)
+ * IDENTICAL to the basic-period POWER/PHASOR/UNBAL v1 maps. Word 13
+ * carries the MTR2 shape word and 14/15 the folded basic-sequence range. */
+inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
+inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
+inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
+/* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
+ * OWN producer port with its own sequence space. Word 13 selects the
+ * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
+ * event type (0 none, 1 sag, 2 swell, 3 interruption), the affected phase
+ * mask, and the locked/fallback/armed flags. Words 16..27: latest
+ * Urms(1/2), the span's min and max (micro-volts), and Irms(1/2)
+ * (micro-amperes), all per phase A/B/C. Word 28 ties an event START to
+ * its END; 29/30 the event duration in samples; 31 the half-cycle update
+ * count. Words 32..36 echo the reference and thresholds the record was
+ * evaluated against, so a stored event stays interpretable. */
+inline constexpr std::uint32_t meter_pq_event_format = 0x000B0001u;
+/* Single-cycle diagnostic records (PL metrology roadmap M2). */
+inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 
 struct MeterChannelReading {
 	bool valid = false;
@@ -121,7 +181,15 @@ struct MeterRecord {
 	{
 		return word(0) == meter_record_magic &&
 		       (record_format() == meter_periodic_format ||
-			record_format() == meter_aggregate_format) &&
+		        record_format() == meter_power_format ||
+			record_format() == meter_phasor_format ||
+			record_format() == meter_unbalance_format ||
+			record_format() == meter_aggregate_format ||
+			record_format() == meter_aggregate_power_format ||
+			record_format() == meter_aggregate_phasor_format ||
+			record_format() == meter_aggregate_unbalance_format ||
+			record_format() == meter_pq_event_format ||
+			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}
 
@@ -151,7 +219,7 @@ struct MeterRecord {
 	std::uint32_t emit_drops() const { return word(11); }
 	std::uint32_t result_drops() const { return word(12); }
 
-	/* ---- periodic (MTR1, 0x00010003) fields -------------------------- */
+	/* ---- periodic (BASIC-v4, 0x00010004) fields ----------------------- */
 
 	MeterTimingWord timing() const
 	{

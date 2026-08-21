@@ -19,6 +19,9 @@ constexpr double adc_positive_codes = 8388608.0;
 constexpr double q16_scale = 65536.0;
 constexpr double q32_scale = 4294967296.0;
 constexpr double square_root_two = 1.4142135623730950488;
+/* A uniform distribution in +/- L has RMS L/sqrt(3), so an engineering
+ * noise RMS converts to the PL's amplitude register via sqrt(3). */
+constexpr double square_root_three = 1.7320508075688772935;
 
 bool valid_pga_gain(std::uint32_t gain)
 {
@@ -57,6 +60,18 @@ std::uint32_t frequency_mode(const std::string &mode)
 	if (mode == "rolling_time")
 		return MSAP1_FREQUENCY_MODE_ROLLING_TIME;
 	throw std::runtime_error("unsupported frequency measurement mode");
+}
+
+std::uint32_t harmonic_channel_mask(const std::string &channels)
+{
+	if (channels == "voltage")
+		return 0x70u;
+	if (channels == "current")
+		return 0x0fu;
+	if (channels == "all")
+		return 0x7fu;
+	throw std::runtime_error(
+		"simulator harmonic channels must be voltage, current, or all");
 }
 
 std::uint32_t phase_q32(double phase_degrees)
@@ -317,6 +332,40 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			std::llround(frequency.hysteresis_volts * 1000000.0));
 
 	/*
+	 * Urms(1/2) event detection. A zero reference is the documented
+	 * DISARMED state and is left unchecked against the band; anything
+	 * else must describe a usable band, because thresholds that cross
+	 * would declare events that mean nothing.
+	 */
+	const auto &pq = result.source.power_quality;
+	const auto pq_fraction = [](double percent) {
+		return static_cast<std::uint32_t>(std::llround(percent * 100.0));
+	};
+	if (!std::isfinite(pq.reference_volts) || pq.reference_volts < 0.0 ||
+	    pq.reference_volts > 1000000.0 ||
+	    !std::isfinite(pq.sag_percent) || !std::isfinite(pq.swell_percent) ||
+	    !std::isfinite(pq.interruption_percent) ||
+	    !std::isfinite(pq.hysteresis_percent) ||
+	    pq.interruption_percent < 0.0 || pq.swell_percent > 655.0 ||
+	    pq.hysteresis_percent < 0.0)
+		throw std::runtime_error(
+			"power-quality configuration values are out of range");
+	if (pq.reference_volts > 0.0 &&
+	    (pq.interruption_percent >= pq.sag_percent ||
+	     pq.sag_percent >= pq.swell_percent ||
+	     pq.hysteresis_percent >= pq.sag_percent))
+		throw std::runtime_error(
+			"power-quality thresholds must be ordered "
+			"interruption < sag < swell with a smaller hysteresis");
+	result.wire.pq_reference_microvolts = static_cast<std::uint32_t>(
+		std::llround(pq.reference_volts * 1000000.0));
+	result.wire.pq_sag_threshold_e4 = pq_fraction(pq.sag_percent);
+	result.wire.pq_swell_threshold_e4 = pq_fraction(pq.swell_percent);
+	result.wire.pq_interruption_threshold_e4 =
+		pq_fraction(pq.interruption_percent);
+	result.wire.pq_hysteresis_e4 = pq_fraction(pq.hysteresis_percent);
+
+	/*
 	 * Convert engineering RMS values back through the same per-channel
 	 * coefficient used by the PL conversion stage. The generated raw samples
 	 * therefore exercise conversion, RMS, frequency, meter, and waveform logic.
@@ -334,7 +383,9 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	for (const auto &channel : simulator.channels) {
 		if (channel.channel > 6u ||
 		    (simulator_mask & (1u << channel.channel)) != 0u ||
-		    !std::isfinite(channel.rms) || channel.rms < 0.0)
+		    !std::isfinite(channel.rms) || channel.rms < 0.0 ||
+		    !std::isfinite(channel.dc) ||
+		    !std::isfinite(channel.noise_rms) || channel.noise_rms < 0.0)
 			throw std::runtime_error(
 				"simulator channel configuration is invalid");
 		const auto coefficient =
@@ -350,21 +401,43 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			result.wire.simulator_peak_counts[channel.channel] = 0;
 			result.wire.simulator_phase_q32[channel.channel] =
 				phase_q32(channel.phase_degrees);
+			result.wire.simulator_dc_offset_counts[channel.channel] = 0;
+			result.wire.simulator_noise_level_counts[channel.channel] = 0;
 			simulator_mask |= 1u << channel.channel;
 			continue;
 		}
-		const double raw_peak = channel.rms * 1000000.0 *
-			square_root_two * q16_scale /
+		const double counts_per_unit = 1000000.0 * q16_scale /
 			static_cast<double>(coefficient);
+		const double raw_peak =
+			channel.rms * square_root_two * counts_per_unit;
 		if (!std::isfinite(raw_peak) || raw_peak < 0.0 ||
 		    raw_peak > 8388607.0)
 			throw std::runtime_error("simulator CH" +
 				std::to_string(channel.channel) +
 				" amplitude exceeds signed 24-bit range");
+		/* DC is an instantaneous level: no sqrt(2) peak conversion. */
+		const double raw_dc = channel.dc * counts_per_unit;
+		if (!std::isfinite(raw_dc) || raw_dc < -8388608.0 ||
+		    raw_dc > 8388607.0)
+			throw std::runtime_error("simulator CH" +
+				std::to_string(channel.channel) +
+				" DC offset exceeds signed 24-bit range");
+		/* Uniform noise amplitude register = RMS * sqrt(3). */
+		const double raw_noise =
+			channel.noise_rms * square_root_three * counts_per_unit;
+		if (!std::isfinite(raw_noise) || raw_noise < 0.0 ||
+		    raw_noise > 8388607.0)
+			throw std::runtime_error("simulator CH" +
+				std::to_string(channel.channel) +
+				" noise amplitude exceeds signed 24-bit range");
 		result.wire.simulator_peak_counts[channel.channel] =
 			static_cast<std::int32_t>(std::llround(raw_peak));
 		result.wire.simulator_phase_q32[channel.channel] =
 			phase_q32(channel.phase_degrees);
+		result.wire.simulator_dc_offset_counts[channel.channel] =
+			static_cast<std::int32_t>(std::llround(raw_dc));
+		result.wire.simulator_noise_level_counts[channel.channel] =
+			static_cast<std::uint32_t>(std::llround(raw_noise));
 		simulator_mask |= 1u << channel.channel;
 	}
 	if (simulator_mask != 0x7fu)
@@ -383,6 +456,33 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			static_cast<double>(sample_rate_hz)));
 	if (result.wire.simulator_phase_step_q32 == 0u)
 		throw std::runtime_error("simulator phase step is zero");
+	result.wire.simulator_flags = simulator.preserve_phase
+		? static_cast<std::uint32_t>(MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE)
+		: 0u;
+	if (simulator.harmonics.size() > 4u)
+		throw std::runtime_error(
+			"simulator supports at most 4 harmonic slots");
+	for (std::size_t slot = 0; slot < simulator.harmonics.size(); ++slot) {
+		const auto &harmonic = simulator.harmonics[slot];
+		if (harmonic.order < 2u || harmonic.order > 63u)
+			throw std::runtime_error(
+				"simulator harmonic order must be 2 through 63");
+		if (!std::isfinite(harmonic.percent) ||
+		    harmonic.percent < 0.0 || harmonic.percent > 99.9)
+			throw std::runtime_error(
+				"simulator harmonic percent must be 0 through 99.9");
+		if (harmonic.order * simulator.frequency_hz >=
+		    static_cast<double>(sample_rate_hz) / 2.0)
+			throw std::runtime_error(
+				"simulator harmonic exceeds the Nyquist limit");
+		const auto fraction = static_cast<std::uint32_t>(
+			std::llround(harmonic.percent / 100.0 * q16_scale));
+		result.wire.simulator_harmonics[slot * 2] = harmonic.order |
+			(harmonic_channel_mask(harmonic.channels) << 8) |
+			(fraction << 16);
+		result.wire.simulator_harmonics[slot * 2 + 1] =
+			phase_q32(harmonic.phase_degrees);
+	}
 
 	result.wire.generation = configuration_fingerprint(result.wire);
 	return result;

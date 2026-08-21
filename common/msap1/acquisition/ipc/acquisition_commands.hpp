@@ -14,6 +14,7 @@
  */
 
 #include "msap1/meter/meter_record.hpp"
+#include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_timing.hpp"
 #include "mnc/MeterDataProvider/snapshot/meter_snapshot.hpp"
 #include "msap1/acquisition/rpu/rpu_control_protocol.h"
@@ -47,8 +48,12 @@ inline constexpr const char *acquisition_socket_path =
  * 22: InfoResponse carries the kernel DMA transport counters (produced,
  * consumed, overrun, cyclic callbacks, ring depth) beside the ingest
  * counters, so health output distinguishes a PL-side loss from a kernel
- * ring overrun without reading the device. */
-inline constexpr std::uint16_t acquisition_ipc_version = 23;
+ * ring overrun without reading the device.
+ * 28: power-quality (PQEVT) snapshots and the simulator event sequencer
+ * (metrology M12) are addressable: meter-power-quality returns the latest
+ * Urms(1/2) record and the latest event edge, and adc-simulator-event
+ * arms/cancels/queries the PL amplitude-envelope burst. */
+inline constexpr std::uint16_t acquisition_ipc_version = 28;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -115,11 +120,76 @@ struct FrequencyIpcConfiguration {
 struct SimulatorIpcChannel {
 	double rms = 0.0;
 	double phase_degrees = 0.0;
+	/* Constant offset in engineering units (volts/amps). */
+	double dc = 0.0;
+	/* RMS of the uniform white fluctuation the PL adds, engineering
+	 * units; 0 keeps the channel noise-free. */
+	double noise_rms = 0.0;
+};
+
+struct SimulatorIpcHarmonic {
+	/* Harmonic order (2..63); 0 marks an unused slot. */
+	std::uint32_t order = 0;
+	/* Amplitude, percent of each receiving lane's fundamental peak. */
+	double percent = 0.0;
+	/* Extra phase (degrees) on top of the physical order*lane rule. */
+	double phase_degrees = 0.0;
+	/* "voltage", "current", or "all". */
+	std::string channels = "voltage";
 };
 
 struct SimulatorIpcConfiguration {
 	std::uint32_t frequency_millihz = 60000;
+	/* Keep the waveform's phase/framing across the configuration
+	 * commit instead of restarting at 0 degrees. */
+	std::uint32_t preserve_phase = 0;
 	std::array<SimulatorIpcChannel, 8> channels{};
+	/* Active harmonic slots (at most 4), echoing the settings. */
+	std::vector<SimulatorIpcHarmonic> harmonics{};
+};
+
+/*
+ * One phase of a decoded PQEVT record, flattened for the wire: the IPC
+ * carries plain scalars only, so the decoder's Reading<> provenance is
+ * projected down to the value plus its quality (msap1::MeasurementQuality).
+ */
+struct PowerQualityIpcPhase {
+	std::int64_t microvolts = 0;
+	std::int64_t minimum_microvolts = 0;
+	std::int64_t maximum_microvolts = 0;
+	std::int64_t microamperes = 0;
+	std::uint8_t quality = 0;
+};
+
+/* One PQEVT record: either a periodic Urms(1/2) heartbeat or an event
+ * edge. Span, thresholds, and flags come straight from the record, so a
+ * stored event stays interpretable without the settings of the day. */
+struct PowerQualityIpcSnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t status = 0;
+	std::uint32_t valid_mask = 0;
+	/* msap1::PowerQualityRecordKind / PowerQualityEventType. */
+	std::uint8_t kind = 0;
+	std::uint8_t event_type = 0;
+	std::uint8_t affected_phases = 0;
+	bool armed = false;
+	bool cycle_locked = false;
+	bool synthetic_half_cycle = false;
+	std::uint32_t event_sequence = 0;
+	/* Event duration in CONVERSION SAMPLES; divide by sample_rate_hz. */
+	std::uint64_t duration_samples = 0;
+	std::uint32_t half_cycle_updates = 0;
+	std::uint32_t reference_microvolts = 0;
+	std::uint32_t sag_threshold_e4 = 0;
+	std::uint32_t swell_threshold_e4 = 0;
+	std::uint32_t interruption_threshold_e4 = 0;
+	std::uint32_t hysteresis_e4 = 0;
+	std::array<PowerQualityIpcPhase, 3> phases{};
 };
 
 struct WaveformSessionIpc {
@@ -189,7 +259,7 @@ struct InfoResponse {
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
 	MeterRecord latest_record{};
-	/* Newest 150/180-cycle aggregate (MTR2, 0x00020002). Meaningful only
+	/* Newest 150/180-cycle aggregate (AGG-v3, 0x00020003). Meaningful only
 	 * when has_aggregate_record is set; the basic latest_record above is
 	 * unaffected by, and never replaced with, an aggregate. */
 	MeterRecord latest_aggregate_record{};
@@ -313,6 +383,45 @@ struct ApplyResponse {
 	std::uint32_t configuration_generation = 0;
 };
 
+struct SingleCycleResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	msap1::SingleCycleSnapshot snapshot{};
+};
+
+/*
+ * Latest power-quality state. `latest` is the newest record of any kind
+ * (live Urms(1/2)); `event` is the newest EVENT EDGE, held separately so
+ * the heartbeat stream cannot erase a short event before anything reads
+ * it.
+ */
+struct PowerQualityResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t events = 0;
+	bool has_latest = false;
+	bool has_event = false;
+	PowerQualityIpcSnapshot latest{};
+	PowerQualityIpcSnapshot event{};
+};
+
+/* Simulator event-sequencer state after the requested action. */
+struct SimulatorEventResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
+	/* [0] armed, [1] running, [2] holding, [31:16] bursts completed. */
+	std::uint32_t sequencer_status = 0;
+	/* Half cycles left in the burst [15:0] and until the repeat [31:16]. */
+	std::uint32_t remaining = 0;
+	std::uint32_t active_control = 0;
+	std::uint32_t active_scale = 0;
+	std::uint32_t active_timing = 0;
+};
+
 /* ---- requests --------------------------------------------------------- */
 
 struct InfoRequest {
@@ -419,6 +528,44 @@ struct SimulatorGetRequest {
 	std::uint16_t version = acquisition_ipc_version;
 };
 
+/** Latest single-cycle diagnostic snapshot (SCYC records, roadmap M3). */
+struct SingleCycleRequest {
+	static constexpr std::string_view command = "meter-single-cycle";
+	using Response = SingleCycleResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
+/** Latest power-quality record and event edge (PQEVT, roadmap M12). */
+struct PowerQualityRequest {
+	static constexpr std::string_view command = "meter-power-quality";
+	using Response = PowerQualityResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
+/**
+ * Drives the simulator's amplitude-envelope sequencer (roadmap M12).
+ *
+ * Deliberately NOT part of the configuration snapshot: a configuration
+ * commit stops and restarts capture, which would destroy the phase
+ * continuity the burst exists to preserve. Amplitude travels as a percent
+ * of nominal, like every other engineering value on this interface; the
+ * daemon converts it to the PL's Q16 scale.
+ */
+struct SimulatorEventRequest {
+	static constexpr std::string_view command = "adc-simulator-event";
+	using Response = SimulatorEventResponse;
+	std::uint16_t version = acquisition_ipc_version;
+	/* msap1_simulator_event_action; QUERY (3) reads without changing. */
+	std::uint32_t action = 3;
+	/* Lanes the envelope multiplies, bit per channel (Va = bit 6). */
+	std::uint32_t channel_mask = 0;
+	/* 100 = unity, 0 = a full interruption, 110 = a 10 % swell. */
+	double scale_percent = 100.0;
+	std::uint32_t duration_half_cycles = 0;
+	std::uint32_t period_half_cycles = 0;
+	bool repeat = false;
+};
+
 /** Applies one complete settings snapshot (sent by the settings service). */
 struct ConfigurationApplyRequest {
 	static constexpr std::string_view command = "configuration-apply";
@@ -433,7 +580,8 @@ using AcquisitionCommandList = std::tuple<
 	StopRequest, FrequencyGetRequest, SampleRateSetRequest,
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
-	SimulatorGetRequest, ConfigurationApplyRequest>;
+	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
+	SimulatorEventRequest, ConfigurationApplyRequest>;
 
 namespace detail {
 

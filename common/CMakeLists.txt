@@ -391,6 +391,34 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME aggregate_decode_test COMMAND aggregate_decode_test)
 
+    # The ADC-simulator golden model (tests/support/waveform_golden.hpp)
+    # and the engineering-units -> counts wire conversion must agree; this
+    # is the host half of the simulator verification framework.
+    add_executable(waveform_golden_test
+        ${PROJECT_SOURCE_DIR}/tests/waveform_golden_test.cpp)
+    target_link_libraries(waveform_golden_test PRIVATE msap1::meter)
+    target_include_directories(waveform_golden_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests)
+    target_compile_options(waveform_golden_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME waveform_golden_test COMMAND waveform_golden_test)
+
+    # SCYC-v2 single-cycle diagnostic decode pinned against the PL word map.
+    add_executable(single_cycle_decode_test
+        ${PROJECT_SOURCE_DIR}/tests/single_cycle_decode_test.cpp)
+    target_link_libraries(single_cycle_decode_test PRIVATE msap1::meter)
+    target_compile_options(single_cycle_decode_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME single_cycle_decode_test COMMAND single_cycle_decode_test)
+
+    # PQEVT-v1 power-quality decode pinned against the PL word map.
+    add_executable(pq_event_decode_test
+        ${PROJECT_SOURCE_DIR}/tests/pq_event_decode_test.cpp)
+    target_link_libraries(pq_event_decode_test PRIVATE msap1::meter)
+    target_compile_options(pq_event_decode_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME pq_event_decode_test COMMAND pq_event_decode_test)
+
     # GET /api/v1/meter/aggregate is pinned by its JSON payload, and the
     # projection that renders it is deliberately WebEngine-free, so the
     # contract is tested without linking the HTTP stack.

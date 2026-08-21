@@ -45,6 +45,10 @@ void MeterLatestStore::apply(const MeterUpdate &update)
 		slot->values.fundamental = *update.fundamental;
 	if (update.power)
 		slot->values.power = *update.power;
+	if (update.phasor)
+		slot->values.phasor = *update.phasor;
+	if (update.unbalance)
+		slot->values.unbalance = *update.unbalance;
 	if (update.energy)
 		slot->values.energy = *update.energy;
 	if (update.demand)
@@ -283,6 +287,16 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
 		reading<MicroVolts>(vc.rms_micro_units, vc.valid, sequence,
 				      received_at, window),
 	};
+	/* BASIC-v4 words 51..53: Vab, Vbc, Vca micro-units (32-bit). A pair
+	 * is valid only when both of its lanes are. */
+	fundamental.voltage_ll = {
+		reading<MicroVolts>(record.word(51), va.valid && vb.valid,
+				      sequence, received_at, window),
+		reading<MicroVolts>(record.word(52), vb.valid && vc.valid,
+				      sequence, received_at, window),
+		reading<MicroVolts>(record.word(53), vc.valid && va.valid,
+				      sequence, received_at, window),
+	};
 	return fundamental;
 }
 
@@ -352,6 +366,19 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va, debug. */
 	fundamental.current = {current(0), current(1), current(2), current(3)};
 	fundamental.voltage_ln = {voltage(6), voltage(5), voltage(4)};
+	/* AGG-v3 (M11): line-line RMS at words 38..40, pair-valid when both
+	 * contributing lanes are (with the arithmetic gate above). */
+	const auto voltage_pair = [&](std::size_t word, unsigned lane_a,
+				      unsigned lane_b) {
+		return aggregate_reading<MicroVolts>(
+			static_cast<std::int64_t>(record.word(word)),
+			(valid_mask & (1u << lane_a)) != 0u &&
+				(valid_mask & (1u << lane_b)) != 0u,
+			status.arithmetic_error, sequence, received_at,
+			window);
+	};
+	fundamental.voltage_ll = {voltage_pair(38, 6, 5), voltage_pair(39, 5, 4),
+				  voltage_pair(40, 4, 6)};
 	return fundamental;
 }
 
@@ -372,12 +399,412 @@ SampleWindow sample_window(std::uint32_t sample_count,
 
 } // namespace
 
+namespace {
+
+/* The POWER payload map (words 16+) is shared verbatim by the basic
+ * (0x0007) and aggregate (0x0010) periods — one decoder, two wrappers. */
+MeterUpdate decode_power_payload(const MeterRecord &record,
+				 SystemTime received_at,
+				 std::uint32_t expected_format,
+				 MeasurementPeriod period)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != expected_format)
+		throw std::invalid_argument("invalid power record");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument("power record has a zero sample count");
+	if (record.first_sample_index() == 0u)
+		throw std::invalid_argument(
+			"power record has a zero first-sample index");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const auto valid_mask = record.valid_mask();
+	const auto lane_valid = [&](unsigned lane) {
+		return (valid_mask & (1u << lane)) != 0u;
+	};
+	const auto word_s64 = [&](std::size_t low) {
+		return static_cast<std::int64_t>(
+			record.word(low) |
+			(std::uint64_t{record.word(low + 1)} << 32));
+	};
+
+	/* Hardware lane order: Ia..In = 0..3, Vc/Vb/Va = 4/5/6; phases pair
+	 * Va/Ia, Vb/Ib, Vc/Ic (the PL power core's mapping). */
+	static constexpr unsigned voltage_lane[3] = {6, 5, 4};
+	static constexpr unsigned current_lane[3] = {0, 1, 2};
+	PowerValues values{};
+	Reading<Picowatts> phase_p[3];
+	Reading<PicoVoltAmperes> phase_s[3];
+	Reading<PowerFactorMillionths> phase_pf[3];
+	for (std::size_t phase = 0; phase < 3; ++phase) {
+		const std::size_t base = 16u + phase * 5u;
+		const bool valid = lane_valid(voltage_lane[phase]) &&
+				   lane_valid(current_lane[phase]);
+		const auto p = word_s64(base);
+		const auto s_va = word_s64(base + 2);
+		const auto pf = static_cast<std::int32_t>(record.word(base + 4));
+		phase_p[phase] = reading<Picowatts>(p, valid, sequence,
+						     received_at, window);
+		phase_s[phase] = reading<PicoVoltAmperes>(s_va, valid, sequence,
+							   received_at, window);
+		/* PF is undefined at S == 0: publish it as unavailable, not
+		 * as a confident zero. */
+		phase_pf[phase] = reading<PowerFactorMillionths>(
+			pf, valid && s_va != 0, sequence, received_at, window);
+	}
+	values.active_power = {phase_p[0], phase_p[1], phase_p[2]};
+	values.apparent_power = {phase_s[0], phase_s[1], phase_s[2]};
+	values.power_factor = {phase_pf[0], phase_pf[1], phase_pf[2]};
+	const bool totals_valid = lane_valid(6) && lane_valid(0);
+	const auto total_s = word_s64(33);
+	values.total_active_power = reading<Picowatts>(
+		word_s64(31), totals_valid, sequence, received_at, window);
+	values.total_apparent_power = reading<PicoVoltAmperes>(
+		total_s, totals_valid, sequence, received_at, window);
+	values.total_power_factor = reading<PowerFactorMillionths>(
+		static_cast<std::int32_t>(record.word(35)),
+		totals_valid && total_s != 0, sequence, received_at, window);
+	const auto crest = [&](unsigned lane) {
+		return reading<CrestTenThousandths>(record.word(36u + lane),
+						     lane_valid(lane), sequence,
+						     received_at, window);
+	};
+	values.current_crest = {crest(0), crest(1), crest(2), crest(3)};
+	values.voltage_crest = {crest(6), crest(5), crest(4)};
+
+	MeterUpdate update{};
+	update.period = period;
+	update.kind = RecordKind::power;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.power = values;
+	return update;
+}
+
+} // namespace
+
+MeterUpdate decode_power_meter_record(const MeterRecord &record,
+				      SystemTime received_at)
+{
+	return decode_power_payload(record, received_at, meter_power_format,
+				    MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_power_meter_record(const MeterRecord &record,
+						SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_aggregate_power_format,
+				    MeasurementPeriod::Cycles150_180);
+}
+
+namespace {
+
+MeterUpdate decode_phasor_payload(const MeterRecord &record,
+				  SystemTime received_at,
+				  std::uint32_t expected_format,
+				  MeasurementPeriod period)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (PHASOR-v1 / AGG-PHASOR-v1). */
+	if (!record.header_valid() ||
+	    record.record_format() != expected_format)
+		throw std::invalid_argument("invalid phasor record");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"phasor record has a zero sample count");
+	if (record.first_sample_index() == 0u)
+		throw std::invalid_argument(
+			"phasor record has a zero first-sample index");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const auto valid_mask = record.valid_mask();
+	/* Status bit 1: a merged cycle lacked a frequency reference — the
+	 * values exist but are garbage, which is `invalid`, never a silent
+	 * `unavailable`. */
+	const bool block_invalid = (record.word(8) & 0x2u) != 0u;
+	const auto flags = record.word(51);
+	const bool reference_valid = (flags & 0x100u) != 0u;
+	const auto lane_valid = [&](unsigned lane) {
+		return (valid_mask & (1u << lane)) != 0u;
+	};
+	const auto quality = [&](bool available) {
+		if (block_invalid)
+			return MeasurementQuality::invalid;
+		return available ? MeasurementQuality::valid
+				 : MeasurementQuality::unavailable;
+	};
+	const auto fund_of = [&](unsigned lane) {
+		return static_cast<std::int64_t>(record.word(16u + lane * 2u));
+	};
+	/* Angles are u32 millidegrees in [0, 360000) since PHASOR-v2. */
+	const auto angle_of = [&](unsigned lane) {
+		return static_cast<std::int64_t>(record.word(17u + lane * 2u));
+	};
+	/* An angle is meaningful only against a live Va reference and for a
+	 * nonzero phasor; differences (displacement) need neither reference. */
+	const auto angle_available = [&](unsigned lane) {
+		return lane_valid(lane) && reference_valid && fund_of(lane) != 0;
+	};
+
+	PhasorValues values{};
+	values.phasor_invalid = block_invalid;
+	values.angle_reference_valid = reference_valid;
+
+	/* Hardware lane order: Ia..In = 0..3, Vc/Vb/Va = 4/5/6. */
+	const auto fund_v = [&](unsigned lane) {
+		return Reading<MicroVolts>{fund_of(lane),
+					   quality(lane_valid(lane)), sequence,
+					   received_at, window};
+	};
+	const auto fund_i = [&](unsigned lane) {
+		return Reading<MicroAmperes>{fund_of(lane),
+					     quality(lane_valid(lane)), sequence,
+					     received_at, window};
+	};
+	const auto angle = [&](unsigned lane) {
+		return Reading<Millidegrees>{angle_of(lane),
+					     quality(angle_available(lane)),
+					     sequence, received_at, window};
+	};
+	values.fundamental_voltage = {fund_v(6), fund_v(5), fund_v(4)};
+	values.fundamental_current = {fund_i(0), fund_i(1), fund_i(2), fund_i(3)};
+	values.voltage_angle = {angle(6), angle(5), angle(4)};
+	values.current_angle = {angle(0), angle(1), angle(2), angle(3)};
+
+	/* Line-line phasors, pairs AB/BC/CA at words 30..35. */
+	static constexpr unsigned pair_lane_a[3] = {6, 5, 4};
+	static constexpr unsigned pair_lane_b[3] = {5, 4, 6};
+	Reading<MicroVolts> vll_fund[3];
+	Reading<Millidegrees> vll_angle[3];
+	for (std::size_t pair = 0; pair < 3; ++pair) {
+		const bool pair_valid = lane_valid(pair_lane_a[pair]) &&
+					lane_valid(pair_lane_b[pair]);
+		const auto fund = static_cast<std::int64_t>(
+			record.word(30u + pair * 2u));
+		vll_fund[pair] = {fund, quality(pair_valid), sequence,
+				  received_at, window};
+		vll_angle[pair] = {
+			static_cast<std::int64_t>(record.word(31u + pair * 2u)),
+			quality(pair_valid && reference_valid && fund != 0),
+			sequence, received_at, window};
+	}
+	values.fundamental_voltage_ll = {vll_fund[0], vll_fund[1], vll_fund[2]};
+	values.voltage_ll_angle = {vll_angle[0], vll_angle[1], vll_angle[2]};
+
+	/* Per-phase quantities: Va/Ia, Vb/Ib, Vc/Ic. The load-nature code is
+	 * the exact S1 = 0 gate (undefined <=> S1 = 0), so it gates the
+	 * displacement PF the same way the PL defined it. */
+	static constexpr unsigned voltage_lane[3] = {6, 5, 4};
+	static constexpr unsigned current_lane[3] = {0, 1, 2};
+	Reading<Millidegrees> disp[3];
+	Reading<Picovars> q1[3];
+	Reading<Picowatts> p1[3];
+	Reading<PowerFactorMillionths> dpf[3];
+	LoadNature nature[3];
+	for (std::size_t phase = 0; phase < 3; ++phase) {
+		const unsigned v = voltage_lane[phase];
+		const unsigned i = current_lane[phase];
+		const bool pair_valid = lane_valid(v) && lane_valid(i);
+		nature[phase] = static_cast<LoadNature>(
+			(flags >> (phase * 2u)) & 0x3u);
+		const bool defined =
+			pair_valid && nature[phase] != LoadNature::undefined;
+		disp[phase] = {
+			static_cast<std::int64_t>(record.word(36u + phase)),
+			quality(pair_valid && fund_of(v) != 0 &&
+				fund_of(i) != 0),
+			sequence, received_at, window};
+		q1[phase] = {record.signed64(39u + phase * 2u),
+			     quality(pair_valid), sequence, received_at,
+			     window};
+		p1[phase] = {record.signed64(52u + phase * 2u),
+			     quality(pair_valid), sequence, received_at,
+			     window};
+		dpf[phase] = {
+			static_cast<std::int64_t>(static_cast<std::int32_t>(
+				record.word(47u + phase))),
+			quality(defined), sequence, received_at, window};
+	}
+	values.displacement_angle = {disp[0], disp[1], disp[2]};
+	values.reactive_power = {q1[0], q1[1], q1[2]};
+	values.fundamental_active_power = {p1[0], p1[1], p1[2]};
+	values.displacement_power_factor = {dpf[0], dpf[1], dpf[2]};
+	values.load_nature = {nature[0], nature[1], nature[2]};
+	values.total_load_nature = static_cast<LoadNature>((flags >> 6u) & 0x3u);
+
+	const bool totals_valid = lane_valid(6) && lane_valid(0);
+	values.total_reactive_power = {record.signed64(45u),
+				       quality(totals_valid), sequence,
+				       received_at, window};
+	values.total_fundamental_active_power = {record.signed64(58u),
+						 quality(totals_valid),
+						 sequence, received_at, window};
+	values.total_displacement_power_factor = {
+		static_cast<std::int64_t>(
+			static_cast<std::int32_t>(record.word(50u))),
+		quality(totals_valid &&
+			values.total_load_nature != LoadNature::undefined),
+		sequence, received_at, window};
+
+	MeterUpdate update{};
+	update.period = period;
+	update.kind = RecordKind::phasor;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.phasor = values;
+	return update;
+}
+
+} // namespace
+
+MeterUpdate decode_phasor_meter_record(const MeterRecord &record,
+				       SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at, meter_phasor_format,
+				     MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_phasor_meter_record(const MeterRecord &record,
+						 SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_aggregate_phasor_format,
+				     MeasurementPeriod::Cycles150_180);
+}
+
+namespace {
+
+MeterUpdate decode_unbalance_payload(const MeterRecord &record,
+				     SystemTime received_at,
+				     std::uint32_t expected_format,
+				     MeasurementPeriod period)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (UNBALANCE-v1 / AGG-UNBAL-v1). */
+	if (!record.header_valid() ||
+	    record.record_format() != expected_format)
+		throw std::invalid_argument("invalid unbalance record");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"unbalance record has a zero sample count");
+	if (record.first_sample_index() == 0u)
+		throw std::invalid_argument(
+			"unbalance record has a zero first-sample index");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool block_invalid = (record.word(8) & 0x2u) != 0u;
+	const auto flags = record.word(32);
+	const bool v_ratios_valid = (flags & 0x1u) != 0u;
+	const bool i_ratios_valid = (flags & 0x2u) != 0u;
+	const bool reference_valid = (flags & 0x100u) != 0u;
+	const auto valid_mask = record.valid_mask();
+	/* A sequence set is meaningful only when all three of its phase
+	 * lanes contributed (the components mix every phase). */
+	const bool v_lanes = (valid_mask & 0x70u) == 0x70u; /* Vc/Vb/Va */
+	const bool i_lanes = (valid_mask & 0x07u) == 0x07u; /* Ia/Ib/Ic */
+	const auto quality = [&](bool available) {
+		if (block_invalid)
+			return MeasurementQuality::invalid;
+		return available ? MeasurementQuality::valid
+				 : MeasurementQuality::unavailable;
+	};
+
+	UnbalanceValues values{};
+	values.phasor_invalid = block_invalid;
+	values.angle_reference_valid = reference_valid;
+
+	const auto magnitude = [&](std::size_t base, bool lanes_ok) {
+		return std::pair<std::int64_t, MeasurementQuality>{
+			static_cast<std::int64_t>(record.word(base)),
+			quality(lanes_ok)};
+	};
+	/* Angles are u32 millidegrees in [0, 360000) since UNBAL-v2. */
+	const auto angle_of = [&](std::size_t base, bool lanes_ok,
+				  std::int64_t rms) {
+		return Reading<Millidegrees>{
+			static_cast<std::int64_t>(record.word(base + 1)),
+			quality(lanes_ok && reference_valid && rms != 0),
+			sequence, received_at, window};
+	};
+	/* Voltage components: zero/positive/negative at words 16/18/20. */
+	Reading<MicroVolts> v_seq[3];
+	Reading<Millidegrees> v_angle[3];
+	for (std::size_t k = 0; k < 3; ++k) {
+		const auto [value, grade] = magnitude(16u + k * 2u, v_lanes);
+		v_seq[k] = {value, grade, sequence, received_at, window};
+		v_angle[k] = angle_of(16u + k * 2u, v_lanes, value);
+	}
+	values.voltage_zero_sequence = v_seq[0];
+	values.voltage_positive_sequence = v_seq[1];
+	values.voltage_negative_sequence = v_seq[2];
+	values.voltage_zero_angle = v_angle[0];
+	values.voltage_positive_angle = v_angle[1];
+	values.voltage_negative_angle = v_angle[2];
+	/* Current components at words 22/24/26. */
+	Reading<MicroAmperes> i_seq[3];
+	Reading<Millidegrees> i_angle[3];
+	for (std::size_t k = 0; k < 3; ++k) {
+		const auto [value, grade] = magnitude(22u + k * 2u, i_lanes);
+		i_seq[k] = {value, grade, sequence, received_at, window};
+		i_angle[k] = angle_of(22u + k * 2u, i_lanes, value);
+	}
+	values.current_zero_sequence = i_seq[0];
+	values.current_positive_sequence = i_seq[1];
+	values.current_negative_sequence = i_seq[2];
+	values.current_zero_angle = i_angle[0];
+	values.current_positive_angle = i_angle[1];
+	values.current_negative_angle = i_angle[2];
+
+	const auto ratio = [&](std::size_t word, bool available) {
+		return Reading<RatioMillionths>{
+			static_cast<std::int64_t>(record.word(word)),
+			quality(available), sequence, received_at, window};
+	};
+	values.voltage_zero_ratio = ratio(28u, v_lanes && v_ratios_valid);
+	values.voltage_unbalance = ratio(29u, v_lanes && v_ratios_valid);
+	values.current_zero_ratio = ratio(30u, i_lanes && i_ratios_valid);
+	values.current_unbalance = ratio(31u, i_lanes && i_ratios_valid);
+
+	MeterUpdate update{};
+	update.period = period;
+	update.kind = RecordKind::unbalance;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.unbalance = values;
+	return update;
+}
+
+} // namespace
+
+MeterUpdate decode_unbalance_meter_record(const MeterRecord &record,
+					  SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_unbalance_format,
+					MeasurementPeriod::Basic);
+}
+
+MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
+						    SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_aggregate_unbalance_format,
+					MeasurementPeriod::Cycles150_180);
+}
+
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 					 SystemTime received_at)
 {
 	if (!record.header_valid() ||
 	    record.record_format() != meter_periodic_format)
-		throw std::invalid_argument("invalid MTR1 record");
+		throw std::invalid_argument("invalid basic record");
 	/*
 	 * Validate the timing identity before building anything: malformed
 	 * timing must never silently become a valid basic measurement block.
@@ -572,6 +999,34 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
+	result.register_decoder(meter_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_power_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_phasor_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_unbalance_meter_record(record,
+							     received_at);
+		});
+	result.register_decoder(meter_aggregate_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_power_meter_record(
+				record, received_at);
+		});
+	result.register_decoder(meter_aggregate_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_phasor_meter_record(
+				record, received_at);
+		});
+	result.register_decoder(meter_aggregate_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_aggregate_unbalance_meter_record(
+				record, received_at);
+		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record(record,
@@ -585,6 +1040,149 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 							     received_at);
 		});
 	return result;
+}
+
+
+SingleCycleSnapshot decode_single_cycle_record(const MeterRecord &record)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (SCYC-v5). */
+	SingleCycleSnapshot snapshot;
+	snapshot.sequence = record.word(3);
+	snapshot.configuration_generation = record.word(4);
+	snapshot.sample_count = record.word(6);
+	snapshot.valid_mask = record.word(7);
+	snapshot.status = record.word(8);
+	snapshot.first_sample =
+		record.word(9) | (std::uint64_t{record.word(10)} << 32);
+	snapshot.nominal_hz = record.word(13) & 0xffu;
+	snapshot.flags = (record.word(13) >> 16) & 0x7u;
+	snapshot.cycle_sequence = record.word(14);
+	snapshot.last_sample =
+		record.word(16) | (std::uint64_t{record.word(17)} << 32);
+	snapshot.processing_tick =
+		record.word(18) | (std::uint64_t{record.word(19)} << 32);
+	snapshot.frequency_millihz = record.word(20);
+	snapshot.frequency_status = record.word(21);
+	for (std::size_t lane = 0; lane < snapshot.rms_micro_units.size();
+	     ++lane) {
+		const std::size_t base = 24 + lane * 2;
+		snapshot.rms_micro_units[lane] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
+	}
+	for (std::size_t pair = 0; pair < snapshot.vll_rms_micro_units.size();
+	     ++pair) {
+		const std::size_t base = 38 + pair * 2;
+		snapshot.vll_rms_micro_units[pair] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
+	}
+	for (std::size_t phase = 0;
+	     phase < snapshot.active_power_picowatts.size(); ++phase) {
+		const std::size_t base = 44 + phase * 2;
+		snapshot.active_power_picowatts[phase] =
+			static_cast<std::int64_t>(
+				record.word(base) |
+				(std::uint64_t{record.word(base + 1)} << 32));
+	}
+	for (std::size_t lane = 0;
+	     lane < snapshot.fundamental_rms_micro_units.size(); ++lane) {
+		const std::size_t base = 50 + lane * 2;
+		snapshot.fundamental_rms_micro_units[lane] =
+			record.word(base) |
+			(std::uint64_t{record.word(base + 1)} << 32);
+	}
+	return snapshot;
+}
+
+namespace {
+
+/* Lane bits in the record's valid mask (PL metering_types.hpp lane
+ * numbering): voltages Va/Vb/Vc are lanes 6/5/4, currents Ia/Ib/Ic 0/1/2. */
+constexpr std::uint8_t pq_voltage_lane_bit[3] = {0x40u, 0x20u, 0x10u};
+constexpr std::uint8_t pq_current_lane_bit[3] = {0x01u, 0x02u, 0x04u};
+
+} // namespace
+
+PowerQualitySnapshot decode_pq_event_record(const MeterRecord &record)
+{
+	/* Word map: PL contract in MSAP1_PL .../common/include/
+	 * measurement_record.hpp (PQEVT-v1). */
+	if (record.record_format() != meter_pq_event_format)
+		throw std::invalid_argument("invalid power-quality record");
+	const auto kind_word = record.word(13);
+	const auto kind = kind_word & 0xffu;
+	const auto event_type = (kind_word >> 8) & 0xffu;
+	if (kind > 2u || event_type > 3u)
+		throw std::invalid_argument(
+			"power-quality record has an unknown kind or event type");
+	const auto sample_count = record.block_sample_count();
+	if (sample_count == 0u)
+		throw std::invalid_argument(
+			"power-quality record has a zero sample count");
+
+	PowerQualitySnapshot snapshot;
+	snapshot.sequence = record.sequence();
+	snapshot.configuration_generation = record.configuration_generation();
+	snapshot.sample_rate_hz = record.sample_rate_hz();
+	snapshot.sample_count = sample_count;
+	snapshot.valid_mask = record.valid_mask();
+	snapshot.status = record.status();
+	snapshot.first_sample = record.first_sample_index();
+	snapshot.last_sample = record.unsigned64(14);
+	if (snapshot.last_sample < snapshot.first_sample)
+		throw std::invalid_argument(
+			"power-quality record spans a negative sample range");
+
+	auto &values = snapshot.values;
+	values.kind = static_cast<PowerQualityRecordKind>(kind);
+	values.event_type = static_cast<PowerQualityEventType>(event_type);
+	values.affected_phases = static_cast<std::uint8_t>((kind_word >> 16) & 0x7u);
+	values.cycle_locked = (kind_word & (1u << 24)) != 0u;
+	values.synthetic_half_cycle = (kind_word & (1u << 25)) != 0u;
+	values.armed = (kind_word & (1u << 26)) != 0u;
+	values.event_sequence = record.word(28);
+	values.duration_samples = record.unsigned64(29);
+	values.half_cycle_updates = record.word(31);
+	values.reference_micro_volts = record.word(32);
+	values.sag_threshold_e4 = record.word(33);
+	values.swell_threshold_e4 = record.word(34);
+	values.interruption_threshold_e4 = record.word(35);
+	values.hysteresis_e4 = record.word(36);
+
+	const auto sequence = static_cast<std::uint64_t>(snapshot.sequence);
+	const auto received_at = std::chrono::system_clock::now();
+	const auto window = sample_window(sample_count, snapshot.sample_rate_hz);
+	/* A lane outside the configured valid mask was never measured; a
+	 * saturated accumulator makes every lane's root untrustworthy. */
+	const auto quality = [&](std::uint8_t lane_bit) {
+		if ((snapshot.valid_mask & lane_bit) == 0u)
+			return MeasurementQuality::unavailable;
+		return snapshot.arithmetic_error()
+			       ? MeasurementQuality::arithmetic_error
+			       : MeasurementQuality::valid;
+	};
+	const auto voltage = [&](std::size_t word, std::size_t phase) {
+		return Reading<MicroVolts>{
+			static_cast<std::int64_t>(record.word(word)),
+			quality(pq_voltage_lane_bit[phase]), sequence,
+			received_at, window};
+	};
+	values.voltage = {voltage(16, 0), voltage(17, 1), voltage(18, 2)};
+	values.voltage_minimum = {voltage(19, 0), voltage(20, 1), voltage(21, 2)};
+	values.voltage_maximum = {voltage(22, 0), voltage(23, 1), voltage(24, 2)};
+	values.current = {
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(25)),
+				      quality(pq_current_lane_bit[0]), sequence,
+				      received_at, window},
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(26)),
+				      quality(pq_current_lane_bit[1]), sequence,
+				      received_at, window},
+		Reading<MicroAmperes>{static_cast<std::int64_t>(record.word(27)),
+				      quality(pq_current_lane_bit[2]), sequence,
+				      received_at, window}};
+	return snapshot;
 }
 
 } // namespace msap1

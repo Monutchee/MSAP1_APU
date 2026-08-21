@@ -10,9 +10,15 @@ static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
 static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
-/* 172 legacy bytes + the trailing nominal_frequency_hz field (wire v2). */
-static_assert(sizeof(msap1_meter_config_payload) == 176,
+/* Wire v5: the four packed simulator harmonic slots sit between the
+ * noise levels and the flags, and the five Urms(1/2) detection fields
+ * close the payload after nominal_frequency_hz. */
+static_assert(sizeof(msap1_meter_config_payload) == 296,
 	      "unexpected meter configuration payload layout");
+static_assert(sizeof(msap1_simulator_event_payload) == 24,
+	      "unexpected simulator event payload layout");
+static_assert(sizeof(msap1_simulator_event_ack_payload) == 20,
+	      "unexpected simulator event acknowledgement layout");
 static_assert(sizeof(msap1_meter_config_ack_payload) == 28,
 	      "unexpected meter configuration acknowledgement layout");
 static_assert(sizeof(msap1_adc_diagnostic_payload) == 188,
@@ -104,6 +110,21 @@ msap1_meter_config_ack_payload decode_meter_config_ack(const Message &message)
 			"message is not a meter configuration acknowledgement");
 
 	msap1_meter_config_ack_payload acknowledgement{};
+	std::memcpy(&acknowledgement, message.payload.data(),
+		    sizeof(acknowledgement));
+	return acknowledgement;
+}
+
+msap1_simulator_event_ack_payload decode_simulator_event_ack(
+	const Message &message)
+{
+	if (message.header.type != MSAP1_RPU_MSG_ACK ||
+	    message.header.status != MSAP1_RPU_STATUS_OK ||
+	    message.payload.size() != sizeof(msap1_simulator_event_ack_payload))
+		throw std::runtime_error(
+			"message is not a simulator event acknowledgement");
+
+	msap1_simulator_event_ack_payload acknowledgement{};
 	std::memcpy(&acknowledgement, message.payload.data(),
 		    sizeof(acknowledgement));
 	return acknowledgement;

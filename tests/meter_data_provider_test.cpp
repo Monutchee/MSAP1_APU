@@ -204,7 +204,10 @@ void empty_selection_means_all_supported_values()
 	mnc::meter::MeterSnapshotRequest request{};
 	request.period = mnc::meter::MeasurementPeriod::Cycles150_180;
 	const auto snapshot = provider.latest(request);
-	require(snapshot.has_value() && snapshot->values.size() == 7,
+	/* M11: the aggregate period carries the full quantity set (7 RMS
+	 * lanes + VLL + power + phasor + unbalance = 46; frequency stays
+	 * basic-only). */
+	require(snapshot.has_value() && snapshot->values.size() == 46,
 		"empty selection did not expand to period capabilities");
 }
 

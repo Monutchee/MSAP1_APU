@@ -768,6 +768,16 @@ struct MeterSnapshot {
 	std::uint32_t result_drops = 0;
 	std::vector<MeterChannelDto> channels;
 	MeterFrequencyDto frequency;
+	/* Non-channel attributes (VLL, power, PF, ...): engineering value
+	 * plus the catalog's stable key, printed generically so new PL
+	 * quantities appear without new plumbing. */
+	struct Extra {
+		std::string key;
+		std::string unit;
+		bool valid = false;
+		double value = 0.0;
+	};
+	std::vector<Extra> readings;
 };
 
 MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
@@ -839,7 +849,52 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			result.channels[*index].valid = valid;
 			result.channels[*index].rms_micro_units = valid
 				? reading.value : 0;
+			continue;
 		}
+		const auto descriptor = mnc::meter::describe(reading.attribute);
+		double value = 0.0;
+		const char *unit = "";
+		switch (reading.unit) {
+		case mnc::meter::MeterUnit::MilliHertz:
+			value = static_cast<double>(reading.value) / 1e3;
+			unit = "Hz";
+			break;
+		case mnc::meter::MeterUnit::MicroVolts:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "V";
+			break;
+		case mnc::meter::MeterUnit::MicroAmperes:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "A";
+			break;
+		case mnc::meter::MeterUnit::Picowatts:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "W";
+			break;
+		case mnc::meter::MeterUnit::PicoVoltAmperes:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "VA";
+			break;
+		case mnc::meter::MeterUnit::PowerFactorMillionths:
+			value = static_cast<double>(reading.value) / 1e6;
+			unit = "PF";
+			break;
+		case mnc::meter::MeterUnit::Picovars:
+			value = static_cast<double>(reading.value) / 1e12;
+			unit = "var";
+			break;
+		case mnc::meter::MeterUnit::Millidegrees:
+			/* The PL publishes the 0..359.999-degree convention directly. */
+			value = static_cast<double>(reading.value) / 1000.0;
+			unit = "deg";
+			break;
+		case mnc::meter::MeterUnit::RatioMillionths:
+			value = static_cast<double>(reading.value) / 10000.0;
+			unit = "%";
+			break;
+		}
+		result.readings.push_back({std::string(descriptor.key),
+					   unit, valid, value});
 	}
 	return result;
 }
@@ -943,6 +998,18 @@ public:
 			       << " Hz\n";
 		else
 			output << "unavailable\n";
+		for (const auto &reading : snapshot.readings) {
+			output << "  " << std::setw(20) << std::left
+			       << reading.key << std::right << ' ';
+			if (!reading.valid)
+				output << "unavailable\n";
+			else
+				output << std::fixed << std::setprecision(
+					       reading.unit == std::string("PF")
+						       ? 4 : 3)
+				       << reading.value << ' ' << reading.unit
+				       << '\n';
+		}
 		return 0;
 	}
 };
@@ -956,6 +1023,241 @@ public:
 		return 0;
 	}
 };
+
+struct SingleCycleResult {
+	bool running = false;
+	bool has_snapshot = false;
+	std::uint64_t records = 0;
+	msap1::SingleCycleSnapshot snapshot{};
+};
+
+class SingleCycleTextGenerator final : public ResultGenerator<SingleCycleResult> {
+public:
+	int write(const SingleCycleResult &result,
+		  std::ostream &output) const override
+	{
+		static constexpr std::array<const char *, 7> names{
+			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		static constexpr std::array<const char *, 3> pairs{
+			"Vab", "Vbc", "Vca"};
+		output << "Single-cycle diagnostic (SCYC-v5)\n"
+		       << "  Records accepted:   " << result.records << '\n';
+		if (!result.has_snapshot) {
+			output << "  No snapshot yet (cycle timing unlocked or "
+				  "acquisition stopped)\n";
+			return 0;
+		}
+		const auto &s = result.snapshot;
+		output << "  Sequence:           " << s.sequence << '\n'
+		       << "  Cycle sequence:     " << s.cycle_sequence << '\n'
+		       << "  Samples:            " << s.sample_count << '\n'
+		       << "  Sample range:       " << s.first_sample << ".."
+		       << s.last_sample << '\n'
+		       << "  Processing tick:    " << s.processing_tick << '\n'
+		       << "  Nominal / flags:    " << s.nominal_hz << " Hz / 0x"
+		       << std::hex << s.flags << std::dec << '\n'
+		       << "  Frequency:          " << s.frequency_millihz
+		       << " mHz\n"
+		       << "  Status:             0x" << std::hex << s.status
+		       << std::dec << '\n';
+		if (s.first_after_gap())
+			output << "  Note: first whole cycle after a "
+				  "discontinuity ("
+			       << (s.gap_was_malformed() ? "malformed/dropped input"
+			           : s.gap_was_timing() ? "cycle timing loss"
+							: "reset or APPLY")
+			       << ")\n";
+		for (std::size_t lane = 0; lane < names.size(); ++lane)
+			output << "  CH" << lane << ' ' << names[lane]
+			       << " RMS: " << s.rms_micro_units[lane]
+			       << " micro-units\n";
+		for (std::size_t pair = 0; pair < pairs.size(); ++pair)
+			output << "  " << pairs[pair]
+			       << " RMS: " << s.vll_rms_micro_units[pair]
+			       << " micro-units\n";
+		static constexpr std::array<const char *, 3> phases{"A", "B",
+								    "C"};
+		for (std::size_t phase = 0; phase < phases.size(); ++phase)
+			output << "  P" << phases[phase] << ": "
+			       << s.active_power_picowatts[phase]
+			       << " pW\n";
+		if (!s.phasor_valid()) {
+			output << "  Fundamental RMS:    invalid (no frequency "
+				  "reference this cycle)\n";
+			return 0;
+		}
+		for (std::size_t lane = 0; lane < names.size(); ++lane)
+			output << "  CH" << lane << ' ' << names[lane]
+			       << " fund RMS: "
+			       << s.fundamental_rms_micro_units[lane]
+			       << " micro-units\n";
+		return 0;
+	}
+};
+
+class SingleCycleJsonGenerator final : public ResultGenerator<SingleCycleResult> {
+public:
+	int write(const SingleCycleResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_single_cycle(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(
+		msap1::SingleCycleRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	SingleCycleResult result{response.running, response.has_snapshot,
+				 response.records, response.snapshot};
+	return render_result(options, result, output,
+			     SingleCycleTextGenerator{},
+			     SingleCycleJsonGenerator{});
+}
+
+struct PowerQualityResult {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t events = 0;
+	bool has_latest = false;
+	bool has_event = false;
+	msap1::PowerQualityIpcSnapshot latest{};
+	msap1::PowerQualityIpcSnapshot event{};
+};
+
+const char *pq_event_type_name(std::uint8_t event_type)
+{
+	switch (event_type) {
+	case 0: return "none";
+	case 1: return "sag";
+	case 2: return "swell";
+	case 3: return "interruption";
+	default: return "unknown";
+	}
+}
+
+const char *pq_kind_name(std::uint8_t kind)
+{
+	switch (kind) {
+	case 0: return "periodic";
+	case 1: return "event start";
+	case 2: return "event end";
+	default: return "unknown";
+	}
+}
+
+void write_power_quality_record(const msap1::PowerQualityIpcSnapshot &record,
+				std::ostream &output)
+{
+	static constexpr std::array<const char *, 3> phases{"A", "B", "C"};
+	output << "    Kind:            " << pq_kind_name(record.kind);
+	if (record.kind != 0)
+		output << " (" << pq_event_type_name(record.event_type) << ')';
+	output << '\n'
+	       << "    Sequence:        " << record.sequence << '\n'
+	       << "    Span:            " << record.first_sample << ".."
+	       << record.last_sample << " (" << record.sample_count
+	       << " samples, " << record.half_cycle_updates << " updates)\n";
+	if (record.kind != 0) {
+		output << "    Affected phases: ";
+		bool first = true;
+		for (std::size_t phase = 0; phase < phases.size(); ++phase) {
+			if ((record.affected_phases & (1u << phase)) == 0u)
+				continue;
+			output << (first ? "" : ", ") << phases[phase];
+			first = false;
+		}
+		output << (first ? "none" : "") << '\n';
+		output << "    Event sequence:  " << record.event_sequence
+		       << '\n';
+		if (record.duration_samples != 0 && record.sample_rate_hz != 0)
+			output << "    Duration:        "
+			       << record.duration_samples << " samples ("
+			       << (static_cast<double>(record.duration_samples) *
+				   1000.0 /
+				   static_cast<double>(record.sample_rate_hz))
+			       << " ms)\n";
+	}
+	for (std::size_t phase = 0; phase < phases.size(); ++phase) {
+		const auto &lane = record.phases[phase];
+		output << "    U" << phases[phase] << "rms(1/2): "
+		       << static_cast<double>(lane.microvolts) / 1e6 << " V"
+		       << "  [min " << static_cast<double>(lane.minimum_microvolts) / 1e6
+		       << ", max " << static_cast<double>(lane.maximum_microvolts) / 1e6
+		       << "]  I" << phases[phase] << "rms(1/2): "
+		       << static_cast<double>(lane.microamperes) / 1e6 << " A\n";
+	}
+	output << "    Detection:       ";
+	if (!record.armed) {
+		output << "DISARMED (no reference configured)\n";
+		return;
+	}
+	output << "reference "
+	       << static_cast<double>(record.reference_microvolts) / 1e6
+	       << " V, sag "
+	       << static_cast<double>(record.sag_threshold_e4) / 100.0
+	       << " %, swell "
+	       << static_cast<double>(record.swell_threshold_e4) / 100.0
+	       << " %, interruption "
+	       << static_cast<double>(record.interruption_threshold_e4) / 100.0
+	       << " %, hysteresis "
+	       << static_cast<double>(record.hysteresis_e4) / 100.0 << " %\n";
+}
+
+class PowerQualityTextGenerator final
+	: public ResultGenerator<PowerQualityResult> {
+public:
+	int write(const PowerQualityResult &result,
+		  std::ostream &output) const override
+	{
+		output << "Power quality (PQEVT-v1, Urms(1/2))\n"
+		       << "  Records accepted:   " << result.records << '\n'
+		       << "  Events declared:    " << result.events << '\n';
+		if (!result.has_latest) {
+			output << "  No record yet (acquisition stopped or the "
+				  "sliding tier is priming)\n";
+			return 0;
+		}
+		output << "  Latest record:\n";
+		write_power_quality_record(result.latest, output);
+		if (!result.has_event) {
+			output << "  No event edge seen since start\n";
+			return 0;
+		}
+		output << "  Latest event edge:\n";
+		write_power_quality_record(result.event, output);
+		return 0;
+	}
+};
+
+class PowerQualityJsonGenerator final
+	: public ResultGenerator<PowerQualityResult> {
+public:
+	int write(const PowerQualityResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_power_quality(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(
+		msap1::PowerQualityRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	PowerQualityResult result{response.running, response.records,
+				  response.events,  response.has_latest,
+				  response.has_event, response.latest,
+				  response.event};
+	return render_result(options, result, output,
+			     PowerQualityTextGenerator{},
+			     PowerQualityJsonGenerator{});
+}
 
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
@@ -1007,6 +1309,26 @@ void register_meter_commands(Application &application)
 		false,
 	});
 	meter.add_subcommand(std::move(health));
+	meter.add_subcommand(Command(
+		"single-cycle", "Show the latest single-cycle diagnostic",
+		run_meter_single_cycle,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	meter.add_subcommand(Command(
+		"power-quality", "Show the latest Urms(1/2) record and event",
+		run_meter_power_quality,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
 	meter.add_subcommand(Command(
 		"snapshot", "Read one coherent meter result",
 		run_meter_snapshot,

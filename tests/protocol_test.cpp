@@ -189,26 +189,116 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Coordinated APU/RPU ABI: nominal_frequency_hz is the appended
-	 * trailing field, growing the packed payload from 172 to 176 bytes
-	 * (frame 16+176 = 192 <= 256). Wire version stays 2. */
-	static_assert(sizeof(msap1_meter_config_payload) == 176,
-		      "meter config payload must be 176 packed bytes");
+	/* Coordinated APU/RPU ABI, wire version 5: the four packed harmonic
+	 * slots (8 words) sit between the noise levels and the simulator
+	 * flags, and the five Urms(1/2) detection fields close the payload
+	 * after nominal_frequency_hz, growing it from 244 to 276 to 296
+	 * bytes (frame 16+296 = 312 <= 384). */
+	static_assert(sizeof(msap1_meter_config_payload) == 296,
+		      "meter config payload must be 296 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       nominal_frequency_hz) == 172,
-		      "nominal_frequency_hz must be the trailing field");
+			       simulator_dc_offset_counts) == 172,
+		      "DC offsets must follow the simulator phase step");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_noise_level_counts) == 204,
+		      "noise levels must follow the DC offsets");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_harmonics) == 236,
+		      "harmonic slots must follow the noise levels");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_flags) == 268,
+		      "simulator flags must follow the harmonic slots");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       nominal_frequency_hz) == 272,
+		      "nominal_frequency_hz must follow the simulator flags");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       pq_reference_microvolts) == 276,
+		      "the PQ reference must follow the nominal frequency");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       pq_hysteresis_e4) == 292,
+		      "the PQ hysteresis must be the trailing field");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
+	payload.simulator_dc_offset_counts[2] = -12345;
+	payload.simulator_noise_level_counts[6] = 777;
+	/* Slot 1 word0: 5% (0x0ccd Q16) 3rd harmonic on the voltage lanes. */
+	payload.simulator_harmonics[2] = 0x0ccd7003u;
+	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
+	payload.pq_reference_microvolts = 230000000u;
+	payload.pq_hysteresis_e4 = 200u;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
 	const auto decoded = msap1::decode_message(wire.data(), wire.size());
 	require(decoded.payload.size() == sizeof(payload),
 		"meter config payload size changed on the wire");
 	std::uint32_t nominal = 0;
-	std::memcpy(&nominal, decoded.payload.data() + 172, sizeof(nominal));
+	std::memcpy(&nominal, decoded.payload.data() + 272, sizeof(nominal));
 	require(nominal == 50,
 		"nominal frequency was not encoded at the trailing offset");
+	std::int32_t dc = 0;
+	std::memcpy(&dc, decoded.payload.data() + 172 + 2 * 4, sizeof(dc));
+	require(dc == -12345,
+		"DC offset was not encoded at its normative offset");
+	std::uint32_t noise = 0;
+	std::memcpy(&noise, decoded.payload.data() + 204 + 6 * 4, sizeof(noise));
+	require(noise == 777,
+		"noise level was not encoded at its normative offset");
+	std::uint32_t harmonic = 0;
+	std::memcpy(&harmonic, decoded.payload.data() + 236 + 2 * 4,
+		    sizeof(harmonic));
+	require(harmonic == 0x0ccd7003u,
+		"harmonic slot was not encoded at its normative offset");
+	std::uint32_t flags = 0;
+	std::memcpy(&flags, decoded.payload.data() + 268, sizeof(flags));
+	require(flags == MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE,
+		"simulator flags were not encoded at their normative offset");
+	std::uint32_t reference = 0;
+	std::memcpy(&reference, decoded.payload.data() + 276, sizeof(reference));
+	require(reference == 230000000u,
+		"the PQ reference was not encoded at its normative offset");
+	std::uint32_t hysteresis = 0;
+	std::memcpy(&hysteresis, decoded.payload.data() + 292,
+		    sizeof(hysteresis));
+	require(hysteresis == 200u,
+		"the PQ hysteresis was not encoded at its normative offset");
+}
+
+void simulator_event_wire_layout()
+{
+	/* Wire version 5: the event sequencer is its own message, so a burst
+	 * never rides a configuration commit (which restarts capture). */
+	static_assert(sizeof(msap1_simulator_event_payload) == 24,
+		      "simulator event payload must be 24 packed bytes");
+	static_assert(sizeof(msap1_simulator_event_ack_payload) == 20,
+		      "simulator event ack must be 20 packed bytes");
+	static_assert(offsetof(msap1_simulator_event_payload,
+			       duration_half_cycles) == 12,
+		      "the burst duration must follow the amplitude scale");
+
+	msap1_simulator_event_payload payload{};
+	payload.action = MSAP1_SIMULATOR_EVENT_ARM;
+	payload.channel_mask = 0x70u;
+	payload.scale_q16 = 0xE666u;
+	payload.duration_half_cycles = 20u;
+	payload.period_half_cycles = 200u;
+	payload.flags = MSAP1_SIMULATOR_EVENT_FLAG_REPEAT;
+	const auto wire = msap1::encode_request(
+		MSAP1_RPU_MSG_SIMULATOR_EVENT_SET, 9, &payload, sizeof(payload));
+	const auto decoded = msap1::decode_message(wire.data(), wire.size());
+	require(decoded.payload.size() == sizeof(payload),
+		"simulator event payload size changed on the wire");
+	require(decoded.header.version == MSAP1_RPU_VERSION &&
+			MSAP1_RPU_VERSION == 5u,
+		"the simulator event message belongs to wire version 5");
+	msap1_simulator_event_payload round_trip{};
+	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
+	require(round_trip.channel_mask == 0x70u &&
+			round_trip.scale_q16 == 0xE666u &&
+			round_trip.duration_half_cycles == 20u &&
+			round_trip.period_half_cycles == 200u &&
+			round_trip.flags == MSAP1_SIMULATOR_EVENT_FLAG_REPEAT,
+		"simulator event fields did not survive the wire");
 }
 
 void meter_record_contract()
@@ -662,6 +752,7 @@ int main()
 		adc_health_round_trip();
 		adc_diagnostic_round_trip();
 		meter_config_wire_layout();
+		simulator_event_wire_layout();
 		meter_record_contract();
 		meter_configuration();
 		disabled_mv_configuration();

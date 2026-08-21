@@ -39,6 +39,21 @@ struct Options {
 	std::optional<double> simulator_frequency_hz;
 	std::array<std::optional<double>, 7> simulator_rms{};
 	std::array<std::optional<double>, 7> simulator_phase_degrees{};
+	std::array<std::optional<double>, 7> simulator_dc{};
+	std::array<std::optional<double>, 7> simulator_noise_rms{};
+	std::optional<bool> simulator_preserve_phase;
+	/* Raw --harmonics spec ("none" or "order:pct[:phase[:lanes]],..."),
+	 * parsed by the adc command. */
+	std::optional<std::string> simulator_harmonics;
+	/* Event sequencer (roadmap M12): the burst description for
+	 * `mnc adc simulator event`. `event_action` selects arm, cancel,
+	 * clear, or query; the rest describe an ARM. */
+	std::optional<std::string> event_action;
+	std::optional<std::string> event_channels;
+	std::optional<double> event_scale_percent;
+	std::optional<std::uint32_t> event_duration_half_cycles;
+	std::optional<std::uint32_t> event_period_half_cycles;
+	std::optional<bool> event_repeat;
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;

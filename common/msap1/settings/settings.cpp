@@ -147,6 +147,7 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 	result.current_channels = settings.metering.conversion.current_channels;
 	result.voltage_channels = settings.metering.conversion.voltage_channels;
 	result.frequency = settings.metering.frequency;
+	result.power_quality = settings.metering.power_quality;
 	result.simulator = settings.adc.simulator;
 	return result;
 }

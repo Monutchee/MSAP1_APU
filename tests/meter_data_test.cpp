@@ -65,12 +65,271 @@ msap1::MeterRecord periodic_record()
 			 channel == 3 ? 0 : static_cast<std::int64_t>(channel + 1) *
 					       1'000'000);
 	}
+	/* BASIC-v4: block last-sample anchor and merged line-line RMS. */
+	record.words[14] = 0x00001a0fu;
+	record.words[15] = 0x00000001u;
+	record.words[51] = 12'000'000;
+	record.words[52] = 11'000'000;
+	record.words[53] = 13'000'000;
 	record.words[56] = 60001;
 	record.words[57] = (1u << 0) | (1u << 1) | (1u << 2) |
 			   (1u << 8) | (6u << 12) | (10u << 16);
 	record.words[58] = 34'952'533;
 	record.words[59] = 11;
 	return record;
+}
+
+msap1::MeterRecord power_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_power_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 42;
+	record.words[4] = 0x12345678;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	/* Phase A: import; B: export (sign pin); C: zero S -> PF undefined. */
+	record.words[16] = 360;  record.words[17] = 0;      /* P_A = 360 pW */
+	record.words[18] = 720;  record.words[19] = 0;      /* S_A */
+	record.words[20] = 500000;                          /* PF_A = 0.5 */
+	const auto negative =
+		static_cast<std::uint64_t>(std::int64_t{-180});
+	record.words[21] = static_cast<std::uint32_t>(negative);
+	record.words[22] = static_cast<std::uint32_t>(negative >> 32);
+	record.words[23] = 360;  record.words[24] = 0;
+	record.words[25] = static_cast<std::uint32_t>(-500000);
+	/* words 26..30 stay zero: S_C = 0. */
+	record.words[31] = 180;  record.words[32] = 0;
+	record.words[33] = 1080; record.words[34] = 0;
+	record.words[35] = 166666;
+	for (std::size_t lane = 0; lane != 7; ++lane)
+		record.words[36 + lane] = 14142 + lane;
+	return record;
+}
+
+void decode_power_record_pins()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{124s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(power_record(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+			update.kind == msap1::RecordKind::power &&
+			update.sequence == 42 && update.power.has_value(),
+		"POWER-v1 did not decode as a basic power update");
+	const auto &values = *update.power;
+	require(values.active_power.phase_a.value == 360 &&
+			values.apparent_power.phase_a.value == 720 &&
+			values.power_factor.phase_a.value == 500000 &&
+			values.power_factor.phase_a.valid(),
+		"phase A power words");
+	require(values.active_power.phase_b.value == -180 &&
+			values.power_factor.phase_b.value == -500000,
+		"phase B sign extension");
+	require(values.apparent_power.phase_c.value == 0 &&
+			!values.power_factor.phase_c.valid(),
+		"PF is unavailable when S is zero");
+	require(values.total_active_power.value == 180 &&
+			values.total_apparent_power.value == 1080 &&
+			values.total_power_factor.value == 166666,
+		"totals decode");
+	require(values.current_crest.phase_a.value == 14142 &&
+			values.voltage_crest.phase_a.value == 14142 + 6 &&
+			values.voltage_crest.phase_c.value == 14142 + 4,
+		"crest lanes map hardware order to phases");
+}
+
+/* PHASOR-v1 fixture: phase A lagging 30 deg (Q1 positive), phase B
+ * leading (Q1 negative), phase C undefined (S1 = 0, nature 0). Flags
+ * word 51: natures A=2 B=3 C=0, total=2, reference valid (bit 8). */
+msap1::MeterRecord phasor_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_phasor_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 42;
+	record.words[4] = 0x12345678;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	/* Per-lane fundamentals + angles: lanes Ia..In = 0..3, Vc/Vb/Va =
+	 * 4/5/6 (Va angle must be 0 by the reference convention). */
+	for (std::size_t lane = 0; lane != 7; ++lane) {
+		record.words[16 + lane * 2] =
+			lane == 3 ? 0u : 1'000'000u + static_cast<std::uint32_t>(lane);
+		record.words[17 + lane * 2] = static_cast<std::uint32_t>(
+			lane == 6 ? 0 : 330000 + lane);
+	}
+	/* VLL pairs AB/BC/CA. */
+	record.words[30] = 2'000'000; record.words[31] = 30000;
+	record.words[32] = 2'000'001;
+	record.words[33] = 270000;
+	record.words[34] = 2'000'002; record.words[35] = 150000;
+	/* Displacement angles: A 30 deg, B 345 deg (a 15-degree lead), C 0. */
+	record.words[36] = 30000;
+	record.words[37] = 345000;
+	/* Q1: A positive, B negative, C zero. */
+	record.words[39] = 500; record.words[40] = 0;
+	signed64(record, 41, -250);
+	/* Q1 total. */
+	record.words[45] = 250; record.words[46] = 0;
+	/* Displacement PF: A 0.866, B -0.965, C 0 (undefined). */
+	record.words[47] = 866025;
+	record.words[48] = static_cast<std::uint32_t>(-965925);
+	record.words[50] = 900000;
+	/* Natures A=lagging B=leading C=undefined, total=lagging, ref ok. */
+	record.words[51] = (2u << 0) | (3u << 2) | (0u << 4) | (2u << 6) |
+			   (1u << 8);
+	/* P1: A 866, B -400, C 0; total 466. */
+	record.words[52] = 866; record.words[53] = 0;
+	signed64(record, 54, -400);
+	record.words[58] = 466; record.words[59] = 0;
+	return record;
+}
+
+void decode_phasor_record_pins()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{125s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(phasor_record(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+			update.kind == msap1::RecordKind::phasor &&
+			update.sequence == 42 && update.phasor.has_value(),
+		"PHASOR-v1 did not decode as a basic phasor update");
+	const auto &values = *update.phasor;
+	require(!values.phasor_invalid && values.angle_reference_valid,
+		"clean record flags");
+	require(values.fundamental_voltage.phase_a.value == 1'000'006 &&
+			values.fundamental_voltage.phase_c.value == 1'000'004 &&
+			values.fundamental_current.phase_a.value == 1'000'000 &&
+			values.fundamental_current.neutral.value == 0,
+		"fundamental lanes map hardware order to phases");
+	require(values.voltage_angle.phase_a.value == 0 &&
+			values.voltage_angle.phase_a.valid() &&
+			values.current_angle.phase_a.value == 330000 &&
+			values.voltage_angle.phase_c.value == 330004,
+		"angle words decode in the [0, 360000) convention");
+	require(!values.current_angle.neutral.valid(),
+		"a zero-fundamental lane has no meaningful angle");
+	require(values.fundamental_voltage_ll.phase_a.value == 2'000'000 &&
+			values.voltage_ll_angle.phase_b.value == 270000,
+		"line-line phasor words");
+	require(values.displacement_angle.phase_a.value == 30000 &&
+			values.displacement_angle.phase_b.value == 345000,
+		"displacement angles");
+	require(values.reactive_power.phase_a.value == 500 &&
+			values.reactive_power.phase_b.value == -250 &&
+			values.total_reactive_power.value == 250,
+		"Q1 decodes signed with arithmetic totals");
+	require(values.fundamental_active_power.phase_a.value == 866 &&
+			values.fundamental_active_power.phase_b.value == -400 &&
+			values.total_fundamental_active_power.value == 466,
+		"P1 decodes signed");
+	require(values.displacement_power_factor.phase_a.value == 866025 &&
+			values.displacement_power_factor.phase_b.value ==
+				-965925 &&
+			values.displacement_power_factor.phase_a.valid(),
+		"displacement PF decodes signed");
+	require(!values.displacement_power_factor.phase_c.valid() &&
+			values.load_nature.phase_c ==
+				msap1::LoadNature::undefined,
+		"S1 = 0 phase: dPF unavailable, nature undefined");
+	require(values.load_nature.phase_a == msap1::LoadNature::lagging &&
+			values.load_nature.phase_b == msap1::LoadNature::leading &&
+			values.total_load_nature == msap1::LoadNature::lagging,
+		"load natures unpack from the flags word");
+
+	/* The block-invalid status bit downgrades every reading. */
+	auto poisoned = phasor_record();
+	poisoned.words[8] = 0x2u;
+	const auto bad = registry.decode(poisoned, timestamp);
+	require(bad.phasor->phasor_invalid &&
+			bad.phasor->reactive_power.phase_a.quality ==
+				msap1::MeasurementQuality::invalid &&
+			bad.phasor->voltage_angle.phase_a.quality ==
+				msap1::MeasurementQuality::invalid,
+		"phasor-invalid block decodes as invalid, not silently valid");
+}
+
+/* UNBALANCE-v1 fixture: V set with a zero-magnitude zero-sequence (angle
+ * gating), a dominant positive sequence and a 2% negative sequence; I
+ * ratios flagged invalid (|I1| = 0 upstream). Flags: V valid (bit 0),
+ * reference valid (bit 8), I NOT valid. */
+msap1::MeterRecord unbalance_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_unbalance_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 42;
+	record.words[4] = 0x12345678;
+	record.words[5] = 32000;
+	record.words[6] = 6400;
+	record.words[7] = 0x7f;
+	record.words[9] = 0x00000010u;
+	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	/* V0 = 0 @ 0; V1 = 1000000 @ 0; V2 = 20000 @ 270 deg. */
+	record.words[16] = 0; record.words[17] = 0;
+	record.words[18] = 1'000'000; record.words[19] = 0;
+	record.words[20] = 20'000;
+	record.words[21] = 270000;
+	/* I components present but the I ratios are undefined. */
+	record.words[22] = 5; record.words[23] = 15000;
+	record.words[24] = 0; record.words[25] = 0;
+	record.words[26] = 7;
+	record.words[27] = 315000;
+	record.words[28] = 0;      /* V0/V1 */
+	record.words[29] = 20000;  /* UNBL_V = 2% */
+	record.words[30] = 0;
+	record.words[31] = 0;
+	record.words[32] = (1u << 0) | (1u << 8);  /* V valid + ref, I not */
+	return record;
+}
+
+void decode_unbalance_record_pins()
+{
+	const auto timestamp = std::chrono::system_clock::time_point{126s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(unbalance_record(), timestamp);
+	require(update.period == msap1::MeasurementPeriod::Basic &&
+			update.kind == msap1::RecordKind::unbalance &&
+			update.sequence == 42 && update.unbalance.has_value(),
+		"UNBALANCE-v1 did not decode as a basic unbalance update");
+	const auto &values = *update.unbalance;
+	require(!values.phasor_invalid && values.angle_reference_valid,
+		"clean record flags");
+	require(values.voltage_positive_sequence.value == 1'000'000 &&
+			values.voltage_negative_sequence.value == 20'000 &&
+			values.voltage_negative_angle.value == 270000,
+		"voltage sequence components decode");
+	require(!values.voltage_zero_angle.valid(),
+		"a zero-magnitude component has no meaningful angle");
+	require(values.voltage_unbalance.value == 20000 &&
+			values.voltage_unbalance.valid() &&
+			values.voltage_zero_ratio.valid(),
+		"voltage ratios valid under the flag");
+	require(!values.current_unbalance.valid() &&
+			!values.current_zero_ratio.valid(),
+		"current ratios unavailable when |I1| = 0 upstream");
+	require(values.current_zero_sequence.value == 5 &&
+			values.current_zero_angle.value == 15000 &&
+			values.current_negative_angle.value == 315000,
+		"current components decode in the [0, 360000) convention");
+
+	/* The block-invalid status bit downgrades every reading. */
+	auto poisoned = unbalance_record();
+	poisoned.words[8] = 0x2u;
+	const auto bad = registry.decode(poisoned, timestamp);
+	require(bad.unbalance->phasor_invalid &&
+			bad.unbalance->voltage_unbalance.quality ==
+				msap1::MeasurementQuality::invalid,
+		"phasor-invalid block decodes as invalid");
 }
 
 void decode_and_period_independence()
@@ -97,6 +356,11 @@ void decode_and_period_independence()
 	require(values.current.neutral.valid() &&
 		values.current.neutral.value == 0,
 		"valid zero current was confused with unavailable current");
+	require(values.voltage_ll.phase_a.valid() &&
+		values.voltage_ll.phase_a.value == 12'000'000 &&
+		values.voltage_ll.phase_b.value == 11'000'000 &&
+		values.voltage_ll.phase_c.value == 13'000'000,
+		"BASIC-v4 line-line words 51..53 were not decoded");
 
 	msap1::MeterLatestStore store;
 	store.apply(update);
@@ -364,6 +628,9 @@ int main()
 {
 	try {
 		decode_and_period_independence();
+	decode_power_record_pins();
+	decode_phasor_record_pins();
+	decode_unbalance_record_pins();
 		decode_block_timing();
 		decode_rejects_malformed_timing();
 		decode_rejects_retired_formats();

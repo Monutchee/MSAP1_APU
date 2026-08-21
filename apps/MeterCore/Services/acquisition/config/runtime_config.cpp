@@ -74,13 +74,21 @@ msap1::SimulatorIpcConfiguration simulator_ipc(
 	msap1::SimulatorIpcConfiguration result{};
 	result.frequency_millihz = static_cast<std::uint32_t>(
 		std::llround(simulator.frequency_hz * 1000.0));
+	result.preserve_phase = simulator.preserve_phase ? 1u : 0u;
 	for (const auto &channel : simulator.channels) {
 		if (channel.channel >= result.channels.size())
 			continue;
 		result.channels[channel.channel].rms = channel.rms;
 		result.channels[channel.channel].phase_degrees =
 			channel.phase_degrees;
+		result.channels[channel.channel].dc = channel.dc;
+		result.channels[channel.channel].noise_rms = channel.noise_rms;
 	}
+	result.harmonics.reserve(simulator.harmonics.size());
+	for (const auto &harmonic : simulator.harmonics)
+		result.harmonics.push_back({harmonic.order, harmonic.percent,
+					    harmonic.phase_degrees,
+					    harmonic.channels});
 	return result;
 }
 

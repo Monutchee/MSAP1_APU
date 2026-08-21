@@ -57,6 +57,22 @@ SimulatorResponse AcquisitionGateway::simulator_configuration(int timeout_ms)
 	return client_.request(SimulatorGetRequest{}, timeout_ms);
 }
 
+SingleCycleResponse AcquisitionGateway::single_cycle(int timeout_ms)
+{
+	return client_.request(SingleCycleRequest{}, timeout_ms);
+}
+
+PowerQualityResponse AcquisitionGateway::power_quality(int timeout_ms)
+{
+	return client_.request(PowerQualityRequest{}, timeout_ms);
+}
+
+SimulatorEventResponse AcquisitionGateway::simulator_event(
+	const SimulatorEventRequest &request, int timeout_ms)
+{
+	return client_.request(request, timeout_ms);
+}
+
 CaptureResponse AcquisitionGateway::set_capture(bool enabled, int timeout_ms)
 {
 	if (enabled)

@@ -13,6 +13,12 @@ std::string unit_id(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::MilliHertz: return "Hz";
 	case mnc::meter::MeterUnit::MicroVolts: return "V";
 	case mnc::meter::MeterUnit::MicroAmperes: return "A";
+	case mnc::meter::MeterUnit::Picowatts: return "W";
+	case mnc::meter::MeterUnit::PicoVoltAmperes: return "VA";
+	case mnc::meter::MeterUnit::PowerFactorMillionths: return "PF";
+	case mnc::meter::MeterUnit::Picovars: return "var";
+	case mnc::meter::MeterUnit::Millidegrees: return "deg";
+	case mnc::meter::MeterUnit::RatioMillionths: return "%";
 	}
 	return "unknown";
 }
