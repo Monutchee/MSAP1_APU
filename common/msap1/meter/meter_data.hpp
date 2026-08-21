@@ -275,8 +275,8 @@ struct MeterUpdate {
 	 * The Basic period has no fixed duration — the actual duration is
 	 * sample_count / sample_rate per block (see SampleWindow). */
 	std::optional<BlockTiming> timing;
-	/* Aggregation identity of the source record. Present exactly for
-	 * 150/180-cycle aggregate (MTR2) records; basic updates leave it
+	/* Aggregation identity of the source record. Present for 150/180-cycle,
+	 * ten-minute, and two-hour aggregate records; basic updates leave it
 	 * absent, and aggregate updates leave `timing` absent. */
 	std::optional<AggregateTiming> aggregate_timing;
 };
@@ -476,6 +476,15 @@ MeterUpdate decode_ten_minute_phasor_meter_record(const MeterRecord &record,
 MeterUpdate decode_ten_minute_unbalance_meter_record(
 	const MeterRecord &record, SystemTime received_at);
 
+/** Two-hour sibling payloads retain the aggregate word maps and publish on
+ * the independent Hour2 period. */
+MeterUpdate decode_two_hour_power_meter_record(const MeterRecord &record,
+					       SystemTime received_at);
+MeterUpdate decode_two_hour_phasor_meter_record(const MeterRecord &record,
+					        SystemTime received_at);
+MeterUpdate decode_two_hour_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
@@ -505,6 +514,12 @@ MeterUpdate decode_ten_minute_unbalance_meter_record(
  * contaminated; callers can inspect its provenance, while every electrical
  * reading is explicitly invalid. */
 [[nodiscard]] MeterUpdate decode_ten_minute_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/** Decode a two-hour aggregate built from twelve complete, consecutive,
+ * boundary-clean ten-minute accumulator images. */
+[[nodiscard]] MeterUpdate decode_two_hour_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

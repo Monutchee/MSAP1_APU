@@ -33,9 +33,8 @@ enum class NominalFrequency : std::uint8_t {
 };
 
 /**
- * Aggregation tier of a decoded meter update. Basic, 150/180-cycle, and
- * clock-aligned ten-minute tiers are produced today; the two-hour tier is
- * reserved for a future aggregate record format.
+ * Aggregation tier of a decoded meter update. Basic, 150/180-cycle,
+ * clock-aligned ten-minute, and two-hour tiers are produced today.
  */
 using MeasurementPeriod = mnc::meter::MeasurementPeriod;
 
@@ -155,22 +154,25 @@ struct AggregateTiming {
 	std::uint64_t first_sample_index = 0;
 	/* Total samples across all contributing basic blocks. */
 	std::uint32_t sample_count = 0;
-	/* BASIC-stream sequence range folded into this aggregate
-	 * (inclusive), for correlation with the basic record stream. */
+	/* Source-tier sequence range folded into this aggregate (inclusive).
+	 * This is the BASIC stream for 150/180-cycle and ten-minute records,
+	 * and the TEN-MINUTE stream for the two-hour record.  The legacy field
+	 * names are retained to avoid churn in existing consumers. */
 	std::uint32_t first_basic_sequence = 0;
 	std::uint32_t last_basic_sequence = 0;
-	/* Contributing basic blocks. This is 15 for the 150/180-cycle tier and
-	 * varies for a clock-aligned ten-minute interval. */
+	/* Contributing source intervals: 15 basic blocks for 150/180-cycle,
+	 * variable basic blocks for ten-minute, and 12 ten-minute intervals for
+	 * two-hour. */
 	std::uint16_t basic_block_count = 0;
 	/* Total complete cycles in this interval. */
-	std::uint16_t cycle_count = 0;
+	std::uint32_t cycle_count = 0;
 	NominalFrequency nominal_frequency = NominalFrequency::Hz60;
 	bool arithmetic_error = false;
 	/* Mean-frequency validity: set only when all 15 basic frequency
 	 * readings were valid (informative — the standardized frequency
 	 * interval is the 10 s tier, not this one). */
 	bool frequency_valid = false;
-	/* M13 boundary provenance. These remain false/absent for the
+	/* M13/M14 boundary provenance. These remain false/absent for the
 	 * 150/180-cycle tier. A contaminated interval is still retained for
 	 * diagnostics, but its electrical readings decode as invalid. */
 	bool time_aligned = false;

@@ -36,15 +36,19 @@ struct AggregatePayloadState {
 AggregatePayloadState aggregate_payload_state(const MeterRecord &record,
 					       MeasurementPeriod period)
 {
-	if (period != MeasurementPeriod::Min10)
+	if (period != MeasurementPeriod::Min10 &&
+	    period != MeasurementPeriod::Hour2)
 		return {};
-	const auto status = record.ten_minute_status();
+	const auto status = period == MeasurementPeriod::Hour2
+		? record.two_hour_status()
+		: record.ten_minute_status();
 	/* Bit 1 is the complete flag only on the fundamental record. The
 	 * phasor and unbalance siblings retain their established bit-1
 	 * phasor-invalid meaning, so their interval validity is carried by
 	 * the shared aligned/contaminated/boundary bits instead. */
 	const bool incomplete =
-		record.record_format() == meter_ten_minute_format &&
+		(record.record_format() == meter_ten_minute_format ||
+		 record.record_format() == meter_two_hour_format) &&
 		!status.complete;
 	return {
 		status.arithmetic_error,
@@ -555,6 +559,14 @@ MeterUpdate decode_ten_minute_power_meter_record(const MeterRecord &record,
 				    MeasurementPeriod::Min10);
 }
 
+MeterUpdate decode_two_hour_power_meter_record(const MeterRecord &record,
+					       SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_two_hour_power_format,
+				    MeasurementPeriod::Hour2);
+}
+
 namespace {
 
 MeterUpdate decode_phasor_payload(const MeterRecord &record,
@@ -744,6 +756,14 @@ MeterUpdate decode_ten_minute_phasor_meter_record(const MeterRecord &record,
 				     MeasurementPeriod::Min10);
 }
 
+MeterUpdate decode_two_hour_phasor_meter_record(const MeterRecord &record,
+					        SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_two_hour_phasor_format,
+				     MeasurementPeriod::Hour2);
+}
+
 namespace {
 
 MeterUpdate decode_unbalance_payload(const MeterRecord &record,
@@ -876,6 +896,14 @@ MeterUpdate decode_ten_minute_unbalance_meter_record(
 	return decode_unbalance_payload(record, received_at,
 					meter_ten_minute_unbalance_format,
 					MeasurementPeriod::Min10);
+}
+
+MeterUpdate decode_two_hour_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_two_hour_unbalance_format,
+					MeasurementPeriod::Hour2);
 }
 
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
@@ -1141,7 +1169,7 @@ MeterUpdate decode_ten_minute_meter_record(const MeterRecord &record,
 	timing.first_basic_sequence = first_basic;
 	timing.last_basic_sequence = last_basic;
 	timing.basic_block_count = composition.basic_block_count;
-	timing.cycle_count = static_cast<std::uint16_t>(composition.cycle_count);
+	timing.cycle_count = composition.cycle_count;
 	timing.nominal_frequency = nominal;
 	timing.arithmetic_error = status.arithmetic_error;
 	timing.frequency_valid = false;
@@ -1150,6 +1178,100 @@ MeterUpdate decode_ten_minute_meter_record(const MeterRecord &record,
 	timing.boundary_valid = status.boundary_valid;
 	timing.target_sample_index = target;
 	timing.overshoot_samples = record.ten_minute_overshoot_samples();
+	update.aggregate_timing = timing;
+	return update;
+}
+
+MeterUpdate decode_two_hour_meter_record(const MeterRecord &record,
+					   SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_two_hour_format)
+		throw std::invalid_argument("invalid two-hour aggregate record");
+
+	const auto status = record.two_hour_status();
+	if (!status.complete)
+		throw std::invalid_argument(
+			"two-hour aggregate is not marked complete");
+	const auto composition = record.two_hour_composition();
+	if (composition.nominal_frequency_hz != 50u &&
+	    composition.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in two-hour composition");
+	/* M14 is deliberately the one cascaded aggregate: exactly twelve
+	 * complete ten-minute accumulator images enter one result. */
+	constexpr std::uint16_t intervals_per_two_hours = 12u;
+	if (composition.basic_block_count != intervals_per_two_hours ||
+	    composition.cycle_count == 0u)
+		throw std::invalid_argument(
+			"two-hour aggregate is not built from twelve intervals");
+	const auto nominal = composition.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+
+	const auto first_interval = record.first_basic_sequence();
+	const auto last_interval = record.last_basic_sequence();
+	const auto interval_span =
+		static_cast<std::uint32_t>(last_interval - first_interval);
+	if (interval_span != intervals_per_two_hours - 1u)
+		throw std::invalid_argument(
+			"two-hour ten-minute sequence span is not consecutive");
+
+	const auto sample_count = record.aggregate_sample_count();
+	const auto first_sample = record.aggregate_first_sample_index();
+	if (sample_count == 0u || first_sample == 0u)
+		throw std::invalid_argument(
+			"two-hour aggregate has an empty sample range");
+	if (first_sample >
+	    std::numeric_limits<std::uint64_t>::max() -
+		static_cast<std::uint64_t>(sample_count - 1u))
+		throw std::invalid_argument(
+			"two-hour sample range overflows the 64-bit counter");
+	const auto expected_last = first_sample + sample_count - 1u;
+	const auto actual_last = record.two_hour_actual_last_sample_index();
+	if (actual_last != expected_last)
+		throw std::invalid_argument(
+			"two-hour actual boundary does not match its sample range");
+	const auto target = record.two_hour_target_sample_index();
+	if (target > actual_last)
+		throw std::invalid_argument(
+			"two-hour target boundary follows its actual boundary");
+	const auto overshoot = actual_last - target;
+	if (overshoot > std::numeric_limits<std::uint32_t>::max() ||
+	    record.two_hour_overshoot_samples() != overshoot)
+		throw std::invalid_argument(
+			"two-hour boundary overshoot is inconsistent");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool invalid_interval = status.contaminated || !status.time_aligned ||
+				      !status.boundary_valid;
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Hour2;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = decode_aggregate_fundamental_values(
+		record, sequence, received_at, window, status.arithmetic_error,
+		invalid_interval);
+
+	meter::AggregateTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample;
+	timing.sample_count = sample_count;
+	timing.first_basic_sequence = first_interval;
+	timing.last_basic_sequence = last_interval;
+	timing.basic_block_count = composition.basic_block_count;
+	timing.cycle_count = composition.cycle_count;
+	timing.nominal_frequency = nominal;
+	timing.arithmetic_error = status.arithmetic_error;
+	timing.frequency_valid = false;
+	timing.time_aligned = status.time_aligned;
+	timing.contaminated = status.contaminated;
+	timing.boundary_valid = status.boundary_valid;
+	timing.target_sample_index = target;
+	timing.overshoot_samples = record.two_hour_overshoot_samples();
 	update.aggregate_timing = timing;
 	return update;
 }
@@ -1218,6 +1340,21 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 			return decode_ten_minute_unbalance_meter_record(record,
 							           received_at);
 		});
+	result.register_decoder(meter_two_hour_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_power_meter_record(record,
+							  received_at);
+		});
+	result.register_decoder(meter_two_hour_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_phasor_meter_record(record,
+							   received_at);
+		});
+	result.register_decoder(meter_two_hour_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_unbalance_meter_record(record,
+							     received_at);
+		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record(record,
@@ -1233,6 +1370,10 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 	result.register_decoder(meter_ten_minute_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_ten_minute_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_two_hour_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_meter_record(record, received_at);
 		});
 	return result;
 }

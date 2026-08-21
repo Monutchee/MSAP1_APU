@@ -359,6 +359,40 @@ msap1::MeterRecord ten_minute_record(std::uint32_t sequence,
 	return record;
 }
 
+/* Minimal valid M14 record. The sequence and contributing ten-minute span
+ * belong to an independent stream, so neither may be compared with the
+ * basic, 150/180-cycle, or ten-minute record counters. */
+msap1::MeterRecord two_hour_record(std::uint32_t sequence,
+				  std::uint32_t generation)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_two_hour_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000;
+	record.words[6] = 230'400'000;
+	record.words[7] = 0x7f;
+	record.words[8] = (1u << 1) | (1u << 2) | (1u << 4);
+	constexpr std::uint64_t first_sample = 25'000'001;
+	record.words[9] = static_cast<std::uint32_t>(first_sample);
+	record.words[10] = static_cast<std::uint32_t>(first_sample >> 32);
+	record.words[13] = 12u | (60u << 16);
+	record.words[14] = sequence * 12u - 11u;
+	record.words[15] = sequence * 12u;
+	const auto actual_last = first_sample + record.words[6] - 1u;
+	constexpr std::uint32_t overshoot = 127;
+	const auto target = actual_last - overshoot;
+	record.words[36] = static_cast<std::uint32_t>(actual_last);
+	record.words[37] = static_cast<std::uint32_t>(actual_last >> 32);
+	record.words[41] = 432'000;
+	record.words[42] = static_cast<std::uint32_t>(target);
+	record.words[43] = static_cast<std::uint32_t>(target >> 32);
+	record.words[44] = overshoot;
+	return record;
+}
+
 /* A UTC ten-minute boundary may occur between any two basic blocks. M13's
  * sequence 1 must not be compared with the already-advanced basic stream. */
 void ingestor_tracks_ten_minute_stream_independently()
@@ -400,6 +434,49 @@ void ingestor_tracks_ten_minute_stream_independently()
 		ingest.sequence_gaps() == 0 &&
 		ingest.aggregate_sequence_gaps() == 0,
 		"ten-minute gaps were not isolated from other record streams");
+}
+
+void ingestor_tracks_two_hour_stream_independently()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefu;
+	configuration.wire.sample_rate_hz = 32000;
+	configuration.wire.rms_window_samples = 6400;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(basic_record(846, 1'000'000, 6400, 0xfeedbeefu));
+	feed(ten_minute_record(91, 0xfeedbeefu));
+	feed(two_hour_record(1, 0xfeedbeefu));
+	require(ingest.invalid_records() == 0 &&
+		ingest.sequence_gaps() == 0 &&
+		ingest.ten_minute_sequence_gaps() == 0 &&
+		ingest.two_hour_sequence_gaps() == 0,
+		"two-hour sequence 1 was compared with another stream");
+	const auto two_hour =
+		ingest.latest_decoded(msap1::MeasurementPeriod::Hour2);
+	require(two_hour && two_hour->latest_sequence == 1,
+		"the accepted two-hour record was not published");
+
+	feed(two_hour_record(2, 0xfeedbeefu));
+	feed(two_hour_record(4, 0xfeedbeefu));
+	require(ingest.two_hour_sequence_gaps() == 1 &&
+		ingest.sequence_gaps() == 0 &&
+		ingest.aggregate_sequence_gaps() == 0 &&
+		ingest.ten_minute_sequence_gaps() == 0,
+		"two-hour gaps were not isolated from other record streams");
 }
 
 /*
@@ -743,6 +820,7 @@ int main()
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_tracks_ten_minute_stream_independently();
+	ingestor_tracks_two_hour_stream_independently();
 	ingestor_pins_aggregate_time_quality_at_ingest();
 	ingestor_handles_u32_sequence_wrap();
 	malformed_and_unknown_requests_are_rejected();

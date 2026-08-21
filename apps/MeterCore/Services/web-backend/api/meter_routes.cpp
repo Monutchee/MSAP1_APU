@@ -670,6 +670,26 @@ webengine::Response get_meter_ten_minute(AppContext &app,
 	}
 }
 
+webengine::Response get_meter_two_hour(AppContext &app,
+				       const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Hour2;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto aggregate = meter_two_hour_dto(response);
+		if (!aggregate)
+			return json_response(webengine::http::status::ok,
+				MeterTwoHourUnavailableDto{});
+		return json_response(webengine::http::status::ok, *aggregate);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/hours-2", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
 /**
  * @brief GET /api/v1/meter/configuration/frequency (Viewer)
  *

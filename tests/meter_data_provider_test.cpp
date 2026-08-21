@@ -67,7 +67,7 @@ void capabilities_advertise_only_supported_periods()
 	msap1::MeterData data;
 	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	const auto capabilities = provider.capabilities();
-	require(capabilities.size() == 3,
+	require(capabilities.size() == 4,
 		"provider advertised vocabulary-only future periods");
 	require(capabilities[0].period ==
 			mnc::meter::MeasurementPeriod::Basic &&
@@ -81,6 +81,10 @@ void capabilities_advertise_only_supported_periods()
 			mnc::meter::MeasurementPeriod::Min10 &&
 			!capabilities[2].attributes.empty(),
 		"ten-minute capability is missing");
+	require(capabilities[3].period ==
+			mnc::meter::MeasurementPeriod::Hour2 &&
+			!capabilities[3].attributes.empty(),
+		"two-hour capability is missing");
 }
 
 void facade_exposes_the_injected_delivery_paths()

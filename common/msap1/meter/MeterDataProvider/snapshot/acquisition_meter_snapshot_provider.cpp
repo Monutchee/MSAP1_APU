@@ -9,8 +9,6 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 	mnc::meter::MeasurementPeriod period)
 {
 	using Id = mnc::meter::MeterAttributeId;
-	if (period == mnc::meter::MeasurementPeriod::Hour2)
-		return {};
 	std::vector<mnc::meter::MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -58,6 +56,7 @@ AcquisitionMeterSnapshotProvider::capabilities() const
 		{Period::Basic, supported(Period::Basic)},
 		{Period::Cycles150_180, supported(Period::Cycles150_180)},
 		{Period::Min10, supported(Period::Min10)},
+		{Period::Hour2, supported(Period::Hour2)},
 	};
 }
 

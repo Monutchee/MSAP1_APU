@@ -29,6 +29,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace msap1::web::api {
@@ -221,21 +222,31 @@ struct MeterTenMinuteUnavailableDto {
 	bool available = false;
 };
 
-/** Project the typed Min10 provider view without recomputing meter values. */
+/* The finalized two-hour tier intentionally uses the same public shape as
+ * the ten-minute tier. Both are typed snapshots with aggregate timing; only
+ * their period identity and cadence differ. Keeping one schema lets clients
+ * render future long intervals without inventing wire-only fields. */
+using MeterTwoHourDto = MeterTenMinuteDto;
+using MeterTwoHourUnavailableDto = MeterTenMinuteUnavailableDto;
+
 [[nodiscard]] inline std::optional<MeterTenMinuteDto>
-meter_ten_minute_dto(const msap1::MeterSnapshotResponse &response)
+meter_long_interval_dto(const msap1::MeterSnapshotResponse &response,
+	mnc::meter::MeasurementPeriod expected_period,
+	std::string_view interval_name)
 {
 	using Id = mnc::meter::MeterAttributeId;
 	using Quality = mnc::meter::ReadingQuality;
 	if (!response.running || !response.has_snapshot)
 		return std::nullopt;
 	const auto &snapshot = response.snapshot;
-	if (snapshot.period != mnc::meter::MeasurementPeriod::Min10)
-		throw std::invalid_argument("cached meter snapshot is not a ten-minute aggregate");
+	if (snapshot.period != expected_period)
+		throw std::invalid_argument("cached meter snapshot is not a " +
+			std::string(interval_name) + " aggregate");
 	if (!snapshot.timing || !snapshot.timing->first_sample_index ||
 	    !snapshot.timing->sample_count || !snapshot.timing->cycle_count ||
 	    !snapshot.timing->nominal_frequency_hz)
-		throw std::invalid_argument("ten-minute aggregate has incomplete timing provenance");
+		throw std::invalid_argument(std::string(interval_name) +
+			" aggregate has incomplete timing provenance");
 
 	const auto find = [&snapshot](Id id) -> const mnc::meter::MeterAttributeValue * {
 		const auto it = std::find_if(snapshot.values.begin(), snapshot.values.end(),
@@ -291,6 +302,22 @@ meter_ten_minute_dto(const msap1::MeterSnapshotResponse &response)
 		}
 	}
 	return result;
+}
+
+/** Project the typed Min10 provider view without recomputing meter values. */
+[[nodiscard]] inline std::optional<MeterTenMinuteDto>
+meter_ten_minute_dto(const msap1::MeterSnapshotResponse &response)
+{
+	return meter_long_interval_dto(response,
+		mnc::meter::MeasurementPeriod::Min10, "ten-minute");
+}
+
+/** Project the typed Hour2 provider view without recomputing meter values. */
+[[nodiscard]] inline std::optional<MeterTwoHourDto>
+meter_two_hour_dto(const msap1::MeterSnapshotResponse &response)
+{
+	return meter_long_interval_dto(response,
+		mnc::meter::MeasurementPeriod::Hour2, "two-hour");
 }
 
 /**

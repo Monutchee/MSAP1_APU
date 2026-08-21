@@ -25,13 +25,17 @@ mnc::meter::MeterAttributeValue value(Id id, Unit unit,
 		1'920'000, 600'000'000'000LL};
 }
 
-msap1::MeterSnapshotResponse response()
+msap1::MeterSnapshotResponse response(
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Min10,
+	std::uint64_t sample_count = 19'200'000,
+	std::uint32_t cycle_count = 36'000)
 {
 	msap1::MeterSnapshotResponse result{};
 	result.running = true;
 	result.has_snapshot = true;
 	result.diagnostics.sample_rate_hz = 32'000;
-	result.snapshot.period = mnc::meter::MeasurementPeriod::Min10;
+	result.snapshot.period = period;
 	result.snapshot.sequence = 42;
 	result.snapshot.configuration_generation = 77;
 	result.snapshot.updated_at_nanoseconds =
@@ -40,8 +44,8 @@ msap1::MeterSnapshotResponse response()
 	mnc::meter::MeterSnapshotTiming timing{};
 	timing.quality = mnc::meter::TimeQuality::Synchronized;
 	timing.first_sample_index = 123'000;
-	timing.sample_count = 19'200'000;
-	timing.cycle_count = 36'000;
+	timing.sample_count = sample_count;
+	timing.cycle_count = cycle_count;
 	timing.nominal_frequency_hz = 60;
 	result.snapshot.timing = timing;
 	result.snapshot.values = {
@@ -56,6 +60,19 @@ msap1::MeterSnapshotResponse response()
 		value(Id::ActivePowerTotal, Unit::Picowatts, 720'000'000'000'000),
 	};
 	return result;
+}
+
+void projects_the_finalized_two_hour_snapshot()
+{
+	const auto projected = msap1::web::api::meter_two_hour_dto(response(
+		mnc::meter::MeasurementPeriod::Hour2, 230'400'000, 432'000));
+	require(projected.has_value(), "two-hour snapshot was unavailable");
+	require(projected->sequence == 42 &&
+		projected->sample_count == 230'400'000 &&
+		projected->cycle_count == 432'000 &&
+		projected->channels[6].valid &&
+		projected->channels[6].rms == 120.0,
+		"two-hour identity, provenance, or channel projection changed");
 }
 
 void projects_the_finalized_ten_minute_snapshot()
@@ -107,6 +124,7 @@ void absence_and_malformed_period_are_distinct()
 int main()
 {
 	projects_the_finalized_ten_minute_snapshot();
+	projects_the_finalized_two_hour_snapshot();
 	absence_and_malformed_period_are_distinct();
 	return 0;
 }

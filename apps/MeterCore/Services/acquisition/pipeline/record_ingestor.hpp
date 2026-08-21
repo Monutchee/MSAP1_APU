@@ -21,9 +21,9 @@ namespace msap1::acquisition::daemon {
 /**
  * @brief Consumes meter records from the meter DMA and publishes them.
  *
- * The DMA stream interleaves basic MTR1, 150/180-cycle aggregate MTR2, and
- * clock-aligned ten-minute M13 records, each on an INDEPENDENT sequence
- * counter.
+ * The DMA stream interleaves basic MTR1, 150/180-cycle aggregate MTR2,
+ * clock-aligned ten-minute M13 records, and two-hour M14 records, each on an
+ * INDEPENDENT sequence counter.
  * Responsibilities, in the order a record flows through:
  *
  *  1. Drain complete 256-byte records from the DMA reader.
@@ -195,6 +195,11 @@ public:
 	{
 		return ten_minute_sequence_gaps_;
 	}
+	/** @brief Missing TWO-HOUR records detected on the M14 stream. */
+	[[nodiscard]] std::uint64_t two_hour_sequence_gaps() const
+	{
+		return two_hour_sequence_gaps_;
+	}
 	/**
 	 * @brief Kernel transport accounting, read live from the source.
 	 *
@@ -225,6 +230,8 @@ private:
 		const msap1::MeterRecord &record);
 	[[nodiscard]] bool track_ten_minute_continuity(
 		const msap1::MeterRecord &record);
+	[[nodiscard]] bool track_two_hour_continuity(
+		const msap1::MeterRecord &record);
 
 	msap1::acquisition::MeterRecordSource &meter_;
 	const msap1::PreparedMeterConfiguration &configuration_;
@@ -252,6 +259,7 @@ private:
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
+	std::uint64_t two_hour_sequence_gaps_ = 0;
 	/* Kernel transport-overrun total at the last sequence-gap log. The
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
@@ -264,11 +272,13 @@ private:
 	std::uint64_t suppressed_reject_logs_ = 0;
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache), the newest accepted aggregate
-	 * sequence, and the newest accepted ten-minute sequence. A record from
-	 * one stream must never look like a gap or stale record in another. */
+	 * sequence, the newest accepted ten-minute sequence, and the newest
+	 * accepted two-hour sequence. A record from one stream must never look
+	 * like a gap or stale record in another. */
 	std::optional<msap1::MeterRecord> latest_record_;
 	std::optional<std::uint32_t> last_aggregate_sequence_;
 	std::optional<std::uint32_t> last_ten_minute_sequence_;
+	std::optional<std::uint32_t> last_two_hour_sequence_;
 	std::optional<Clock::time_point> last_record_time_;
 	/* Newest accepted aggregate and its arrival time. Held beside — never
 	 * inside — the basic caches above so /meter/readings semantics are

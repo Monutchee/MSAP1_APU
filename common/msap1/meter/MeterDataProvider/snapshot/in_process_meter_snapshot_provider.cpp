@@ -92,8 +92,6 @@ MeterAttributeValue unavailable(MeterAttributeKey attribute)
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
 	using Id = MeterAttributeId;
-	if (period == msap1::MeasurementPeriod::Hour2)
-		return {};
 	std::vector<MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -156,6 +154,7 @@ InProcessMeterSnapshotProvider::capabilities() const
 		{MeasurementPeriod::Cycles150_180,
 		 supported(MeasurementPeriod::Cycles150_180)},
 		{MeasurementPeriod::Min10, supported(MeasurementPeriod::Min10)},
+		{MeasurementPeriod::Hour2, supported(MeasurementPeriod::Hour2)},
 	};
 }
 

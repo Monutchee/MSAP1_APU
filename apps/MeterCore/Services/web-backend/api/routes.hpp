@@ -88,6 +88,9 @@ webengine::Response get_meter_aggregate(AppContext &,
 /** @brief GET /api/v1/meter/minutes-10 — newest aligned ten-minute block. */
 webengine::Response get_meter_ten_minute(AppContext &,
 					 const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/hours-2 — newest finalized two-hour block. */
+webengine::Response get_meter_two_hour(AppContext &,
+				       const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/configuration/frequency — active config. */
 webengine::Response
 get_frequency_configuration(AppContext &,
@@ -247,6 +250,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/minutes-10",
 	 webengine::Role::Viewer, &get_meter_ten_minute,
 	 "Newest clock-aligned ten-minute aggregate"},
+	{webengine::http::verb::get, "/api/v1/meter/hours-2",
+	 webengine::Role::Viewer, &get_meter_two_hour,
+	 "Newest finalized two-hour aggregate"},
 	{webengine::http::verb::get, "/api/v1/meter/single-cycle",
 	 webengine::Role::Viewer, &get_meter_single_cycle,
 	 "Latest single-cycle diagnostic (RMS, VLL, per-phase power)"},

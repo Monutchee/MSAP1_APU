@@ -87,6 +87,15 @@ inline constexpr std::uint32_t meter_ten_minute_format = 0x000C0001u;
 inline constexpr std::uint32_t meter_ten_minute_power_format = 0x00130001u;
 inline constexpr std::uint32_t meter_ten_minute_phasor_format = 0x00140002u;
 inline constexpr std::uint32_t meter_ten_minute_unbalance_format = 0x00150002u;
+/* TWO-HOUR v1 (M14): twelve consecutive, complete ten-minute intervals
+ * merged from their accumulator images.  The fundamental record reuses the
+ * M13 boundary/composition layout; words 14/15 identify the contributing
+ * ten-minute sequence range.  Sibling payload maps remain identical to the
+ * other aggregate tiers. */
+inline constexpr std::uint32_t meter_two_hour_format = 0x000D0001u;
+inline constexpr std::uint32_t meter_two_hour_power_format = 0x00160001u;
+inline constexpr std::uint32_t meter_two_hour_phasor_format = 0x00170002u;
+inline constexpr std::uint32_t meter_two_hour_unbalance_format = 0x00180002u;
 /* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
  * OWN producer port with its own sequence space. Word 13 selects the
  * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
@@ -160,6 +169,12 @@ struct MeterTenMinuteComposition {
 	std::uint32_t cycle_count = 0;
 };
 
+/* M14 deliberately reuses the merge-safe M13 interval envelope.  Keep
+ * distinct semantic names at the API boundary even though the wire fields
+ * have the same representation. */
+using MeterTwoHourStatus = MeterTenMinuteStatus;
+using MeterTwoHourComposition = MeterTenMinuteComposition;
+
 struct MeterFrequencyReading {
 	bool enabled = false;
 	bool valid = false;
@@ -217,6 +232,10 @@ struct MeterRecord {
 				record_format() == meter_ten_minute_power_format ||
 				record_format() == meter_ten_minute_phasor_format ||
 				record_format() == meter_ten_minute_unbalance_format ||
+				record_format() == meter_two_hour_format ||
+				record_format() == meter_two_hour_power_format ||
+				record_format() == meter_two_hour_phasor_format ||
+				record_format() == meter_two_hour_unbalance_format ||
 			record_format() == meter_pq_event_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
@@ -391,6 +410,31 @@ struct MeterRecord {
 		return unsigned64(42);
 	}
 	std::uint32_t ten_minute_overshoot_samples() const { return word(44); }
+
+	/* ---- two-hour aggregate (M14) ------------------------------------
+	 * The shared AggregationEngine intentionally keeps the M13 layout so
+	 * downstream decoders can share validation without duplicating a wire
+	 * contract.  In this tier, words 14/15 are TEN-MINUTE sequences. */
+	MeterTwoHourStatus two_hour_status() const
+	{
+		return ten_minute_status();
+	}
+	MeterTwoHourComposition two_hour_composition() const
+	{
+		return ten_minute_composition();
+	}
+	std::uint64_t two_hour_actual_last_sample_index() const
+	{
+		return ten_minute_actual_last_sample_index();
+	}
+	std::uint64_t two_hour_target_sample_index() const
+	{
+		return ten_minute_target_sample_index();
+	}
+	std::uint32_t two_hour_overshoot_samples() const
+	{
+		return ten_minute_overshoot_samples();
+	}
 };
 
 static_assert(sizeof(MeterRecord) == meter_record_size,
