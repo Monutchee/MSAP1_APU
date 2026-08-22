@@ -54,6 +54,10 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 		return mnc::meter_stream::DatabaseDataset::minutes_10;
 	case MeasurementPeriod::Hour2:
 		return mnc::meter_stream::DatabaseDataset::hours_2;
+	case MeasurementPeriod::Min10Live:
+	case MeasurementPeriod::Hour2Live:
+		throw std::invalid_argument(
+			"non-normative open intervals are not historian datasets");
 	}
 	throw std::invalid_argument("unknown historian measurement period");
 }

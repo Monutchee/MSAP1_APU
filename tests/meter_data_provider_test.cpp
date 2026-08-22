@@ -67,8 +67,8 @@ void capabilities_advertise_only_supported_periods()
 	msap1::MeterData data;
 	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	const auto capabilities = provider.capabilities();
-	require(capabilities.size() == 4,
-		"provider advertised vocabulary-only future periods");
+	require(capabilities.size() == 6,
+		"provider did not advertise every implemented completed/live period");
 	require(capabilities[0].period ==
 			mnc::meter::MeasurementPeriod::Basic &&
 			!capabilities[0].attributes.empty(),
@@ -85,6 +85,14 @@ void capabilities_advertise_only_supported_periods()
 			mnc::meter::MeasurementPeriod::Hour2 &&
 			!capabilities[3].attributes.empty(),
 		"two-hour capability is missing");
+	require(capabilities[4].period ==
+			mnc::meter::MeasurementPeriod::Min10Live &&
+			!capabilities[4].attributes.empty(),
+		"ten-minute live-partial capability is missing");
+	require(capabilities[5].period ==
+			mnc::meter::MeasurementPeriod::Hour2Live &&
+			!capabilities[5].attributes.empty(),
+		"two-hour live-partial capability is missing");
 }
 
 void facade_exposes_the_injected_delivery_paths()

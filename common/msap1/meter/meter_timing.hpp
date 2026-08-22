@@ -96,6 +96,7 @@ struct BlockTiming {
 	/* Actual samples in this block — varies with grid frequency when
 	 * cycle-locked; equals the fallback window in free-run. */
 	std::uint32_t sample_count = 0;
+	std::uint32_t sample_rate_hz = 0;
 	/* Complete cycles closed in this block (10 or 12 when locked). */
 	std::uint16_t cycle_count = 0;
 	NominalFrequency nominal_frequency = NominalFrequency::Hz60;
@@ -154,6 +155,7 @@ struct AggregateTiming {
 	std::uint64_t first_sample_index = 0;
 	/* Total samples across all contributing basic blocks. */
 	std::uint32_t sample_count = 0;
+	std::uint32_t sample_rate_hz = 0;
 	/* Source-tier sequence range folded into this aggregate (inclusive).
 	 * This is the BASIC stream for 150/180-cycle and ten-minute records,
 	 * and the TEN-MINUTE stream for the two-hour record.  The legacy field

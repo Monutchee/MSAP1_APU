@@ -522,14 +522,26 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			msap1::meter_ten_minute_unbalance_format ||
 		record.record_format() == msap1::meter_two_hour_power_format ||
 		record.record_format() == msap1::meter_two_hour_phasor_format ||
-		record.record_format() == msap1::meter_two_hour_unbalance_format;
+		record.record_format() == msap1::meter_two_hour_unbalance_format ||
+		record.record_format() == msap1::meter_ten_minute_open_power_format ||
+		record.record_format() == msap1::meter_ten_minute_open_phasor_format ||
+		record.record_format() == msap1::meter_ten_minute_open_unbalance_format ||
+		record.record_format() == msap1::meter_two_hour_open_power_format ||
+		record.record_format() == msap1::meter_two_hour_open_phasor_format ||
+		record.record_format() == msap1::meter_two_hour_open_unbalance_format;
 	const bool aggregate =
 		record.record_format() == msap1::meter_aggregate_format;
 	const bool ten_minute =
 		record.record_format() == msap1::meter_ten_minute_format;
 	const bool two_hour =
 		record.record_format() == msap1::meter_two_hour_format;
-	if (!sibling) {
+	const bool open_preview =
+		record.record_format() == msap1::meter_ten_minute_open_format ||
+		record.record_format() == msap1::meter_two_hour_open_format;
+	/* Preview sequences are diagnostic and intentionally lossy. They have
+	 * independent producer spaces, and a missing preview never means the
+	 * authoritative completed stream lost a result. */
+	if (!sibling && !open_preview) {
 		const auto continuous =
 			aggregate ? track_aggregate_continuity(record)
 			: ten_minute ? track_ten_minute_continuity(record)
@@ -647,7 +659,8 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		 * producer sequence. Its four records must never replace a shorter
 		 * tier's raw-record cache or continuity baseline. */
 		last_two_hour_sequence_ = record.sequence();
-	} else if (record.record_format() == msap1::meter_periodic_format) {
+	} else if (!open_preview &&
+		   record.record_format() == msap1::meter_periodic_format) {
 		/* ONLY the BASIC record refreshes the instantaneous-readings
 		 * cache and the basic continuity baseline. Sibling records
 		 * must not: the basic-period siblings share their BASIC

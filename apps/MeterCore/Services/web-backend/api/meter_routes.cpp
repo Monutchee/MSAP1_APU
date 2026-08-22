@@ -690,6 +690,46 @@ webengine::Response get_meter_two_hour(AppContext &app,
 	}
 }
 
+webengine::Response get_meter_ten_minute_live(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Min10Live;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto preview = meter_ten_minute_live_dto(response);
+		if (!preview)
+			return json_response(webengine::http::status::ok,
+				MeterTenMinuteUnavailableDto{});
+		return json_response(webengine::http::status::ok, *preview);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/minutes-10/live", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_two_hour_live(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Hour2Live;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto preview = meter_two_hour_live_dto(response);
+		if (!preview)
+			return json_response(webengine::http::status::ok,
+				MeterTwoHourUnavailableDto{});
+		return json_response(webengine::http::status::ok, *preview);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/hours-2/live", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
 /**
  * @brief GET /api/v1/meter/configuration/frequency (Viewer)
  *

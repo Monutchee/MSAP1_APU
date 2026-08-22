@@ -126,6 +126,8 @@ std::string_view period_name(MeasurementPeriod period)
 	case MeasurementPeriod::Cycles150_180: return "150/180-cycle";
 	case MeasurementPeriod::Min10: return "10-minute";
 	case MeasurementPeriod::Hour2: return "2-hour";
+	case MeasurementPeriod::Min10Live: return "10-minute live partial";
+	case MeasurementPeriod::Hour2Live: return "2-hour live partial";
 	}
 	return "unknown";
 }
@@ -137,6 +139,8 @@ std::string_view period_key(MeasurementPeriod period)
 	case MeasurementPeriod::Cycles150_180: return "cycles_150_180";
 	case MeasurementPeriod::Min10: return "minute_10";
 	case MeasurementPeriod::Hour2: return "hour_2";
+	case MeasurementPeriod::Min10Live: return "minute_10_live";
+	case MeasurementPeriod::Hour2Live: return "hour_2_live";
 	}
 	return "unknown";
 }

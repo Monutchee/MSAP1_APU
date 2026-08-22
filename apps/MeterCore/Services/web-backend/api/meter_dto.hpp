@@ -215,6 +215,20 @@ struct MeterTenMinuteDto {
 	std::uint32_t age_ms;
 	std::array<MeterAggregateChannelDto, msap1::meter_channel_count> channels;
 	std::vector<MeterAttributeDto> attributes;
+	/* Live-partial records use the same electrical-value shape, but these
+	 * fields make their non-normative status and unfinished boundary
+	 * provenance impossible to confuse with a completed result. */
+	bool open_interval = false;
+	bool non_normative = false;
+	std::uint32_t source_interval_count = 0;
+	std::uint64_t first_source_sequence = 0;
+	std::uint64_t last_source_sequence = 0;
+	std::optional<std::uint64_t> expected_end_sample_index;
+	std::optional<std::uint32_t> overshoot_samples;
+	std::uint64_t elapsed_milliseconds = 0;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
 };
 
 /** No aligned ten-minute interval has closed since acquisition started. */
@@ -272,7 +286,31 @@ meter_long_interval_dto(const msap1::MeterSnapshotResponse &response,
 		time_quality_name(snapshot.timing->quality),
 		static_cast<std::uint32_t>(std::min<std::int64_t>(
 			age_ms64, std::numeric_limits<std::uint32_t>::max())), {}, {},
+		false, false, 0, 0, 0, std::nullopt, std::nullopt, 0,
+		false, false, false,
 	};
+	result.open_interval = expected_period ==
+		mnc::meter::MeasurementPeriod::Min10Live ||
+		expected_period == mnc::meter::MeasurementPeriod::Hour2Live;
+	result.non_normative = result.open_interval;
+	result.source_interval_count =
+		snapshot.timing->source_interval_count.value_or(0u);
+	result.first_source_sequence =
+		snapshot.timing->first_source_sequence.value_or(0u);
+	result.last_source_sequence =
+		snapshot.timing->last_source_sequence.value_or(0u);
+	result.expected_end_sample_index =
+		snapshot.timing->expected_end_sample_index;
+	result.overshoot_samples = snapshot.timing->overshoot_samples;
+	result.time_aligned = snapshot.timing->time_aligned.value_or(false);
+	result.contaminated = snapshot.timing->contaminated.value_or(false);
+	result.boundary_valid = snapshot.timing->boundary_valid.value_or(false);
+	if (snapshot.timing->sample_rate_hz.value_or(0u) != 0u) {
+		result.sample_rate_hz = *snapshot.timing->sample_rate_hz;
+		result.elapsed_milliseconds =
+			static_cast<std::uint64_t>(*snapshot.timing->sample_count) *
+			1000u / *snapshot.timing->sample_rate_hz;
+	}
 
 	for (std::size_t index = 0; index < result.channels.size(); ++index) {
 		const auto *reading = index == 7 ? nullptr : find(channel_ids[index]);
@@ -318,6 +356,22 @@ meter_two_hour_dto(const msap1::MeterSnapshotResponse &response)
 {
 	return meter_long_interval_dto(response,
 		mnc::meter::MeasurementPeriod::Hour2, "two-hour");
+}
+
+/** Project the latest non-normative open ten-minute preview. */
+[[nodiscard]] inline std::optional<MeterTenMinuteDto>
+meter_ten_minute_live_dto(const msap1::MeterSnapshotResponse &response)
+{
+	return meter_long_interval_dto(response,
+		mnc::meter::MeasurementPeriod::Min10Live, "live ten-minute");
+}
+
+/** Project the latest non-normative open two-hour preview. */
+[[nodiscard]] inline std::optional<MeterTwoHourDto>
+meter_two_hour_live_dto(const msap1::MeterSnapshotResponse &response)
+{
+	return meter_long_interval_dto(response,
+		mnc::meter::MeasurementPeriod::Hour2Live, "live two-hour");
 }
 
 /**

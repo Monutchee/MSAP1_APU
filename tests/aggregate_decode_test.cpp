@@ -264,6 +264,67 @@ msap1::MeterRecord two_hour_record(const TwoHourSpec &spec)
 	return record;
 }
 
+/** Convert a completed long-interval wire image into an M15 live preview. */
+msap1::MeterRecord open_interval_record(msap1::MeterRecord record,
+	std::uint32_t format, std::uint64_t remaining_samples)
+{
+	record.words[1] = format;
+	/* Clear COMPLETE and set OPEN_INTERVAL | NON_NORMATIVE while retaining
+	 * aligned/boundary status from the completed-record fixture. */
+	record.words[8] &= ~(1u << 1);
+	record.words[8] |= (1u << 5) | (1u << 6);
+	const auto actual_last =
+		(static_cast<std::uint64_t>(record.words[37]) << 32) |
+		record.words[36];
+	const auto expected_end = actual_last + remaining_samples;
+	record.words[42] = static_cast<std::uint32_t>(expected_end);
+	record.words[43] = static_cast<std::uint32_t>(expected_end >> 32);
+	record.words[44] = 0u;
+	return record;
+}
+
+void open_intervals_are_non_normative_independent_views()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto ten = open_interval_record(ten_minute_record(TenMinuteSpec{}),
+		msap1::meter_ten_minute_open_format, 96'000u);
+	const auto ten_update = registry.decode(ten);
+	require(ten_update.period == msap1::MeasurementPeriod::Min10Live &&
+		ten_update.aggregate_timing &&
+		ten_update.aggregate_timing->overshoot_samples == 0u &&
+		ten_update.aggregate_timing->target_sample_index >
+			ten.ten_minute_actual_last_sample_index(),
+		"ten-minute live preview lost its open-window provenance");
+
+	const auto two = open_interval_record(two_hour_record(TwoHourSpec{}),
+		msap1::meter_two_hour_open_format, 19'200'000u);
+	const auto two_update = registry.decode(two);
+	require(two_update.period == msap1::MeasurementPeriod::Hour2Live &&
+		two_update.aggregate_timing &&
+		two_update.aggregate_timing->basic_block_count == 12u,
+		"two-hour live preview decoded on the wrong independent view");
+
+	msap1::MeterLatestStore store;
+	store.apply(ten_update);
+	store.apply(two_update);
+	require(store.latest(msap1::MeasurementPeriod::Min10Live).has_value() &&
+		store.latest(msap1::MeasurementPeriod::Hour2Live).has_value() &&
+		!store.latest(msap1::MeasurementPeriod::Min10).has_value() &&
+		!store.latest(msap1::MeasurementPeriod::Hour2).has_value(),
+		"live previews replaced an authoritative completed interval");
+
+	auto power = ten;
+	power.words[1] = msap1::meter_ten_minute_open_power_format;
+	require(registry.decode(power).period ==
+			msap1::MeasurementPeriod::Min10Live,
+		"open-window sibling decoded on the wrong period");
+
+	auto missing_marker = ten;
+	missing_marker.words[8] &= ~(1u << 6);
+	require_throws([&] { (void)registry.decode(missing_marker); },
+		"live preview without NON_NORMATIVE marker decoded");
+}
+
 void two_hour_decodes_cascaded_provenance()
 {
 	TwoHourSpec spec{};
@@ -884,6 +945,7 @@ int main()
 		ten_minute_rejects_inconsistent_boundaries();
 		two_hour_decodes_cascaded_provenance();
 		two_hour_rejects_incomplete_or_discontinuous_inputs();
+		open_intervals_are_non_normative_independent_views();
 		reference_reproduces_constant_inputs();
 		reference_matches_hand_computed_vectors();
 		decode_reference_built_record_60hz();

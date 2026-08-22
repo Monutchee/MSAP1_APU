@@ -96,6 +96,17 @@ inline constexpr std::uint32_t meter_two_hour_format = 0x000D0001u;
 inline constexpr std::uint32_t meter_two_hour_power_format = 0x00160001u;
 inline constexpr std::uint32_t meter_two_hour_phasor_format = 0x00170002u;
 inline constexpr std::uint32_t meter_two_hour_unbalance_format = 0x00180002u;
+/* M15 live-partial views. These records expose an open accumulator for
+ * operations only. They use independent sequence spaces and can never replace
+ * the immutable completed M13/M14 results. */
+inline constexpr std::uint32_t meter_ten_minute_open_format = 0x000E0001u;
+inline constexpr std::uint32_t meter_ten_minute_open_power_format = 0x00190001u;
+inline constexpr std::uint32_t meter_ten_minute_open_phasor_format = 0x001A0002u;
+inline constexpr std::uint32_t meter_ten_minute_open_unbalance_format = 0x001B0002u;
+inline constexpr std::uint32_t meter_two_hour_open_format = 0x000F0001u;
+inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x001C0001u;
+inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x001D0002u;
+inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x001E0002u;
 /* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
  * OWN producer port with its own sequence space. Word 13 selects the
  * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
@@ -159,6 +170,8 @@ struct MeterTenMinuteStatus {
 	bool time_aligned = false;
 	bool contaminated = false;
 	bool boundary_valid = false;
+	bool open_interval = false;
+	bool non_normative = false;
 };
 
 /** Decoded TEN-MINUTE word 13 plus word 41 composition. */
@@ -236,6 +249,14 @@ struct MeterRecord {
 				record_format() == meter_two_hour_power_format ||
 				record_format() == meter_two_hour_phasor_format ||
 				record_format() == meter_two_hour_unbalance_format ||
+				record_format() == meter_ten_minute_open_format ||
+				record_format() == meter_ten_minute_open_power_format ||
+				record_format() == meter_ten_minute_open_phasor_format ||
+				record_format() == meter_ten_minute_open_unbalance_format ||
+				record_format() == meter_two_hour_open_format ||
+				record_format() == meter_two_hour_open_power_format ||
+				record_format() == meter_two_hour_open_phasor_format ||
+				record_format() == meter_two_hour_open_unbalance_format ||
 			record_format() == meter_pq_event_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
@@ -387,6 +408,8 @@ struct MeterRecord {
 			(status_word & (1u << 2)) != 0u,
 			(status_word & (1u << 3)) != 0u,
 			(status_word & (1u << 4)) != 0u,
+			(status_word & (1u << 5)) != 0u,
+			(status_word & (1u << 6)) != 0u,
 		};
 	}
 

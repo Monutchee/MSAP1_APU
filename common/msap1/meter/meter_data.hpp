@@ -299,7 +299,7 @@ public:
 	latest(MeasurementPeriod period) const;
 
 private:
-	static constexpr std::size_t period_count = 4;
+	static constexpr std::size_t period_count = 6;
 	mutable std::mutex mutex_;
 	std::array<std::optional<MeterPeriodView>, period_count> views_{};
 };
@@ -485,6 +485,20 @@ MeterUpdate decode_two_hour_phasor_meter_record(const MeterRecord &record,
 MeterUpdate decode_two_hour_unbalance_meter_record(
 	const MeterRecord &record, SystemTime received_at);
 
+/** Non-normative live-partial sibling payloads. */
+MeterUpdate decode_ten_minute_open_power_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+MeterUpdate decode_ten_minute_open_phasor_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+MeterUpdate decode_ten_minute_open_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+MeterUpdate decode_two_hour_open_power_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+MeterUpdate decode_two_hour_open_phasor_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+MeterUpdate decode_two_hour_open_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at);
+
 /**
  * Decode an MTR1 (0x00010003) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
@@ -520,6 +534,14 @@ MeterUpdate decode_two_hour_unbalance_meter_record(
 /** Decode a two-hour aggregate built from twelve complete, consecutive,
  * boundary-clean ten-minute accumulator images. */
 [[nodiscard]] MeterUpdate decode_two_hour_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/** Decode non-normative views of the currently open accumulators. */
+[[nodiscard]] MeterUpdate decode_ten_minute_open_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+[[nodiscard]] MeterUpdate decode_two_hour_open_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

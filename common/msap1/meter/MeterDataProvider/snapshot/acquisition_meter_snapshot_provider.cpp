@@ -57,6 +57,8 @@ AcquisitionMeterSnapshotProvider::capabilities() const
 		{Period::Cycles150_180, supported(Period::Cycles150_180)},
 		{Period::Min10, supported(Period::Min10)},
 		{Period::Hour2, supported(Period::Hour2)},
+		{Period::Min10Live, supported(Period::Min10Live)},
+		{Period::Hour2Live, supported(Period::Hour2Live)},
 	};
 }
 
