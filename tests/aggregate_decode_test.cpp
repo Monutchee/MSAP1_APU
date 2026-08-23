@@ -127,6 +127,385 @@ msap1::MeterRecord aggregate_record(const AggregateSpec &spec)
 	return record;
 }
 
+/** Wire image for one M13 clock-aligned ten-minute fundamental record. */
+struct TenMinuteSpec {
+	std::uint32_t sequence = 9;
+	std::uint32_t generation = 0x12345678u;
+	std::uint32_t sample_rate_hz = 32'000;
+	std::uint32_t sample_count = 19'200'000;
+	std::uint32_t valid_mask = 0x7f;
+	bool arithmetic_error = false;
+	bool complete = true;
+	bool time_aligned = true;
+	bool contaminated = false;
+	bool boundary_valid = true;
+	std::uint32_t first_basic_sequence = 1'000;
+	std::uint32_t last_basic_sequence = 3'999;
+	std::uint32_t basic_block_count = 3'000;
+	std::uint32_t nominal_hz = 60;
+	std::uint32_t cycle_count = 36'000;
+	std::uint64_t first_sample_index = 5'000'001ull;
+	std::uint32_t overshoot_samples = 127;
+	std::array<std::int64_t, msap1::meter_channel_count>
+		rms_micro_units{};
+};
+
+msap1::MeterRecord ten_minute_record(const TenMinuteSpec &spec)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_ten_minute_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = spec.sequence;
+	record.words[4] = spec.generation;
+	record.words[5] = spec.sample_rate_hz;
+	record.words[6] = spec.sample_count;
+	record.words[7] = spec.valid_mask;
+	record.words[8] = (spec.arithmetic_error ? (1u << 0) : 0u) |
+			  (spec.complete ? (1u << 1) : 0u) |
+			  (spec.time_aligned ? (1u << 2) : 0u) |
+			  (spec.contaminated ? (1u << 3) : 0u) |
+			  (spec.boundary_valid ? (1u << 4) : 0u);
+	record.words[9] = static_cast<std::uint32_t>(spec.first_sample_index);
+	record.words[10] =
+		static_cast<std::uint32_t>(spec.first_sample_index >> 32);
+	record.words[13] = spec.basic_block_count | (spec.nominal_hz << 16);
+	record.words[14] = spec.first_basic_sequence;
+	record.words[15] = spec.last_basic_sequence;
+	for (std::size_t channel = 0;
+	     channel != msap1::meter_channel_count; ++channel) {
+		const auto bits = std::bit_cast<std::uint64_t>(
+			spec.rms_micro_units[channel]);
+		record.words[16 + channel * 2] =
+			static_cast<std::uint32_t>(bits);
+		record.words[17 + channel * 2] =
+			static_cast<std::uint32_t>(bits >> 32);
+	}
+	const auto actual_last =
+		spec.first_sample_index + spec.sample_count - 1u;
+	const auto target = actual_last - spec.overshoot_samples;
+	record.words[36] = static_cast<std::uint32_t>(actual_last);
+	record.words[37] = static_cast<std::uint32_t>(actual_last >> 32);
+	record.words[38] = 208'000'000;
+	record.words[39] = 207'000'000;
+	record.words[40] = 209'000'000;
+	record.words[41] = spec.cycle_count;
+	record.words[42] = static_cast<std::uint32_t>(target);
+	record.words[43] = static_cast<std::uint32_t>(target >> 32);
+	record.words[44] = spec.overshoot_samples;
+	return record;
+}
+
+/** Wire image for one M14 two-hour record built from twelve ten-minute images. */
+struct TwoHourSpec {
+	std::uint32_t sequence = 3;
+	std::uint32_t generation = 0x12345678u;
+	std::uint32_t sample_rate_hz = 32'000;
+	std::uint32_t sample_count = 230'400'000;
+	std::uint32_t valid_mask = 0x7f;
+	bool arithmetic_error = false;
+	bool complete = true;
+	bool time_aligned = true;
+	bool contaminated = false;
+	bool boundary_valid = true;
+	std::uint32_t first_ten_minute_sequence = 100;
+	std::uint32_t last_ten_minute_sequence = 111;
+	std::uint32_t ten_minute_count = 12;
+	std::uint32_t nominal_hz = 60;
+	std::uint32_t cycle_count = 432'000;
+	std::uint64_t first_sample_index = 25'000'001ull;
+	std::uint32_t overshoot_samples = 127;
+	std::array<std::int64_t, msap1::meter_channel_count>
+		rms_micro_units{};
+};
+
+msap1::MeterRecord two_hour_record(const TwoHourSpec &spec)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_two_hour_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = spec.sequence;
+	record.words[4] = spec.generation;
+	record.words[5] = spec.sample_rate_hz;
+	record.words[6] = spec.sample_count;
+	record.words[7] = spec.valid_mask;
+	record.words[8] = (spec.arithmetic_error ? (1u << 0) : 0u) |
+			  (spec.complete ? (1u << 1) : 0u) |
+			  (spec.time_aligned ? (1u << 2) : 0u) |
+			  (spec.contaminated ? (1u << 3) : 0u) |
+			  (spec.boundary_valid ? (1u << 4) : 0u);
+	record.words[9] = static_cast<std::uint32_t>(spec.first_sample_index);
+	record.words[10] =
+		static_cast<std::uint32_t>(spec.first_sample_index >> 32);
+	record.words[13] = spec.ten_minute_count | (spec.nominal_hz << 16);
+	record.words[14] = spec.first_ten_minute_sequence;
+	record.words[15] = spec.last_ten_minute_sequence;
+	for (std::size_t channel = 0;
+	     channel != msap1::meter_channel_count; ++channel) {
+		const auto bits = std::bit_cast<std::uint64_t>(
+			spec.rms_micro_units[channel]);
+		record.words[16 + channel * 2] = static_cast<std::uint32_t>(bits);
+		record.words[17 + channel * 2] =
+			static_cast<std::uint32_t>(bits >> 32);
+	}
+	const auto actual_last =
+		spec.first_sample_index + spec.sample_count - 1u;
+	const auto target = actual_last - spec.overshoot_samples;
+	record.words[36] = static_cast<std::uint32_t>(actual_last);
+	record.words[37] = static_cast<std::uint32_t>(actual_last >> 32);
+	record.words[38] = 208'000'000;
+	record.words[39] = 207'000'000;
+	record.words[40] = 209'000'000;
+	record.words[41] = spec.cycle_count;
+	record.words[42] = static_cast<std::uint32_t>(target);
+	record.words[43] = static_cast<std::uint32_t>(target >> 32);
+	record.words[44] = spec.overshoot_samples;
+	return record;
+}
+
+/** Convert a completed long-interval wire image into an M15 live preview. */
+msap1::MeterRecord open_interval_record(msap1::MeterRecord record,
+	std::uint32_t format, std::uint64_t remaining_samples)
+{
+	record.words[1] = format;
+	/* Clear COMPLETE and set OPEN_INTERVAL | NON_NORMATIVE while retaining
+	 * aligned/boundary status from the completed-record fixture. */
+	record.words[8] &= ~(1u << 1);
+	record.words[8] |= (1u << 5) | (1u << 6);
+	const auto actual_last =
+		(static_cast<std::uint64_t>(record.words[37]) << 32) |
+		record.words[36];
+	const auto expected_end = actual_last + remaining_samples;
+	record.words[42] = static_cast<std::uint32_t>(expected_end);
+	record.words[43] = static_cast<std::uint32_t>(expected_end >> 32);
+	record.words[44] = 0u;
+	return record;
+}
+
+void open_intervals_are_non_normative_independent_views()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto ten = open_interval_record(ten_minute_record(TenMinuteSpec{}),
+		msap1::meter_ten_minute_open_format, 96'000u);
+	const auto ten_update = registry.decode(ten);
+	require(ten_update.period == msap1::MeasurementPeriod::Min10Live &&
+		ten_update.aggregate_timing &&
+		ten_update.aggregate_timing->overshoot_samples == 0u &&
+		ten_update.aggregate_timing->target_sample_index >
+			ten.ten_minute_actual_last_sample_index(),
+		"ten-minute live preview lost its open-window provenance");
+
+	const auto two = open_interval_record(two_hour_record(TwoHourSpec{}),
+		msap1::meter_two_hour_open_format, 19'200'000u);
+	const auto two_update = registry.decode(two);
+	require(two_update.period == msap1::MeasurementPeriod::Hour2Live &&
+		two_update.aggregate_timing &&
+		two_update.aggregate_timing->basic_block_count == 12u,
+		"two-hour live preview decoded on the wrong independent view");
+
+	msap1::MeterLatestStore store;
+	store.apply(ten_update);
+	store.apply(two_update);
+	require(store.latest(msap1::MeasurementPeriod::Min10Live).has_value() &&
+		store.latest(msap1::MeasurementPeriod::Hour2Live).has_value() &&
+		!store.latest(msap1::MeasurementPeriod::Min10).has_value() &&
+		!store.latest(msap1::MeasurementPeriod::Hour2).has_value(),
+		"live previews replaced an authoritative completed interval");
+
+	auto power = ten;
+	power.words[1] = msap1::meter_ten_minute_open_power_format;
+	require(registry.decode(power).period ==
+			msap1::MeasurementPeriod::Min10Live,
+		"open-window sibling decoded on the wrong period");
+
+	auto missing_marker = ten;
+	missing_marker.words[8] &= ~(1u << 6);
+	require_throws([&] { (void)registry.decode(missing_marker); },
+		"live preview without NON_NORMATIVE marker decoded");
+}
+
+void two_hour_decodes_cascaded_provenance()
+{
+	TwoHourSpec spec{};
+	spec.rms_micro_units = {
+		3'000'000, 3'100'000, 2'900'000, 0,
+		120'000'000, 121'000'000, 122'000'000, 0,
+	};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(two_hour_record(spec));
+	require(update.period == msap1::MeasurementPeriod::Hour2 &&
+		update.kind == msap1::RecordKind::fundamental &&
+		update.fundamental.has_value() &&
+		update.aggregate_timing.has_value(),
+		"M14 record did not decode as a two-hour fundamental update");
+	require(update.fundamental->voltage_ln.phase_a.value == 122'000'000 &&
+		update.fundamental->current.neutral.valid() &&
+		update.fundamental->current.neutral.value == 0 &&
+		!update.fundamental->frequency.available(),
+		"M14 values, valid zero, or frequency availability changed");
+	const auto &timing = *update.aggregate_timing;
+	require(timing.basic_block_count == 12 &&
+		timing.cycle_count == 432'000 && timing.time_aligned &&
+		!timing.contaminated && timing.boundary_valid &&
+		timing.first_basic_sequence == 100 &&
+		timing.last_basic_sequence == 111,
+		"M14 cascaded timing provenance did not survive decoding");
+
+	msap1::MeterLatestStore store;
+	store.apply(update);
+	const auto view = store.latest(msap1::MeasurementPeriod::Hour2);
+	require(view && view->latest_sequence == spec.sequence &&
+		view->aggregate_timing &&
+		view->aggregate_timing->basic_block_count == 12,
+		"two-hour update was not retained in its independent view");
+
+	auto sibling = two_hour_record(spec);
+	sibling.words[1] = msap1::meter_two_hour_power_format;
+	sibling.words[16] = 123;
+	require(registry.decode(sibling).period ==
+			msap1::MeasurementPeriod::Hour2,
+		"two-hour power sibling decoded on the wrong period");
+	sibling.words[1] = msap1::meter_two_hour_phasor_format;
+	require(registry.decode(sibling).period ==
+			msap1::MeasurementPeriod::Hour2,
+		"two-hour phasor sibling decoded on the wrong period");
+	sibling.words[1] = msap1::meter_two_hour_unbalance_format;
+	require(registry.decode(sibling).period ==
+			msap1::MeasurementPeriod::Hour2,
+		"two-hour unbalance sibling decoded on the wrong period");
+}
+
+void two_hour_rejects_incomplete_or_discontinuous_inputs()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	auto wrong_count = TwoHourSpec{};
+	wrong_count.ten_minute_count = 11;
+	require_throws([&] { (void)registry.decode(two_hour_record(wrong_count)); },
+		"two-hour result with eleven inputs decoded");
+	auto wrong_span = TwoHourSpec{};
+	wrong_span.last_ten_minute_sequence = 112;
+	require_throws([&] { (void)registry.decode(two_hour_record(wrong_span)); },
+		"two-hour result with a discontinuous input span decoded");
+	auto incomplete = TwoHourSpec{};
+	incomplete.complete = false;
+	require_throws([&] { (void)registry.decode(two_hour_record(incomplete)); },
+		"incomplete two-hour result decoded");
+	auto wrong_boundary = two_hour_record(TwoHourSpec{});
+	++wrong_boundary.words[44];
+	require_throws([&] { (void)registry.decode(wrong_boundary); },
+		"two-hour result with false boundary provenance decoded");
+}
+
+void ten_minute_decodes_boundary_provenance()
+{
+	TenMinuteSpec spec{};
+	spec.rms_micro_units = {
+		3'000'000, 3'100'000, 2'900'000, 0,
+		120'000'000, 121'000'000, 122'000'000, 0,
+	};
+	const auto timestamp = std::chrono::system_clock::time_point{600s};
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(ten_minute_record(spec), timestamp);
+
+	require(update.period == msap1::MeasurementPeriod::Min10 &&
+		update.kind == msap1::RecordKind::fundamental &&
+		update.fundamental.has_value() &&
+		update.aggregate_timing.has_value(),
+		"M13 record did not decode as a ten-minute fundamental update");
+	const auto &values = *update.fundamental;
+	require(values.voltage_ln.phase_a.valid() &&
+		values.voltage_ln.phase_a.value == 122'000'000 &&
+		values.current.neutral.valid() &&
+		values.current.neutral.value == 0,
+		"M13 channel values or valid zero did not decode");
+	require(!values.frequency.available(),
+		"ten-minute informative frequency was advertised as valid");
+
+	const auto &timing = *update.aggregate_timing;
+	const auto actual_last =
+		spec.first_sample_index + spec.sample_count - 1u;
+	require(timing.basic_block_count == 3'000 &&
+		timing.cycle_count == 36'000 && timing.time_aligned &&
+		!timing.contaminated && timing.boundary_valid &&
+		timing.target_sample_index ==
+			actual_last - spec.overshoot_samples &&
+		timing.overshoot_samples == spec.overshoot_samples,
+		"M13 UTC-boundary provenance did not survive decoding");
+
+	msap1::MeterLatestStore store;
+	store.apply(update);
+	const auto view = store.latest(msap1::MeasurementPeriod::Min10);
+	require(view.has_value() && view->latest_sequence == spec.sequence &&
+		view->aggregate_timing.has_value() &&
+		view->aggregate_timing->time_aligned,
+		"ten-minute update was not retained in its independent view");
+}
+
+void ten_minute_contamination_is_visible_but_invalid()
+{
+	TenMinuteSpec contaminated{};
+	contaminated.rms_micro_units.fill(1'000'000);
+	contaminated.contaminated = true;
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(ten_minute_record(contaminated));
+	require(update.aggregate_timing->contaminated &&
+		update.fundamental->voltage_ln.phase_a.quality ==
+			msap1::MeasurementQuality::invalid,
+		"a startup-contaminated ten-minute interval appeared valid");
+
+	/* Sibling records carry the same interval state in status bits even
+	 * though their payload words are occupied by their own quantities. */
+	auto power_record = ten_minute_record(contaminated);
+	power_record.words[1] = msap1::meter_ten_minute_power_format;
+	power_record.words[16] = 123;
+	power_record.words[18] = 456;
+	const auto power = registry.decode(power_record);
+	require(power.period == msap1::MeasurementPeriod::Min10 &&
+		power.power.has_value() &&
+		power.power->active_power.phase_a.quality ==
+			msap1::MeasurementQuality::invalid,
+		"ten-minute sibling ignored contaminated interval status");
+}
+
+void ten_minute_rejects_inconsistent_boundaries()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	require(registry.decode(ten_minute_record(TenMinuteSpec{}))
+			.aggregate_timing.has_value(),
+		"baseline ten-minute record did not decode");
+
+	auto wrong_cycles = TenMinuteSpec{};
+	wrong_cycles.cycle_count = 35'999;
+	require_throws([&] {
+		(void)registry.decode(ten_minute_record(wrong_cycles));
+	}, "ten-minute record with an inconsistent cycle count decoded");
+
+	auto wrong_span = TenMinuteSpec{};
+	wrong_span.last_basic_sequence = 4'000;
+	require_throws([&] {
+		(void)registry.decode(ten_minute_record(wrong_span));
+	}, "ten-minute record with a nonconsecutive basic span decoded");
+
+	auto wrong_actual = ten_minute_record(TenMinuteSpec{});
+	++wrong_actual.words[36];
+	require_throws([&] {
+		(void)registry.decode(wrong_actual);
+	}, "ten-minute record with a false actual boundary decoded");
+
+	auto wrong_overshoot = ten_minute_record(TenMinuteSpec{});
+	++wrong_overshoot.words[44];
+	require_throws([&] {
+		(void)registry.decode(wrong_overshoot);
+	}, "ten-minute record with a false boundary overshoot decoded");
+
+	auto incomplete = TenMinuteSpec{};
+	incomplete.complete = false;
+	require_throws([&] {
+		(void)registry.decode(ten_minute_record(incomplete));
+	}, "an incomplete ten-minute aggregate decoded");
+}
+
 /* AGG-v3 (M11): the line-line words decode with pair validity. */
 void aggregate_decodes_line_line()
 {
@@ -561,6 +940,12 @@ int main()
 	try {
 		aggregate_decodes_line_line();
 		aggregate_siblings_decode();
+		ten_minute_decodes_boundary_provenance();
+		ten_minute_contamination_is_visible_but_invalid();
+		ten_minute_rejects_inconsistent_boundaries();
+		two_hour_decodes_cascaded_provenance();
+		two_hour_rejects_incomplete_or_discontinuous_inputs();
+		open_intervals_are_non_normative_independent_views();
 		reference_reproduces_constant_inputs();
 		reference_matches_hand_computed_vectors();
 		decode_reference_built_record_60hz();

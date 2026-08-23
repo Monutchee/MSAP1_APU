@@ -217,6 +217,9 @@ bool MeterHistorianService::rebuilds_volatile_period(
 		case MeasurementPeriod::Cycles150_180: return Dataset::cycles_150_180;
 		case MeasurementPeriod::Min10: return Dataset::minutes_10;
 		case MeasurementPeriod::Hour2: return Dataset::hours_2;
+		case MeasurementPeriod::Min10Live:
+		case MeasurementPeriod::Hour2Live:
+			return std::nullopt;
 		}
 		return std::nullopt;
 	}();
@@ -273,6 +276,13 @@ bool MeterHistorianService::ingest(
 				"historian_record_skipped");
 		return false;
 	}
+	/* M15 open-window records are explicitly non-normative operational
+	 * previews. They share the durable transport with completed records so
+	 * all consumers see one ordered contract, but they must never enter the
+	 * compliance historian. consume() still acknowledges this cursor. */
+	if (update.period == MeasurementPeriod::Min10Live ||
+	    update.period == MeasurementPeriod::Hour2Live)
+		return false;
 	store_->append(update, envelope.cursor,
 		envelope.timing.utc_start_nanoseconds.value_or(
 			envelope.ingested_at_nanoseconds));

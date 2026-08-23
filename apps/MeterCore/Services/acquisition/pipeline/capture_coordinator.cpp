@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -149,8 +150,66 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		  * can refuse to extrapolate across a rate change. */
 		 .sample_rate_hz = sample_rate,
 		 .configuration_generation = configuration_.wire.generation,
-		 .utc_synchronized = clock_status.synchronized},
+			 .utc_synchronized = clock_status.synchronized},
 		now);
+
+	/*
+	 * M13 maps the NEXT wall-clock ten-minute boundary into the same
+	 * free-running sample-counter domain as the aggregation engine. The PL
+	 * then advances the target by sample_rate * 600 after every close, so
+	 * Linux only needs to seed each new capture/configuration epoch.
+	 *
+	 * Use a ceiling division: closing one sample early would assign a block
+	 * to the wrong UTC interval, while closing on the first eligible basic
+	 * block at/after the target is explicitly represented by the record's
+	 * overshoot field.
+	 */
+	if (!ten_minute_boundary_programmed_ && sample_rate != 0u &&
+	    clock_status.synchronized) {
+		static constexpr std::uint64_t interval_ns =
+			600ull * 1'000'000'000ull;
+		const auto remainder = sync->realtime_nanoseconds % interval_ns;
+		const auto delta_ns = interval_ns - remainder;
+		if (delta_ns >
+		    std::numeric_limits<std::uint64_t>::max() / sample_rate) {
+			log_message(config_log, mnc::logging::Priority::error,
+				"ten-minute UTC boundary mapping overflowed",
+				"ten_minute_boundary_overflow");
+			return;
+		}
+		const auto scaled = delta_ns * sample_rate;
+		const auto frames_until_boundary =
+			(scaled + 1'000'000'000ull - 1ull) /
+			1'000'000'000ull;
+		if (sync->sample_counter >
+		    std::numeric_limits<std::uint64_t>::max() -
+			    frames_until_boundary) {
+			log_message(config_log, mnc::logging::Priority::error,
+				"ten-minute PL sample target overflowed",
+				"ten_minute_boundary_overflow");
+			return;
+		}
+		const auto target =
+			sync->sample_counter + frames_until_boundary;
+		try {
+			waveform_.program_ten_minute_boundary(target, true);
+			ten_minute_boundary_programmed_ = true;
+			log_message(config_log, mnc::logging::Priority::notice,
+				"programmed next UTC ten-minute aggregation boundary",
+				"ten_minute_boundary_programmed",
+				{{"MNC_TARGET_SAMPLE_INDEX",
+				  std::to_string(target)},
+				 {"MNC_SAMPLE_RATE_HZ",
+				  std::to_string(sample_rate)}});
+		} catch (const std::exception &error) {
+			/* Retain the synchronized measurement timebase and retry this
+			 * independent control write at the next cadence. */
+			log_message(config_log, mnc::logging::Priority::error,
+				"failed to program ten-minute boundary: " +
+					std::string(error.what()),
+				"ten_minute_boundary_program_failed");
+		}
+	}
 }
 
 void CaptureCoordinator::configure_meter()
@@ -198,6 +257,7 @@ void CaptureCoordinator::start(bool apply_configuration)
 	 * not packet loss and must not increment the health gap counter.
 	 */
 	ingest_.begin_epoch();
+	ten_minute_boundary_programmed_ = false;
 	try {
 		/*
 		 * Both DMA consumers must own their S2MM channels before the
@@ -270,6 +330,15 @@ void CaptureCoordinator::stop() noexcept
 	log_message(dma_log, mnc::logging::Priority::info,
 		"meter DMA device closed: " + std::string(meter_.name()),
 		"dma_closed", {{"MNC_DEVICE", std::string(meter_.name())}});
+	try {
+		waveform_.program_ten_minute_boundary(0u, false);
+	} catch (const std::exception &error) {
+		log_message(config_log, mnc::logging::Priority::warning,
+			"failed to invalidate ten-minute boundary: " +
+				std::string(error.what()),
+			"ten_minute_boundary_invalidate_failed");
+	}
+	ten_minute_boundary_programmed_ = false;
 	waveform_.stop();
 	running_ = false;
 	health_.on_capture_stopped();

@@ -28,6 +28,8 @@ constexpr unsigned long waveform_correlate_ioctl =
 	_IOR('W', 0x01, WaveformCorrelationIoctl);
 constexpr unsigned long waveform_transport_status_ioctl =
 	_IOR('W', 0x02, WaveformTransportStatusIoctl);
+constexpr unsigned long waveform_ten_minute_boundary_ioctl =
+	_IOW('W', 0x03, WaveformTenMinuteBoundaryIoctl);
 
 /*
  * Session outcomes are journaled here, where the state transitions happen:
@@ -608,6 +610,21 @@ std::optional<WaveformTimeSync> WaveformCapture::time_sync() const noexcept
 		realtime_before + (realtime_after - realtime_before) / 2u,
 		realtime_after - realtime_before,
 	};
+}
+
+void WaveformCapture::program_ten_minute_boundary(
+	std::uint64_t target_sample_index, bool valid)
+{
+	if (fd_ < 0)
+		throw std::runtime_error(
+			"program ten-minute boundary: waveform device is closed");
+	WaveformTenMinuteBoundaryIoctl request{
+		target_sample_index,
+		valid ? 1u : 0u,
+		0u,
+	};
+	if (::ioctl(fd_, waveform_ten_minute_boundary_ioctl, &request) != 0)
+		throw_errno("program ten-minute boundary");
 }
 
 void WaveformCapture::update_transport_status() noexcept

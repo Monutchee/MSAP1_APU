@@ -49,6 +49,8 @@ mnc::meter::MeasurementPeriod MeterPublicationCatalog::period(std::string_view i
 	if (id == "cycles150_180") return Period::Cycles150_180;
 	if (id == "min10") return Period::Min10;
 	if (id == "hour2") return Period::Hour2;
+	if (id == "min10_live") return Period::Min10Live;
+	if (id == "hour2_live") return Period::Hour2Live;
 	throw std::invalid_argument("unknown meter publication period");
 }
 
@@ -61,6 +63,8 @@ std::string MeterPublicationCatalog::period_id(
 		return "cycles150_180";
 	case mnc::meter::MeasurementPeriod::Min10: return "min10";
 	case mnc::meter::MeasurementPeriod::Hour2: return "hour2";
+	case mnc::meter::MeasurementPeriod::Min10Live: return "min10_live";
+	case mnc::meter::MeasurementPeriod::Hour2Live: return "hour2_live";
 	}
 	return "unknown";
 }

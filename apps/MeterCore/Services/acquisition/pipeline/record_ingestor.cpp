@@ -108,6 +108,8 @@ void MeterRecordIngestor::begin_epoch()
 {
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
+	last_ten_minute_sequence_.reset();
+	last_two_hour_sequence_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -115,6 +117,8 @@ void MeterRecordIngestor::begin_epoch()
 	last_aggregate_record_time_.reset();
 	sequence_gaps_ = 0;
 	aggregate_sequence_gaps_ = 0;
+	ten_minute_sequence_gaps_ = 0;
+	two_hour_sequence_gaps_ = 0;
 }
 
 void MeterRecordIngestor::clear_latest()
@@ -124,6 +128,8 @@ void MeterRecordIngestor::clear_latest()
 	 * that must not be counted as packet loss. */
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
+	last_ten_minute_sequence_.reset();
+	last_two_hour_sequence_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -287,6 +293,82 @@ bool MeterRecordIngestor::track_aggregate_continuity(
 }
 
 /*
+ * Clock-aligned ten-minute (M13) records are a third independent producer
+ * stream. Its first record is normally sequence 1 even when hundreds or
+ * thousands of basic records have already been accepted. Treating that
+ * sequence as basic continuity rejects the valid boundary record as stale.
+ *
+ * Only the fundamental M13 record advances this baseline. Its power,
+ * phasor, and unbalance siblings describe the same interval and deliberately
+ * repeat the same sequence.
+ */
+bool MeterRecordIngestor::track_ten_minute_continuity(
+	const msap1::MeterRecord &record)
+{
+	if (!last_ten_minute_sequence_)
+		return true;
+	const auto expected = *last_ten_minute_sequence_ + 1u;
+	const auto received = record.sequence();
+	const auto forward_distance = received - expected;
+	if (forward_distance == 0u)
+		return true;
+	if (forward_distance < (std::uint32_t{1} << 31u)) {
+		ten_minute_sequence_gaps_ += forward_distance;
+		log_message(dma_log, mnc::logging::Priority::warning,
+			"ten-minute record sequence gap: expected " +
+				std::to_string(expected) + ", got " +
+				std::to_string(received),
+			"meter_ten_minute_sequence_gap",
+			{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
+			 {"MNC_SEQUENCE", std::to_string(received)}});
+		return true;
+	}
+	++invalid_records_;
+	log_rejected_record(
+		"stale or out-of-order ten-minute sequence (expected " +
+			std::to_string(expected) + ", received " +
+			std::to_string(received) + ")",
+		"meter_record_stale_rejected", record);
+	return false;
+}
+
+/*
+ * Two-hour (M14) records form a fourth independent stream. The fundamental
+ * record alone advances the baseline; the power, phasor, and unbalance
+ * siblings intentionally repeat its sequence because they describe the
+ * same twelve-ten-minute interval.
+ */
+bool MeterRecordIngestor::track_two_hour_continuity(
+	const msap1::MeterRecord &record)
+{
+	if (!last_two_hour_sequence_)
+		return true;
+	const auto expected = *last_two_hour_sequence_ + 1u;
+	const auto received = record.sequence();
+	const auto forward_distance = received - expected;
+	if (forward_distance == 0u)
+		return true;
+	if (forward_distance < (std::uint32_t{1} << 31u)) {
+		two_hour_sequence_gaps_ += forward_distance;
+		log_message(dma_log, mnc::logging::Priority::warning,
+			"two-hour record sequence gap: expected " +
+				std::to_string(expected) + ", got " +
+				std::to_string(received),
+			"meter_two_hour_sequence_gap",
+			{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
+			 {"MNC_SEQUENCE", std::to_string(received)}});
+		return true;
+	}
+	++invalid_records_;
+	log_rejected_record(
+		"stale or out-of-order two-hour sequence (expected " +
+			std::to_string(expected) + ", received " +
+			std::to_string(received) + ")",
+		"meter_record_stale_rejected", record);
+	return false;
+}
+
+/*
  * Field-incident forensics, covering EVERY silent rejection path. The
  * 2026-08-13..15 PL emission fault emits one partially-written record per
  * aggregate window; depending on where the truncation lands, the record
@@ -433,13 +515,41 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		record.record_format() == msap1::meter_aggregate_power_format ||
 		record.record_format() == msap1::meter_aggregate_phasor_format ||
 		record.record_format() ==
-			msap1::meter_aggregate_unbalance_format;
+			msap1::meter_aggregate_unbalance_format ||
+		record.record_format() == msap1::meter_ten_minute_power_format ||
+		record.record_format() == msap1::meter_ten_minute_phasor_format ||
+		record.record_format() ==
+			msap1::meter_ten_minute_unbalance_format ||
+		record.record_format() == msap1::meter_two_hour_power_format ||
+		record.record_format() == msap1::meter_two_hour_phasor_format ||
+		record.record_format() == msap1::meter_two_hour_unbalance_format ||
+		record.record_format() == msap1::meter_ten_minute_open_power_format ||
+		record.record_format() == msap1::meter_ten_minute_open_phasor_format ||
+		record.record_format() == msap1::meter_ten_minute_open_unbalance_format ||
+		record.record_format() == msap1::meter_two_hour_open_power_format ||
+		record.record_format() == msap1::meter_two_hour_open_phasor_format ||
+		record.record_format() == msap1::meter_two_hour_open_unbalance_format;
 	const bool aggregate =
 		record.record_format() == msap1::meter_aggregate_format;
-	if (!sibling &&
-	    (aggregate ? !track_aggregate_continuity(record)
-		       : !track_basic_continuity(record)))
-		return;
+	const bool ten_minute =
+		record.record_format() == msap1::meter_ten_minute_format;
+	const bool two_hour =
+		record.record_format() == msap1::meter_two_hour_format;
+	const bool open_preview =
+		record.record_format() == msap1::meter_ten_minute_open_format ||
+		record.record_format() == msap1::meter_two_hour_open_format;
+	/* Preview sequences are diagnostic and intentionally lossy. They have
+	 * independent producer spaces, and a missing preview never means the
+	 * authoritative completed stream lost a result. */
+	if (!sibling && !open_preview) {
+		const auto continuous =
+			aggregate ? track_aggregate_continuity(record)
+			: ten_minute ? track_ten_minute_continuity(record)
+			: two_hour ? track_two_hour_continuity(record)
+				     : track_basic_continuity(record);
+		if (!continuous)
+			return;
+	}
 	/*
 	 * Decode-validate before publication: a record whose timing fields are
 	 * malformed (zero-sample block, overflowing sample range, impossible
@@ -539,7 +649,18 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 				? update.aggregate_timing->time_quality
 				: msap1::meter::TimeQuality::Unsynchronized;
 		last_aggregate_record_time_ = Clock::now();
-	} else if (record.record_format() == msap1::meter_periodic_format) {
+	} else if (ten_minute) {
+		/* M13 has its own cadence and sequence space. It is retained by
+		 * MeterData under MeasurementPeriod::Min10, but never replaces
+		 * either the basic or 150/180-cycle raw-record cache. */
+		last_ten_minute_sequence_ = record.sequence();
+	} else if (two_hour) {
+		/* M14 is retained under MeasurementPeriod::Hour2 and has its own
+		 * producer sequence. Its four records must never replace a shorter
+		 * tier's raw-record cache or continuity baseline. */
+		last_two_hour_sequence_ = record.sequence();
+	} else if (!open_preview &&
+		   record.record_format() == msap1::meter_periodic_format) {
 		/* ONLY the BASIC record refreshes the instantaneous-readings
 		 * cache and the basic continuity baseline. Sibling records
 		 * must not: the basic-period siblings share their BASIC

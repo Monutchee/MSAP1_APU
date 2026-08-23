@@ -14,7 +14,7 @@ namespace {
 std::size_t period_index(MeasurementPeriod period)
 {
 	const auto index = static_cast<std::size_t>(period);
-	if (index >= 4)
+	if (index >= 6)
 		throw std::invalid_argument("invalid measurement period");
 	return index;
 }
@@ -26,6 +26,57 @@ Reading<Unit> reading(std::int64_t value, bool valid, std::uint64_t sequence,
 	return {value,
 		valid ? MeasurementQuality::valid : MeasurementQuality::unavailable,
 		sequence, timestamp, window};
+}
+
+struct AggregatePayloadState {
+	bool arithmetic_error = false;
+	bool invalid = false;
+};
+
+AggregatePayloadState aggregate_payload_state(const MeterRecord &record,
+					       MeasurementPeriod period)
+{
+	if (period != MeasurementPeriod::Min10 &&
+	    period != MeasurementPeriod::Hour2 &&
+	    period != MeasurementPeriod::Min10Live &&
+	    period != MeasurementPeriod::Hour2Live)
+		return {};
+	const auto status = (period == MeasurementPeriod::Hour2 ||
+			     period == MeasurementPeriod::Hour2Live)
+		? record.two_hour_status()
+		: record.ten_minute_status();
+	const bool preview = period == MeasurementPeriod::Min10Live ||
+		period == MeasurementPeriod::Hour2Live;
+	const bool preview_contract_invalid = preview &&
+		(status.complete || !status.open_interval || !status.non_normative);
+	/* Bit 1 is the complete flag only on the fundamental record. The
+	 * phasor and unbalance siblings retain their established bit-1
+	 * phasor-invalid meaning, so their interval validity is carried by
+	 * the shared aligned/contaminated/boundary bits instead. */
+	const bool incomplete =
+		(record.record_format() == meter_ten_minute_format ||
+		 record.record_format() == meter_two_hour_format) &&
+		!status.complete;
+	return {
+		status.arithmetic_error,
+		incomplete || preview_contract_invalid || !status.time_aligned ||
+			status.contaminated ||
+			!status.boundary_valid,
+	};
+}
+
+template<typename Unit>
+Reading<Unit> payload_reading(std::int64_t value, bool available,
+			      AggregatePayloadState state,
+			      std::uint64_t sequence, SystemTime timestamp,
+			      SampleWindow window)
+{
+	const auto quality = state.arithmetic_error
+		? MeasurementQuality::arithmetic_error
+		: state.invalid ? MeasurementQuality::invalid
+				: available ? MeasurementQuality::valid
+					    : MeasurementQuality::unavailable;
+	return {value, quality, sequence, timestamp, window};
 }
 
 } // namespace
@@ -316,11 +367,13 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
  */
 template<typename Unit>
 Reading<Unit> aggregate_reading(std::int64_t value, bool channel_valid,
-				bool arithmetic_error, std::uint64_t sequence,
+				bool arithmetic_error, bool force_invalid,
+				std::uint64_t sequence,
 				SystemTime timestamp, SampleWindow window)
 {
 	const auto quality = arithmetic_error
 		? MeasurementQuality::arithmetic_error
+		: force_invalid ? MeasurementQuality::invalid
 		: channel_valid ? MeasurementQuality::valid
 				: MeasurementQuality::unavailable;
 	return {value, quality, sequence, timestamp, window};
@@ -329,10 +382,11 @@ Reading<Unit> aggregate_reading(std::int64_t value, bool channel_valid,
 FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 						      std::uint64_t sequence,
 						      SystemTime received_at,
-						      SampleWindow window)
+						      SampleWindow window,
+						      bool arithmetic_error,
+						      bool force_invalid)
 {
 	FundamentalValues fundamental{};
-	const auto status = record.aggregate_status();
 	/*
 	 * The MTR2 frequency field is informational only: it is the mean of
 	 * the 15 basic frequency estimates, not a standardized measurement.
@@ -353,14 +407,14 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 		return aggregate_reading<MicroAmperes>(
 			record.aggregate_rms_micro_units(channel),
 			(valid_mask & (1u << channel)) != 0u,
-			status.arithmetic_error, sequence, received_at,
+			arithmetic_error, force_invalid, sequence, received_at,
 			window);
 	};
 	const auto voltage = [&](std::size_t channel) {
 		return aggregate_reading<MicroVolts>(
 			record.aggregate_rms_micro_units(channel),
 			(valid_mask & (1u << channel)) != 0u,
-			status.arithmetic_error, sequence, received_at,
+			arithmetic_error, force_invalid, sequence, received_at,
 			window);
 	};
 	/* Hardware channel order is Ia, Ib, Ic, In, Vc, Vb, Va, debug. */
@@ -374,7 +428,7 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 			static_cast<std::int64_t>(record.word(word)),
 			(valid_mask & (1u << lane_a)) != 0u &&
 				(valid_mask & (1u << lane_b)) != 0u,
-			status.arithmetic_error, sequence, received_at,
+			arithmetic_error, force_invalid, sequence, received_at,
 			window);
 	};
 	fundamental.voltage_ll = {voltage_pair(38, 6, 5), voltage_pair(39, 5, 4),
@@ -420,6 +474,7 @@ MeterUpdate decode_power_payload(const MeterRecord &record,
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const auto payload_state = aggregate_payload_state(record, period);
 	const auto valid_mask = record.valid_mask();
 	const auto lane_valid = [&](unsigned lane) {
 		return (valid_mask & (1u << lane)) != 0u;
@@ -445,31 +500,35 @@ MeterUpdate decode_power_payload(const MeterRecord &record,
 		const auto p = word_s64(base);
 		const auto s_va = word_s64(base + 2);
 		const auto pf = static_cast<std::int32_t>(record.word(base + 4));
-		phase_p[phase] = reading<Picowatts>(p, valid, sequence,
-						     received_at, window);
-		phase_s[phase] = reading<PicoVoltAmperes>(s_va, valid, sequence,
-							   received_at, window);
+		phase_p[phase] = payload_reading<Picowatts>(
+			p, valid, payload_state, sequence, received_at, window);
+		phase_s[phase] = payload_reading<PicoVoltAmperes>(
+			s_va, valid, payload_state, sequence, received_at, window);
 		/* PF is undefined at S == 0: publish it as unavailable, not
 		 * as a confident zero. */
-		phase_pf[phase] = reading<PowerFactorMillionths>(
-			pf, valid && s_va != 0, sequence, received_at, window);
+		phase_pf[phase] = payload_reading<PowerFactorMillionths>(
+			pf, valid && s_va != 0, payload_state, sequence,
+			received_at, window);
 	}
 	values.active_power = {phase_p[0], phase_p[1], phase_p[2]};
 	values.apparent_power = {phase_s[0], phase_s[1], phase_s[2]};
 	values.power_factor = {phase_pf[0], phase_pf[1], phase_pf[2]};
 	const bool totals_valid = lane_valid(6) && lane_valid(0);
 	const auto total_s = word_s64(33);
-	values.total_active_power = reading<Picowatts>(
-		word_s64(31), totals_valid, sequence, received_at, window);
-	values.total_apparent_power = reading<PicoVoltAmperes>(
-		total_s, totals_valid, sequence, received_at, window);
-	values.total_power_factor = reading<PowerFactorMillionths>(
+	values.total_active_power = payload_reading<Picowatts>(
+		word_s64(31), totals_valid, payload_state, sequence,
+		received_at, window);
+	values.total_apparent_power = payload_reading<PicoVoltAmperes>(
+		total_s, totals_valid, payload_state, sequence, received_at,
+		window);
+	values.total_power_factor = payload_reading<PowerFactorMillionths>(
 		static_cast<std::int32_t>(record.word(35)),
-		totals_valid && total_s != 0, sequence, received_at, window);
+		totals_valid && total_s != 0, payload_state, sequence,
+		received_at, window);
 	const auto crest = [&](unsigned lane) {
-		return reading<CrestTenThousandths>(record.word(36u + lane),
-						     lane_valid(lane), sequence,
-						     received_at, window);
+		return payload_reading<CrestTenThousandths>(
+			record.word(36u + lane), lane_valid(lane), payload_state,
+			sequence, received_at, window);
 	};
 	values.current_crest = {crest(0), crest(1), crest(2), crest(3)};
 	values.voltage_crest = {crest(6), crest(5), crest(4)};
@@ -500,6 +559,38 @@ MeterUpdate decode_aggregate_power_meter_record(const MeterRecord &record,
 				    MeasurementPeriod::Cycles150_180);
 }
 
+MeterUpdate decode_ten_minute_power_meter_record(const MeterRecord &record,
+						 SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_ten_minute_power_format,
+				    MeasurementPeriod::Min10);
+}
+
+MeterUpdate decode_two_hour_power_meter_record(const MeterRecord &record,
+					       SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_two_hour_power_format,
+				    MeasurementPeriod::Hour2);
+}
+
+MeterUpdate decode_ten_minute_open_power_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_ten_minute_open_power_format,
+				    MeasurementPeriod::Min10Live);
+}
+
+MeterUpdate decode_two_hour_open_power_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_power_payload(record, received_at,
+				    meter_two_hour_open_power_format,
+				    MeasurementPeriod::Hour2Live);
+}
+
 namespace {
 
 MeterUpdate decode_phasor_payload(const MeterRecord &record,
@@ -522,17 +613,21 @@ MeterUpdate decode_phasor_payload(const MeterRecord &record,
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const auto payload_state = aggregate_payload_state(record, period);
 	const auto valid_mask = record.valid_mask();
 	/* Status bit 1: a merged cycle lacked a frequency reference — the
 	 * values exist but are garbage, which is `invalid`, never a silent
 	 * `unavailable`. */
-	const bool block_invalid = (record.word(8) & 0x2u) != 0u;
+	const bool block_invalid = (record.word(8) & 0x2u) != 0u ||
+				   payload_state.invalid;
 	const auto flags = record.word(51);
 	const bool reference_valid = (flags & 0x100u) != 0u;
 	const auto lane_valid = [&](unsigned lane) {
 		return (valid_mask & (1u << lane)) != 0u;
 	};
 	const auto quality = [&](bool available) {
+		if (payload_state.arithmetic_error)
+			return MeasurementQuality::arithmetic_error;
 		if (block_invalid)
 			return MeasurementQuality::invalid;
 		return available ? MeasurementQuality::valid
@@ -677,6 +772,38 @@ MeterUpdate decode_aggregate_phasor_meter_record(const MeterRecord &record,
 				     MeasurementPeriod::Cycles150_180);
 }
 
+MeterUpdate decode_ten_minute_phasor_meter_record(const MeterRecord &record,
+						  SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_ten_minute_phasor_format,
+				     MeasurementPeriod::Min10);
+}
+
+MeterUpdate decode_two_hour_phasor_meter_record(const MeterRecord &record,
+					        SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_two_hour_phasor_format,
+				     MeasurementPeriod::Hour2);
+}
+
+MeterUpdate decode_ten_minute_open_phasor_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_ten_minute_open_phasor_format,
+				     MeasurementPeriod::Min10Live);
+}
+
+MeterUpdate decode_two_hour_open_phasor_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_phasor_payload(record, received_at,
+				     meter_two_hour_open_phasor_format,
+				     MeasurementPeriod::Hour2Live);
+}
+
 namespace {
 
 MeterUpdate decode_unbalance_payload(const MeterRecord &record,
@@ -699,7 +826,9 @@ MeterUpdate decode_unbalance_payload(const MeterRecord &record,
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	const auto window = sample_window(sample_count, record.sample_rate_hz());
-	const bool block_invalid = (record.word(8) & 0x2u) != 0u;
+	const auto payload_state = aggregate_payload_state(record, period);
+	const bool block_invalid = (record.word(8) & 0x2u) != 0u ||
+				   payload_state.invalid;
 	const auto flags = record.word(32);
 	const bool v_ratios_valid = (flags & 0x1u) != 0u;
 	const bool i_ratios_valid = (flags & 0x2u) != 0u;
@@ -710,6 +839,8 @@ MeterUpdate decode_unbalance_payload(const MeterRecord &record,
 	const bool v_lanes = (valid_mask & 0x70u) == 0x70u; /* Vc/Vb/Va */
 	const bool i_lanes = (valid_mask & 0x07u) == 0x07u; /* Ia/Ib/Ic */
 	const auto quality = [&](bool available) {
+		if (payload_state.arithmetic_error)
+			return MeasurementQuality::arithmetic_error;
 		if (block_invalid)
 			return MeasurementQuality::invalid;
 		return available ? MeasurementQuality::valid
@@ -799,6 +930,38 @@ MeterUpdate decode_aggregate_unbalance_meter_record(const MeterRecord &record,
 					MeasurementPeriod::Cycles150_180);
 }
 
+MeterUpdate decode_ten_minute_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_ten_minute_unbalance_format,
+					MeasurementPeriod::Min10);
+}
+
+MeterUpdate decode_two_hour_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_two_hour_unbalance_format,
+					MeasurementPeriod::Hour2);
+}
+
+MeterUpdate decode_ten_minute_open_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_ten_minute_open_unbalance_format,
+					MeasurementPeriod::Min10Live);
+}
+
+MeterUpdate decode_two_hour_open_unbalance_meter_record(
+	const MeterRecord &record, SystemTime received_at)
+{
+	return decode_unbalance_payload(record, received_at,
+					meter_two_hour_open_unbalance_format,
+					MeasurementPeriod::Hour2Live);
+}
+
 MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 					 SystemTime received_at)
 {
@@ -868,6 +1031,7 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample_index;
 	timing.sample_count = sample_count;
+	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.cycle_count = timing_word.cycle_count;
 	timing.nominal_frequency = nominal;
 	timing.cycle_locked = timing_word.cycle_locked;
@@ -956,7 +1120,8 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	update.sequence = sequence;
 	update.configuration_generation = record.configuration_generation();
 	update.fundamental = decode_aggregate_fundamental_values(
-		record, sequence, received_at, window);
+		record, sequence, received_at, window,
+		record.aggregate_status().arithmetic_error, false);
 
 	const auto status = record.aggregate_status();
 	meter::AggregateTiming timing{};
@@ -964,6 +1129,7 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample_index;
 	timing.sample_count = sample_count;
+	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.first_basic_sequence = record.first_basic_sequence();
 	timing.last_basic_sequence = record.last_basic_sequence();
 	timing.basic_block_count = composition.basic_block_count;
@@ -974,6 +1140,296 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	/* TimeQuality/utc_start/utc_uncertainty_ns are stamped by the caller:
 	 * UTC state lives in the APU MeasurementTimebase, never in the PL
 	 * record. */
+	update.aggregate_timing = timing;
+	return update;
+}
+
+namespace {
+
+MeterUpdate decode_open_interval_meter_record(
+	const MeterRecord &record, SystemTime received_at,
+	std::uint32_t expected_format, MeasurementPeriod period)
+{
+	if (!record.header_valid() || record.record_format() != expected_format)
+		throw std::invalid_argument("invalid open aggregate record");
+	const auto status = record.ten_minute_status();
+	if (status.complete || !status.open_interval || !status.non_normative)
+		throw std::invalid_argument(
+			"open aggregate lacks its non-normative interval markers");
+
+	const auto composition = record.ten_minute_composition();
+	if ((composition.nominal_frequency_hz != 50u &&
+	     composition.nominal_frequency_hz != 60u) ||
+	    composition.basic_block_count == 0u || composition.cycle_count == 0u)
+		throw std::invalid_argument("open aggregate has an invalid composition");
+	const auto nominal = composition.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+	const auto first_sequence = record.first_basic_sequence();
+	const auto last_sequence = record.last_basic_sequence();
+	if (static_cast<std::uint32_t>(last_sequence - first_sequence) !=
+	    static_cast<std::uint32_t>(composition.basic_block_count - 1u))
+		throw std::invalid_argument(
+			"open aggregate source sequence span is not consecutive");
+
+	const auto sample_count = record.aggregate_sample_count();
+	const auto first_sample = record.aggregate_first_sample_index();
+	if (sample_count == 0u || first_sample == 0u ||
+	    first_sample > std::numeric_limits<std::uint64_t>::max() -
+			   static_cast<std::uint64_t>(sample_count - 1u))
+		throw std::invalid_argument("open aggregate has an invalid sample range");
+	const auto actual_last = record.ten_minute_actual_last_sample_index();
+	if (actual_last != first_sample + sample_count - 1u)
+		throw std::invalid_argument(
+			"open aggregate last sample does not match its range");
+	const auto expected_end = record.ten_minute_target_sample_index();
+	if (expected_end < actual_last || record.ten_minute_overshoot_samples() != 0u)
+		throw std::invalid_argument(
+			"open aggregate expected end or overshoot is inconsistent");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool invalid_interval = status.contaminated || !status.time_aligned ||
+				      !status.boundary_valid;
+	MeterUpdate update{};
+	update.period = period;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = decode_aggregate_fundamental_values(
+		record, sequence, received_at, window, status.arithmetic_error,
+		invalid_interval);
+
+	meter::AggregateTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample;
+	timing.sample_count = sample_count;
+	timing.sample_rate_hz = record.sample_rate_hz();
+	timing.first_basic_sequence = first_sequence;
+	timing.last_basic_sequence = last_sequence;
+	timing.basic_block_count = composition.basic_block_count;
+	timing.cycle_count = composition.cycle_count;
+	timing.nominal_frequency = nominal;
+	timing.arithmetic_error = status.arithmetic_error;
+	timing.frequency_valid = false;
+	timing.time_aligned = status.time_aligned;
+	timing.contaminated = status.contaminated;
+	timing.boundary_valid = status.boundary_valid;
+	/* For an open record this is the expected interval end, not a boundary
+	 * already crossed. The current end is derivable from first+count. */
+	timing.target_sample_index = expected_end;
+	timing.overshoot_samples = 0u;
+	update.aggregate_timing = timing;
+	return update;
+}
+
+} // namespace
+
+MeterUpdate decode_ten_minute_open_meter_record(const MeterRecord &record,
+						 SystemTime received_at)
+{
+	return decode_open_interval_meter_record(
+		record, received_at, meter_ten_minute_open_format,
+		MeasurementPeriod::Min10Live);
+}
+
+MeterUpdate decode_two_hour_open_meter_record(const MeterRecord &record,
+					      SystemTime received_at)
+{
+	return decode_open_interval_meter_record(
+		record, received_at, meter_two_hour_open_format,
+		MeasurementPeriod::Hour2Live);
+}
+
+MeterUpdate decode_ten_minute_meter_record(const MeterRecord &record,
+					    SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_ten_minute_format)
+		throw std::invalid_argument("invalid ten-minute aggregate record");
+
+	const auto status = record.ten_minute_status();
+	if (!status.complete)
+		throw std::invalid_argument(
+			"ten-minute aggregate is not marked complete");
+	const auto composition = record.ten_minute_composition();
+	if (composition.nominal_frequency_hz != 50u &&
+	    composition.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in ten-minute composition");
+	if (composition.basic_block_count == 0u || composition.cycle_count == 0u)
+		throw std::invalid_argument(
+			"ten-minute aggregate has an empty composition");
+	const auto nominal = composition.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+	const auto expected_cycles =
+		static_cast<std::uint64_t>(composition.basic_block_count) *
+		cycles_per_basic_block(nominal);
+	if (composition.cycle_count != expected_cycles)
+		throw std::invalid_argument(
+			"ten-minute aggregate cycle count does not match its blocks");
+
+	const auto first_basic = record.first_basic_sequence();
+	const auto last_basic = record.last_basic_sequence();
+	const auto basic_span = static_cast<std::uint32_t>(last_basic - first_basic);
+	if (basic_span !=
+	    static_cast<std::uint32_t>(composition.basic_block_count - 1u))
+		throw std::invalid_argument(
+			"ten-minute basic sequence span is not consecutive");
+
+	const auto sample_count = record.aggregate_sample_count();
+	const auto first_sample = record.aggregate_first_sample_index();
+	if (sample_count == 0u || first_sample == 0u)
+		throw std::invalid_argument(
+			"ten-minute aggregate has an empty sample range");
+	if (first_sample >
+	    std::numeric_limits<std::uint64_t>::max() -
+		static_cast<std::uint64_t>(sample_count - 1u))
+		throw std::invalid_argument(
+			"ten-minute sample range overflows the 64-bit counter");
+	const auto expected_last = first_sample + sample_count - 1u;
+	const auto actual_last = record.ten_minute_actual_last_sample_index();
+	if (actual_last != expected_last)
+		throw std::invalid_argument(
+			"ten-minute actual boundary does not match its sample range");
+	const auto target = record.ten_minute_target_sample_index();
+	if (target > actual_last)
+		throw std::invalid_argument(
+			"ten-minute target boundary follows its actual boundary");
+	const auto overshoot = actual_last - target;
+	if (overshoot > std::numeric_limits<std::uint32_t>::max() ||
+	    record.ten_minute_overshoot_samples() != overshoot)
+		throw std::invalid_argument(
+			"ten-minute boundary overshoot is inconsistent");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool invalid_interval = status.contaminated || !status.time_aligned ||
+				      !status.boundary_valid;
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Min10;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = decode_aggregate_fundamental_values(
+		record, sequence, received_at, window, status.arithmetic_error,
+		invalid_interval);
+
+	meter::AggregateTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample;
+	timing.sample_count = sample_count;
+	timing.sample_rate_hz = record.sample_rate_hz();
+	timing.first_basic_sequence = first_basic;
+	timing.last_basic_sequence = last_basic;
+	timing.basic_block_count = composition.basic_block_count;
+	timing.cycle_count = composition.cycle_count;
+	timing.nominal_frequency = nominal;
+	timing.arithmetic_error = status.arithmetic_error;
+	timing.frequency_valid = false;
+	timing.time_aligned = status.time_aligned;
+	timing.contaminated = status.contaminated;
+	timing.boundary_valid = status.boundary_valid;
+	timing.target_sample_index = target;
+	timing.overshoot_samples = record.ten_minute_overshoot_samples();
+	update.aggregate_timing = timing;
+	return update;
+}
+
+MeterUpdate decode_two_hour_meter_record(const MeterRecord &record,
+					   SystemTime received_at)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_two_hour_format)
+		throw std::invalid_argument("invalid two-hour aggregate record");
+
+	const auto status = record.two_hour_status();
+	if (!status.complete)
+		throw std::invalid_argument(
+			"two-hour aggregate is not marked complete");
+	const auto composition = record.two_hour_composition();
+	if (composition.nominal_frequency_hz != 50u &&
+	    composition.nominal_frequency_hz != 60u)
+		throw std::invalid_argument(
+			"invalid nominal frequency in two-hour composition");
+	/* M14 is deliberately the one cascaded aggregate: exactly twelve
+	 * complete ten-minute accumulator images enter one result. */
+	constexpr std::uint16_t intervals_per_two_hours = 12u;
+	if (composition.basic_block_count != intervals_per_two_hours ||
+	    composition.cycle_count == 0u)
+		throw std::invalid_argument(
+			"two-hour aggregate is not built from twelve intervals");
+	const auto nominal = composition.nominal_frequency_hz == 50u
+		? NominalFrequency::Hz50
+		: NominalFrequency::Hz60;
+
+	const auto first_interval = record.first_basic_sequence();
+	const auto last_interval = record.last_basic_sequence();
+	const auto interval_span =
+		static_cast<std::uint32_t>(last_interval - first_interval);
+	if (interval_span != intervals_per_two_hours - 1u)
+		throw std::invalid_argument(
+			"two-hour ten-minute sequence span is not consecutive");
+
+	const auto sample_count = record.aggregate_sample_count();
+	const auto first_sample = record.aggregate_first_sample_index();
+	if (sample_count == 0u || first_sample == 0u)
+		throw std::invalid_argument(
+			"two-hour aggregate has an empty sample range");
+	if (first_sample >
+	    std::numeric_limits<std::uint64_t>::max() -
+		static_cast<std::uint64_t>(sample_count - 1u))
+		throw std::invalid_argument(
+			"two-hour sample range overflows the 64-bit counter");
+	const auto expected_last = first_sample + sample_count - 1u;
+	const auto actual_last = record.two_hour_actual_last_sample_index();
+	if (actual_last != expected_last)
+		throw std::invalid_argument(
+			"two-hour actual boundary does not match its sample range");
+	const auto target = record.two_hour_target_sample_index();
+	if (target > actual_last)
+		throw std::invalid_argument(
+			"two-hour target boundary follows its actual boundary");
+	const auto overshoot = actual_last - target;
+	if (overshoot > std::numeric_limits<std::uint32_t>::max() ||
+	    record.two_hour_overshoot_samples() != overshoot)
+		throw std::invalid_argument(
+			"two-hour boundary overshoot is inconsistent");
+
+	const auto sequence = static_cast<std::uint64_t>(record.sequence());
+	const auto window = sample_window(sample_count, record.sample_rate_hz());
+	const bool invalid_interval = status.contaminated || !status.time_aligned ||
+				      !status.boundary_valid;
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Hour2;
+	update.kind = RecordKind::fundamental;
+	update.sequence = sequence;
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = decode_aggregate_fundamental_values(
+		record, sequence, received_at, window, status.arithmetic_error,
+		invalid_interval);
+
+	meter::AggregateTiming timing{};
+	timing.sequence = sequence;
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample;
+	timing.sample_count = sample_count;
+	timing.sample_rate_hz = record.sample_rate_hz();
+	timing.first_basic_sequence = first_interval;
+	timing.last_basic_sequence = last_interval;
+	timing.basic_block_count = composition.basic_block_count;
+	timing.cycle_count = composition.cycle_count;
+	timing.nominal_frequency = nominal;
+	timing.arithmetic_error = status.arithmetic_error;
+	timing.frequency_valid = false;
+	timing.time_aligned = status.time_aligned;
+	timing.contaminated = status.contaminated;
+	timing.boundary_valid = status.boundary_valid;
+	timing.target_sample_index = target;
+	timing.overshoot_samples = record.two_hour_overshoot_samples();
 	update.aggregate_timing = timing;
 	return update;
 }
@@ -1027,6 +1483,66 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 			return decode_aggregate_unbalance_meter_record(
 				record, received_at);
 		});
+	result.register_decoder(meter_ten_minute_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_power_meter_record(record,
+							       received_at);
+		});
+	result.register_decoder(meter_ten_minute_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_phasor_meter_record(record,
+							        received_at);
+		});
+	result.register_decoder(meter_ten_minute_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_unbalance_meter_record(record,
+							           received_at);
+		});
+	result.register_decoder(meter_two_hour_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_power_meter_record(record,
+							  received_at);
+		});
+	result.register_decoder(meter_two_hour_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_phasor_meter_record(record,
+							   received_at);
+		});
+	result.register_decoder(meter_two_hour_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_unbalance_meter_record(record,
+							     received_at);
+		});
+	result.register_decoder(meter_ten_minute_open_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_open_power_meter_record(record,
+							    received_at);
+		});
+	result.register_decoder(meter_ten_minute_open_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_open_phasor_meter_record(record,
+							     received_at);
+		});
+	result.register_decoder(meter_ten_minute_open_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_open_unbalance_meter_record(
+				record, received_at);
+		});
+	result.register_decoder(meter_two_hour_open_power_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_open_power_meter_record(record,
+							  received_at);
+		});
+	result.register_decoder(meter_two_hour_open_phasor_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_open_phasor_meter_record(record,
+							   received_at);
+		});
+	result.register_decoder(meter_two_hour_open_unbalance_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_open_unbalance_meter_record(
+				record, received_at);
+		});
 	result.register_decoder(meter_periodic_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_periodic_meter_record(record,
@@ -1038,6 +1554,24 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_aggregate_meter_record(record,
 							     received_at);
+		});
+	result.register_decoder(meter_ten_minute_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_two_hour_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_meter_record(record, received_at);
+		});
+	result.register_decoder(meter_ten_minute_open_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_ten_minute_open_meter_record(record,
+							    received_at);
+		});
+	result.register_decoder(meter_two_hour_open_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_two_hour_open_meter_record(record,
+							 received_at);
 		});
 	return result;
 }

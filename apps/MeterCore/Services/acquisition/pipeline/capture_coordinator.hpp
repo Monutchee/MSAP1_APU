@@ -174,6 +174,10 @@ private:
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
+	/* True after the next UTC ten-minute boundary has been mapped into the
+	 * active PL sample-counter epoch. Capture/configuration restarts clear it
+	 * and force a fresh mapping. */
+	bool ten_minute_boundary_programmed_ = false;
 	msap1::meter_stream::MeterRecordStreamClient meter_stream_;
 	MeterRecordIngestor ingest_;
 	msap1::meter::InProcessMeterSnapshotProvider snapshot_provider_;

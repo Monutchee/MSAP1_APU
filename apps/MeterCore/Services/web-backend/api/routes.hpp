@@ -85,6 +85,18 @@ webengine::Response get_meter_single_cycle(AppContext &,
 /** @brief GET /api/v1/meter/aggregate — newest 150/180-cycle aggregate. */
 webengine::Response get_meter_aggregate(AppContext &,
 					const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/minutes-10 — newest aligned ten-minute block. */
+webengine::Response get_meter_ten_minute(AppContext &,
+					 const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/hours-2 — newest finalized two-hour block. */
+webengine::Response get_meter_two_hour(AppContext &,
+				       const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/minutes-10/live — open non-normative preview. */
+webengine::Response get_meter_ten_minute_live(AppContext &,
+					      const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/hours-2/live — open non-normative preview. */
+webengine::Response get_meter_two_hour_live(AppContext &,
+					    const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/configuration/frequency — active config. */
 webengine::Response
 get_frequency_configuration(AppContext &,
@@ -241,6 +253,18 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/aggregate",
 	 webengine::Role::Viewer, &get_meter_aggregate,
 	 "Newest 150/180-cycle aggregate RMS values"},
+	{webengine::http::verb::get, "/api/v1/meter/minutes-10",
+	 webengine::Role::Viewer, &get_meter_ten_minute,
+	 "Newest clock-aligned ten-minute aggregate"},
+	{webengine::http::verb::get, "/api/v1/meter/hours-2",
+	 webengine::Role::Viewer, &get_meter_two_hour,
+	 "Newest finalized two-hour aggregate"},
+	{webengine::http::verb::get, "/api/v1/meter/minutes-10/live",
+	 webengine::Role::Viewer, &get_meter_ten_minute_live,
+	 "Newest open non-normative ten-minute preview"},
+	{webengine::http::verb::get, "/api/v1/meter/hours-2/live",
+	 webengine::Role::Viewer, &get_meter_two_hour_live,
+	 "Newest open non-normative two-hour preview"},
 	{webengine::http::verb::get, "/api/v1/meter/single-cycle",
 	 webengine::Role::Viewer, &get_meter_single_cycle,
 	 "Latest single-cycle diagnostic (RMS, VLL, per-phase power)"},

@@ -34,10 +34,23 @@ struct MeterSnapshotTiming {
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 	std::optional<std::uint64_t> first_sample_index;
 	std::optional<std::uint32_t> sample_count;
+	std::optional<std::uint32_t> sample_rate_hz;
 	/* Keep this wider than the current product wire field: generic consumers
 	 * should not inherit an MSAP1-specific limit when longer windows appear. */
 	std::optional<std::uint32_t> cycle_count;
 	std::optional<std::uint32_t> nominal_frequency_hz;
+	/* Aggregate provenance. These fields are absent for a Basic block. For
+	 * live partial intervals, expected_end_sample_index identifies the
+	 * programmed normative boundary while sample_count describes only the
+	 * samples accumulated so far. */
+	std::optional<std::uint32_t> source_interval_count;
+	std::optional<std::uint64_t> first_source_sequence;
+	std::optional<std::uint64_t> last_source_sequence;
+	std::optional<std::uint64_t> expected_end_sample_index;
+	std::optional<std::uint32_t> overshoot_samples;
+	std::optional<bool> time_aligned;
+	std::optional<bool> contaminated;
+	std::optional<bool> boundary_valid;
 };
 
 struct MeterAttributeValue {

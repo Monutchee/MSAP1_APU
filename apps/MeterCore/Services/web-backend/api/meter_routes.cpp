@@ -84,17 +84,6 @@ struct MeterTimingDto {
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
-/** One catalog attribute in GET /api/v1/meter/readings: quantities that
- * are not per-channel RMS values (line-line voltages, power, PF, ...),
- * published generically so new PL quantities appear without new fields.
- * `value` is in base engineering units (V, W, VA, PF as a ratio). */
-struct MeterAttributeDto {
-	std::string key;
-	std::string unit;
-	bool valid;
-	double value;
-};
-
 /** Body of GET /api/v1/meter/readings. */
 struct MeterReadingsDto {
 	std::uint64_t sequence;
@@ -113,56 +102,6 @@ struct MeterReadingsDto {
 	/* Absent (omitted from the JSON) until timing provenance exists. */
 	std::optional<MeterTimingDto> timing;
 };
-
-/** Engineering projection of one snapshot attribute for the DTO. */
-inline MeterAttributeDto attribute_dto(
-	const mnc::meter::MeterAttributeValue &reading)
-{
-	const auto descriptor = mnc::meter::describe(reading.attribute);
-	double value = 0.0;
-	const char *unit = "";
-	switch (reading.unit) {
-	case mnc::meter::MeterUnit::MilliHertz:
-		value = static_cast<double>(reading.value) / 1e3;
-		unit = "Hz";
-		break;
-	case mnc::meter::MeterUnit::MicroVolts:
-		value = static_cast<double>(reading.value) / 1e6;
-		unit = "V";
-		break;
-	case mnc::meter::MeterUnit::MicroAmperes:
-		value = static_cast<double>(reading.value) / 1e6;
-		unit = "A";
-		break;
-	case mnc::meter::MeterUnit::Picowatts:
-		value = static_cast<double>(reading.value) / 1e12;
-		unit = "W";
-		break;
-	case mnc::meter::MeterUnit::PicoVoltAmperes:
-		value = static_cast<double>(reading.value) / 1e12;
-		unit = "VA";
-		break;
-	case mnc::meter::MeterUnit::PowerFactorMillionths:
-		value = static_cast<double>(reading.value) / 1e6;
-		unit = "PF";
-		break;
-	case mnc::meter::MeterUnit::Picovars:
-		value = static_cast<double>(reading.value) / 1e12;
-		unit = "var";
-		break;
-	case mnc::meter::MeterUnit::Millidegrees:
-		/* The PL publishes the 0..359.999-degree convention directly. */
-		value = static_cast<double>(reading.value) / 1000.0;
-		unit = "deg";
-		break;
-	case mnc::meter::MeterUnit::RatioMillionths:
-		value = static_cast<double>(reading.value) / 10000.0;
-		unit = "%";
-		break;
-	}
-	return {std::string(descriptor.key), unit,
-		reading.quality == mnc::meter::ReadingQuality::Valid, value};
-}
 
 /* time_quality_name(), the channel name table, the per-channel unit, and the
  * micro-unit scaling are shared with the aggregate endpoint; they live in
@@ -707,6 +646,86 @@ webengine::Response get_meter_aggregate(AppContext &app,
 		log_api_failure("/api/v1/meter/aggregate", error);
 		return error_response(
 			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_ten_minute(AppContext &app,
+					 const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Min10;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto aggregate = meter_ten_minute_dto(response);
+		if (!aggregate)
+			return json_response(webengine::http::status::ok,
+				MeterTenMinuteUnavailableDto{});
+		return json_response(webengine::http::status::ok, *aggregate);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/minutes-10", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_two_hour(AppContext &app,
+				       const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Hour2;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto aggregate = meter_two_hour_dto(response);
+		if (!aggregate)
+			return json_response(webengine::http::status::ok,
+				MeterTwoHourUnavailableDto{});
+		return json_response(webengine::http::status::ok, *aggregate);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/hours-2", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_ten_minute_live(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Min10Live;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto preview = meter_ten_minute_live_dto(response);
+		if (!preview)
+			return json_response(webengine::http::status::ok,
+				MeterTenMinuteUnavailableDto{});
+		return json_response(webengine::http::status::ok, *preview);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/minutes-10/live", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_two_hour_live(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		mnc::meter::MeterSnapshotRequest selection{};
+		selection.period = mnc::meter::MeasurementPeriod::Hour2Live;
+		const auto response = app.acquisition.meter_snapshot(selection);
+		require_acquisition_ok(response.status);
+		const auto preview = meter_two_hour_live_dto(response);
+		if (!preview)
+			return json_response(webengine::http::status::ok,
+				MeterTwoHourUnavailableDto{});
+		return json_response(webengine::http::status::ok, *preview);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/hours-2/live", error);
+		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
 }

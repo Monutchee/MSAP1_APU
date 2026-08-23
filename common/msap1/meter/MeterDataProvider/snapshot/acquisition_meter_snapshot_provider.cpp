@@ -17,6 +17,32 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 	};
 	if (period == mnc::meter::MeasurementPeriod::Basic)
 		result.insert(result.begin(), {Id::Frequency, std::nullopt});
+	for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
+			      Id::ActivePowerA, Id::ActivePowerB,
+			      Id::ActivePowerC, Id::ActivePowerTotal,
+			      Id::ApparentPowerA, Id::ApparentPowerB,
+			      Id::ApparentPowerC, Id::ApparentPowerTotal,
+			      Id::PowerFactorA, Id::PowerFactorB,
+			      Id::PowerFactorC, Id::PowerFactorTotal,
+			      Id::ReactivePowerA, Id::ReactivePowerB,
+			      Id::ReactivePowerC, Id::ReactivePowerTotal,
+			      Id::DisplacementPowerFactorA,
+			      Id::DisplacementPowerFactorB,
+			      Id::DisplacementPowerFactorC,
+			      Id::DisplacementPowerFactorTotal,
+			      Id::VoltagePhaseAngleA, Id::VoltagePhaseAngleB,
+			      Id::VoltagePhaseAngleC, Id::CurrentPhaseAngleA,
+			      Id::CurrentPhaseAngleB, Id::CurrentPhaseAngleC,
+			      Id::VoltageUnbalance, Id::CurrentUnbalance,
+			      Id::VoltageZeroSequenceRatio,
+			      Id::CurrentZeroSequenceRatio,
+			      Id::ZeroSequenceVoltage,
+			      Id::PositiveSequenceVoltage,
+			      Id::NegativeSequenceVoltage,
+			      Id::ZeroSequenceCurrent,
+			      Id::PositiveSequenceCurrent,
+			      Id::NegativeSequenceCurrent})
+		result.push_back({id, std::nullopt});
 	return result;
 }
 
@@ -29,6 +55,10 @@ AcquisitionMeterSnapshotProvider::capabilities() const
 	return {
 		{Period::Basic, supported(Period::Basic)},
 		{Period::Cycles150_180, supported(Period::Cycles150_180)},
+		{Period::Min10, supported(Period::Min10)},
+		{Period::Hour2, supported(Period::Hour2)},
+		{Period::Min10Live, supported(Period::Min10Live)},
+		{Period::Hour2Live, supported(Period::Hour2Live)},
 	};
 }
 

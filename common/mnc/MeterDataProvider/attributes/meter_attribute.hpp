@@ -21,10 +21,14 @@ enum class MeasurementPeriod : std::uint8_t {
 	 * 180 cycles at 60 Hz nominal.
 	 */
 	Cycles150_180,
-	/** Reserved for a future PL ten-minute product. */
+	/** Clock-aligned ten-minute aggregate of eligible Basic blocks. */
 	Min10,
-	/** Reserved for a future PL two-hour product. */
+	/** Twelve completed, aligned ten-minute intervals. */
 	Hour2,
+	/** Non-normative view of the currently open ten-minute interval. */
+	Min10Live,
+	/** Non-normative view of the currently open two-hour interval. */
+	Hour2Live,
 };
 
 /**

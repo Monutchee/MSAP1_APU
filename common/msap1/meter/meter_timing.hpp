@@ -33,9 +33,8 @@ enum class NominalFrequency : std::uint8_t {
 };
 
 /**
- * Aggregation tier of a decoded meter update. Basic and the 150/180-cycle
- * tier are produced today; the longer tiers are reserved for future
- * aggregate record formats.
+ * Aggregation tier of a decoded meter update. Basic, 150/180-cycle,
+ * clock-aligned ten-minute, and two-hour tiers are produced today.
  */
 using MeasurementPeriod = mnc::meter::MeasurementPeriod;
 
@@ -97,6 +96,7 @@ struct BlockTiming {
 	/* Actual samples in this block — varies with grid frequency when
 	 * cycle-locked; equals the fallback window in free-run. */
 	std::uint32_t sample_count = 0;
+	std::uint32_t sample_rate_hz = 0;
 	/* Complete cycles closed in this block (10 or 12 when locked). */
 	std::uint16_t cycle_count = 0;
 	NominalFrequency nominal_frequency = NominalFrequency::Hz60;
@@ -134,7 +134,7 @@ class_a_aggregation_eligible(const BlockTiming &timing)
 }
 
 /**
- * Timing identity of one decoded 150/180-cycle aggregate record.
+ * Timing identity of one decoded aggregate record.
  *
  * The PL is the authoritative aggregator: it folds exactly 15 consecutive
  * ELIGIBLE basic blocks (same generation, same nominal, sample-range
@@ -153,22 +153,35 @@ struct AggregateTiming {
 	 * 64-bit free-running conversion counter — the same domain as
 	 * BlockTiming::first_sample_index. */
 	std::uint64_t first_sample_index = 0;
-	/* Total samples across the 15 contributing basic blocks. */
+	/* Total samples across all contributing basic blocks. */
 	std::uint32_t sample_count = 0;
-	/* BASIC-stream sequence range folded into this aggregate
-	 * (inclusive), for correlation with the basic record stream. */
+	std::uint32_t sample_rate_hz = 0;
+	/* Source-tier sequence range folded into this aggregate (inclusive).
+	 * This is the BASIC stream for 150/180-cycle and ten-minute records,
+	 * and the TEN-MINUTE stream for the two-hour record.  The legacy field
+	 * names are retained to avoid churn in existing consumers. */
 	std::uint32_t first_basic_sequence = 0;
 	std::uint32_t last_basic_sequence = 0;
-	/* Contributing basic blocks: 15 on every emitted record. */
+	/* Contributing source intervals: 15 basic blocks for 150/180-cycle,
+	 * variable basic blocks for ten-minute, and 12 ten-minute intervals for
+	 * two-hour. */
 	std::uint16_t basic_block_count = 0;
-	/* Total complete cycles: 150 at a 50 Hz nominal, 180 at 60 Hz. */
-	std::uint16_t cycle_count = 0;
+	/* Total complete cycles in this interval. */
+	std::uint32_t cycle_count = 0;
 	NominalFrequency nominal_frequency = NominalFrequency::Hz60;
 	bool arithmetic_error = false;
 	/* Mean-frequency validity: set only when all 15 basic frequency
 	 * readings were valid (informative — the standardized frequency
 	 * interval is the 10 s tier, not this one). */
 	bool frequency_valid = false;
+	/* M13/M14 boundary provenance. These remain false/absent for the
+	 * 150/180-cycle tier. A contaminated interval is still retained for
+	 * diagnostics, but its electrical readings decode as invalid. */
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+	std::optional<std::uint64_t> target_sample_index;
+	std::optional<std::uint32_t> overshoot_samples;
 	TimeQuality time_quality = TimeQuality::Unsynchronized;
 	/* UTC of the first sample via the measurement timebase mapping;
 	 * absent while unsynchronized. */

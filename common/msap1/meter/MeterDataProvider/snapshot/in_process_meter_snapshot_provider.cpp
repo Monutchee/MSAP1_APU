@@ -35,9 +35,29 @@ std::optional<mnc::meter::MeterSnapshotTiming> snapshot_timing(
 	result.quality = time_quality(timing.time_quality);
 	result.first_sample_index = timing.first_sample_index;
 	result.sample_count = timing.sample_count;
+	result.sample_rate_hz = timing.sample_rate_hz;
 	result.cycle_count = timing.cycle_count;
 	result.nominal_frequency_hz =
 		static_cast<std::uint32_t>(timing.nominal_frequency);
+	if constexpr (requires {
+		timing.basic_block_count;
+		timing.first_basic_sequence;
+		timing.last_basic_sequence;
+		timing.target_sample_index;
+		timing.overshoot_samples;
+		timing.time_aligned;
+		timing.contaminated;
+		timing.boundary_valid;
+	}) {
+		result.source_interval_count = timing.basic_block_count;
+		result.first_source_sequence = timing.first_basic_sequence;
+		result.last_source_sequence = timing.last_basic_sequence;
+		result.expected_end_sample_index = timing.target_sample_index;
+		result.overshoot_samples = timing.overshoot_samples;
+		result.time_aligned = timing.time_aligned;
+		result.contaminated = timing.contaminated;
+		result.boundary_valid = timing.boundary_valid;
+	}
 	if (timing.utc_start) {
 		result.utc_start_nanoseconds =
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -92,9 +112,6 @@ MeterAttributeValue unavailable(MeterAttributeKey attribute)
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
 	using Id = MeterAttributeId;
-	if (period == msap1::MeasurementPeriod::Min10 ||
-	    period == msap1::MeasurementPeriod::Hour2)
-		return {};
 	std::vector<MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -106,7 +123,7 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 							       std::nullopt});
 	}
 	{
-		/* Both tiers carry line-line RMS, the finalized power
+		/* All implemented tiers carry line-line RMS, the finalized power
 		 * quantities, the fundamental phasors, and the symmetrical
 		 * components since M11 (the basic tier since M7..M10; the
 		 * aggregate tier's AGG record quad). Frequency stays
@@ -156,6 +173,12 @@ InProcessMeterSnapshotProvider::capabilities() const
 		{MeasurementPeriod::Basic, supported(MeasurementPeriod::Basic)},
 		{MeasurementPeriod::Cycles150_180,
 		 supported(MeasurementPeriod::Cycles150_180)},
+		{MeasurementPeriod::Min10, supported(MeasurementPeriod::Min10)},
+		{MeasurementPeriod::Hour2, supported(MeasurementPeriod::Hour2)},
+		{MeasurementPeriod::Min10Live,
+		 supported(MeasurementPeriod::Min10Live)},
+		{MeasurementPeriod::Hour2Live,
+		 supported(MeasurementPeriod::Hour2Live)},
 	};
 }
 
