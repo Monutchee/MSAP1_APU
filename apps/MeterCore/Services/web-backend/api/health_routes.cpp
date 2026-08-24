@@ -31,6 +31,7 @@ struct HealthDto {
 	bool healthy;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
+	AggregationHealthDto aggregation;
 	bool frequency_arithmetic_ok;
 	bool backend_running;
 	bool nginx_running;
@@ -76,6 +77,7 @@ HealthDto system_health(const msap1::InfoResponse &response,
 		meter.healthy && nginx_ok,
 		meter.acquisition,
 		meter.adc,
+		meter.aggregation,
 		meter.frequency_arithmetic_ok,
 		true,
 		nginx_ok,

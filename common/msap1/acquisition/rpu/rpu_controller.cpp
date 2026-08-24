@@ -68,4 +68,10 @@ msap1_adc_health_payload RpuController::query_health()
 	return decode_adc_health(transact(MSAP1_RPU_MSG_ADC_HEALTH_GET));
 }
 
+msap1_aggregation_health_payload RpuController::query_aggregation_health()
+{
+	return decode_aggregation_health(
+		transact(MSAP1_RPU_MSG_AGGREGATION_HEALTH_GET));
+}
+
 } // namespace msap1::acquisition

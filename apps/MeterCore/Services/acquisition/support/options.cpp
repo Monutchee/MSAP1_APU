@@ -14,6 +14,8 @@ void usage(const char *program)
 		<< "Usage: " << program << " [options]\n"
 		<< "  --service NAME       RPMsg service (default: mncos-r5c0-ctrl)\n"
 		<< "  --rpmsg-device PATH  Use an existing /dev/rpmsgN endpoint\n"
+		<< "  --aggregation-service NAME R5C1 diagnostic service (default: mncos-r5c1-ctrl)\n"
+		<< "  --aggregation-rpmsg-device PATH Use an existing R5C1 /dev/rpmsgN endpoint\n"
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
 		<< "  --waveform-device PATH Waveform DMA device (default: /dev/msap1-waveform)\n"
 		<< "  --waveform-directory PATH Completed waveform storage\n"
@@ -38,6 +40,10 @@ Options parse_options(int argc, char **argv)
 			options.service = value;
 		else if (option == "--rpmsg-device")
 			options.rpmsg_device = value;
+		else if (option == "--aggregation-service")
+			options.aggregation_service = value;
+		else if (option == "--aggregation-rpmsg-device")
+			options.aggregation_rpmsg_device = value;
 		else if (option == "--meter-device")
 			options.meter_device = value;
 		else if (option == "--waveform-device")

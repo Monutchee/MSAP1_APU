@@ -321,6 +321,14 @@ MeterHealthDto meter_health_dto(const msap1::InfoResponse &response)
 	degraded_reasons.reserve(status.adc_degraded_reasons.size());
 	for (const auto &reason : status.adc_degraded_reasons)
 		degraded_reasons.push_back({reason.code, reason.message});
+	std::vector<HealthReasonDto> aggregation_reasons;
+	aggregation_reasons.reserve(status.aggregation_degraded_reasons.size());
+	for (const auto &reason : status.aggregation_degraded_reasons)
+		aggregation_reasons.push_back({reason.code, reason.message});
+
+	msap1_aggregation_health_payload aggregation{};
+	if (response.has_aggregation_health)
+		aggregation = response.rpu_aggregation_health.value();
 	return {
 		status.healthy,
 		{response.running, response.has_meter_record,
@@ -358,8 +366,40 @@ MeterHealthDto meter_health_dto(const msap1::InfoResponse &response)
 		 adc.simulator_active_generation,
 		 adc.simulator_frame_count,
 		 adc.simulator_saturation_count,
-		 adc.simulator_missed_sample_count,
-		 std::move(degraded_reasons)},
+			 adc.simulator_missed_sample_count,
+			 std::move(degraded_reasons)},
+		{status.aggregation_health_available,
+		 status.aggregation_healthy,
+		 status.aggregation_authoritative,
+		 status.aggregation_transport_available,
+		 status.aggregation_transport_initialized,
+		 status.aggregation_input_healthy,
+		 status.aggregation_engine_ready,
+		 status.aggregation_output_ready,
+		 status.aggregation_output_active,
+		 response.aggregation_health_probe_pending,
+		 response.aggregation_health_probe_failures,
+		 response.aggregation_health_age_ms,
+		 response.aggregation_rpmsg_device,
+		 aggregation.health_flags,
+		 aggregation.frames_received,
+		 aggregation.frames_valid,
+		 aggregation.frames_invalid,
+		 aggregation.crc_errors,
+		 aggregation.format_errors,
+		 aggregation.sequence_gaps,
+		 aggregation.ring_overflows,
+		 aggregation.fifo_errors,
+		 aggregation.length_errors,
+		 aggregation.records_queued,
+		 aggregation.records_emitted,
+		 aggregation.output_errors,
+		 aggregation.output_drops,
+		 aggregation.basic_completed,
+		 aggregation.aggregate_completed,
+		 aggregation.ten_minute_completed,
+		 aggregation.two_hour_completed,
+		 std::move(aggregation_reasons)},
 		status.frequency_arithmetic_ok,
 	};
 }

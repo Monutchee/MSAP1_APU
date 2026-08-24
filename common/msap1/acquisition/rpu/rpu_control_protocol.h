@@ -39,6 +39,18 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_ADC_DIAGNOSTIC_RUN = 14,
 	MSAP1_RPU_MSG_ADC_DIAGNOSTIC = 15,
 	MSAP1_RPU_MSG_SIMULATOR_EVENT_SET = 16,
+	MSAP1_RPU_MSG_AGGREGATION_HEALTH_GET = 17,
+	MSAP1_RPU_MSG_AGGREGATION_HEALTH = 18,
+};
+
+enum msap1_aggregation_health_flag {
+	MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE = 1u << 0,
+	MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED = 1u << 1,
+	MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY = 1u << 2,
+	MSAP1_AGGREGATION_HEALTH_ENGINE_READY = 1u << 3,
+	MSAP1_AGGREGATION_HEALTH_OUTPUT_READY = 1u << 4,
+	MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE = 1u << 5,
+	MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE = 1u << 6,
 };
 
 enum msap1_rpu_status_code {
@@ -450,6 +462,40 @@ struct msap1_adc_diagnostic_payload {
 	struct msap1_adc_diagnostic_snapshot reset_asserted;
 	struct msap1_adc_diagnostic_snapshot reset_defaults;
 	struct msap1_adc_diagnostic_snapshot after;
+} __attribute__((packed));
+
+/*
+ * R5C1 aggregation-offload diagnostics. Meter payloads remain on the AXI
+ * FIFO/DMA path; RPMsg carries only this bounded health snapshot.
+ */
+struct msap1_aggregation_health_payload {
+	uint32_t health_flags;
+	uint32_t frames_received;
+	uint32_t frames_valid;
+	uint32_t frames_invalid;
+	uint32_t crc_errors;
+	uint32_t format_errors;
+	uint32_t sequence_gaps;
+	uint32_t repeated_frames;
+	uint32_t out_of_order_frames;
+	uint32_t ring_overflows;
+	uint32_t fifo_errors;
+	uint32_t length_errors;
+	uint32_t records_queued;
+	uint32_t records_emitted;
+	uint32_t output_errors;
+	uint32_t output_drops;
+	uint32_t basic_completed;
+	uint32_t aggregate_completed;
+	uint32_t ten_minute_completed;
+	uint32_t two_hour_completed;
+	uint32_t last_input_sequence;
+	uint32_t expected_input_sequence;
+	uint32_t last_output_sequence;
+	uint32_t last_fifo_error;
+	uint32_t last_frame_length;
+	uint32_t last_validation_error;
+	uint32_t last_tx_vacancy;
 } __attribute__((packed));
 
 #ifdef __cplusplus

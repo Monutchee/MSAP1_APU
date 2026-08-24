@@ -16,6 +16,12 @@ bool meter_flag(const msap1_adc_health_payload &health, std::uint32_t flag)
 	return (health.meter_health_flags & flag) != 0u;
 }
 
+bool aggregation_flag(const msap1_aggregation_health_payload &health,
+		      std::uint32_t flag)
+{
+	return (health.health_flags & flag) != 0u;
+}
+
 void append_reason(std::vector<HealthReason> &reasons, std::string code,
 		   std::string message)
 {
@@ -94,6 +100,60 @@ evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health)
 	return reasons;
 }
 
+std::vector<HealthReason> evaluate_rpu_aggregation_health_reasons(
+	const msap1_aggregation_health_payload &health)
+{
+	std::vector<HealthReason> reasons;
+	if (!aggregation_flag(
+		    health, MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE))
+		append_reason(reasons, "transport_unavailable",
+			      "R5C1 AXI FIFO transport is unavailable");
+	if (!aggregation_flag(
+		    health, MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED))
+		append_reason(reasons, "transport_not_initialized",
+			      "R5C1 AXI FIFO transport is not initialized");
+	if (!aggregation_flag(health, MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY))
+		append_reason(reasons, "input_unhealthy",
+			      "R5C1 aggregation input stream is not healthy");
+	if (health.fifo_errors != 0u)
+		append_reason(reasons, "fifo_errors",
+			      "R5C1 reports " +
+				      std::to_string(health.fifo_errors) +
+				      " AXI FIFO error(s)");
+	if (health.crc_errors != 0u || health.format_errors != 0u ||
+	    health.length_errors != 0u)
+		append_reason(reasons, "invalid_input_frames",
+			      "R5C1 rejected aggregation input frame(s)");
+	if (health.ring_overflows != 0u)
+		append_reason(reasons, "input_ring_overflow",
+			      "R5C1 aggregation input ring overflowed");
+
+	/* Engine/output readiness is required only after R5C1 declares itself
+	 * authoritative. During shadow validation these zero flags document the
+	 * incomplete cutover rather than a production meter failure. */
+	if (aggregation_flag(health, MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE)) {
+		if (!aggregation_flag(health,
+				      MSAP1_AGGREGATION_HEALTH_ENGINE_READY))
+			append_reason(reasons, "engine_not_ready",
+				      "R5C1 aggregation engine is not ready");
+		if (!aggregation_flag(health,
+				      MSAP1_AGGREGATION_HEALTH_OUTPUT_READY))
+			append_reason(reasons, "output_not_ready",
+				      "R5C1 aggregation output is not ready");
+		if (!aggregation_flag(health,
+				      MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE))
+			append_reason(reasons, "output_inactive",
+				      "R5C1 aggregation output is inactive");
+		if (health.output_errors != 0u)
+			append_reason(reasons, "output_errors",
+				      "R5C1 reports aggregation output errors");
+		if (health.output_drops != 0u)
+			append_reason(reasons, "output_drops",
+				      "R5C1 dropped aggregation output records");
+	}
+	return reasons;
+}
+
 MeterHealth evaluate_meter_health(const InfoResponse &response)
 {
 	const auto adc = response.rpu_health.value();
@@ -148,6 +208,30 @@ MeterHealth evaluate_meter_health(const InfoResponse &response)
 	// Only an arithmetic error means the PL metering path itself is unhealthy.
 	result.frequency_arithmetic_ok =
 		response.has_meter_record && !frequency.arithmetic_error;
+	result.aggregation_health_available = response.has_aggregation_health;
+	if (response.has_aggregation_health) {
+		const auto aggregation = response.rpu_aggregation_health.value();
+		result.aggregation_authoritative = aggregation_flag(
+			aggregation, MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE);
+		result.aggregation_transport_available = aggregation_flag(
+			aggregation,
+			MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE);
+		result.aggregation_transport_initialized = aggregation_flag(
+			aggregation,
+			MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED);
+		result.aggregation_input_healthy = aggregation_flag(
+			aggregation, MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY);
+		result.aggregation_engine_ready = aggregation_flag(
+			aggregation, MSAP1_AGGREGATION_HEALTH_ENGINE_READY);
+		result.aggregation_output_ready = aggregation_flag(
+			aggregation, MSAP1_AGGREGATION_HEALTH_OUTPUT_READY);
+		result.aggregation_output_active = aggregation_flag(
+			aggregation, MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE);
+		result.aggregation_degraded_reasons =
+			evaluate_rpu_aggregation_health_reasons(aggregation);
+		result.aggregation_healthy =
+			result.aggregation_degraded_reasons.empty();
+	}
 	result.record_stale = response.running &&
 		response.meter_record_age_ms > meter_record_stale_after_ms;
 	result.acquisition_healthy = response.running &&
@@ -162,7 +246,9 @@ MeterHealth evaluate_meter_health(const InfoResponse &response)
 		result.capture_active && result.fifo_ok && result.headers_valid &&
 		result.meter_configured &&
 		result.meter_generation_match;
-	result.healthy = result.acquisition_healthy && result.adc_healthy;
+	result.healthy = result.acquisition_healthy && result.adc_healthy &&
+		(!result.aggregation_authoritative ||
+		 result.aggregation_healthy);
 	return result;
 }
 

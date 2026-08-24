@@ -4,6 +4,7 @@ add_executable(msap1-fpga-acquisition
     support/options.cpp
     config/runtime_config.cpp
     pipeline/capture_coordinator.cpp
+    pipeline/aggregation_health_monitor.cpp
     pipeline/health_monitor.cpp
     pipeline/record_ingestor.cpp
     ipc/ipc_channel.cpp

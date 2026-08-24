@@ -32,8 +32,21 @@ struct MeterHealth {
 	bool meter_generation_match = false;
 	bool dc_offset_removal = false;
 	bool frequency_arithmetic_ok = false;
+	/* R5C1 aggregation offload is independent from R5C0 ADC health. During
+	 * shadow validation it is observable but non-authoritative; only an
+	 * authoritative R5C1 path participates in the global meter verdict. */
+	bool aggregation_health_available = false;
+	bool aggregation_authoritative = false;
+	bool aggregation_transport_available = false;
+	bool aggregation_transport_initialized = false;
+	bool aggregation_input_healthy = false;
+	bool aggregation_engine_ready = false;
+	bool aggregation_output_ready = false;
+	bool aggregation_output_active = false;
+	bool aggregation_healthy = false;
 	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
 	std::vector<HealthReason> adc_degraded_reasons;
+	std::vector<HealthReason> aggregation_degraded_reasons;
 };
 
 /**
@@ -49,6 +62,8 @@ std::uint64_t transport_callback_deficit(const InfoResponse &response);
 
 std::vector<HealthReason>
 evaluate_rpu_adc_health_reasons(const msap1_adc_health_payload &health);
+std::vector<HealthReason> evaluate_rpu_aggregation_health_reasons(
+	const msap1_aggregation_health_payload &health);
 MeterHealth evaluate_meter_health(const InfoResponse &response);
 
 } // namespace msap1

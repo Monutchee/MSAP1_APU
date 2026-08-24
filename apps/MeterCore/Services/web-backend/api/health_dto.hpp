@@ -98,11 +98,48 @@ struct AdcHealthDto {
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 
+/** Cached R5C1 aggregation-offload health, independent from R5C0 ADC health. */
+struct AggregationHealthDto {
+	bool available;
+	bool healthy;
+	bool authoritative;
+	bool transport_available;
+	bool transport_initialized;
+	bool input_healthy;
+	bool engine_ready;
+	bool output_ready;
+	bool output_active;
+	bool probe_pending;
+	std::uint32_t probe_failures;
+	std::uint32_t cache_age_ms;
+	std::string rpmsg_device;
+	std::uint32_t health_flags;
+	std::uint32_t frames_received;
+	std::uint32_t frames_valid;
+	std::uint32_t frames_invalid;
+	std::uint32_t crc_errors;
+	std::uint32_t format_errors;
+	std::uint32_t sequence_gaps;
+	std::uint32_t ring_overflows;
+	std::uint32_t fifo_errors;
+	std::uint32_t length_errors;
+	std::uint32_t records_queued;
+	std::uint32_t records_emitted;
+	std::uint32_t output_errors;
+	std::uint32_t output_drops;
+	std::uint32_t basic_completed;
+	std::uint32_t aggregate_completed;
+	std::uint32_t ten_minute_completed;
+	std::uint32_t two_hour_completed;
+	std::vector<HealthReasonDto> degraded_reasons;
+};
+
 /** Metering pipeline health, the body of GET /api/v1/meter/health. */
 struct MeterHealthDto {
 	bool healthy;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
+	AggregationHealthDto aggregation;
 	bool frequency_arithmetic_ok;
 };
 

@@ -52,8 +52,10 @@ inline constexpr const char *acquisition_socket_path =
  * 28: power-quality (PQEVT) snapshots and the simulator event sequencer
  * (metrology M12) are addressable: meter-power-quality returns the latest
  * Urms(1/2) record and the latest event edge, and adc-simulator-event
- * arms/cancels/queries the PL amplitude-envelope burst. */
-inline constexpr std::uint16_t acquisition_ipc_version = 28;
+ * arms/cancels/queries the PL amplitude-envelope burst.
+ * 29: InfoResponse carries the cached R5C1 aggregation-offload health and
+ * endpoint diagnostics independently from the R5C0 ADC health cache. */
+inline constexpr std::uint16_t acquisition_ipc_version = 29;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -258,6 +260,15 @@ struct InfoResponse {
 	msap1::meter::TimeQuality aggregate_time_quality =
 		msap1::meter::TimeQuality::Unsynchronized;
 	PackedIpc<msap1_adc_health_payload> rpu_health{};
+	/* R5C1 is brought up independently from the ADC-owning R5C0. Absence
+	 * therefore has an explicit presence bit and never makes acquisition
+	 * IPC fail merely because the shadow aggregation endpoint is restarting. */
+	bool has_aggregation_health = false;
+	bool aggregation_health_probe_pending = false;
+	std::uint32_t aggregation_health_age_ms = acquisition_age_unavailable;
+	std::uint32_t aggregation_health_probe_failures = 0;
+	std::string aggregation_rpmsg_device;
+	PackedIpc<msap1_aggregation_health_payload> rpu_aggregation_health{};
 	MeterRecord latest_record{};
 	/* Newest 150/180-cycle aggregate (AGG-v3, 0x00020003). Meaningful only
 	 * when has_aggregate_record is set; the basic latest_record above is
