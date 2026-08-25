@@ -54,8 +54,12 @@ inline constexpr const char *acquisition_socket_path =
  * Urms(1/2) record and the latest event edge, and adc-simulator-event
  * arms/cancels/queries the PL amplitude-envelope burst.
  * 29: InfoResponse carries the cached R5C1 aggregation-offload health and
- * endpoint diagnostics independently from the R5C0 ADC health cache. */
-inline constexpr std::uint16_t acquisition_ipc_version = 29;
+ * endpoint diagnostics independently from the R5C0 ADC health cache.
+ * 30: R5C1 aggregation health adds bounded-worker scheduling, software-ring
+ * pressure, and hardware-FIFO occupancy telemetry.
+ * 31: R5C1 aggregation health adds deterministic input-drop provenance,
+ * software-ring push failures, and hardware-FIFO programmable-full edges. */
+inline constexpr std::uint16_t acquisition_ipc_version = 31;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();

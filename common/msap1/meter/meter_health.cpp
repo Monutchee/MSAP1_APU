@@ -127,6 +127,34 @@ std::vector<HealthReason> evaluate_rpu_aggregation_health_reasons(
 	if (health.ring_overflows != 0u)
 		append_reason(reasons, "input_ring_overflow",
 			      "R5C1 aggregation input ring overflowed");
+	if (health.software_ring_push_failures != 0u)
+		append_reason(
+			reasons, "input_ring_push_failures",
+			"R5C1 could not enqueue " +
+				std::to_string(health.software_ring_push_failures) +
+				" aggregation input record(s)");
+	if (health.input_records_dropped != 0u) {
+		std::string message =
+			"R5C1 deterministically dropped " +
+			std::to_string(health.input_records_dropped) +
+			" aggregation input record(s)";
+		if (health.first_dropped_sequence != 0u ||
+		    health.last_dropped_sequence != 0u)
+			message += " (source sequences " +
+				std::to_string(health.first_dropped_sequence) +
+				" through " +
+				std::to_string(health.last_dropped_sequence) + ")";
+		append_reason(reasons, "input_records_dropped",
+			      std::move(message));
+	}
+	if (health.software_ring_pressure >=
+	    MSAP1_AGGREGATION_RING_PRESSURE_CRITICAL)
+		append_reason(
+			reasons, "input_ring_pressure_critical",
+			"R5C1 aggregation input ring pressure is critical (" +
+				std::to_string(health.software_ring_current) + "/" +
+				std::to_string(health.software_ring_capacity) +
+				" records occupied)");
 
 	/* Engine/output readiness is required only after R5C1 declares itself
 	 * authoritative. During shadow validation these zero flags document the

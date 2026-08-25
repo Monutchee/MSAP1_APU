@@ -70,6 +70,7 @@ private:
 	Clock::time_point next_audit_ = Clock::now();
 	std::uint32_t probe_failures_ = 0;
 	std::optional<std::uint32_t> last_flags_;
+	std::optional<bool> last_healthy_;
 };
 
 } // namespace msap1::acquisition::daemon

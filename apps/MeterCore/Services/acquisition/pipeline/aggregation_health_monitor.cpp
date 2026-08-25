@@ -67,20 +67,25 @@ void AggregationHealthMonitor::periodic_audit() noexcept
 void AggregationHealthMonitor::observe_transition(
 	const msap1_aggregation_health_payload &health)
 {
-	if (last_flags_ && *last_flags_ == health.health_flags)
-		return;
 	const bool authoritative = flag(
 		health.health_flags, MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE);
 	const bool shadow_healthy = flag(
 		health.health_flags, MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED) &&
 		flag(health.health_flags, MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY) &&
-		health.fifo_errors == 0u && health.ring_overflows == 0u;
+		health.fifo_errors == 0u && health.ring_overflows == 0u &&
+		health.software_ring_push_failures == 0u &&
+		health.input_records_dropped == 0u &&
+		health.software_ring_pressure <
+			MSAP1_AGGREGATION_RING_PRESSURE_CRITICAL;
 	const bool output_healthy =
 		flag(health.health_flags, MSAP1_AGGREGATION_HEALTH_ENGINE_READY) &&
 		flag(health.health_flags, MSAP1_AGGREGATION_HEALTH_OUTPUT_READY) &&
 		flag(health.health_flags, MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE) &&
 		health.output_errors == 0u && health.output_drops == 0u;
 	const bool healthy = shadow_healthy && (!authoritative || output_healthy);
+	if (last_flags_ && *last_flags_ == health.health_flags &&
+	    last_healthy_ && *last_healthy_ == healthy)
+		return;
 
 	log_message(aggregation_log,
 		healthy ? mnc::logging::Priority::notice
@@ -96,8 +101,33 @@ void AggregationHealthMonitor::observe_transition(
 		 {"MNC_FRAMES_RECEIVED", std::to_string(health.frames_received)},
 		 {"MNC_RECORDS_EMITTED", std::to_string(health.records_emitted)},
 		 {"MNC_FIFO_ERRORS", std::to_string(health.fifo_errors)},
-		 {"MNC_OUTPUT_ERRORS", std::to_string(health.output_errors)}});
+		 {"MNC_OUTPUT_ERRORS", std::to_string(health.output_errors)},
+		 {"MNC_SOFTWARE_RING_CURRENT",
+		  std::to_string(health.software_ring_current)},
+		 {"MNC_SOFTWARE_RING_HIGH_WATER",
+		  std::to_string(health.software_ring_high_water)},
+		 {"MNC_SOFTWARE_RING_CAPACITY",
+		  std::to_string(health.software_ring_capacity)},
+		 {"MNC_SOFTWARE_RING_PRESSURE",
+		  std::to_string(health.software_ring_pressure)},
+		 {"MNC_SOFTWARE_RING_PUSH_FAILURES",
+		  std::to_string(health.software_ring_push_failures)},
+		 {"MNC_INPUT_RECORDS_DROPPED",
+		  std::to_string(health.input_records_dropped)},
+		 {"MNC_HARDWARE_FIFO_CURRENT_WORDS",
+		  std::to_string(health.hardware_fifo_current_words)},
+		 {"MNC_HARDWARE_FIFO_HIGH_WATER_WORDS",
+		  std::to_string(health.hardware_fifo_high_water_words)},
+		 {"MNC_HARDWARE_FIFO_FULL_EVENTS",
+		  std::to_string(health.hardware_fifo_full_events)},
+		 {"MNC_INPUT_MAX_BATCH",
+		  std::to_string(health.input_max_batch)},
+		 {"MNC_INPUT_MAX_RUNTIME_US",
+		  std::to_string(health.input_max_runtime_us)},
+		 {"MNC_VALIDATOR_MAX_SCHEDULE_GAP_US",
+		  std::to_string(health.validator_max_schedule_gap_us)}});
 	last_flags_ = health.health_flags;
+	last_healthy_ = healthy;
 }
 
 } // namespace msap1::acquisition::daemon

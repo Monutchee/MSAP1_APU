@@ -121,6 +121,10 @@ struct AggregationHealthDto {
 	std::uint32_t format_errors;
 	std::uint32_t sequence_gaps;
 	std::uint32_t ring_overflows;
+	std::uint32_t software_ring_push_failures;
+	std::uint32_t input_records_dropped;
+	std::uint32_t first_dropped_sequence;
+	std::uint32_t last_dropped_sequence;
 	std::uint32_t fifo_errors;
 	std::uint32_t length_errors;
 	std::uint32_t records_queued;
@@ -131,6 +135,25 @@ struct AggregationHealthDto {
 	std::uint32_t aggregate_completed;
 	std::uint32_t ten_minute_completed;
 	std::uint32_t two_hour_completed;
+	std::uint32_t software_ring_current;
+	std::uint32_t software_ring_high_water;
+	std::uint32_t software_ring_capacity;
+	std::uint32_t software_ring_pressure;
+	std::uint32_t software_ring_warning_entries;
+	std::uint32_t software_ring_high_entries;
+	std::uint32_t software_ring_critical_entries;
+	std::uint32_t software_ring_full_entries;
+	std::uint32_t hardware_fifo_current_words;
+	std::uint32_t hardware_fifo_high_water_words;
+	std::uint32_t hardware_fifo_full_events;
+	std::uint32_t input_wake_count;
+	std::uint32_t input_records_processed;
+	std::uint32_t input_max_batch;
+	std::uint32_t input_max_runtime_us;
+	std::uint32_t validator_wake_count;
+	std::uint32_t validator_records_processed;
+	std::uint32_t validator_max_runtime_us;
+	std::uint32_t validator_max_schedule_gap_us;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 

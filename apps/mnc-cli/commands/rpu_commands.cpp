@@ -30,6 +30,10 @@ struct AggregationHealthResult {
 	std::uint32_t frames_invalid = 0;
 	std::uint32_t sequence_gaps = 0;
 	std::uint32_t ring_overflows = 0;
+	std::uint32_t software_ring_push_failures = 0;
+	std::uint32_t input_records_dropped = 0;
+	std::uint32_t first_dropped_sequence = 0;
+	std::uint32_t last_dropped_sequence = 0;
 	std::uint32_t fifo_errors = 0;
 	std::uint32_t records_queued = 0;
 	std::uint32_t records_emitted = 0;
@@ -39,6 +43,25 @@ struct AggregationHealthResult {
 	std::uint32_t aggregate_completed = 0;
 	std::uint32_t ten_minute_completed = 0;
 	std::uint32_t two_hour_completed = 0;
+	std::uint32_t software_ring_current = 0;
+	std::uint32_t software_ring_high_water = 0;
+	std::uint32_t software_ring_capacity = 0;
+	std::uint32_t software_ring_pressure = 0;
+	std::uint32_t software_ring_warning_entries = 0;
+	std::uint32_t software_ring_high_entries = 0;
+	std::uint32_t software_ring_critical_entries = 0;
+	std::uint32_t software_ring_full_entries = 0;
+	std::uint32_t hardware_fifo_current_words = 0;
+	std::uint32_t hardware_fifo_high_water_words = 0;
+	std::uint32_t hardware_fifo_full_events = 0;
+	std::uint32_t input_wake_count = 0;
+	std::uint32_t input_records_processed = 0;
+	std::uint32_t input_max_batch = 0;
+	std::uint32_t input_max_runtime_us = 0;
+	std::uint32_t validator_wake_count = 0;
+	std::uint32_t validator_records_processed = 0;
+	std::uint32_t validator_max_runtime_us = 0;
+	std::uint32_t validator_max_schedule_gap_us = 0;
 	std::vector<HealthReason> degraded_reasons;
 };
 
@@ -55,6 +78,24 @@ bool aggregation_flag(const msap1_aggregation_health_payload &health,
 		      std::uint32_t flag)
 {
 	return (health.health_flags & flag) != 0u;
+}
+
+const char *ring_pressure_name(std::uint32_t pressure)
+{
+	switch (pressure) {
+	case MSAP1_AGGREGATION_RING_PRESSURE_NORMAL:
+		return "normal";
+	case MSAP1_AGGREGATION_RING_PRESSURE_WARNING:
+		return "warning";
+	case MSAP1_AGGREGATION_RING_PRESSURE_HIGH:
+		return "high";
+	case MSAP1_AGGREGATION_RING_PRESSURE_CRITICAL:
+		return "critical";
+	case MSAP1_AGGREGATION_RING_PRESSURE_FULL:
+		return "full";
+	default:
+		return "unknown";
+	}
 }
 
 AggregationHealthResult aggregation_result(const InfoResponse &response)
@@ -82,6 +123,11 @@ AggregationHealthResult aggregation_result(const InfoResponse &response)
 	result.frames_invalid = health.frames_invalid;
 	result.sequence_gaps = health.sequence_gaps;
 	result.ring_overflows = health.ring_overflows;
+	result.software_ring_push_failures =
+		health.software_ring_push_failures;
+	result.input_records_dropped = health.input_records_dropped;
+	result.first_dropped_sequence = health.first_dropped_sequence;
+	result.last_dropped_sequence = health.last_dropped_sequence;
 	result.fifo_errors = health.fifo_errors;
 	result.records_queued = health.records_queued;
 	result.records_emitted = health.records_emitted;
@@ -91,6 +137,30 @@ AggregationHealthResult aggregation_result(const InfoResponse &response)
 	result.aggregate_completed = health.aggregate_completed;
 	result.ten_minute_completed = health.ten_minute_completed;
 	result.two_hour_completed = health.two_hour_completed;
+	result.software_ring_current = health.software_ring_current;
+	result.software_ring_high_water = health.software_ring_high_water;
+	result.software_ring_capacity = health.software_ring_capacity;
+	result.software_ring_pressure = health.software_ring_pressure;
+	result.software_ring_warning_entries =
+		health.software_ring_warning_entries;
+	result.software_ring_high_entries = health.software_ring_high_entries;
+	result.software_ring_critical_entries =
+		health.software_ring_critical_entries;
+	result.software_ring_full_entries = health.software_ring_full_entries;
+	result.hardware_fifo_current_words =
+		health.hardware_fifo_current_words;
+	result.hardware_fifo_high_water_words =
+		health.hardware_fifo_high_water_words;
+	result.hardware_fifo_full_events = health.hardware_fifo_full_events;
+	result.input_wake_count = health.input_wake_count;
+	result.input_records_processed = health.input_records_processed;
+	result.input_max_batch = health.input_max_batch;
+	result.input_max_runtime_us = health.input_max_runtime_us;
+	result.validator_wake_count = health.validator_wake_count;
+	result.validator_records_processed = health.validator_records_processed;
+	result.validator_max_runtime_us = health.validator_max_runtime_us;
+	result.validator_max_schedule_gap_us =
+		health.validator_max_schedule_gap_us;
 	return result;
 }
 
@@ -184,14 +254,55 @@ public:
 			       << "    input frames=" << aggregation.frames_received
 			       << " valid=" << aggregation.frames_valid
 			       << " invalid=" << aggregation.frames_invalid
-			       << " gaps=" << aggregation.sequence_gaps << '\n'
+			       << " gaps=" << aggregation.sequence_gaps
+			       << " inferred-drops="
+			       << aggregation.input_records_dropped << '\n'
+			       << "    input pressure ring-push-failures="
+			       << aggregation.software_ring_push_failures;
+			if (aggregation.input_records_dropped != 0u)
+				output << " first-drop="
+				       << aggregation.first_dropped_sequence
+				       << " last-drop="
+				       << aggregation.last_dropped_sequence;
+			output << '\n'
 			       << "    records queued=" << aggregation.records_queued
 			       << " emitted=" << aggregation.records_emitted
 			       << " drops=" << aggregation.output_drops << '\n'
 			       << "    completed basic=" << aggregation.basic_completed
 			       << " aggregate=" << aggregation.aggregate_completed
 			       << " 10-minute=" << aggregation.ten_minute_completed
-			       << " 2-hour=" << aggregation.two_hour_completed << '\n';
+			       << " 2-hour=" << aggregation.two_hour_completed << '\n'
+			       << "    software ring=" << aggregation.software_ring_current
+			       << '/' << aggregation.software_ring_capacity
+			       << " high-water=" << aggregation.software_ring_high_water
+			       << " pressure="
+			       << ring_pressure_name(aggregation.software_ring_pressure)
+			       << '\n'
+			       << "    pressure entries warning="
+			       << aggregation.software_ring_warning_entries
+			       << " high=" << aggregation.software_ring_high_entries
+			       << " critical="
+			       << aggregation.software_ring_critical_entries
+			       << " full=" << aggregation.software_ring_full_entries
+			       << '\n'
+			       << "    hardware FIFO words="
+			       << aggregation.hardware_fifo_current_words
+			       << " high-water="
+			       << aggregation.hardware_fifo_high_water_words
+			       << " programmable-full-events="
+			       << aggregation.hardware_fifo_full_events << '\n'
+			       << "    input worker wakes=" << aggregation.input_wake_count
+			       << " records=" << aggregation.input_records_processed
+			       << " max-batch=" << aggregation.input_max_batch
+			       << " max-runtime=" << aggregation.input_max_runtime_us
+			       << " us\n"
+			       << "    validator wakes="
+			       << aggregation.validator_wake_count
+			       << " records=" << aggregation.validator_records_processed
+			       << " max-runtime="
+			       << aggregation.validator_max_runtime_us
+			       << " us max-schedule-gap="
+			       << aggregation.validator_max_schedule_gap_us << " us\n";
 			for (const auto &reason : aggregation.degraded_reasons)
 				output << "    - " << reason.message << '\n';
 		}

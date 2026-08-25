@@ -10,7 +10,7 @@ static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
 static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
-static_assert(sizeof(msap1_aggregation_health_payload) == 108,
+static_assert(sizeof(msap1_aggregation_health_payload) == 200,
 	      "unexpected aggregation health payload layout");
 /* Wire v5: the four packed simulator harmonic slots sit between the
  * noise levels and the flags, and the five Urms(1/2) detection fields

@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 5u
+#define MSAP1_RPU_VERSION 6u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -51,6 +51,14 @@ enum msap1_aggregation_health_flag {
 	MSAP1_AGGREGATION_HEALTH_OUTPUT_READY = 1u << 4,
 	MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE = 1u << 5,
 	MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE = 1u << 6,
+};
+
+enum msap1_aggregation_ring_pressure {
+	MSAP1_AGGREGATION_RING_PRESSURE_NORMAL = 0,
+	MSAP1_AGGREGATION_RING_PRESSURE_WARNING = 1,
+	MSAP1_AGGREGATION_RING_PRESSURE_HIGH = 2,
+	MSAP1_AGGREGATION_RING_PRESSURE_CRITICAL = 3,
+	MSAP1_AGGREGATION_RING_PRESSURE_FULL = 4,
 };
 
 enum msap1_rpu_status_code {
@@ -465,7 +473,7 @@ struct msap1_adc_diagnostic_payload {
 } __attribute__((packed));
 
 /*
- * R5C1 aggregation-offload diagnostics. Meter payloads remain on the AXI
+ * R5C1 aggregation-offload diagnostics.  Meter payloads remain on the AXI
  * FIFO/DMA path; RPMsg carries only this bounded health snapshot.
  */
 struct msap1_aggregation_health_payload {
@@ -479,6 +487,10 @@ struct msap1_aggregation_health_payload {
 	uint32_t repeated_frames;
 	uint32_t out_of_order_frames;
 	uint32_t ring_overflows;
+	uint32_t software_ring_push_failures;
+	uint32_t input_records_dropped;
+	uint32_t first_dropped_sequence;
+	uint32_t last_dropped_sequence;
 	uint32_t fifo_errors;
 	uint32_t length_errors;
 	uint32_t records_queued;
@@ -496,6 +508,30 @@ struct msap1_aggregation_health_payload {
 	uint32_t last_frame_length;
 	uint32_t last_validation_error;
 	uint32_t last_tx_vacancy;
+	/*
+	 * Scheduler/backpressure telemetry.  Counters saturate and maxima are
+	 * lifetime high-water marks since R5C1 firmware startup.
+	 */
+	uint32_t software_ring_current;
+	uint32_t software_ring_high_water;
+	uint32_t software_ring_capacity;
+	uint32_t software_ring_pressure;
+	uint32_t software_ring_warning_entries;
+	uint32_t software_ring_high_entries;
+	uint32_t software_ring_critical_entries;
+	uint32_t software_ring_full_entries;
+	uint32_t hardware_fifo_current_words;
+	uint32_t hardware_fifo_high_water_words;
+	/* Receive programmable-full interrupt edges, not lost-record count. */
+	uint32_t hardware_fifo_full_events;
+	uint32_t input_wake_count;
+	uint32_t input_records_processed;
+	uint32_t input_max_batch;
+	uint32_t input_max_runtime_us;
+	uint32_t validator_wake_count;
+	uint32_t validator_records_processed;
+	uint32_t validator_max_runtime_us;
+	uint32_t validator_max_schedule_gap_us;
 } __attribute__((packed));
 
 #ifdef __cplusplus

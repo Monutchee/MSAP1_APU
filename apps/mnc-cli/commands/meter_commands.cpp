@@ -397,13 +397,20 @@ int write_meter_health_text(const MeterHealthResult &result,
 		       << "  R5C1 input sequence:  "
 		       << aggregation.last_input_sequence << " last, "
 		       << aggregation.expected_input_sequence << " expected, "
-		       << aggregation.sequence_gaps << " gap(s)\n"
+		       << aggregation.sequence_gaps << " gap(s), "
+		       << aggregation.input_records_dropped
+		       << " inferred drop(s)\n"
 		       << "  R5C1 input errors:    CRC " << aggregation.crc_errors
 		       << ", format " << aggregation.format_errors << ", length "
 		       << aggregation.length_errors << ", FIFO "
 		       << aggregation.fifo_errors << ", ring "
-		       << aggregation.ring_overflows << '\n'
-		       << "  R5C1 output records:  " << aggregation.records_queued
+		       << aggregation.ring_overflows << ", ring push "
+		       << aggregation.software_ring_push_failures << '\n';
+		if (aggregation.input_records_dropped != 0u)
+			output << "  R5C1 dropped range:   "
+			       << aggregation.first_dropped_sequence << " first, "
+			       << aggregation.last_dropped_sequence << " last\n";
+		output << "  R5C1 output records:  " << aggregation.records_queued
 		       << " queued, " << aggregation.records_emitted << " emitted, "
 		       << aggregation.output_errors << " error(s), "
 		       << aggregation.output_drops << " drop(s)\n"
@@ -411,7 +418,36 @@ int write_meter_health_text(const MeterHealthResult &result,
 		       << aggregation.basic_completed << ", 150/180 "
 		       << aggregation.aggregate_completed << ", 10-minute "
 		       << aggregation.ten_minute_completed << ", 2-hour "
-		       << aggregation.two_hour_completed << '\n';
+		       << aggregation.two_hour_completed << '\n'
+		       << "  R5C1 software ring:   "
+		       << aggregation.software_ring_current << '/'
+		       << aggregation.software_ring_capacity << " current, "
+		       << aggregation.software_ring_high_water
+		       << " high-water, pressure "
+		       << aggregation.software_ring_pressure << '\n'
+		       << "  R5C1 pressure edges:  warning "
+		       << aggregation.software_ring_warning_entries << ", high "
+		       << aggregation.software_ring_high_entries << ", critical "
+		       << aggregation.software_ring_critical_entries << ", full "
+		       << aggregation.software_ring_full_entries << '\n'
+		       << "  R5C1 hardware FIFO:   "
+		       << aggregation.hardware_fifo_current_words
+		       << " current words, "
+		       << aggregation.hardware_fifo_high_water_words
+		       << " high-water, programmable-full edges "
+		       << aggregation.hardware_fifo_full_events << '\n'
+		       << "  R5C1 input worker:    "
+		       << aggregation.input_wake_count << " wakes, "
+		       << aggregation.input_records_processed << " records, max batch "
+		       << aggregation.input_max_batch << ", max runtime "
+		       << aggregation.input_max_runtime_us << " us\n"
+		       << "  R5C1 validator:       "
+		       << aggregation.validator_wake_count << " wakes, "
+		       << aggregation.validator_records_processed
+		       << " records, max runtime "
+		       << aggregation.validator_max_runtime_us
+		       << " us, max schedule gap "
+		       << aggregation.validator_max_schedule_gap_us << " us\n";
 	}
 	output << "  Health confirmation:  "
 	       << (!response.health_probe_pending
@@ -628,6 +664,10 @@ struct AggregationHealthDto {
 	std::uint32_t repeated_frames = 0;
 	std::uint32_t out_of_order_frames = 0;
 	std::uint32_t ring_overflows = 0;
+	std::uint32_t software_ring_push_failures = 0;
+	std::uint32_t input_records_dropped = 0;
+	std::uint32_t first_dropped_sequence = 0;
+	std::uint32_t last_dropped_sequence = 0;
 	std::uint32_t fifo_errors = 0;
 	std::uint32_t length_errors = 0;
 	std::uint32_t records_queued = 0;
@@ -645,6 +685,25 @@ struct AggregationHealthDto {
 	std::uint32_t last_frame_length = 0;
 	std::uint32_t last_validation_error = 0;
 	std::uint32_t last_tx_vacancy = 0;
+	std::uint32_t software_ring_current = 0;
+	std::uint32_t software_ring_high_water = 0;
+	std::uint32_t software_ring_capacity = 0;
+	std::uint32_t software_ring_pressure = 0;
+	std::uint32_t software_ring_warning_entries = 0;
+	std::uint32_t software_ring_high_entries = 0;
+	std::uint32_t software_ring_critical_entries = 0;
+	std::uint32_t software_ring_full_entries = 0;
+	std::uint32_t hardware_fifo_current_words = 0;
+	std::uint32_t hardware_fifo_high_water_words = 0;
+	std::uint32_t hardware_fifo_full_events = 0;
+	std::uint32_t input_wake_count = 0;
+	std::uint32_t input_records_processed = 0;
+	std::uint32_t input_max_batch = 0;
+	std::uint32_t input_max_runtime_us = 0;
+	std::uint32_t validator_wake_count = 0;
+	std::uint32_t validator_records_processed = 0;
+	std::uint32_t validator_max_runtime_us = 0;
+	std::uint32_t validator_max_schedule_gap_us = 0;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 
@@ -851,6 +910,14 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 		dto.aggregation.out_of_order_frames =
 			aggregation.out_of_order_frames;
 		dto.aggregation.ring_overflows = aggregation.ring_overflows;
+		dto.aggregation.software_ring_push_failures =
+			aggregation.software_ring_push_failures;
+		dto.aggregation.input_records_dropped =
+			aggregation.input_records_dropped;
+		dto.aggregation.first_dropped_sequence =
+			aggregation.first_dropped_sequence;
+		dto.aggregation.last_dropped_sequence =
+			aggregation.last_dropped_sequence;
 		dto.aggregation.fifo_errors = aggregation.fifo_errors;
 		dto.aggregation.length_errors = aggregation.length_errors;
 		dto.aggregation.records_queued = aggregation.records_queued;
@@ -875,6 +942,42 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 		dto.aggregation.last_validation_error =
 			aggregation.last_validation_error;
 		dto.aggregation.last_tx_vacancy = aggregation.last_tx_vacancy;
+		dto.aggregation.software_ring_current =
+			aggregation.software_ring_current;
+		dto.aggregation.software_ring_high_water =
+			aggregation.software_ring_high_water;
+		dto.aggregation.software_ring_capacity =
+			aggregation.software_ring_capacity;
+		dto.aggregation.software_ring_pressure =
+			aggregation.software_ring_pressure;
+		dto.aggregation.software_ring_warning_entries =
+			aggregation.software_ring_warning_entries;
+		dto.aggregation.software_ring_high_entries =
+			aggregation.software_ring_high_entries;
+		dto.aggregation.software_ring_critical_entries =
+			aggregation.software_ring_critical_entries;
+		dto.aggregation.software_ring_full_entries =
+			aggregation.software_ring_full_entries;
+		dto.aggregation.hardware_fifo_current_words =
+			aggregation.hardware_fifo_current_words;
+		dto.aggregation.hardware_fifo_high_water_words =
+			aggregation.hardware_fifo_high_water_words;
+		dto.aggregation.hardware_fifo_full_events =
+			aggregation.hardware_fifo_full_events;
+		dto.aggregation.input_wake_count = aggregation.input_wake_count;
+		dto.aggregation.input_records_processed =
+			aggregation.input_records_processed;
+		dto.aggregation.input_max_batch = aggregation.input_max_batch;
+		dto.aggregation.input_max_runtime_us =
+			aggregation.input_max_runtime_us;
+		dto.aggregation.validator_wake_count =
+			aggregation.validator_wake_count;
+		dto.aggregation.validator_records_processed =
+			aggregation.validator_records_processed;
+		dto.aggregation.validator_max_runtime_us =
+			aggregation.validator_max_runtime_us;
+		dto.aggregation.validator_max_schedule_gap_us =
+			aggregation.validator_max_schedule_gap_us;
 	}
 	if (result.full && status.spi_responsive)
 		dto.adc.registers = adc_register_dtos(health);
