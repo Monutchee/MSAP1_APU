@@ -36,6 +36,7 @@ public:
 		int timeout_ms = 1000);
 	[[nodiscard]] SingleCycleResponse single_cycle(int timeout_ms = 1000);
 	[[nodiscard]] PowerQualityResponse power_quality(int timeout_ms = 1000);
+	[[nodiscard]] HarmonicResponse harmonics(int timeout_ms = 1000);
 	[[nodiscard]] SimulatorEventResponse simulator_event(
 		const SimulatorEventRequest &request, int timeout_ms = 3000);
 	[[nodiscard]] CaptureResponse set_capture(

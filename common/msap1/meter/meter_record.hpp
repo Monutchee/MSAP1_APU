@@ -109,6 +109,11 @@ inline constexpr std::uint32_t meter_two_hour_open_format = 0x000F0001u;
 inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x001C0001u;
 inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x001D0002u;
 inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x001E0002u;
+/* HARMONIC v1 (metrology M16): one 10/12-cycle spectrum is a 42-record
+ * family: seven product channels, six consecutive order chunks per channel,
+ * and one shared producer sequence. Each record carries up to 24 packed
+ * magnitude/angle entries; the completed family covers orders 1..127. */
+inline constexpr std::uint32_t meter_harmonic_format = 0x00050001u;
 /* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
  * OWN producer port with its own sequence space. Word 13 selects the
  * kind (0 periodic heartbeat, 1 event start, 2 event end) and carries the
@@ -267,6 +272,7 @@ struct MeterRecord {
 				record_format() == meter_two_hour_open_power_format ||
 				record_format() == meter_two_hour_open_phasor_format ||
 				record_format() == meter_two_hour_open_unbalance_format ||
+				record_format() == meter_harmonic_format ||
 			record_format() == meter_pq_event_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;

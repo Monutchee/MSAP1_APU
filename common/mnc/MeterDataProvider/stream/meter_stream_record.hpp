@@ -24,6 +24,9 @@ struct MeterStreamRecord {
 	std::uint16_t record_kind = 0;
 	std::uint8_t measurement_period = 0;
 	std::uint64_t source_sequence = 0;
+	/* Distinguishes records which deliberately share one producer sequence
+	 * and sample span (for example the 42 chunks of one M16 family). */
+	std::uint16_t source_fragment = 0;
 	std::uint32_t configuration_generation = 0;
 	std::int64_t ingested_at_nanoseconds = 0;
 	RecordTimingProvenance timing{};

@@ -114,6 +114,7 @@ public:
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
 	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;
 	[[nodiscard]] msap1::PowerQualityResponse power_quality_response() const;
+	[[nodiscard]] msap1::HarmonicResponse harmonic_response() const;
 	/**
 	 * @brief Drive the simulator's amplitude-envelope sequencer.
 	 *

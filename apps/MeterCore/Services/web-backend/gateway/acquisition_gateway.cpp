@@ -67,6 +67,11 @@ PowerQualityResponse AcquisitionGateway::power_quality(int timeout_ms)
 	return client_.request(PowerQualityRequest{}, timeout_ms);
 }
 
+HarmonicResponse AcquisitionGateway::harmonics(int timeout_ms)
+{
+	return client_.request(HarmonicRequest{}, timeout_ms);
+}
+
 SimulatorEventResponse AcquisitionGateway::simulator_event(
 	const SimulatorEventRequest &request, int timeout_ms)
 {

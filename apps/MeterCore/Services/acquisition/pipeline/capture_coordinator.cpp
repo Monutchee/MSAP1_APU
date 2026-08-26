@@ -768,6 +768,20 @@ msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
 	return response;
 }
 
+msap1::HarmonicResponse CaptureCoordinator::harmonic_response() const
+{
+	msap1::HarmonicResponse response{};
+	response.running = running_;
+	response.records = ingest_.harmonic_records();
+	response.families = ingest_.harmonic_families();
+	response.incomplete_families = ingest_.incomplete_harmonic_families();
+	const auto &latest = ingest_.latest_harmonic_spectrum();
+	response.has_snapshot = latest.has_value();
+	if (latest)
+		response.snapshot = *latest;
+	return response;
+}
+
 msap1::SimulatorEventResponse CaptureCoordinator::simulator_event_response(
 	const msap1::SimulatorEventRequest &request)
 {

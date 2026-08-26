@@ -1550,6 +1550,103 @@ int run_meter_power_quality(const Options &options, std::ostream &output)
 			     PowerQualityJsonGenerator{});
 }
 
+struct HarmonicResult {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t families = 0;
+	std::uint64_t incomplete_families = 0;
+	bool available = false;
+	msap1::HarmonicSpectrumSnapshot snapshot{};
+};
+
+class HarmonicTextGenerator final : public ResultGenerator<HarmonicResult> {
+public:
+	int write(const HarmonicResult &result,
+		  std::ostream &output) const override
+	{
+		output << "Harmonic spectrum (HARMONIC-v1, IEC subgroups)\n"
+		       << "  Chunks accepted:    " << result.records << '\n'
+		       << "  Families completed: " << result.families << '\n'
+		       << "  Families incomplete:" << ' '
+		       << result.incomplete_families << '\n';
+		if (!result.available) {
+			output << "  No complete 42-record family yet\n";
+			return 0;
+		}
+		const auto &spectrum = result.snapshot;
+		output << "  Sequence:           " << spectrum.sequence << '\n'
+		       << "  Window:             " << spectrum.cycle_count
+		       << " cycles, " << spectrum.sample_count << " samples at "
+		       << spectrum.sample_rate_hz << " Hz\n"
+		       << "  Measured frequency: "
+		       << static_cast<double>(spectrum.measured_frequency_millihz) /
+				  1000.0
+		       << " Hz\n"
+		       << "  Qualified orders:   1.."
+		       << static_cast<unsigned>(spectrum.qualified_max_order)
+		       << (spectrum.rate_limited() ? " (rate limited)" : "")
+		       << '\n'
+		       << "  Quality:            grid=" << yes_no(spectrum.grid_locked())
+		       << ", conditioner=" << yes_no(spectrum.conditioner_valid())
+		       << ", FFT=" << yes_no(spectrum.fft_valid())
+		       << ", arithmetic="
+		       << (spectrum.arithmetic_error() ? "error" : "clean") << '\n';
+		static constexpr std::array<const char *, 7> names{
+			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		for (std::size_t channel = 0; channel < spectrum.channels.size();
+		     ++channel) {
+			const char *unit = channel < 4 ? "A" : "V";
+			output << "  " << names[channel] << " (order, magnitude "
+			       << unit << ", angle degrees relative to h*Va1):\n";
+			for (const auto &point : spectrum.channels[channel]) {
+				if (point.order > spectrum.qualified_max_order)
+					break;
+				output << "    " << std::setw(3)
+				       << static_cast<unsigned>(point.order) << "  ";
+				if (!point.magnitude_valid) {
+					output << "unavailable\n";
+					continue;
+				}
+				output << static_cast<double>(
+						  point.magnitude_micro_units) /
+						  1e6
+				       << ' ' << unit << "  ";
+				if (point.angle_valid)
+					output << static_cast<double>(
+						  point.angle_millidegrees) /
+						  1000.0
+					       << " deg\n";
+				else
+					output << "angle unavailable\n";
+			}
+		}
+		return 0;
+	}
+};
+
+class HarmonicJsonGenerator final : public ResultGenerator<HarmonicResult> {
+public:
+	int write(const HarmonicResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_harmonics(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(
+		msap1::HarmonicRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	HarmonicResult result{response.running, response.records,
+			      response.families, response.incomplete_families,
+			      response.has_snapshot, response.snapshot};
+	return render_result(options, result, output, HarmonicTextGenerator{},
+			     HarmonicJsonGenerator{});
+}
+
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -1613,6 +1710,16 @@ void register_meter_commands(Application &application)
 	meter.add_subcommand(Command(
 		"power-quality", "Show the latest Urms(1/2) record and event",
 		run_meter_power_quality,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	meter.add_subcommand(Command(
+		"harmonics", "Show the latest complete harmonic spectrum",
+		run_meter_harmonics,
 		{
 			.access = AccessLevel::diagnostic,
 			.side_effect = SideEffect::none,

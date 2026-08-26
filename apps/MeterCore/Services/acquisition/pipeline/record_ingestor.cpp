@@ -120,6 +120,9 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
+	harmonic_assembler_.reset();
+	latest_harmonic_spectrum_.reset();
+	incomplete_harmonic_families_ = 0;
 }
 
 void MeterRecordIngestor::clear_latest()
@@ -136,6 +139,8 @@ void MeterRecordIngestor::clear_latest()
 		msap1::meter::TimeQuality::Unsynchronized;
 	last_record_time_.reset();
 	last_aggregate_record_time_.reset();
+	harmonic_assembler_.reset();
+	latest_harmonic_spectrum_.reset();
 }
 
 bool MeterRecordIngestor::matches_configuration(
@@ -516,6 +521,80 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 					error.what(),
 				"meter_record_decode_rejected", record);
 		}
+		return;
+	}
+
+	/*
+	 * HARMONIC-v1 is a latest-only product family on its own sequence space.
+	 * Decode and family-validate first, durably publish the exact chunk, and
+	 * only then expose a newly completed 42-record spectrum. A partial family
+	 * can therefore never replace the previous complete snapshot.
+	 */
+	if (record.record_format() == msap1::meter_harmonic_format) {
+		msap1::HarmonicRecordChunk chunk{};
+		msap1::HarmonicAssemblyUpdate assembly{};
+		try {
+			chunk = msap1::decode_harmonic_record(record);
+			assembly = harmonic_assembler_.accept(chunk);
+		} catch (const std::exception &error) {
+			++invalid_records_;
+			log_rejected_record(
+				std::string("harmonic record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = chunk.sequence;
+		timing.configuration_generation = chunk.configuration_generation;
+		timing.first_sample_index = chunk.first_sample;
+		timing.sample_count = chunk.sample_count;
+		timing.sample_rate_hz = chunk.sample_rate_hz;
+		timing.cycle_count = chunk.cycle_count;
+		timing.nominal_frequency = chunk.nominal_frequency_hz == 50u
+			? msap1::meter::NominalFrequency::Hz50
+			: msap1::meter::NominalFrequency::Hz60;
+		timing.cycle_locked = (chunk.status & 0x4u) != 0u;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::harmonic);
+		stream_record.measurement_period = static_cast<std::uint8_t>(
+			msap1::MeasurementPeriod::Basic);
+		stream_record.source_sequence = chunk.sequence;
+		stream_record.source_fragment = static_cast<std::uint16_t>(
+			chunk.channel * msap1::harmonic_chunks_per_channel +
+			chunk.chunk);
+		stream_record.configuration_generation =
+			chunk.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = chunk.first_sample;
+		stream_record.timing.sample_count = chunk.sample_count;
+		stream_record.timing.cycle_count = chunk.cycle_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+
+		++harmonic_records_;
+		incomplete_harmonic_families_ += assembly.incomplete_families;
+		if (assembly.completed) {
+			latest_harmonic_spectrum_ = std::move(*assembly.completed);
+			++harmonic_families_;
+		}
+		++meter_records_;
 		return;
 	}
 

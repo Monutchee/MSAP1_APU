@@ -72,7 +72,9 @@ std::vector<std::byte> encode_record(
 	writer.u32(record.timing.cycle_count);
 	writer.u8(record.timing.utc_start_nanoseconds.has_value());
 	writer.u8(record.timing.utc_uncertainty_nanoseconds.has_value());
-	writer.u16(0);
+	/* This field was reserved as zero before fragmented producer families;
+	 * consuming it preserves the record wire size and field offsets. */
+	writer.u16(record.source_fragment);
 	writer.i64(record.timing.utc_start_nanoseconds.value_or(0));
 	writer.u64(record.timing.utc_uncertainty_nanoseconds.value_or(0));
 	writer.u32(static_cast<std::uint32_t>(record.payload.size()));
@@ -96,7 +98,7 @@ mnc::meter_stream::MeterStreamRecord decode_record(ByteReader &reader)
 	record.timing.cycle_count = reader.u32();
 	const bool has_utc = reader.u8() != 0;
 	const bool has_uncertainty = reader.u8() != 0;
-	(void)reader.u16();
+	record.source_fragment = reader.u16();
 	const auto utc = reader.i64();
 	const auto uncertainty = reader.u64();
 	if (has_utc)

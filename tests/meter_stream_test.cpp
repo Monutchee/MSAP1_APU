@@ -1,4 +1,6 @@
 #include "mnc/MeterDataProvider/stream/meter_stream.hpp"
+#include "mnc/storage/sqlite/sqlite_database.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/meter/history/meter_history.hpp"
 
 #include <chrono>
@@ -96,6 +98,95 @@ void spool_is_ordered_idempotent_and_durable()
 			"historian acknowledgement did not survive reopen");
 		require(reopened.read_after("audit", 16).size() == 2,
 			"consumer cursors were not independent");
+	}
+	remove_database(path);
+}
+
+void spool_distinguishes_source_fragments()
+{
+	const auto path = temporary_database("spool-fragment-test");
+	remove_database(path);
+	mnc::meter_stream::DurableMeterSpool spool(path,
+		spool_policy(mnc::meter_stream::StorageBackend::memory));
+	auto first = record(42);
+	auto last = first;
+	last.source_fragment = 41;
+	last.payload.front() = std::byte{0x41};
+	const auto first_cursor = spool.publish(first);
+	const auto last_cursor = spool.publish(last);
+	require(last_cursor == first_cursor + 1,
+		"a distinct source fragment was treated as an idempotent replay");
+	require(spool.publish(last) == last_cursor,
+		"a replay of one source fragment allocated another cursor");
+	spool.register_consumer("fragment-check");
+	const auto committed = spool.read_after("fragment-check", 4);
+	require(committed.size() == 2 &&
+			committed[0].source_fragment == 0 &&
+			committed[1].source_fragment == 41,
+		"source fragments did not survive durable-envelope storage");
+
+	const auto encoded = msap1::meter_stream::encode_record(last);
+	mnc::ipc::ByteReader reader(encoded);
+	const auto decoded = msap1::meter_stream::decode_record(reader);
+	reader.require_finished();
+	require(decoded.source_fragment == 41 &&
+			decoded.source_sequence == last.source_sequence,
+		"source fragment did not survive meter-stream IPC");
+	remove_database(path);
+}
+
+void spool_migrates_legacy_identity_key()
+{
+	const auto path = temporary_database("spool-fragment-migration-test");
+	remove_database(path);
+	{
+		mnc::storage::sqlite::Database legacy(path);
+		legacy.execute(R"SQL(
+CREATE TABLE records(
+ cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+ record_format INTEGER NOT NULL,
+ record_kind INTEGER NOT NULL,
+ measurement_period INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ configuration_generation INTEGER NOT NULL,
+ ingested_at_ns INTEGER NOT NULL,
+ first_sample_index INTEGER NOT NULL,
+ sample_count INTEGER NOT NULL,
+ cycle_count INTEGER NOT NULL,
+ time_quality INTEGER NOT NULL,
+ utc_start_ns INTEGER NOT NULL,
+ utc_uncertainty_ns INTEGER NOT NULL,
+ payload BLOB NOT NULL,
+ UNIQUE(record_format, configuration_generation, source_sequence,
+        first_sample_index)
+);
+CREATE TABLE consumers(
+ name TEXT PRIMARY KEY,
+ acknowledged_cursor INTEGER NOT NULL DEFAULT 0,
+ updated_at_ns INTEGER NOT NULL
+);
+INSERT INTO records(
+ record_format,record_kind,measurement_period,source_sequence,
+ configuration_generation,ingested_at_ns,first_sample_index,sample_count,
+ cycle_count,time_quality,utc_start_ns,utc_uncertainty_ns,payload)
+VALUES(65539,1,0,7,7,1000000007,44800,6400,12,0,
+ -9223372036854775808,-9223372036854775808,X'5A');
+)SQL");
+	}
+	{
+		mnc::meter_stream::DurableMeterSpool spool(path,
+			spool_policy(mnc::meter_stream::StorageBackend::persistent));
+		spool.register_consumer("migration-check");
+		const auto migrated = spool.read_after("migration-check", 4);
+		require(migrated.size() == 1 &&
+				migrated.front().source_sequence == 7 &&
+				migrated.front().source_fragment == 0,
+			"legacy spool rows did not migrate with fragment zero");
+		auto fragment = record(7);
+		fragment.source_fragment = 1;
+		(void)spool.publish(fragment);
+		require(spool.status().record_count == 2,
+			"migrated identity key still collapsed distinct fragments");
 	}
 	remove_database(path);
 }
@@ -567,6 +658,8 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 int main()
 {
 	spool_is_ordered_idempotent_and_durable();
+	spool_distinguishes_source_fragments();
+	spool_migrates_legacy_identity_key();
 	spool_backend_switch_replaces_stale_target();
 	memory_spool_cursors_survive_restart();
 	publish_enforces_hard_byte_cap();

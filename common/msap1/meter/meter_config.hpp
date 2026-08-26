@@ -60,13 +60,14 @@ struct SimulatorChannelConfig {
 };
 
 struct SimulatorHarmonicConfig {
-	/* Harmonic order, 2..63 (1 would silently double the fundamental). */
-	std::uint32_t order = 0;
+	/* Harmonic/interharmonic frequency ratio, >1 and <128. Integer values
+	 * are harmonic orders; fractional values inject interharmonics. */
+	double order = 0.0;
 	/* Amplitude as a percentage of each receiving lane's fundamental
 	 * peak (0..99.9; the PL fraction register is Q16 < 1.0). */
 	double percent = 0.0;
 	/* Extra phase in degrees ON TOP of the physical rule (the PL
-	 * scales each lane's fundamental offset by the order, so a 3rd
+	 * scales each lane's fundamental offset by the ratio, so a 3rd
 	 * harmonic on a balanced set lands zero-sequence by itself). */
 	double phase_degrees = 0.0;
 	/* Which lanes receive it: "voltage", "current", or "all". */

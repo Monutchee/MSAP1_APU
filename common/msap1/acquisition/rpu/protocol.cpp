@@ -12,10 +12,10 @@ static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
 static_assert(sizeof(msap1_aggregation_health_payload) == 200,
 	      "unexpected aggregation health payload layout");
-/* Wire v5: the four packed simulator harmonic slots sit between the
- * noise levels and the flags, and the five Urms(1/2) detection fields
- * close the payload after nominal_frequency_hz. */
-static_assert(sizeof(msap1_meter_config_payload) == 296,
+/* Wire v7: four simulator harmonic/interharmonic slots use three words
+ * apiece between the noise levels and flags. The five Urms(1/2) detection
+ * fields still close the payload after nominal_frequency_hz. */
+static_assert(sizeof(msap1_meter_config_payload) == 312,
 	      "unexpected meter configuration payload layout");
 static_assert(sizeof(msap1_simulator_event_payload) == 24,
 	      "unexpected simulator event payload layout");

@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS records(
  record_kind INTEGER NOT NULL,
  measurement_period INTEGER NOT NULL,
  source_sequence INTEGER NOT NULL,
+ source_fragment INTEGER NOT NULL DEFAULT 0,
  configuration_generation INTEGER NOT NULL,
  ingested_at_ns INTEGER NOT NULL,
  first_sample_index INTEGER NOT NULL,
@@ -154,7 +155,7 @@ CREATE TABLE IF NOT EXISTS records(
  utc_start_ns INTEGER NOT NULL,
  utc_uncertainty_ns INTEGER NOT NULL,
  payload BLOB NOT NULL,
- UNIQUE(record_format, configuration_generation, source_sequence,
+ UNIQUE(record_format, configuration_generation, source_sequence, source_fragment,
         first_sample_index)
 );
 CREATE TABLE IF NOT EXISTS consumers(
@@ -163,6 +164,55 @@ CREATE TABLE IF NOT EXISTS consumers(
  updated_at_ns INTEGER NOT NULL
 );
 )SQL");
+		/* Before M16, the producer identity assumed exactly one record for a
+		 * sequence/sample span. Preserve existing rows while widening that key
+		 * for bounded multi-record families. */
+		bool has_source_fragment = false;
+		{
+			auto columns = database.prepare("PRAGMA table_info(records)");
+			while (columns.step()) {
+				if (columns.text(1) == "source_fragment") {
+					has_source_fragment = true;
+					break;
+				}
+			}
+		}
+		if (!has_source_fragment) {
+			Transaction migration(database);
+			database.execute(R"SQL(
+ALTER TABLE records RENAME TO records_without_fragments;
+CREATE TABLE records(
+ cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+ record_format INTEGER NOT NULL,
+ record_kind INTEGER NOT NULL,
+ measurement_period INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ source_fragment INTEGER NOT NULL DEFAULT 0,
+ configuration_generation INTEGER NOT NULL,
+ ingested_at_ns INTEGER NOT NULL,
+ first_sample_index INTEGER NOT NULL,
+ sample_count INTEGER NOT NULL,
+ cycle_count INTEGER NOT NULL,
+ time_quality INTEGER NOT NULL,
+ utc_start_ns INTEGER NOT NULL,
+ utc_uncertainty_ns INTEGER NOT NULL,
+ payload BLOB NOT NULL,
+ UNIQUE(record_format, configuration_generation, source_sequence, source_fragment,
+        first_sample_index)
+);
+INSERT INTO records(
+ cursor, record_format, record_kind, measurement_period, source_sequence,
+ source_fragment, configuration_generation, ingested_at_ns,
+ first_sample_index, sample_count, cycle_count, time_quality, utc_start_ns,
+ utc_uncertainty_ns, payload)
+SELECT cursor, record_format, record_kind, measurement_period, source_sequence,
+ 0, configuration_generation, ingested_at_ns, first_sample_index, sample_count,
+ cycle_count, time_quality, utc_start_ns, utc_uncertainty_ns, payload
+FROM records_without_fragments;
+DROP TABLE records_without_fragments;
+)SQL");
+			migration.commit();
+		}
 		seed_cursor_space();
 		{
 			auto usage = database.prepare(
@@ -277,13 +327,14 @@ std::uint64_t DurableMeterSpool::publish(const MeterStreamRecord &record)
 	auto existing = impl_->database.prepare(R"SQL(
 SELECT cursor FROM records
  WHERE record_format=? AND configuration_generation=? AND source_sequence=?
-   AND first_sample_index=?
+   AND source_fragment=? AND first_sample_index=?
 )SQL");
 	existing.bind(1, static_cast<std::int64_t>(record.record_format));
 	existing.bind(2,
 		static_cast<std::int64_t>(record.configuration_generation));
 	existing.bind(3, record.source_sequence);
-	existing.bind(4, record.timing.first_sample_index);
+	existing.bind(4, static_cast<std::int32_t>(record.source_fragment));
+	existing.bind(5, record.timing.first_sample_index);
 	if (existing.step()) {
 		const auto cursor = static_cast<std::uint64_t>(existing.integer(0));
 		/* Never commit with a row-active statement: the WAL auto-checkpoint
@@ -295,24 +346,25 @@ SELECT cursor FROM records
 	}
 	auto insert = impl_->database.prepare(R"SQL(
 INSERT INTO records(
- record_format, record_kind, measurement_period, source_sequence,
+ record_format, record_kind, measurement_period, source_sequence, source_fragment,
  configuration_generation, ingested_at_ns, first_sample_index, sample_count,
  cycle_count, time_quality, utc_start_ns, utc_uncertainty_ns, payload)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 )SQL");
 	insert.bind(1, static_cast<std::int64_t>(record.record_format));
 	insert.bind(2, static_cast<std::int32_t>(record.record_kind));
 	insert.bind(3, static_cast<std::int32_t>(record.measurement_period));
 	insert.bind(4, record.source_sequence);
-	insert.bind(5, static_cast<std::int64_t>(record.configuration_generation));
-	insert.bind(6, record.ingested_at_nanoseconds);
-	insert.bind(7, record.timing.first_sample_index);
-	insert.bind(8, static_cast<std::int64_t>(record.timing.sample_count));
-	insert.bind(9, static_cast<std::int64_t>(record.timing.cycle_count));
-	insert.bind(10, static_cast<std::int32_t>(record.timing.time_quality));
-	insert.bind(11, optional_signed(record.timing.utc_start_nanoseconds));
-	insert.bind(12, optional_unsigned(record.timing.utc_uncertainty_nanoseconds));
-	insert.bind(13, record.payload);
+	insert.bind(5, static_cast<std::int32_t>(record.source_fragment));
+	insert.bind(6, static_cast<std::int64_t>(record.configuration_generation));
+	insert.bind(7, record.ingested_at_nanoseconds);
+	insert.bind(8, record.timing.first_sample_index);
+	insert.bind(9, static_cast<std::int64_t>(record.timing.sample_count));
+	insert.bind(10, static_cast<std::int64_t>(record.timing.cycle_count));
+	insert.bind(11, static_cast<std::int32_t>(record.timing.time_quality));
+	insert.bind(12, optional_signed(record.timing.utc_start_nanoseconds));
+	insert.bind(13, optional_unsigned(record.timing.utc_uncertainty_nanoseconds));
+	insert.bind(14, record.payload);
 	insert.execute();
 
 	const auto cursor = static_cast<std::uint64_t>(
@@ -415,7 +467,7 @@ std::vector<MeterStreamRecord> DurableMeterSpool::read_after(
 	const auto acknowledged = consumer.integer(0);
 	auto query = impl_->database.prepare(R"SQL(
 SELECT cursor, record_format, record_kind, measurement_period,
- source_sequence, configuration_generation, ingested_at_ns,
+ source_sequence, source_fragment, configuration_generation, ingested_at_ns,
  first_sample_index, sample_count, cycle_count, time_quality,
  utc_start_ns, utc_uncertainty_ns, payload
 FROM records WHERE cursor>? ORDER BY cursor LIMIT ?
@@ -430,17 +482,18 @@ FROM records WHERE cursor>? ORDER BY cursor LIMIT ?
 		record.record_kind = static_cast<std::uint16_t>(query.integer(2));
 		record.measurement_period = static_cast<std::uint8_t>(query.integer(3));
 		record.source_sequence = static_cast<std::uint64_t>(query.integer(4));
-		record.configuration_generation = static_cast<std::uint32_t>(query.integer(5));
-		record.ingested_at_nanoseconds = query.integer(6);
-		record.timing.first_sample_index = static_cast<std::uint64_t>(query.integer(7));
-		record.timing.sample_count = static_cast<std::uint32_t>(query.integer(8));
-		record.timing.cycle_count = static_cast<std::uint32_t>(query.integer(9));
-		record.timing.time_quality = static_cast<std::uint8_t>(query.integer(10));
+		record.source_fragment = static_cast<std::uint16_t>(query.integer(5));
+		record.configuration_generation = static_cast<std::uint32_t>(query.integer(6));
+		record.ingested_at_nanoseconds = query.integer(7);
+		record.timing.first_sample_index = static_cast<std::uint64_t>(query.integer(8));
+		record.timing.sample_count = static_cast<std::uint32_t>(query.integer(9));
+		record.timing.cycle_count = static_cast<std::uint32_t>(query.integer(10));
+		record.timing.time_quality = static_cast<std::uint8_t>(query.integer(11));
 		record.timing.utc_start_nanoseconds =
-			from_optional_integer<std::int64_t>(query.integer(11));
+			from_optional_integer<std::int64_t>(query.integer(12));
 		record.timing.utc_uncertainty_nanoseconds =
-			from_optional_integer<std::uint64_t>(query.integer(12));
-		record.payload = query.blob(13);
+			from_optional_integer<std::uint64_t>(query.integer(13));
+		record.payload = query.blob(14);
 		result.push_back(std::move(record));
 	}
 	return result;
@@ -534,20 +587,20 @@ void DurableMeterSpool::apply_policy(DatabaseStoragePolicy policy)
 	replacement->database.execute("DELETE FROM records; DELETE FROM consumers");
 	auto records = impl_->database.prepare(R"SQL(
 SELECT cursor,record_format,record_kind,measurement_period,source_sequence,
- configuration_generation,ingested_at_ns,first_sample_index,sample_count,
+ source_fragment,configuration_generation,ingested_at_ns,first_sample_index,sample_count,
  cycle_count,time_quality,utc_start_ns,utc_uncertainty_ns,payload
 FROM records ORDER BY cursor
 )SQL");
 	auto insert = replacement->database.prepare(R"SQL(
 INSERT OR IGNORE INTO records(cursor,record_format,record_kind,measurement_period,
- source_sequence,configuration_generation,ingested_at_ns,first_sample_index,
+ source_sequence,source_fragment,configuration_generation,ingested_at_ns,first_sample_index,
  sample_count,cycle_count,time_quality,utc_start_ns,utc_uncertainty_ns,payload)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 )SQL");
 	while (records.step()) {
-		for (int column = 0; column < 13; ++column)
+		for (int column = 0; column < 14; ++column)
 			insert.bind(column + 1, records.integer(column));
-		insert.bind(14, records.blob(13));
+		insert.bind(15, records.blob(14));
 		insert.execute();
 		insert.reset();
 	}

@@ -234,6 +234,12 @@ bool MeterHistorianService::rebuilds_volatile_period(
 bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
+	/* M16 spectra are intentionally latest-only in this milestone. Every
+	 * validated chunk crosses the durable spool barrier, but the compliance
+	 * historian has no long-term spectrum projection yet; acknowledge it
+	 * without treating the known format as an undecodable poison record. */
+	if (envelope.record_format == msap1::meter_harmonic_format)
+		return false;
 	/*
 	 * A record that cannot be decoded is a POISON PILL, and the spool is
 	 * durable: the record survives every restart, so retrying it wedges the

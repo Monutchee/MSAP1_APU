@@ -7,6 +7,7 @@
 
 #include "msap1/acquisition/dma/meter_record_source.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
+#include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
@@ -185,6 +186,26 @@ public:
 	{
 		return latest_power_quality_event_;
 	}
+	/** @brief Accepted HARMONIC-v1 chunks, including incomplete families. */
+	[[nodiscard]] std::uint64_t harmonic_records() const
+	{
+		return harmonic_records_;
+	}
+	/** @brief Complete 42-record spectrum families made externally visible. */
+	[[nodiscard]] std::uint64_t harmonic_families() const
+	{
+		return harmonic_families_;
+	}
+	/** @brief Partial or wholly skipped producer families. */
+	[[nodiscard]] std::uint64_t incomplete_harmonic_families() const
+	{
+		return incomplete_harmonic_families_;
+	}
+	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
+	latest_harmonic_spectrum() const
+	{
+		return latest_harmonic_spectrum_;
+	}
 	/** @brief Missing AGGREGATE records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
 	{
@@ -257,6 +278,14 @@ private:
 	std::uint64_t pq_events_ = 0;
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_{};
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
+	/* M16 publishes one spectrum only after all 42 channel/chunk records
+	 * agree. The bounded assembler retains at most one partial family. */
+	msap1::HarmonicFamilyAssembler harmonic_assembler_{};
+	std::uint64_t harmonic_records_ = 0;
+	std::uint64_t harmonic_families_ = 0;
+	std::uint64_t incomplete_harmonic_families_ = 0;
+	std::optional<msap1::HarmonicSpectrumSnapshot>
+		latest_harmonic_spectrum_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
 	std::uint64_t two_hour_sequence_gaps_ = 0;
