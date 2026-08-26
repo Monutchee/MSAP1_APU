@@ -232,7 +232,8 @@ public:
 msap1::MeterRecord basic_record(std::uint32_t sequence,
 				std::uint64_t first_sample_index,
 				std::uint32_t sample_count,
-				std::uint32_t generation)
+				std::uint32_t generation,
+				bool utc_resynchronized = false)
 {
 	msap1::MeterRecord record{};
 	record.words[0] = msap1::meter_record_magic;
@@ -244,7 +245,8 @@ msap1::MeterRecord basic_record(std::uint32_t sequence,
 	record.words[6] = sample_count;
 	record.words[9] = static_cast<std::uint32_t>(first_sample_index);
 	record.words[10] = static_cast<std::uint32_t>(first_sample_index >> 32);
-	record.words[13] = 60u | (12u << 8) | (1u << 16);
+	record.words[13] = 60u | (12u << 8) | (1u << 16) |
+		(utc_resynchronized ? (1u << 19) : 0u);
 	return record;
 }
 
@@ -297,6 +299,43 @@ void ingestor_validates_sample_range_continuity()
 		require(ingest.invalid_records() == 1,
 			"a stale-generation record was accepted");
 	}
+
+	{
+		ScriptedMeterSource source;
+		msap1::PreparedMeterConfiguration configuration{};
+		configuration.wire.generation = 0xfeedbeefu;
+		configuration.wire.sample_rate_hz = 32000;
+		const msap1::meter::MeasurementTimebase timebase;
+		FakeRecordPublisher publisher;
+		MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+		ingest.begin_epoch();
+
+		const auto feed = [&](const msap1::MeterRecord &record) {
+			source.next = {};
+			source.next.records[0] = record;
+			source.next.count = 1;
+			source.next.bytes = sizeof(msap1::MeterRecord);
+			ingest.read_available();
+		};
+
+		feed(basic_record(1, 1'000, 120, 0xfeedbeefu));
+		feed(basic_record(2, 1'060, 120, 0xfeedbeefu, true));
+		require(ingest.sequence_gaps() == 0 &&
+			ingest.latest_record()->timing().utc_resynchronized,
+			"a marked lateral UTC overlap was reported as a sample gap");
+
+		feed(basic_record(3, 1'120, 120, 0xfeedbeefu));
+		require(ingest.sequence_gaps() == 1,
+			"an unmarked overlap was accepted");
+
+		/* A marker cannot hide a contained duplicate or a forward gap. */
+		feed(basic_record(4, 1'130, 50, 0xfeedbeefu, true));
+		require(ingest.sequence_gaps() == 2,
+			"a contained marked duplicate was accepted");
+		feed(basic_record(5, 2'000, 120, 0xfeedbeefu, true));
+		require(ingest.sequence_gaps() == 3,
+			"a marked forward sample gap was accepted");
+	}
 }
 
 /* Minimal valid MTR2 aggregate for the interleaving checks: 15 blocks of
@@ -323,6 +362,9 @@ msap1::MeterRecord aggregate_record(std::uint32_t sequence,
 	record.words[14] = sequence * 15u - 14u;
 	record.words[15] = sequence * 15u;
 	record.words[32] = 60'000;
+	const auto last_sample = first_sample_index + record.words[6] - 1u;
+	record.words[36] = static_cast<std::uint32_t>(last_sample);
+	record.words[37] = static_cast<std::uint32_t>(last_sample >> 32);
 	return record;
 }
 

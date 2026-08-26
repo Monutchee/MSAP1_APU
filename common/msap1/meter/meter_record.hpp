@@ -34,7 +34,8 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
  * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
  * word, per-lane slots, and words 56..63; additions: block last-sample
  * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
- * 32-bit), and status bit 2 = first block after a discontinuity. */
+ * 32-bit), status bit 2 = first block after a discontinuity, and timing
+ * bit 19 = first Basic on a UTC-resynchronized cadence. */
 inline constexpr std::uint32_t meter_periodic_format = 0x00010004u;
 /* POWER v1 (metrology M8): emitted by the 10/12-cycle tier on the same
  * stream immediately after each BASIC-v4 record, same sequence and
@@ -64,13 +65,14 @@ inline constexpr std::uint32_t meter_phasor_format = 0x00080002u;
  * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
  * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
 inline constexpr std::uint32_t meter_unbalance_format = 0x00090002u;
-/* AGG v3 (metrology M11): the 150/180-cycle tier record from
- * Agg150_180CycleEngine (Mtr2Engine retired). MTR2-v2 interior plus:
+/* AGG v3 (metrology M11/M15): the R5C1 150/180-cycle tier record
+ * (Mtr2Engine retired). MTR2-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
  * aggregate RMS (u32 micro-units). SEMANTIC upgrade: per-lane RMS is the
  * whole-interval finalize of the summed raw accumulators (mean-corrected
  * under the committed dc_remove, sample-weighted), no longer sqrt(mean
- * of 15 block-RMS squares). */
+ * of 15 block-RMS squares). Status bits 3/4 distinguish the continuing
+ * UTC-overlap interval from the new synchronized interval. */
 inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
 /* AGG-POWER/PHASOR/UNBAL v1 (M11): the aggregate tier's siblings, same
  * sequence/anchors as their AGG-v3 record; payload word maps (16+)
@@ -138,6 +140,9 @@ struct MeterTimingWord {
 	bool cycle_locked = false;
 	bool free_run_fallback = false;
 	bool first_block_after_apply = false;
+	/* First Basic window on the cadence resynchronized at a UTC ten-minute
+	 * boundary. The format ID is unchanged; this uses reserved word-13 bit 19. */
+	bool utc_resynchronized = false;
 };
 
 /** Decoded aggregate record word 8: record-level status flags. */
@@ -149,6 +154,11 @@ struct MeterAggregateStatus {
 	bool complete = false;
 	/* Set only when all 15 basic frequency readings were valid. */
 	bool frequency_valid = false;
+	/* Continuing pre-boundary interval that deliberately overlaps the new
+	 * synchronized interval. */
+	bool utc_overlap = false;
+	/* Interval seeded by the first Basic on the synchronized cadence. */
+	bool utc_resynchronized = false;
 };
 
 /** Decoded aggregate record word 13: aggregation composition. */
@@ -277,8 +287,8 @@ struct MeterRecord {
 
 	/* Words 9/10: first sample of this record's interval on the PL
 	 * 64-bit free-running conversion-domain counter (never reset by
-	 * configuration or UTC). The last sample is intentionally not in the
-	 * record: last = first + block_sample_count() - 1. */
+	 * configuration or UTC). Format-specific fields carry the actual last
+	 * sample where overlap provenance requires it. */
 	std::uint64_t first_sample_index() const { return unsigned64(9); }
 
 	/* Words 11/12: transport health, carried in-record ("as of this
@@ -299,6 +309,7 @@ struct MeterRecord {
 			(timing_word & (1u << 16)) != 0u,
 			(timing_word & (1u << 17)) != 0u,
 			(timing_word & (1u << 18)) != 0u,
+			(timing_word & (1u << 19)) != 0u,
 		};
 	}
 
@@ -342,7 +353,7 @@ struct MeterRecord {
 	std::uint32_t fifo_overflows() const { return word(62); }
 	std::uint32_t adc_alerts() const { return word(63); }
 
-	/* ---- aggregate (MTR2, 0x00020002) fields ------------------------- */
+	/* ---- aggregate (AGG-v3/MTR2, 0x00020003) fields ------------------ */
 
 	std::uint32_t aggregate_sequence() const { return sequence(); }
 	std::uint32_t aggregate_sample_count() const
@@ -362,6 +373,8 @@ struct MeterRecord {
 			(status_word & (1u << 0)) != 0u,
 			(status_word & (1u << 1)) != 0u,
 			(status_word & (1u << 2)) != 0u,
+			(status_word & (1u << 3)) != 0u,
+			(status_word & (1u << 4)) != 0u,
 		};
 	}
 	MeterAggregateComposition aggregate_composition() const
@@ -396,6 +409,13 @@ struct MeterRecord {
 	std::uint32_t aggregate_reset_count() const { return word(33); }
 	std::uint32_t aggregate_ineligible_count() const { return word(34); }
 	std::uint32_t aggregate_continuity_count() const { return word(35); }
+	/* AGG-v3 words 36/37 carry the actual last contributing sample. For a
+	 * UTC-overlap aggregate this can be earlier than first+sample_count-1,
+	 * because sample_count remains the sum of all 15 Basic contributions. */
+	std::uint64_t aggregate_last_sample_index() const
+	{
+		return unsigned64(36);
+	}
 
 	/* ---- clock-aligned ten-minute aggregate (M13) -------------------- */
 

@@ -77,6 +77,10 @@ msap1::MeterRecord contract_aggregate_record()
 	for (std::size_t channel = 4; channel < 7; ++channel)
 		set_rms(channel, 120'000'000);
 	record.words[32] = 60'000;
+	const std::uint64_t last_sample =
+		331'990'790ull + static_cast<std::uint64_t>(record.words[6]) - 1u;
+	record.words[36] = static_cast<std::uint32_t>(last_sample);
+	record.words[37] = static_cast<std::uint32_t>(last_sample >> 32);
 	return record;
 }
 

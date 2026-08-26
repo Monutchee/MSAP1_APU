@@ -1037,6 +1037,7 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	timing.cycle_locked = timing_word.cycle_locked;
 	timing.free_run_fallback = timing_word.free_run_fallback;
 	timing.first_block_after_apply = timing_word.first_block_after_apply;
+	timing.utc_resynchronized = timing_word.utc_resynchronized;
 	/* TimeQuality/utc_start/utc_uncertainty_ns are stamped by the caller:
 	 * UTC state lives in the APU MeasurementTimebase, never in the PL
 	 * record. */
@@ -1063,7 +1064,8 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	 * otherwise is corruption or an RTL regression, never a partial
 	 * result to be salvaged.
 	 */
-	if (!record.aggregate_status().complete)
+	const auto status = record.aggregate_status();
+	if (!status.complete)
 		throw std::invalid_argument(
 			"MTR2 aggregate is not marked complete");
 	const auto composition = record.aggregate_composition();
@@ -1107,6 +1109,20 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
 			"MTR2 sample range overflows the 64-bit counter");
+	if (status.utc_overlap && status.utc_resynchronized)
+		throw std::invalid_argument(
+			"MTR2 aggregate has conflicting UTC provenance");
+	const auto expected_last =
+		first_sample_index + static_cast<std::uint64_t>(sample_count) - 1u;
+	const auto actual_last = record.aggregate_last_sample_index();
+	if (status.utc_overlap) {
+		if (actual_last < first_sample_index || actual_last >= expected_last)
+			throw std::invalid_argument(
+				"MTR2 UTC-overlap range is not shorter than its contribution count");
+	} else if (actual_last != expected_last) {
+		throw std::invalid_argument(
+			"MTR2 aggregate sample range is discontinuous");
+	}
 
 	const auto sequence =
 		static_cast<std::uint64_t>(record.aggregate_sequence());
@@ -1123,11 +1139,11 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 		record, sequence, received_at, window,
 		record.aggregate_status().arithmetic_error, false);
 
-	const auto status = record.aggregate_status();
 	meter::AggregateTiming timing{};
 	timing.sequence = sequence;
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample_index;
+	timing.last_sample_index = actual_last;
 	timing.sample_count = sample_count;
 	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.first_basic_sequence = record.first_basic_sequence();
@@ -1137,6 +1153,8 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	timing.nominal_frequency = nominal;
 	timing.arithmetic_error = status.arithmetic_error;
 	timing.frequency_valid = status.frequency_valid;
+	timing.utc_overlap = status.utc_overlap;
+	timing.utc_resynchronized = status.utc_resynchronized;
 	/* TimeQuality/utc_start/utc_uncertainty_ns are stamped by the caller:
 	 * UTC state lives in the APU MeasurementTimebase, never in the PL
 	 * record. */
@@ -1204,6 +1222,7 @@ MeterUpdate decode_open_interval_meter_record(
 	timing.sequence = sequence;
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample;
+	timing.last_sample_index = actual_last;
 	timing.sample_count = sample_count;
 	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.first_basic_sequence = first_sequence;
@@ -1321,6 +1340,7 @@ MeterUpdate decode_ten_minute_meter_record(const MeterRecord &record,
 	timing.sequence = sequence;
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample;
+	timing.last_sample_index = actual_last;
 	timing.sample_count = sample_count;
 	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.first_basic_sequence = first_basic;
@@ -1416,6 +1436,7 @@ MeterUpdate decode_two_hour_meter_record(const MeterRecord &record,
 	timing.sequence = sequence;
 	timing.configuration_generation = record.configuration_generation();
 	timing.first_sample_index = first_sample;
+	timing.last_sample_index = actual_last;
 	timing.sample_count = sample_count;
 	timing.sample_rate_hz = record.sample_rate_hz();
 	timing.first_basic_sequence = first_interval;

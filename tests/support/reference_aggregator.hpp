@@ -4,14 +4,12 @@
 /**
  * NON-AUTHORITATIVE software reference for 150/180-cycle aggregation.
  *
- * The PL is the authoritative aggregator: it folds 15 consecutive eligible
+ * R5C1 is the authoritative aggregator: it folds 15 consecutive eligible
  * basic blocks into one MTR2 record, and the APU only DECODES that record.
  * Production code must not include this header — it exists solely so tests
- * can verify the PL wire contract against an independent implementation of
+ * can verify the decoded wire quantities against an independent implementation of
  * the pinned arithmetic. Everything here is integer math (unsigned 128-bit
- * accumulation, integer floor square root, floor divisions); with no
- * floating point involved, a correct PL implementation and this reference
- * must produce bit-identical results.
+ * accumulation, integer floor square root, floor divisions).
  *
  * Pinned semantics (IEC 61000-4-30 aggregation):
  *

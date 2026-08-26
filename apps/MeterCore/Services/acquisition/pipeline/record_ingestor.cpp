@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <string>
 
 namespace msap1::acquisition::daemon {
@@ -237,16 +238,34 @@ bool MeterRecordIngestor::track_basic_continuity(
 		const auto expected_first = latest_record_->first_sample_index() +
 			latest_record_->block_sample_count();
 		if (record.first_sample_index() != expected_first) {
-			++sequence_gaps_;
-			log_message(dma_log, mnc::logging::Priority::warning,
-				"meter record sample range is discontinuous: expected " +
-					std::to_string(expected_first) + ", got " +
-					std::to_string(record.first_sample_index()),
-				"meter_sample_range_gap",
-				{{"MNC_EXPECTED_SAMPLE_INDEX",
-				  std::to_string(expected_first)},
-				 {"MNC_FIRST_SAMPLE_INDEX",
-				  std::to_string(record.first_sample_index())}});
+			const auto first = record.first_sample_index();
+			const auto count = record.block_sample_count();
+			const auto previous_first =
+				latest_record_->first_sample_index();
+			const auto previous_last = expected_first - 1u;
+			const bool range_safe =
+				count != 0u && first <=
+					std::numeric_limits<std::uint64_t>::max() -
+						static_cast<std::uint64_t>(count - 1u);
+			const auto last = range_safe
+				? first + static_cast<std::uint64_t>(count) - 1u
+				: 0u;
+			const bool intentional_utc_overlap =
+				record.timing().utc_resynchronized && range_safe &&
+				first > previous_first && first <= previous_last &&
+				last > previous_last;
+			if (!intentional_utc_overlap) {
+				++sequence_gaps_;
+				log_message(dma_log, mnc::logging::Priority::warning,
+					"meter record sample range is discontinuous: expected " +
+						std::to_string(expected_first) + ", got " +
+						std::to_string(first),
+					"meter_sample_range_gap",
+					{{"MNC_EXPECTED_SAMPLE_INDEX",
+					  std::to_string(expected_first)},
+					 {"MNC_FIRST_SAMPLE_INDEX",
+					  std::to_string(first)}});
+			}
 		}
 	}
 	return true;
