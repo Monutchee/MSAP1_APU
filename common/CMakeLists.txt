@@ -467,6 +467,17 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME meter_stream_test COMMAND meter_stream_test)
 
+    # Live target-only M15 probe. It is deliberately excluded from the normal
+    # build and CTest: it requires a running meter-stream service and must span
+    # a programmed UTC ten-minute boundary. Build it explicitly when producing
+    # target evidence; tests/target/README.md documents the safe procedure.
+    add_executable(m15_utc_overlap_target_test EXCLUDE_FROM_ALL
+        ${PROJECT_SOURCE_DIR}/tests/target/m15_utc_overlap_target_test.cpp)
+    target_link_libraries(m15_utc_overlap_target_test PRIVATE
+        msap1::meter-data-provider-stream)
+    target_compile_options(m15_utc_overlap_target_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+
     add_executable(service_manager_test
         ${PROJECT_SOURCE_DIR}/tests/service_manager_test.cpp)
     target_link_libraries(service_manager_test PRIVATE mnc::service)
