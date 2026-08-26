@@ -381,7 +381,7 @@ if(BUILD_TESTING)
     add_test(NAME meter_data_test COMMAND meter_data_test)
 
     # The reference aggregator under tests/support is deliberately test-only:
-    # the PL is the authoritative aggregator and production code never
+    # R5C1 is the authoritative aggregator and APU production code never
     # computes aggregates, so only this test target sees tests/ includes.
     add_executable(aggregate_decode_test
         ${PROJECT_SOURCE_DIR}/tests/aggregate_decode_test.cpp)

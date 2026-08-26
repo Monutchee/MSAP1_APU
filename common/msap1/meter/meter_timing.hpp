@@ -8,7 +8,7 @@
  * 10 complete grid cycles at a 50 Hz nominal, 12 at 60 Hz. The nominal
  * duration is about 200 ms, but 200 ms is never the semantic definition —
  * the actual duration varies with grid frequency, intentionally. See
- * docs/TIMING_MODEL.md for the full model.
+ * docs/System_Architecture/TIMING_MODEL.md for the full model.
  */
 
 #include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
@@ -103,6 +103,7 @@ struct BlockTiming {
 	bool cycle_locked = false;
 	bool free_run_fallback = false;
 	bool first_block_after_apply = false;
+	bool utc_resynchronized = false;
 	TimeQuality time_quality = TimeQuality::Unsynchronized;
 	/* UTC of the first sample via the measurement timebase mapping;
 	 * absent while unsynchronized. */
@@ -136,9 +137,9 @@ class_a_aggregation_eligible(const BlockTiming &timing)
 /**
  * Timing identity of one decoded aggregate record.
  *
- * The PL is the authoritative aggregator: it folds exactly 15 consecutive
- * ELIGIBLE basic blocks (same generation, same nominal, sample-range
- * continuous — all enforced in the PL) into one aggregate and emits only
+ * R5C1 is the authoritative aggregator: it folds exactly 15 consecutive
+ * ELIGIBLE basic blocks (same generation and nominal; sample-range continuous
+ * except for the one marked UTC transition) into one aggregate and emits only
  * complete aggregates. The APU never recomputes any of that; it decodes the
  * record and, exactly as for BlockTiming, stamps the UTC mapping and its
  * quality at decode time.
@@ -153,6 +154,9 @@ struct AggregateTiming {
 	 * 64-bit free-running conversion counter — the same domain as
 	 * BlockTiming::first_sample_index. */
 	std::uint64_t first_sample_index = 0;
+	/* Actual last contributing sample. Normally this is first+count-1; an
+	 * intentional UTC-overlap aggregate has a shorter physical span. */
+	std::uint64_t last_sample_index = 0;
 	/* Total samples across all contributing basic blocks. */
 	std::uint32_t sample_count = 0;
 	std::uint32_t sample_rate_hz = 0;
@@ -174,6 +178,8 @@ struct AggregateTiming {
 	 * readings were valid (informative — the standardized frequency
 	 * interval is the 10 s tier, not this one). */
 	bool frequency_valid = false;
+	bool utc_overlap = false;
+	bool utc_resynchronized = false;
 	/* M13/M14 boundary provenance. These remain false/absent for the
 	 * 150/180-cycle tier. A contaminated interval is still retained for
 	 * diagnostics, but its electrical readings decode as invalid. */

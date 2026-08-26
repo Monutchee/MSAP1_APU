@@ -23,6 +23,17 @@ to a fixed sample window (`rms_window_samples`, derived from the nominal
 frequency) and flags the block `free_run_fallback`; blocks stay gapless
 across the transition.
 
+R5C1 assembles the cycle results into Basic windows. At every programmed UTC
+ten-minute sample target, the first whole cycle whose first sample is at or
+after the target starts the synchronized cadence. If an old Basic window is
+open, that cycle is folded into both the continuing old slot and one transient
+shadow slot; the old window closes normally and the selector promotes the
+shadow without copying its accumulator image. The first Basic result on the
+new cadence carries timing-word bit 19 (`utc_resynchronized`). Consecutive
+Basic records may therefore overlap only at this marked transition; the APU
+accepts a marked lateral overlap but still rejects an unmarked overlap,
+contained duplicate, or forward gap.
+
 ## The 150/180-cycle aggregate is 15 basic blocks
 
 The first Class A aggregation tier folds exactly **15 consecutive eligible
@@ -31,18 +42,16 @@ basic blocks** into one aggregate: 150 cycles at a 50 Hz nominal, 180 at
 about 3 s, but it is NOT a 3-second timer, and the actual duration varies
 with grid frequency.
 
-- The **PL is the authoritative aggregator**, and it is not an independent
-  raw-sample RMS engine: it combines the 15 standard basic results.
+- **R5C1 is the authoritative aggregator**, and it is not an independent
+  raw-sample RMS engine: it combines the merge-safe sufficient statistics of
+  15 standard Basic results and reuses the shared interval finalizer.
   Eligibility (cycle-locked, no free-run fallback, not first-after-apply,
   exact cycle count — the `class_a_aggregation_eligible` terms), same
-  configuration generation, same nominal, and sample-range continuity
-  across the 15 blocks are all enforced in the PL, and only complete
-  15-block aggregates are emitted.
-- RMS quantities aggregate per IEC 61000-4-30 as the square root of the
-  arithmetic mean of the squares of the 15 basic values — unweighted, each
-  basic interval contributes equally even though actual sample counts vary
-  slightly: `X_agg = floor(sqrt(floor(sum(X_i^2)/15)))`, computed in the PL
-  Q16 internal domain and then converted to micro-units. Frequency
+  configuration generation, same nominal, and sample-range continuity (with
+  one explicitly marked lateral UTC transition) across the 15 blocks are all
+  enforced in R5C1, and only complete 15-block aggregates are emitted.
+- Electrical quantities are finalized from the summed accumulator images;
+  previously rounded Basic RMS values are never averaged. Frequency
   aggregates as the arithmetic mean `floor(sum(f_i)/15)` of the 15 basic
   values, valid only when all 15 were valid. That mean is **informative
   only** — the standardized Class A frequency product is defined over its
@@ -58,10 +67,16 @@ with grid frequency.
   travels over RPMsg, and the APU never recomputes aggregate values
   (`tests/support/reference_aggregator.hpp` is a test-only reference for
   verifying the PL, not production code).
-- `AggregateTiming` carries the aggregate identity — first sample index in
-  the conversion domain, total sample count, the contributing basic
-  sequence range — and the APU stamps TimeQuality/UTC at decode time
-  exactly as for `BlockTiming`.
+- At a UTC transition, a synchronized Basic seeds a second 150/180-cycle
+  slot while also completing the pre-boundary interval. Both intervals still
+  contain exactly 15 consecutive Basic sequence numbers. The continuing
+  record carries status bit 3 (`utc_overlap`); the new record carries bit 4
+  (`utc_resynchronized`). Only the continuing record may have an actual
+  first-to-last sample span shorter than its summed contribution count.
+- `AggregateTiming` carries the aggregate identity — first and actual last
+  sample indices, total contribution count, contributing Basic sequence
+  range, and UTC-overlap provenance — and the APU stamps TimeQuality/UTC at
+  decode time exactly as for `BlockTiming`.
 
 ### Exposing the aggregate
 
@@ -118,8 +133,10 @@ The two record streams stay separate all the way to the API:
    is never reset by configuration apply, capture restart, or any clock
    correction. Block identity (`first_sample_index`, sample-range
    continuity `first(N+1) == first(N) + count(N)`) lives entirely in this
-   domain. The last sample index is never transmitted: it is always
-   `first + count - 1`.
+   domain. BASIC-v4 transmits the actual last sample in words 14–15. AGG-v3
+   transmits it in words 36–37 because a continuing UTC-overlap aggregate has
+   `last < first + count - 1`; all non-overlap ranges retain the usual
+   `last == first + count - 1` invariant.
 
 2. **UTC** — a wall-clock label attached to measurement time through
    discrete sync points. The acquisition daemon periodically latches the
@@ -146,12 +163,13 @@ measured frequency never changes the block rule.
 
 ## Ownership
 
-- **PL** — cycle timing (zero-cross detection, block boundaries, lock and
-  fallback flags) and the monotonic 64-bit sample counter. The PL knows
-  nothing about UTC.
-- **RPU** — configuration conduit only: validates the nominal frequency,
-  writes the PL grid registers through the shadow/apply discipline, and
-  verifies readback. No MTR1 knowledge, no timing state.
+- **PL** — cycle timing (zero-cross detection, cycle boundaries, lock and
+  fallback flags), merge-safe single-cycle statistics, and the monotonic
+  64-bit sample counter. The PL exports the Linux-programmed sample-domain UTC
+  target as context but does not perform wall-clock conversion.
+- **RPU** — R5C1 owns Basic and longer interval aggregation, including the
+  two-slot UTC transition state and complete MTR1/MTR2 serialization. R5C0
+  remains the configuration conduit for grid timing and capture control.
 - **APU** — UTC sync authority (MeasurementTimebase) and decoded data:
   record validation and continuity, BlockTiming stamping at decode time,
   durable storage, and publication.
@@ -166,17 +184,20 @@ sample rate (5), actual sample count (6), valid mask (7), status (8), the
 64-bit first-sample index (words 9–10, the PL conversion-domain counter),
 and the transport drop words (11–12, constant 0 by construction).
 
-MTR1 format v3 (`0x00010003`) adds the timing word (word 13: nominal Hz,
-cycle count, cycle_locked / free_run_fallback / first_block_after_apply
-flags), per-channel readings (words 16–55), the frequency block (56–59),
-and the capture diagnostics latched at block close (60–63).
+The current Basic format v4 (`0x00010004`) adds the timing word (word 13:
+nominal Hz, cycle count, cycle_locked / free_run_fallback /
+first_block_after_apply flags, plus bit 19 `utc_resynchronized`), the actual
+last-sample index (words 14–15), per-channel readings (words 16–55), the
+frequency block (56–59), and capture diagnostics (60–63).
 
-Aggregate format `0x00020002` (MTR2) carries the composition word
+Aggregate format v3 `0x00020003` (MTR2) carries the composition word
 (word 13: block count 15, nominal Hz, total cycle count), the first/last
 contributing basic sequence (words 14–15), per-channel aggregate RMS in
 signed 64-bit micro-units (words 16–31, MTR1 channel order), the mean
 frequency in millihertz (word 32), and the aggregation-engine diagnostics
-as of the emit (words 33–35: reset / ineligible / continuity counts).
+as of the emit (words 33–35: reset / ineligible / continuity counts). Words
+36–37 carry the actual last sample. Status bits 3 and 4 distinguish the
+continuing overlap interval from the newly synchronized interval.
 Decoding produces `MeasurementPeriod::Cycles150_180` updates carrying
 `AggregateTiming`; basic decoding is unchanged. Earlier formats (v1
 `0x00010001`, v2 `0x00010002`, MTR2 `0x00020001`) are not decodable —
@@ -188,7 +209,10 @@ building anything: it must be marked complete, carry a 50/60 Hz nominal,
 exactly 15 basic blocks whose cycle count matches that nominal, a
 first/last basic sequence span of exactly 15 consecutive blocks (modular,
 so a span wrapping 0xFFFFFFFF is accepted), a non-zero sample count, and a
-sample range that stays inside the 64-bit counter. Aggregate RMS quality
+sample range that stays inside the 64-bit counter. An unmarked or synchronized
+record must have `actual_last == first + count - 1`; an overlap record must
+have a strictly shorter, nonempty physical span, and conflicting provenance
+bits are rejected. Aggregate RMS quality
 follows a strict priority — an aggregation arithmetic error outranks the
 channel valid mask, so a saturated value can never be published as
 `valid`.

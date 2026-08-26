@@ -374,7 +374,7 @@ VALUES(?,?,?,?,?,?,?,?,?)
 	block.bind(6, measured_at_ns);
 	std::uint64_t first = 0; std::uint64_t last = 0;
 	if (update.timing) { first = update.timing->first_sample_index; last = first + update.timing->sample_count - 1u; }
-	else if (update.aggregate_timing) { first = update.aggregate_timing->first_sample_index; last = first + update.aggregate_timing->sample_count - 1u; }
+	else if (update.aggregate_timing) { first = update.aggregate_timing->first_sample_index; last = update.aggregate_timing->last_sample_index; }
 	block.bind(7, first); block.bind(8, last); block.bind(9, std::int32_t{1});
 	block.execute();
 	const bool inserted = database.changes() == 1;

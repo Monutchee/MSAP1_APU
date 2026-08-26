@@ -13,11 +13,11 @@
 #include <stdexcept>
 
 /*
- * MTR2 (0x00020002) aggregate-record tests: the test-only reference
+ * AGG-v3/MTR2 (0x00020003) aggregate-record tests: the test-only reference
  * aggregator against golden vectors, the decoder against records built from
- * reference output, and the defensive validation of shapes the PL must
- * never emit. The PL is the authoritative aggregator; nothing here computes
- * aggregates in production code.
+ * reference output, and the defensive validation of shapes R5C1 must never
+ * emit. R5C1 is the authoritative aggregator; nothing here computes
+ * aggregates in APU production code.
  */
 
 namespace {
@@ -117,10 +117,11 @@ msap1::MeterRecord aggregate_record(const AggregateSpec &spec)
 	}
 	record.words[32] = spec.frequency_millihz;
 	/* AGG-v3 additions: interval last-sample anchor + line-line RMS. */
+	const auto last_sample =
+		spec.first_sample_index + spec.sample_count - 1u;
 	record.words[36] =
-		static_cast<std::uint32_t>(spec.first_sample_index + 384'014);
-	record.words[37] = static_cast<std::uint32_t>(
-		(spec.first_sample_index + 384'014) >> 32);
+		static_cast<std::uint32_t>(last_sample);
+	record.words[37] = static_cast<std::uint32_t>(last_sample >> 32);
 	record.words[38] = 12'000'000;
 	record.words[39] = 11'000'000;
 	record.words[40] = 13'000'000;
@@ -519,6 +520,54 @@ void aggregate_decodes_line_line()
 			fundamental.voltage_ll.phase_b.value == 11'000'000 &&
 			fundamental.voltage_ll.phase_c.value == 13'000'000,
 		"AGG-v3 line-line words 38..40 were not decoded");
+}
+
+void aggregate_decodes_and_validates_utc_overlap_provenance()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto spec = AggregateSpec{};
+	const auto contiguous_last =
+		spec.first_sample_index + spec.sample_count - 1u;
+	const auto shortened_last = contiguous_last - 6'400u;
+	const auto set_last = [](msap1::MeterRecord &record,
+				 std::uint64_t last) {
+		record.words[36] = static_cast<std::uint32_t>(last);
+		record.words[37] = static_cast<std::uint32_t>(last >> 32);
+	};
+
+	auto overlap = aggregate_record(spec);
+	overlap.words[8] |= 1u << 3;
+	set_last(overlap, shortened_last);
+	const auto overlap_update = registry.decode(overlap);
+	require(overlap_update.aggregate_timing->utc_overlap &&
+		!overlap_update.aggregate_timing->utc_resynchronized &&
+		overlap_update.aggregate_timing->last_sample_index ==
+			shortened_last,
+		"UTC-overlap provenance or actual last sample was lost");
+
+	auto synchronized = aggregate_record(spec);
+	synchronized.words[8] |= 1u << 4;
+	const auto synchronized_update = registry.decode(synchronized);
+	require(!synchronized_update.aggregate_timing->utc_overlap &&
+		synchronized_update.aggregate_timing->utc_resynchronized &&
+		synchronized_update.aggregate_timing->last_sample_index ==
+			contiguous_last,
+		"UTC-resynchronized aggregate provenance was lost");
+
+	auto conflicting = overlap;
+	conflicting.words[8] |= 1u << 4;
+	require_throws([&] { (void)registry.decode(conflicting); },
+		"conflicting UTC aggregate provenance decoded");
+
+	auto unmarked_short = aggregate_record(spec);
+	set_last(unmarked_short, shortened_last);
+	require_throws([&] { (void)registry.decode(unmarked_short); },
+		"an unmarked shortened aggregate range decoded");
+
+	auto marked_contiguous = aggregate_record(spec);
+	marked_contiguous.words[8] |= 1u << 3;
+	require_throws([&] { (void)registry.decode(marked_contiguous); },
+		"a UTC-overlap flag without overlap geometry decoded");
 }
 
 /* The aggregate sibling records (M11) decode on the Cycles150_180 period
@@ -939,6 +988,7 @@ int main()
 {
 	try {
 		aggregate_decodes_line_line();
+		aggregate_decodes_and_validates_utc_overlap_provenance();
 		aggregate_siblings_decode();
 		ten_minute_decodes_boundary_provenance();
 		ten_minute_contamination_is_visible_but_invalid();

@@ -171,18 +171,26 @@
   sequencer and is deliberately NOT part of the configuration snapshot: a
   configuration commit stops and restarts capture, which would destroy the
   phase continuity a sag/swell/interruption test depends on.
-- MTR1 record format `0x00010002` (v2) is the cycle-timing block format:
-  word 6 = actual sample count, word 15 = timing word, words 60–61 =
-  64-bit first-sample index. Keep the v1 (`0x00010001`) decoder registered
-  for stored streams. See `docs/TIMING_MODEL.md` for the timing model and
-  the PL/RPU/APU ownership split.
-- Record format `0x00020001` (MTR2) is the 150/180-cycle aggregate
+- BASIC-v4 record format `0x00010004` is the authoritative R5C1
+  10/12-cycle format: word 6 = actual sample count, word 13 = timing and
+  provenance (bit 19 marks the first UTC-resynchronized Basic), words 14–15
+  = actual last sample, and words 9–10 = 64-bit first sample. Consecutive
+  Basic records may overlap only when the later record has bit 19 and its
+  range advances beyond the prior record; reject unmarked overlaps,
+  contained duplicates, and forward gaps. See
+  `docs/System_Architecture/TIMING_MODEL.md` for the timing model and the
+  PL/RPU/APU ownership split.
+- Record format `0x00020003` (AGG-v3/MTR2) is the 150/180-cycle aggregate
   fundamental record: exactly 15 consecutive eligible basic blocks folded
-  by the PL (the authoritative aggregator) into one 256-byte record that
+  by R5C1 (the authoritative aggregator) into one 256-byte record that
   interleaves with basic records on the meter DMA stream under an
   independent sequence counter. The APU only decodes MTR2 — never compute
-  aggregates in APU production code — and aggregate data never travels
-  over RPMsg. The word layout is pinned in `docs/TIMING_MODEL.md`.
+  aggregates in APU production code — and aggregate data never travels over
+  RPMsg. Status bit 3 marks the continuing UTC-overlap interval, bit 4 marks
+  the synchronized interval, and words 36–37 carry the actual last sample.
+  Only a bit-3 record may have a physical span shorter than its summed
+  contribution count. The word layout is pinned in
+  `docs/System_Architecture/TIMING_MODEL.md`.
 - The newest aggregate is cached beside — never inside — the basic latest
   record, travels in `InfoResponse` behind its own presence, age, and
   time-quality fields (acquisition IPC version 19), and is published by
