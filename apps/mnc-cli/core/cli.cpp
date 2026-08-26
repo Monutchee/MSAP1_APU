@@ -487,6 +487,7 @@ Application make_application()
 {
 	Application application;
 	register_meter_commands(application);
+	register_rpu_command(application);
 	register_adc_commands(application);
 	register_waveform_commands(application);
 	register_log_command(application);

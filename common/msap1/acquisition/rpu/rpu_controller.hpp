@@ -24,6 +24,8 @@ public:
 		std::chrono::milliseconds timeout =
 			std::chrono::milliseconds{1000}) override;
 	[[nodiscard]] msap1_adc_health_payload query_health() override;
+	[[nodiscard]] msap1_aggregation_health_payload
+	query_aggregation_health();
 
 	[[nodiscard]] const std::string &device_path() const noexcept
 	{

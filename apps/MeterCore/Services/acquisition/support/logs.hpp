@@ -29,6 +29,8 @@ inline const mnc::logging::Logger dma_log{"fpga-acquisition", "dma"};
 inline const mnc::logging::Logger rpmsg_log{"fpga-acquisition", "rpmsg"};
 inline const mnc::logging::Logger config_log{"fpga-acquisition", "adc-config"};
 inline const mnc::logging::Logger health_log{"fpga-acquisition", "health"};
+inline const mnc::logging::Logger aggregation_log{"fpga-acquisition",
+						  "rpu-aggregation"};
 inline const mnc::logging::Logger waveform_log{"fpga-acquisition", "waveform"};
 
 /**

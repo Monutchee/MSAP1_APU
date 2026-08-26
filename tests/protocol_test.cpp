@@ -149,6 +149,53 @@ void adc_health_round_trip()
 		"wrong SPI health diagnostics");
 }
 
+void aggregation_health_round_trip()
+{
+	static_assert(sizeof(msap1_aggregation_health_payload) == 200,
+		      "aggregation health ABI must be 50 packed words");
+	msap1_aggregation_health_payload health{};
+	health.health_flags = MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE |
+		MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED |
+		MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY |
+		MSAP1_AGGREGATION_HEALTH_ENGINE_READY |
+		MSAP1_AGGREGATION_HEALTH_OUTPUT_READY |
+		MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE |
+		MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE;
+	health.frames_received = 101;
+	health.software_ring_push_failures = 2;
+	health.input_records_dropped = 3;
+	health.first_dropped_sequence = 41;
+	health.last_dropped_sequence = 43;
+	health.software_ring_current = 4;
+	health.software_ring_high_water = 48;
+	health.software_ring_capacity = 64;
+	health.software_ring_pressure =
+		MSAP1_AGGREGATION_RING_PRESSURE_WARNING;
+	health.software_ring_warning_entries = 5;
+	health.software_ring_high_entries = 6;
+	health.software_ring_critical_entries = 7;
+	health.software_ring_full_entries = 8;
+	health.hardware_fifo_current_words = 9;
+	health.hardware_fifo_high_water_words = 10;
+	health.hardware_fifo_full_events = 11;
+	health.input_wake_count = 12;
+	health.input_records_processed = 13;
+	health.input_max_batch = 4;
+	health.input_max_runtime_us = 15;
+	health.validator_wake_count = 16;
+	health.validator_records_processed = 17;
+	health.validator_max_runtime_us = 18;
+	health.validator_max_schedule_gap_us = 19;
+
+	const auto wire = msap1::encode_request(
+		MSAP1_RPU_MSG_AGGREGATION_HEALTH, 37, &health,
+		sizeof(health));
+	const auto message = msap1::decode_message(wire.data(), wire.size());
+	const auto decoded = msap1::decode_aggregation_health(message);
+	require(std::memcmp(&decoded, &health, sizeof(health)) == 0,
+		"aggregation health payload changed during wire round trip");
+}
+
 void adc_diagnostic_round_trip()
 {
 	msap1_adc_diagnostic_payload diagnostic{};
@@ -189,7 +236,8 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Coordinated APU/RPU ABI, wire version 5: the four packed harmonic
+	/* Coordinated APU/RPU ABI layout introduced in wire version 5 and
+	 * retained by version 6: the four packed harmonic
 	 * slots (8 words) sit between the noise levels and the simulator
 	 * flags, and the five Urms(1/2) detection fields close the payload
 	 * after nominal_frequency_hz, growing it from 244 to 276 to 296
@@ -289,8 +337,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 5u,
-		"the simulator event message belongs to wire version 5");
+			MSAP1_RPU_VERSION == 6u,
+		"the simulator event message belongs to wire version 6");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -687,6 +735,48 @@ void meter_health_evaluation()
 	require(healthy.adc_degraded_reasons.empty(),
 		"healthy ADC response reported degradation reasons");
 
+	msap1_aggregation_health_payload aggregation{};
+	aggregation.health_flags =
+		MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE |
+		MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED |
+		MSAP1_AGGREGATION_HEALTH_INPUT_HEALTHY |
+		MSAP1_AGGREGATION_HEALTH_ENGINE_READY |
+		MSAP1_AGGREGATION_HEALTH_OUTPUT_READY |
+		MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE |
+		MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE;
+	aggregation.software_ring_capacity = 64;
+	response.has_aggregation_health = true;
+	response.rpu_aggregation_health = aggregation;
+	const auto aggregation_healthy = msap1::evaluate_meter_health(response);
+	require(aggregation_healthy.healthy &&
+			aggregation_healthy.aggregation_healthy &&
+			aggregation_healthy.aggregation_authoritative,
+		"healthy authoritative aggregation response was rejected");
+
+	aggregation.software_ring_push_failures = 1;
+	aggregation.input_records_dropped = 2;
+	aggregation.first_dropped_sequence = 100;
+	aggregation.last_dropped_sequence = 101;
+	aggregation.software_ring_current = 60;
+	aggregation.software_ring_pressure =
+		MSAP1_AGGREGATION_RING_PRESSURE_CRITICAL;
+	const auto aggregation_reasons =
+		msap1::evaluate_rpu_aggregation_health_reasons(aggregation);
+	auto has_aggregation_reason = [&](const char *code) {
+		for (const auto &reason : aggregation_reasons)
+			if (reason.code == code)
+				return true;
+		return false;
+	};
+	require(has_aggregation_reason("input_ring_push_failures"),
+		"software-ring push failure was not diagnosed");
+	require(has_aggregation_reason("input_records_dropped"),
+		"deterministic input loss was not diagnosed");
+	require(has_aggregation_reason("input_ring_pressure_critical"),
+		"critical ring pressure was not diagnosed");
+	response.has_aggregation_health = false;
+	response.rpu_aggregation_health = msap1_aggregation_health_payload{};
+
 	response.meter_record_age_ms =
 		msap1::meter_record_stale_after_ms + 1u;
 	const auto stale = msap1::evaluate_meter_health(response);
@@ -750,6 +840,7 @@ int main()
 		request_round_trip();
 		meter_ack_round_trip();
 		adc_health_round_trip();
+		aggregation_health_round_trip();
 		adc_diagnostic_round_trip();
 		meter_config_wire_layout();
 		simulator_event_wire_layout();

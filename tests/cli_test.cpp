@@ -37,6 +37,9 @@ void command_hierarchy()
 	require(temperature.show_help &&
 			temperature.command->name() == "temperature",
 		"explicit help did not select the temperature command");
+	const auto rpu = application.parse({"help", "rpu"});
+	require(rpu.show_help && rpu.command->name() == "rpu",
+		"explicit help did not select the RPU command");
 }
 
 void option_parsing()
@@ -172,6 +175,12 @@ void machine_interface()
 				msap1::cli::AccessLevel::diagnostic &&
 			health->metadata.supports_json,
 		"meter health metadata is not diagnostic JSON");
+	const auto rpu = find("mnc rpu");
+	require(rpu != descriptors.end() &&
+			rpu->metadata.access ==
+				msap1::cli::AccessLevel::diagnostic &&
+			rpu->metadata.supports_json,
+		"RPU metadata is not diagnostic JSON");
 	const auto start = find("mnc adc start");
 	require(start != descriptors.end() &&
 			start->metadata.access ==

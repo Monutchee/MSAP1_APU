@@ -286,6 +286,22 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "unavailable)\n";
 		output << "  ADC:                 "
 		       << (status.adc_healthy ? "healthy" : "degraded") << '\n'
+		       << "  RPU aggregation:     ";
+		if (!status.aggregation_health_available) {
+			output << "unavailable";
+			if (response.aggregation_health_probe_pending)
+				output << " (probe pending, "
+				       << response.aggregation_health_probe_failures
+				       << " failure(s))";
+			output << '\n';
+		} else {
+			output << (status.aggregation_healthy ? "healthy" : "degraded")
+			       << " ("
+			       << (status.aggregation_authoritative ? "authoritative"
+							       : "shadow")
+			       << ")\n";
+		}
+		output
 		       << "  Sample rate:         " << health.sample_rate_hz
 		       << " configured / ";
 		if (health.drdy_frequency_hz != 0u)
@@ -321,6 +337,13 @@ int write_meter_health_text(const MeterHealthResult &result,
 				output << "    - [" << reason.code << "] "
 				       << reason.message << '\n';
 		}
+		if (!status.aggregation_degraded_reasons.empty()) {
+			output << "  RPU aggregation degraded because:\n";
+			for (const auto &reason :
+			     status.aggregation_degraded_reasons)
+				output << "    - [" << reason.code << "] "
+				       << reason.message << '\n';
+		}
 		output << "  Run 'mnc meter health --full' for complete diagnostics.\n";
 		return status.healthy ? 0 : 1;
 	}
@@ -342,6 +365,90 @@ int write_meter_health_text(const MeterHealthResult &result,
 		output << response.rpu_health_age_ms << " ms\n";
 	else
 		output << "unavailable\n";
+	output << "  R5C1 aggregation:     ";
+	if (!status.aggregation_health_available) {
+		output << "unavailable";
+		if (response.aggregation_health_probe_pending)
+			output << " (probe pending, "
+			       << response.aggregation_health_probe_failures
+			       << " failure(s))";
+		output << '\n';
+	} else {
+		output << (status.aggregation_healthy ? "healthy" : "degraded")
+		       << " ("
+		       << (status.aggregation_authoritative ? "authoritative"
+						       : "shadow")
+		       << ")\n";
+		output << "  R5C1 health age:      ";
+		if (response.aggregation_health_age_ms !=
+		    std::numeric_limits<std::uint32_t>::max())
+			output << response.aggregation_health_age_ms << " ms\n";
+		else
+			output << "unavailable\n";
+		output << "  R5C1 RPMsg device:    "
+		       << (response.aggregation_rpmsg_device.empty()
+				   ? "unavailable"
+				   : response.aggregation_rpmsg_device)
+		       << '\n';
+		const auto aggregation = response.rpu_aggregation_health.value();
+		output << "  R5C1 input frames:    " << aggregation.frames_received
+		       << " received, " << aggregation.frames_valid << " valid, "
+		       << aggregation.frames_invalid << " invalid\n"
+		       << "  R5C1 input sequence:  "
+		       << aggregation.last_input_sequence << " last, "
+		       << aggregation.expected_input_sequence << " expected, "
+		       << aggregation.sequence_gaps << " gap(s), "
+		       << aggregation.input_records_dropped
+		       << " inferred drop(s)\n"
+		       << "  R5C1 input errors:    CRC " << aggregation.crc_errors
+		       << ", format " << aggregation.format_errors << ", length "
+		       << aggregation.length_errors << ", FIFO "
+		       << aggregation.fifo_errors << ", ring "
+		       << aggregation.ring_overflows << ", ring push "
+		       << aggregation.software_ring_push_failures << '\n';
+		if (aggregation.input_records_dropped != 0u)
+			output << "  R5C1 dropped range:   "
+			       << aggregation.first_dropped_sequence << " first, "
+			       << aggregation.last_dropped_sequence << " last\n";
+		output << "  R5C1 output records:  " << aggregation.records_queued
+		       << " queued, " << aggregation.records_emitted << " emitted, "
+		       << aggregation.output_errors << " error(s), "
+		       << aggregation.output_drops << " drop(s)\n"
+		       << "  R5C1 completions:     basic "
+		       << aggregation.basic_completed << ", 150/180 "
+		       << aggregation.aggregate_completed << ", 10-minute "
+		       << aggregation.ten_minute_completed << ", 2-hour "
+		       << aggregation.two_hour_completed << '\n'
+		       << "  R5C1 software ring:   "
+		       << aggregation.software_ring_current << '/'
+		       << aggregation.software_ring_capacity << " current, "
+		       << aggregation.software_ring_high_water
+		       << " high-water, pressure "
+		       << aggregation.software_ring_pressure << '\n'
+		       << "  R5C1 pressure edges:  warning "
+		       << aggregation.software_ring_warning_entries << ", high "
+		       << aggregation.software_ring_high_entries << ", critical "
+		       << aggregation.software_ring_critical_entries << ", full "
+		       << aggregation.software_ring_full_entries << '\n'
+		       << "  R5C1 hardware FIFO:   "
+		       << aggregation.hardware_fifo_current_words
+		       << " current words, "
+		       << aggregation.hardware_fifo_high_water_words
+		       << " high-water, programmable-full edges "
+		       << aggregation.hardware_fifo_full_events << '\n'
+		       << "  R5C1 input worker:    "
+		       << aggregation.input_wake_count << " wakes, "
+		       << aggregation.input_records_processed << " records, max batch "
+		       << aggregation.input_max_batch << ", max runtime "
+		       << aggregation.input_max_runtime_us << " us\n"
+		       << "  R5C1 validator:       "
+		       << aggregation.validator_wake_count << " wakes, "
+		       << aggregation.validator_records_processed
+		       << " records, max runtime "
+		       << aggregation.validator_max_runtime_us
+		       << " us, max schedule gap "
+		       << aggregation.validator_max_schedule_gap_us << " us\n";
+	}
 	output << "  Health confirmation:  "
 	       << (!response.health_probe_pending
 			   ? "not pending"
@@ -448,6 +555,12 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "    - [" << reason.code << "] "
 			       << reason.message << '\n';
 	}
+	if (!status.aggregation_degraded_reasons.empty()) {
+		output << "  RPU aggregation degraded because:\n";
+		for (const auto &reason : status.aggregation_degraded_reasons)
+			output << "    - [" << reason.code << "] "
+			       << reason.message << '\n';
+	}
 	if (status.spi_responsive)
 		print_adc_registers(output, health);
 	else
@@ -527,6 +640,73 @@ struct AdcHealthDto {
 	std::vector<RegisterDto> registers;
 };
 
+struct AggregationHealthDto {
+	bool available = false;
+	bool healthy = false;
+	bool authoritative = false;
+	bool transport_available = false;
+	bool transport_initialized = false;
+	bool input_healthy = false;
+	bool engine_ready = false;
+	bool output_ready = false;
+	bool output_active = false;
+	bool probe_pending = false;
+	std::uint32_t probe_failures = 0;
+	std::optional<std::uint32_t> cache_age_ms;
+	std::string rpmsg_device;
+	std::uint32_t health_flags = 0;
+	std::uint32_t frames_received = 0;
+	std::uint32_t frames_valid = 0;
+	std::uint32_t frames_invalid = 0;
+	std::uint32_t crc_errors = 0;
+	std::uint32_t format_errors = 0;
+	std::uint32_t sequence_gaps = 0;
+	std::uint32_t repeated_frames = 0;
+	std::uint32_t out_of_order_frames = 0;
+	std::uint32_t ring_overflows = 0;
+	std::uint32_t software_ring_push_failures = 0;
+	std::uint32_t input_records_dropped = 0;
+	std::uint32_t first_dropped_sequence = 0;
+	std::uint32_t last_dropped_sequence = 0;
+	std::uint32_t fifo_errors = 0;
+	std::uint32_t length_errors = 0;
+	std::uint32_t records_queued = 0;
+	std::uint32_t records_emitted = 0;
+	std::uint32_t output_errors = 0;
+	std::uint32_t output_drops = 0;
+	std::uint32_t basic_completed = 0;
+	std::uint32_t aggregate_completed = 0;
+	std::uint32_t ten_minute_completed = 0;
+	std::uint32_t two_hour_completed = 0;
+	std::uint32_t last_input_sequence = 0;
+	std::uint32_t expected_input_sequence = 0;
+	std::uint32_t last_output_sequence = 0;
+	std::uint32_t last_fifo_error = 0;
+	std::uint32_t last_frame_length = 0;
+	std::uint32_t last_validation_error = 0;
+	std::uint32_t last_tx_vacancy = 0;
+	std::uint32_t software_ring_current = 0;
+	std::uint32_t software_ring_high_water = 0;
+	std::uint32_t software_ring_capacity = 0;
+	std::uint32_t software_ring_pressure = 0;
+	std::uint32_t software_ring_warning_entries = 0;
+	std::uint32_t software_ring_high_entries = 0;
+	std::uint32_t software_ring_critical_entries = 0;
+	std::uint32_t software_ring_full_entries = 0;
+	std::uint32_t hardware_fifo_current_words = 0;
+	std::uint32_t hardware_fifo_high_water_words = 0;
+	std::uint32_t hardware_fifo_full_events = 0;
+	std::uint32_t input_wake_count = 0;
+	std::uint32_t input_records_processed = 0;
+	std::uint32_t input_max_batch = 0;
+	std::uint32_t input_max_runtime_us = 0;
+	std::uint32_t validator_wake_count = 0;
+	std::uint32_t validator_records_processed = 0;
+	std::uint32_t validator_max_runtime_us = 0;
+	std::uint32_t validator_max_schedule_gap_us = 0;
+	std::vector<HealthReasonDto> degraded_reasons;
+};
+
 struct MeterHealthDto {
 	bool healthy = false;
 	bool full = false;
@@ -540,6 +720,7 @@ struct MeterHealthDto {
 	std::uint32_t health_probe_failures = 0;
 	AcquisitionHealthDto acquisition;
 	AdcHealthDto adc;
+	AggregationHealthDto aggregation;
 };
 
 std::vector<RegisterDto>
@@ -682,6 +863,30 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.degraded_reasons = {},
 			.registers = {},
 		},
+		.aggregation = {
+			.available = status.aggregation_health_available,
+			.healthy = status.aggregation_healthy,
+			.authoritative = status.aggregation_authoritative,
+			.transport_available =
+				status.aggregation_transport_available,
+			.transport_initialized =
+				status.aggregation_transport_initialized,
+			.input_healthy = status.aggregation_input_healthy,
+			.engine_ready = status.aggregation_engine_ready,
+			.output_ready = status.aggregation_output_ready,
+			.output_active = status.aggregation_output_active,
+			.probe_pending = response.aggregation_health_probe_pending,
+			.probe_failures =
+				response.aggregation_health_probe_failures,
+			.cache_age_ms =
+				response.aggregation_health_age_ms ==
+						std::numeric_limits<std::uint32_t>::max()
+					? std::nullopt
+					: std::optional<std::uint32_t>(
+						  response.aggregation_health_age_ms),
+			.rpmsg_device = response.aggregation_rpmsg_device,
+			.degraded_reasons = {},
+		},
 	};
 	for (std::size_t bucket = 0;
 	     bucket < dto.adc.spi_header_histogram.size(); ++bucket)
@@ -689,6 +894,91 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			health.spi_header_histogram[bucket];
 	for (const auto &reason : status.adc_degraded_reasons)
 		dto.adc.degraded_reasons.push_back({reason.code, reason.message});
+	for (const auto &reason : status.aggregation_degraded_reasons)
+		dto.aggregation.degraded_reasons.push_back(
+			{reason.code, reason.message});
+	if (response.has_aggregation_health) {
+		const auto aggregation = response.rpu_aggregation_health.value();
+		dto.aggregation.health_flags = aggregation.health_flags;
+		dto.aggregation.frames_received = aggregation.frames_received;
+		dto.aggregation.frames_valid = aggregation.frames_valid;
+		dto.aggregation.frames_invalid = aggregation.frames_invalid;
+		dto.aggregation.crc_errors = aggregation.crc_errors;
+		dto.aggregation.format_errors = aggregation.format_errors;
+		dto.aggregation.sequence_gaps = aggregation.sequence_gaps;
+		dto.aggregation.repeated_frames = aggregation.repeated_frames;
+		dto.aggregation.out_of_order_frames =
+			aggregation.out_of_order_frames;
+		dto.aggregation.ring_overflows = aggregation.ring_overflows;
+		dto.aggregation.software_ring_push_failures =
+			aggregation.software_ring_push_failures;
+		dto.aggregation.input_records_dropped =
+			aggregation.input_records_dropped;
+		dto.aggregation.first_dropped_sequence =
+			aggregation.first_dropped_sequence;
+		dto.aggregation.last_dropped_sequence =
+			aggregation.last_dropped_sequence;
+		dto.aggregation.fifo_errors = aggregation.fifo_errors;
+		dto.aggregation.length_errors = aggregation.length_errors;
+		dto.aggregation.records_queued = aggregation.records_queued;
+		dto.aggregation.records_emitted = aggregation.records_emitted;
+		dto.aggregation.output_errors = aggregation.output_errors;
+		dto.aggregation.output_drops = aggregation.output_drops;
+		dto.aggregation.basic_completed = aggregation.basic_completed;
+		dto.aggregation.aggregate_completed =
+			aggregation.aggregate_completed;
+		dto.aggregation.ten_minute_completed =
+			aggregation.ten_minute_completed;
+		dto.aggregation.two_hour_completed =
+			aggregation.two_hour_completed;
+		dto.aggregation.last_input_sequence =
+			aggregation.last_input_sequence;
+		dto.aggregation.expected_input_sequence =
+			aggregation.expected_input_sequence;
+		dto.aggregation.last_output_sequence =
+			aggregation.last_output_sequence;
+		dto.aggregation.last_fifo_error = aggregation.last_fifo_error;
+		dto.aggregation.last_frame_length = aggregation.last_frame_length;
+		dto.aggregation.last_validation_error =
+			aggregation.last_validation_error;
+		dto.aggregation.last_tx_vacancy = aggregation.last_tx_vacancy;
+		dto.aggregation.software_ring_current =
+			aggregation.software_ring_current;
+		dto.aggregation.software_ring_high_water =
+			aggregation.software_ring_high_water;
+		dto.aggregation.software_ring_capacity =
+			aggregation.software_ring_capacity;
+		dto.aggregation.software_ring_pressure =
+			aggregation.software_ring_pressure;
+		dto.aggregation.software_ring_warning_entries =
+			aggregation.software_ring_warning_entries;
+		dto.aggregation.software_ring_high_entries =
+			aggregation.software_ring_high_entries;
+		dto.aggregation.software_ring_critical_entries =
+			aggregation.software_ring_critical_entries;
+		dto.aggregation.software_ring_full_entries =
+			aggregation.software_ring_full_entries;
+		dto.aggregation.hardware_fifo_current_words =
+			aggregation.hardware_fifo_current_words;
+		dto.aggregation.hardware_fifo_high_water_words =
+			aggregation.hardware_fifo_high_water_words;
+		dto.aggregation.hardware_fifo_full_events =
+			aggregation.hardware_fifo_full_events;
+		dto.aggregation.input_wake_count = aggregation.input_wake_count;
+		dto.aggregation.input_records_processed =
+			aggregation.input_records_processed;
+		dto.aggregation.input_max_batch = aggregation.input_max_batch;
+		dto.aggregation.input_max_runtime_us =
+			aggregation.input_max_runtime_us;
+		dto.aggregation.validator_wake_count =
+			aggregation.validator_wake_count;
+		dto.aggregation.validator_records_processed =
+			aggregation.validator_records_processed;
+		dto.aggregation.validator_max_runtime_us =
+			aggregation.validator_max_runtime_us;
+		dto.aggregation.validator_max_schedule_gap_us =
+			aggregation.validator_max_schedule_gap_us;
+	}
 	if (result.full && status.spi_responsive)
 		dto.adc.registers = adc_register_dtos(health);
 	return dto;
@@ -800,6 +1090,7 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 		.result_drops = diagnostics.result_drops,
 		.channels = {},
 		.frequency = {},
+		.readings = {},
 	};
 	for (std::size_t index = 0; index < 7; ++index) {
 		result.channels.push_back({

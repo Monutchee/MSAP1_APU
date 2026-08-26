@@ -158,7 +158,7 @@
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
-- The prototype wire version is 5 (`MSAP1_RPU_VERSION`). Keep the coordinated
+- The prototype wire version is 6 (`MSAP1_RPU_VERSION`). Keep the coordinated
   APU/RPU copies byte-identical when adding configuration fields or
   acknowledgements.
 - `msap1_meter_config_payload` is 296 packed bytes. `nominal_frequency_hz`

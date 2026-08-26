@@ -303,6 +303,7 @@ target_link_libraries(msap1_mqtt PUBLIC
 target_link_libraries(msap1_mqtt PRIVATE glaze::glaze)
 
 msap1_library(msap1_system msap1::system
+    msap1/system/rpu_runtime_status.cpp
     msap1/system/soc_temperature.cpp
     msap1/system/system_identity.cpp
 )

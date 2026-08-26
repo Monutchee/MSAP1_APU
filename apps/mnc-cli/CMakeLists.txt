@@ -1,6 +1,7 @@
 add_library(mnc_cli STATIC
     core/cli.cpp
     commands/meter_commands.cpp
+    commands/rpu_commands.cpp
     commands/adc_commands.cpp
     commands/waveform_commands.cpp
     commands/log_commands.cpp

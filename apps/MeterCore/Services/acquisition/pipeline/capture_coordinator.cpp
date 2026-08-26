@@ -36,6 +36,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
 	  health_(rpu_),
+	  aggregation_health_(options.aggregation_service,
+			      options.aggregation_rpmsg_device),
 	  ipc_(options.socket_path)
 {
 	register_acquisition_commands(registry_, *this);
@@ -61,6 +63,10 @@ void CaptureCoordinator::run()
 		 {"MNC_DEVICE", std::string(meter_.name())}});
 	while (!stop_requested_) {
 		service_poll_events();
+		/* R5C1 is an independent optional endpoint during shadow bring-up;
+		 * its audit runs even while capture is stopped and can never throw
+		 * into this acquisition loop. */
+		aggregation_health_.periodic_audit();
 		if (running_) {
 			health_.periodic_audit();
 			refresh_time_sync();
@@ -562,6 +568,17 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.aggregate_time_quality =
 		ingest_.latest_aggregate_time_quality();
 	response.rpu_health = health_.cached();
+	response.has_aggregation_health =
+		aggregation_health_.has_cached_health();
+	response.aggregation_health_probe_pending =
+		aggregation_health_.probe_pending();
+	response.aggregation_health_age_ms =
+		aggregation_health_.health_age_ms();
+	response.aggregation_health_probe_failures =
+		aggregation_health_.probe_failures();
+	response.aggregation_rpmsg_device = aggregation_health_.device_path();
+	if (response.has_aggregation_health)
+		response.rpu_aggregation_health = aggregation_health_.cached();
 	if (ingest_.latest_record())
 		response.latest_record = *ingest_.latest_record();
 	if (ingest_.latest_aggregate_record())

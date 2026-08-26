@@ -183,6 +183,7 @@ void write_json_error(std::ostream &output, std::string_view code,
 
 Application make_application();
 void register_meter_commands(Application &application);
+void register_rpu_command(Application &application);
 void register_adc_commands(Application &application);
 void register_waveform_commands(Application &application);
 void register_log_command(Application &application);

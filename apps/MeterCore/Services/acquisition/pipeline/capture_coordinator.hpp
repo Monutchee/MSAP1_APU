@@ -17,6 +17,7 @@
 #include "msap1/settings/settings.hpp"
 #include "msap1/waveform/waveform_capture.hpp"
 #include "ipc/ipc_channel.hpp"
+#include "pipeline/aggregation_health_monitor.hpp"
 #include "pipeline/health_monitor.hpp"
 #include "pipeline/record_ingestor.hpp"
 #include "support/options.hpp"
@@ -96,7 +97,11 @@ public:
 	void run_adc_diagnostic(std::uint32_t flow);
 
 	/** @brief Run an immediate RPU health audit (HealthRefreshRequest). */
-	void refresh_rpu_health() { health_.refresh(); }
+	void refresh_rpu_health()
+	{
+		health_.refresh();
+		aggregation_health_.refresh();
+	}
 
 	/* ── Typed status snapshots for the IPC responses ───────────────── */
 
@@ -185,6 +190,7 @@ private:
 	 * interfaces are still passed to Modbus, historian, and other consumers. */
 	mnc::meter::MeterDataProviderView meter_data_provider_;
 	RpuHealthMonitor health_;
+	AggregationHealthMonitor aggregation_health_;
 	IpcChannel ipc_;
 	msap1::AcquisitionCommandRegistry registry_;
 	std::atomic<bool> stop_requested_{false};

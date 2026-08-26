@@ -17,6 +17,10 @@ struct Options {
 	std::string service = "mncos-r5c0-ctrl";
 	/** Pre-bound /dev/rpmsgN endpoint; discovered from service when empty. */
 	std::string rpmsg_device;
+	/** RPMsg diagnostic service announced by R5 core 1. */
+	std::string aggregation_service = "mncos-r5c1-ctrl";
+	/** Optional pre-bound endpoint for R5C1 aggregation diagnostics. */
+	std::string aggregation_rpmsg_device;
 	/** Meter record DMA character device. */
 	std::string meter_device = "/dev/msap1-meter";
 	/** Waveform block DMA character device. */
