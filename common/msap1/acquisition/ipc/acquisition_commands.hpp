@@ -62,7 +62,7 @@ inline constexpr const char *acquisition_socket_path =
  * software-ring push failures, and hardware-FIFO programmable-full edges.
  * 32: M16 adds the latest complete 7x127 harmonic spectrum command and the
  * simulator tone ratio becomes fractional for interharmonic injection. */
-inline constexpr std::uint16_t acquisition_ipc_version = 32;
+inline constexpr std::uint16_t acquisition_ipc_version = 33;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -431,6 +431,8 @@ struct PowerQualityResponse {
 struct HarmonicResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	bool running = false;
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Cycles150_180;
 	std::uint64_t records = 0;
 	std::uint64_t families = 0;
 	std::uint64_t incomplete_families = 0;
@@ -577,6 +579,8 @@ struct HarmonicRequest {
 	static constexpr std::string_view command = "meter-harmonics";
 	using Response = HarmonicResponse;
 	std::uint16_t version = acquisition_ipc_version;
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Cycles150_180;
 };
 
 /**

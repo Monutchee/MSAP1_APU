@@ -32,6 +32,7 @@ private:
 	void subscribe(const mnc::ipc::UnixStreamServer::Connection &connection);
 	void publish_event(msap1::meter_stream::Event event,
 		std::uint64_t cursor = 0);
+	void report_dropped_records();
 	boost::asio::io_context context_;
 	std::unique_ptr<mnc::meter_stream::DurableMeterSpool> spool_;
 	mnc::ipc::UnixStreamServer server_;

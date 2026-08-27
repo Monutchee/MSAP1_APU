@@ -1,15 +1,18 @@
 #include "msap1/meter/history/meter_history.hpp"
 
 #include "mnc/storage/sqlite/sqlite_database.hpp"
+#include "msap1/meter/harmonic_spectrum.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -38,9 +41,53 @@ MeasurementPeriod period_for(mnc::meter_stream::DatabaseDataset dataset)
 	case mnc::meter_stream::DatabaseDataset::hours_2:
 		return MeasurementPeriod::Hour2;
 	case mnc::meter_stream::DatabaseDataset::raw_record_spool:
+	case mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180:
+	case mnc::meter_stream::DatabaseDataset::harmonic_minutes_10:
+	case mnc::meter_stream::DatabaseDataset::harmonic_hours_2:
 		throw std::invalid_argument("spool is not a historian dataset");
 	}
 	throw std::invalid_argument("unknown historian dataset");
+}
+
+bool harmonic_dataset(mnc::meter_stream::DatabaseDataset dataset)
+{
+	using Dataset = mnc::meter_stream::DatabaseDataset;
+	return dataset == Dataset::harmonic_cycles_150_180 ||
+		dataset == Dataset::harmonic_minutes_10 ||
+		dataset == Dataset::harmonic_hours_2;
+}
+
+mnc::meter_stream::DatabaseDataset harmonic_dataset_for(
+	MeasurementPeriod period)
+{
+	using Dataset = mnc::meter_stream::DatabaseDataset;
+	switch (period) {
+	case MeasurementPeriod::Cycles150_180:
+		return Dataset::harmonic_cycles_150_180;
+	case MeasurementPeriod::Min10:
+		return Dataset::harmonic_minutes_10;
+	case MeasurementPeriod::Hour2:
+		return Dataset::harmonic_hours_2;
+	case MeasurementPeriod::Basic:
+	case MeasurementPeriod::Min10Live:
+	case MeasurementPeriod::Hour2Live:
+		break;
+	}
+	throw std::invalid_argument("unsupported harmonic historian period");
+}
+
+MeasurementPeriod harmonic_period_for(
+	mnc::meter_stream::DatabaseDataset dataset)
+{
+	using Dataset = mnc::meter_stream::DatabaseDataset;
+	switch (dataset) {
+	case Dataset::harmonic_cycles_150_180:
+		return MeasurementPeriod::Cycles150_180;
+	case Dataset::harmonic_minutes_10: return MeasurementPeriod::Min10;
+	case Dataset::harmonic_hours_2: return MeasurementPeriod::Hour2;
+	default:
+		throw std::invalid_argument("dataset is not harmonic history");
+	}
 }
 
 mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
@@ -65,9 +112,9 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 void validate_historian_policies(
 	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
 {
-	if (policies.size() != 4)
+	if (policies.size() != 7)
 		throw std::invalid_argument(
-			"historian requires exactly four dataset policies");
+			"historian requires exactly seven dataset policies");
 	std::set<mnc::meter_stream::DatabaseDataset> datasets;
 	for (const auto &policy : policies) {
 		mnc::meter_stream::validate_database_policy(policy);
@@ -110,6 +157,49 @@ FROM measurement_blocks b WHERE b.period=?
 	usage.bind(1, period_value(period));
 	(void)usage.step();
 	return static_cast<std::uint64_t>(usage.integer(0));
+}
+
+std::uint64_t logical_harmonic_bytes(Database &database,
+	MeasurementPeriod period)
+{
+	auto usage = database.prepare(R"SQL(
+SELECT COALESCE(SUM(160 + LENGTH(payload)),0)
+FROM harmonic_families WHERE period=?
+)SQL");
+	usage.bind(1, period_value(period));
+	(void)usage.step();
+	return static_cast<std::uint64_t>(usage.integer(0));
+}
+
+std::uint64_t delete_oldest_harmonic_families(Database &database,
+	MeasurementPeriod period, std::optional<std::int64_t> cutoff,
+	std::uint64_t needed)
+{
+	const std::string sql = std::string(R"SQL(
+SELECT id,160 + LENGTH(payload) FROM harmonic_families WHERE period=?
+)SQL") + (cutoff ? " AND measured_at_ns<?" : "") +
+		" ORDER BY measured_at_ns LIMIT 256";
+	auto oldest = database.prepare(sql);
+	oldest.bind(1, period_value(period));
+	if (cutoff)
+		oldest.bind(2, *cutoff);
+	std::vector<std::pair<std::int64_t, std::uint64_t>> victims;
+	while (oldest.step())
+		victims.emplace_back(oldest.integer(0),
+			static_cast<std::uint64_t>(oldest.integer(1)));
+	if (victims.empty())
+		return 0;
+	auto remove = database.prepare("DELETE FROM harmonic_families WHERE id=?");
+	std::uint64_t removed = 0;
+	for (const auto &[id, bytes] : victims) {
+		remove.bind(1, id);
+		remove.execute();
+		remove.reset();
+		removed += bytes;
+		if (removed >= needed)
+			break;
+	}
+	return removed;
 }
 
 /*
@@ -218,6 +308,36 @@ CREATE TABLE IF NOT EXISTS historian_metadata(
  dataset INTEGER PRIMARY KEY,
  clear_through_cursor INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS harmonic_pending(
+ period INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ source_fragment INTEGER NOT NULL,
+ stream_cursor INTEGER NOT NULL UNIQUE,
+ measured_at_ns INTEGER NOT NULL,
+ payload BLOB NOT NULL,
+ PRIMARY KEY(period,source_sequence,source_fragment)
+);
+CREATE TABLE IF NOT EXISTS harmonic_families(
+ id INTEGER PRIMARY KEY,
+ stream_cursor INTEGER NOT NULL UNIQUE,
+ period INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ configuration_generation INTEGER NOT NULL,
+ measured_at_ns INTEGER NOT NULL,
+ first_sample INTEGER NOT NULL,
+ sample_count INTEGER NOT NULL,
+ target_sample INTEGER NOT NULL,
+ contributors INTEGER NOT NULL,
+ overshoot_samples INTEGER NOT NULL,
+ status INTEGER NOT NULL,
+ qualified_max_order INTEGER NOT NULL,
+ first_source_sequence INTEGER NOT NULL,
+ last_source_sequence INTEGER NOT NULL,
+ payload BLOB NOT NULL,
+ UNIQUE(period,configuration_generation,source_sequence)
+);
+CREATE INDEX IF NOT EXISTS harmonic_families_time
+ ON harmonic_families(period, measured_at_ns);
 )SQL");
 }
 
@@ -282,7 +402,11 @@ public:
 		 * lag/status truthful before the next record arrives.  Volatile rows
 		 * are rebuilt separately by MeterHistorianService. */
 		auto latest = persistent.prepare(
-			"SELECT COALESCE(MAX(stream_cursor),0) FROM measurement_blocks");
+			"SELECT MAX(value) FROM ("
+			" SELECT COALESCE(MAX(stream_cursor),0) AS value FROM measurement_blocks"
+			" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_families"
+			" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_pending"
+			")");
 		(void)latest.step();
 		acknowledged_cursor =
 			static_cast<std::uint64_t>(latest.integer(0));
@@ -291,7 +415,13 @@ public:
 	Database &database(MeasurementPeriod period)
 	{
 		const auto dataset = dataset_for(period);
-		return manager.policy(dataset).backend == mnc::meter_stream::StorageBackend::memory
+		return database_for(dataset);
+	}
+
+	Database &database_for(mnc::meter_stream::DatabaseDataset dataset)
+	{
+		return manager.policy(dataset).backend ==
+			mnc::meter_stream::StorageBackend::memory
 			? memory : persistent;
 	}
 
@@ -313,6 +443,7 @@ public:
 	 * rows actually removed.
 	 */
 	std::map<MeasurementPeriod, std::uint64_t> logical_bytes;
+	std::map<MeasurementPeriod, std::uint64_t> harmonic_logical_bytes;
 
 	/* Seed on first use, then hand back the running total by reference so
 	 * callers can adjust it in place. */
@@ -325,13 +456,27 @@ public:
 		return found->second;
 	}
 
+	std::uint64_t &tracked_harmonic_bytes(Database &database,
+		MeasurementPeriod period)
+	{
+		auto found = harmonic_logical_bytes.find(period);
+		if (found == harmonic_logical_bytes.end())
+			found = harmonic_logical_bytes.emplace(period,
+				logical_harmonic_bytes(database, period)).first;
+		return found->second;
+	}
+
 	/*
 	 * Drop the cache so it reseeds from the database. Required after any row
 	 * change this class did not account for itself: dataset clearing, historian
 	 * recreation, and backend migration all rewrite or discard whole tables.
 	 * Reseeding is a scan, so it must stay off the per-append path.
 	 */
-	void forget_tracked_bytes() { logical_bytes.clear(); }
+	void forget_tracked_bytes()
+	{
+		logical_bytes.clear();
+		harmonic_logical_bytes.clear();
+	}
 };
 
 MeterHistoryStore::MeterHistoryStore(std::filesystem::path path,
@@ -463,6 +608,170 @@ VALUES(?,?,?,?,?)
 	}
 }
 
+bool MeterHistoryStore::append_harmonic_record(const MeterRecord &record,
+	std::uint64_t stream_cursor, std::int64_t measured_at_ns)
+{
+	const auto chunk = decode_harmonic_record(record);
+	if (chunk.period == MeasurementPeriod::Basic)
+		throw std::invalid_argument(
+			"base harmonic families are latest-only");
+	const auto dataset = harmonic_dataset_for(chunk.period);
+	const auto fragment = static_cast<std::uint32_t>(chunk.channel) *
+		harmonic_chunks_per_channel + chunk.chunk;
+
+	std::scoped_lock lock(impl_->mutex);
+	if (const auto floor = impl_->clear_floors.find(dataset);
+	    floor != impl_->clear_floors.end() && stream_cursor <= floor->second) {
+		impl_->acknowledged_cursor = std::max(
+			impl_->acknowledged_cursor, stream_cursor);
+		return false;
+	}
+	auto &database = impl_->database_for(dataset);
+	auto &tracked = impl_->tracked_harmonic_bytes(database, chunk.period);
+	Transaction transaction(database);
+
+	/* The producer publishes one family contiguously. Bound abandoned staging
+	 * state before inserting the current sequence so a missing fragment can
+	 * never grow either backend without limit. */
+	auto abandon = database.prepare(
+		"DELETE FROM harmonic_pending WHERE period=? AND source_sequence<>?");
+	abandon.bind(1, period_value(chunk.period));
+	abandon.bind(2, static_cast<std::uint64_t>(chunk.sequence));
+	abandon.execute();
+
+	auto stage = database.prepare(R"SQL(
+INSERT OR IGNORE INTO harmonic_pending(period,source_sequence,source_fragment,
+ stream_cursor,measured_at_ns,payload) VALUES(?,?,?,?,?,?)
+)SQL");
+	stage.bind(1, period_value(chunk.period));
+	stage.bind(2, static_cast<std::uint64_t>(chunk.sequence));
+	stage.bind(3, static_cast<std::int32_t>(fragment));
+	stage.bind(4, stream_cursor);
+	stage.bind(5, measured_at_ns);
+	stage.bind(6, std::as_bytes(std::span{&record, std::size_t{1}}));
+	stage.execute();
+
+	auto count = database.prepare(
+		"SELECT COUNT(*) FROM harmonic_pending WHERE period=? AND source_sequence=?");
+	count.bind(1, period_value(chunk.period));
+	count.bind(2, static_cast<std::uint64_t>(chunk.sequence));
+	(void)count.step();
+	const auto complete = count.integer(0) ==
+		static_cast<std::int64_t>(harmonic_records_per_family);
+	count.reset();
+	bool inserted = false;
+	std::uint64_t family_bytes = 0;
+	if (complete) {
+		std::vector<std::byte> payload;
+		payload.reserve(harmonic_records_per_family * meter_record_size);
+		HarmonicFamilyAssembler assembler;
+		std::optional<HarmonicSpectrumSnapshot> snapshot;
+		std::uint64_t last_cursor = 0;
+		std::int64_t family_measured_at = 0;
+		auto records = database.prepare(R"SQL(
+SELECT source_fragment,stream_cursor,measured_at_ns,payload
+FROM harmonic_pending WHERE period=? AND source_sequence=?
+ORDER BY source_fragment
+)SQL");
+		records.bind(1, period_value(chunk.period));
+		records.bind(2, static_cast<std::uint64_t>(chunk.sequence));
+		std::uint32_t expected_fragment = 0;
+		while (records.step()) {
+			if (records.integer(0) != expected_fragment++)
+				throw std::invalid_argument(
+					"harmonic history fragment sequence is incomplete");
+			auto bytes = records.blob(3);
+			if (bytes.size() != sizeof(MeterRecord))
+				throw std::invalid_argument(
+					"harmonic history fragment size is malformed");
+			MeterRecord raw{};
+			std::memcpy(&raw, bytes.data(), sizeof(raw));
+			const auto update = assembler.accept(
+				decode_harmonic_record(raw));
+			if (update.completed)
+				snapshot = update.completed;
+			payload.insert(payload.end(), bytes.begin(), bytes.end());
+			last_cursor = std::max(last_cursor,
+				static_cast<std::uint64_t>(records.integer(1)));
+			family_measured_at = std::max(family_measured_at,
+				records.integer(2));
+		}
+		records.reset();
+		if (!snapshot || expected_fragment != harmonic_records_per_family)
+			throw std::invalid_argument(
+				"harmonic history family failed atomic validation");
+
+		auto family = database.prepare(R"SQL(
+INSERT OR IGNORE INTO harmonic_families(stream_cursor,period,source_sequence,
+ configuration_generation,measured_at_ns,first_sample,sample_count,target_sample,
+ contributors,overshoot_samples,status,qualified_max_order,
+ first_source_sequence,last_source_sequence,payload)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+)SQL");
+		family.bind(1, last_cursor);
+		family.bind(2, period_value(snapshot->period));
+		family.bind(3, static_cast<std::uint64_t>(snapshot->sequence));
+		family.bind(4, static_cast<std::uint64_t>(
+			snapshot->configuration_generation));
+		family.bind(5, family_measured_at);
+		family.bind(6, snapshot->first_sample);
+		family.bind(7, static_cast<std::uint64_t>(snapshot->sample_count));
+		family.bind(8, snapshot->target_sample);
+		family.bind(9, static_cast<std::int32_t>(snapshot->contributors));
+		family.bind(10,
+			static_cast<std::int32_t>(snapshot->overshoot_samples));
+		family.bind(11, static_cast<std::uint64_t>(snapshot->status));
+		family.bind(12,
+			static_cast<std::int32_t>(snapshot->qualified_max_order));
+		family.bind(13, static_cast<std::uint64_t>(
+			snapshot->first_source_sequence));
+		family.bind(14, static_cast<std::uint64_t>(
+			snapshot->last_source_sequence));
+		family.bind(15, payload);
+		family.execute();
+		inserted = database.changes() == 1;
+		family_bytes = 160u + payload.size();
+
+		auto remove = database.prepare(
+			"DELETE FROM harmonic_pending WHERE period=? AND source_sequence=?");
+		remove.bind(1, period_value(chunk.period));
+		remove.bind(2, static_cast<std::uint64_t>(chunk.sequence));
+		remove.execute();
+	}
+	transaction.commit();
+	impl_->acknowledged_cursor = std::max(
+		impl_->acknowledged_cursor, stream_cursor);
+	if (!inserted)
+		return false;
+
+	tracked += family_bytes;
+	const auto policy = impl_->manager.policy(dataset);
+	if (policy.retention.maximum_age) {
+		const auto cutoff = measured_at_ns -
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				*policy.retention.maximum_age).count();
+		for (;;) {
+			const auto removed = delete_oldest_harmonic_families(database,
+				chunk.period, cutoff,
+				std::numeric_limits<std::uint64_t>::max());
+			if (removed == 0)
+				break;
+			tracked -= std::min(tracked, removed);
+		}
+	}
+	if (policy.retention.maximum_bytes) {
+		while (tracked > *policy.retention.maximum_bytes) {
+			const auto removed = delete_oldest_harmonic_families(database,
+				chunk.period, std::nullopt,
+				tracked - *policy.retention.maximum_bytes);
+			if (removed == 0)
+				break;
+			tracked -= std::min(tracked, removed);
+		}
+	}
+	return true;
+}
+
 std::vector<HistoryPoint> MeterHistoryStore::query(const HistoryQuery &query) const
 {
 	(void)dataset_for(query.period);
@@ -513,11 +822,16 @@ HistorianStatus MeterHistoryStore::status() const
 	for (const auto &policy : impl_->manager.policies()) {
 		if (policy.dataset == mnc::meter_stream::DatabaseDataset::raw_record_spool)
 			continue;
-		const auto period = period_for(policy.dataset);
-		auto &database = impl_->database(period);
-		auto range = database.prepare(
-			"SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
-			"FROM measurement_blocks WHERE period=?");
+		const bool harmonic = harmonic_dataset(policy.dataset);
+		const auto period = harmonic ? harmonic_period_for(policy.dataset)
+			: period_for(policy.dataset);
+		auto &database = harmonic ? impl_->database_for(policy.dataset)
+			: impl_->database(period);
+		auto range = database.prepare(harmonic
+			? "SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
+			  "FROM harmonic_families WHERE period=?"
+			: "SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
+			  "FROM measurement_blocks WHERE period=?");
 		range.bind(1, period_value(period)); (void)range.step();
 		HistorianStatus::DatasetStatus item;
 		item.dataset = policy.dataset; item.backend = policy.backend;
@@ -527,7 +841,9 @@ HistorianStatus MeterHistoryStore::status() const
 			item.oldest_nanoseconds = range.integer(1);
 			item.newest_nanoseconds = range.integer(2);
 		}
-		item.storage_bytes = logical_period_bytes(database, period);
+		item.storage_bytes = harmonic
+			? logical_harmonic_bytes(database, period)
+			: logical_period_bytes(database, period);
 		if (policy.backend == mnc::meter_stream::StorageBackend::memory)
 			result.storage_bytes += item.storage_bytes;
 		result.datasets.push_back(item);
@@ -542,7 +858,11 @@ std::uint64_t MeterHistoryStore::persisted_stream_high_water() const
 {
 	std::scoped_lock lock(impl_->mutex);
 	auto latest = impl_->persistent.prepare(
-		"SELECT COALESCE(MAX(stream_cursor),0) FROM measurement_blocks");
+		"SELECT MAX(value) FROM ("
+		" SELECT COALESCE(MAX(stream_cursor),0) AS value FROM measurement_blocks"
+		" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_families"
+		" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_pending"
+		")");
 	(void)latest.step();
 	return static_cast<std::uint64_t>(latest.integer(0));
 }
@@ -557,10 +877,20 @@ void MeterHistoryStore::prepare_policy_migration(
 		if (current.backend == policy.backend ||
 		    policy.backend != mnc::meter_stream::StorageBackend::memory)
 			continue;
-		auto remove = impl_->memory.prepare(
-			"DELETE FROM measurement_blocks WHERE period=?");
-		remove.bind(1, period_value(period_for(policy.dataset)));
+		const bool harmonic = harmonic_dataset(policy.dataset);
+		const auto period = harmonic ? harmonic_period_for(policy.dataset)
+			: period_for(policy.dataset);
+		auto remove = impl_->memory.prepare(harmonic
+			? "DELETE FROM harmonic_families WHERE period=?"
+			: "DELETE FROM measurement_blocks WHERE period=?");
+		remove.bind(1, period_value(period));
 		remove.execute();
+		if (harmonic) {
+			auto pending = impl_->memory.prepare(
+				"DELETE FROM harmonic_pending WHERE period=?");
+			pending.bind(1, period_value(period));
+			pending.execute();
+		}
 	}
 	/* Rows were discarded outside append(), so the cached sizes no longer
 	 * describe the tables. Reseeding is a scan, which is why it happens here
@@ -587,7 +917,10 @@ void MeterHistoryStore::clear_datasets(
 {
 	std::set<mnc::meter_stream::DatabaseDataset> unique;
 	for (const auto dataset : datasets) {
-		(void)period_for(dataset);
+		if (harmonic_dataset(dataset))
+			(void)harmonic_period_for(dataset);
+		else
+			(void)period_for(dataset);
 		if (!unique.insert(dataset).second)
 			throw std::invalid_argument("duplicate historian dataset clear request");
 	}
@@ -598,20 +931,40 @@ void MeterHistoryStore::clear_datasets(
 	{
 		Transaction transaction(impl_->memory);
 		for (const auto dataset : unique) {
-			auto remove = impl_->memory.prepare(
-				"DELETE FROM measurement_blocks WHERE period=?");
-			remove.bind(1, period_value(period_for(dataset)));
+			const bool harmonic = harmonic_dataset(dataset);
+			const auto period = harmonic ? harmonic_period_for(dataset)
+				: period_for(dataset);
+			auto remove = impl_->memory.prepare(harmonic
+				? "DELETE FROM harmonic_families WHERE period=?"
+				: "DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period));
 			remove.execute();
+			if (harmonic) {
+				auto pending = impl_->memory.prepare(
+					"DELETE FROM harmonic_pending WHERE period=?");
+				pending.bind(1, period_value(period));
+				pending.execute();
+			}
 		}
 		transaction.commit();
 	}
 	{
 		Transaction transaction(impl_->persistent);
 		for (const auto dataset : unique) {
-			auto remove = impl_->persistent.prepare(
-				"DELETE FROM measurement_blocks WHERE period=?");
-			remove.bind(1, period_value(period_for(dataset)));
+			const bool harmonic = harmonic_dataset(dataset);
+			const auto period = harmonic ? harmonic_period_for(dataset)
+				: period_for(dataset);
+			auto remove = impl_->persistent.prepare(harmonic
+				? "DELETE FROM harmonic_families WHERE period=?"
+				: "DELETE FROM measurement_blocks WHERE period=?");
+			remove.bind(1, period_value(period));
 			remove.execute();
+			if (harmonic) {
+				auto pending = impl_->persistent.prepare(
+					"DELETE FROM harmonic_pending WHERE period=?");
+				pending.bind(1, period_value(period));
+				pending.execute();
+			}
 			write_clear_floor(impl_->persistent, dataset,
 				through_stream_cursor);
 		}
@@ -634,6 +987,9 @@ void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
 		mnc::meter_stream::DatabaseDataset::cycles_150_180,
 		mnc::meter_stream::DatabaseDataset::minutes_10,
 		mnc::meter_stream::DatabaseDataset::hours_2,
+		mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180,
+		mnc::meter_stream::DatabaseDataset::harmonic_minutes_10,
+		mnc::meter_stream::DatabaseDataset::harmonic_hours_2,
 	};
 	std::scoped_lock lock(impl_->mutex);
 

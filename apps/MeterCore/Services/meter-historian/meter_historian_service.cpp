@@ -212,6 +212,21 @@ bool MeterHistorianService::rebuilds_volatile_period(
 {
 	using Dataset = mnc::meter_stream::DatabaseDataset;
 	const auto dataset = [&]() -> std::optional<Dataset> {
+		if (record.record_format == msap1::meter_harmonic_aggregate_format) {
+			switch (static_cast<MeasurementPeriod>(
+				record.measurement_period)) {
+			case MeasurementPeriod::Cycles150_180:
+				return Dataset::harmonic_cycles_150_180;
+			case MeasurementPeriod::Min10:
+				return Dataset::harmonic_minutes_10;
+			case MeasurementPeriod::Hour2:
+				return Dataset::harmonic_hours_2;
+			case MeasurementPeriod::Basic:
+			case MeasurementPeriod::Min10Live:
+			case MeasurementPeriod::Hour2Live:
+				return std::nullopt;
+			}
+		}
 		switch (static_cast<MeasurementPeriod>(record.measurement_period)) {
 		case MeasurementPeriod::Basic: return Dataset::basic;
 		case MeasurementPeriod::Cycles150_180: return Dataset::cycles_150_180;
@@ -234,12 +249,31 @@ bool MeterHistorianService::rebuilds_volatile_period(
 bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
-	/* M16 spectra are intentionally latest-only in this milestone. Every
-	 * validated chunk crosses the durable spool barrier, but the compliance
-	 * historian has no long-term spectrum projection yet; acknowledge it
-	 * without treating the known format as an undecodable poison record. */
+	/* Base HARMONIC-v1 remains the high-rate diagnostic/fallback family. R5C1
+	 * emits the interval families used by history, so retaining base chunks
+	 * would reproduce the write amplification this offload removes. */
 	if (envelope.record_format == msap1::meter_harmonic_format)
 		return false;
+	if (envelope.record_format == msap1::meter_harmonic_aggregate_format) {
+		try {
+			if (envelope.payload.size() != sizeof(msap1::MeterRecord))
+				throw std::invalid_argument(
+					"historian harmonic record size mismatch");
+			msap1::MeterRecord raw{};
+			std::memcpy(&raw, envelope.payload.data(), sizeof(raw));
+			return store_->append_harmonic_record(raw, envelope.cursor,
+				envelope.timing.utc_start_nanoseconds.value_or(
+					envelope.ingested_at_nanoseconds));
+		} catch (const std::invalid_argument &error) {
+			const auto skipped = ++undecodable_records_;
+			if (skipped == 1 || skipped % 100 == 0)
+				(void)logger().write(mnc::logging::Priority::warning,
+					"skipped an undecodable harmonic record at cursor " +
+						std::to_string(envelope.cursor) + ": " +
+						error.what(), "historian_record_skipped");
+			return false;
+		}
+	}
 	/*
 	 * A record that cannot be decoded is a POISON PILL, and the spool is
 	 * durable: the record survives every restart, so retrying it wedges the

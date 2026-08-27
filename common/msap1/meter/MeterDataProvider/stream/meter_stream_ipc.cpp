@@ -109,6 +109,33 @@ mnc::meter_stream::MeterStreamRecord decode_record(ByteReader &reader)
 	return record;
 }
 
+std::vector<std::byte> encode_records(
+	std::span<const mnc::meter_stream::MeterStreamRecord> records)
+{
+	if (records.empty() || records.size() > maximum_publish_records)
+		throw std::invalid_argument(
+			"meter-stream publish batch must contain 1..256 records");
+	ByteWriter writer;
+	writer.u32(static_cast<std::uint32_t>(records.size()));
+	for (const auto &record : records)
+		writer.bytes(encode_record(record));
+	return writer.take();
+}
+
+std::vector<mnc::meter_stream::MeterStreamRecord> decode_records(
+	ByteReader &reader)
+{
+	const auto count = reader.u32();
+	if (count == 0 || count > maximum_publish_records)
+		throw std::invalid_argument(
+			"meter-stream publish batch must contain 1..256 records");
+	std::vector<mnc::meter_stream::MeterStreamRecord> records;
+	records.reserve(count);
+	for (std::uint32_t index = 0; index < count; ++index)
+		records.push_back(decode_record(reader));
+	return records;
+}
+
 MeterRecordStreamClient::MeterRecordStreamClient(std::string path)
 	: transport_(std::make_unique<mnc::ipc::PersistentBlockingClient>(
 		std::move(path), connection_limits))
@@ -134,6 +161,25 @@ std::uint64_t MeterRecordStreamClient::publish(
 	const auto cursor = reader.u64();
 	reader.require_finished();
 	return cursor;
+}
+
+std::vector<std::uint64_t> MeterRecordStreamClient::publish_records(
+	std::span<const mnc::meter_stream::MeterStreamRecord> records)
+{
+	auto response = request(Command::publish_records, encode_records(records),
+		10000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const auto count = reader.u32();
+	if (count != records.size())
+		throw std::runtime_error(
+			"meter-stream publish batch cursor count mismatch");
+	std::vector<std::uint64_t> cursors;
+	cursors.reserve(count);
+	for (std::uint32_t index = 0; index < count; ++index)
+		cursors.push_back(reader.u64());
+	reader.require_finished();
+	return cursors;
 }
 
 void MeterRecordStreamClient::register_consumer(std::string_view name)

@@ -1,15 +1,19 @@
 #include "mnc/MeterDataProvider/stream/meter_stream.hpp"
 #include "mnc/storage/sqlite/sqlite_database.hpp"
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/history/meter_history.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 namespace {
@@ -57,6 +61,51 @@ mnc::meter_stream::MeterStreamRecord record(std::uint64_t sequence)
 	result.timing.sample_count = 6400;
 	result.timing.cycle_count = 12;
 	result.payload.assign(256, std::byte{0x5a});
+	return result;
+}
+
+msap1::MeterRecord harmonic_aggregate_record(std::uint32_t sequence,
+	std::uint8_t channel, std::uint8_t chunk)
+{
+	msap1::MeterRecord result{};
+	result.words[0] = msap1::meter_record_magic;
+	result.words[1] = msap1::meter_harmonic_aggregate_format;
+	result.words[2] = msap1::meter_record_size;
+	result.words[3] = sequence;
+	result.words[4] = 9u;
+	result.words[5] = 32000u;
+	result.words[6] = 96000u;
+	result.words[7] = 0x7fu;
+	result.words[8] = 0x3eu;
+	result.words[9] = 0x1000u;
+	result.words[11] = 0x18700u;
+	const auto first_order = static_cast<std::uint8_t>(
+		chunk * msap1::harmonic_aggregate_orders_per_record + 1u);
+	const auto count = static_cast<std::uint8_t>(std::min<std::size_t>(
+		msap1::harmonic_aggregate_orders_per_record,
+		msap1::harmonic_max_order - first_order + 1u));
+	result.words[13] = channel |
+		(static_cast<std::uint32_t>(chunk) << 3) |
+		(static_cast<std::uint32_t>(first_order) << 7) |
+		(static_cast<std::uint32_t>(count) << 15) |
+		(static_cast<std::uint32_t>(
+			msap1::harmonic_chunks_per_channel) << 20) |
+		(static_cast<std::uint32_t>(msap1::harmonic_max_order) << 24);
+	result.words[14] = static_cast<std::uint32_t>(
+		mnc::meter::MeasurementPeriod::Cycles150_180) |
+		(15u << 2) | (1u << 30);
+	result.words[15] = 127u | (50u << 8) | (10u << 16) | (3u << 24);
+	for (std::size_t index = 0; index < count; ++index) {
+		const auto order = first_order + index;
+		const std::uint64_t packed =
+			(static_cast<std::uint64_t>(channel) * 1000000u + order) |
+			(std::uint64_t{1} << 60);
+		result.words[16 + index * 2] = static_cast<std::uint32_t>(packed);
+		result.words[17 + index * 2] =
+			static_cast<std::uint32_t>(packed >> 32);
+	}
+	result.words[62] = 100u;
+	result.words[63] = 114u;
 	return result;
 }
 
@@ -132,6 +181,52 @@ void spool_distinguishes_source_fragments()
 	require(decoded.source_fragment == 41 &&
 			decoded.source_sequence == last.source_sequence,
 		"source fragment did not survive meter-stream IPC");
+	remove_database(path);
+}
+
+void spool_atomically_publishes_record_families()
+{
+	const auto path = temporary_database("spool-family-test");
+	remove_database(path);
+	mnc::meter_stream::DurableMeterSpool spool(path,
+		spool_policy(mnc::meter_stream::StorageBackend::memory));
+
+	std::vector<mnc::meter_stream::MeterStreamRecord> family;
+	for (std::uint16_t fragment = 0; fragment < 42; ++fragment) {
+		auto member = record(77);
+		member.source_fragment = fragment;
+		member.timing.first_sample_index = 77 * 6400;
+		family.push_back(std::move(member));
+	}
+	auto malformed = family;
+	malformed[20].timing.utc_uncertainty_nanoseconds =
+		std::numeric_limits<std::uint64_t>::max();
+	bool rejected = false;
+	try {
+		(void)spool.publish_records(malformed);
+	} catch (const std::overflow_error &) {
+		rejected = true;
+	}
+	require(rejected && spool.status().record_count == 0,
+		"a failed family transaction left partially committed records");
+
+	const auto cursors = spool.publish_records(family);
+	require(cursors.size() == family.size(),
+		"family publish returned the wrong cursor count");
+	for (std::size_t index = 1; index < cursors.size(); ++index)
+		require(cursors[index] == cursors.front() + index,
+			"family records did not receive contiguous ordered cursors");
+	const auto replay = spool.publish_records(family);
+	require(replay == cursors && spool.status().record_count == family.size(),
+		"idempotent family replay changed the durable stream");
+
+	const auto encoded = msap1::meter_stream::encode_records(family);
+	mnc::ipc::ByteReader reader(encoded);
+	const auto decoded = msap1::meter_stream::decode_records(reader);
+	reader.require_finished();
+	require(decoded.size() == family.size() &&
+			decoded.back().source_fragment == 41,
+		"record family did not round trip through meter-stream IPC");
 	remove_database(path);
 }
 
@@ -394,6 +489,9 @@ void historian_wal_stays_bounded_under_sustained_appends()
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
+			{D::harmonic_cycles_150_180, B::memory, {}},
+			{D::harmonic_minutes_10, B::persistent, {}},
+			{D::harmonic_hours_2, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		/* Enough commits that SQLite's 1000-page auto-checkpoint must fire
@@ -432,6 +530,9 @@ void historian_preserves_quality_and_storage_routing()
 		{D::cycles_150_180, B::persistent, {}},
 		{D::minutes_10, B::persistent, {}},
 		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -461,6 +562,58 @@ void historian_preserves_quality_and_storage_routing()
 		require(basic != status.datasets.end() && basic->backend == B::memory &&
 			basic->block_count == 1,
 			"basic history was not routed to volatile storage");
+	}
+	remove_database(path);
+}
+
+void historian_commits_harmonics_as_one_durable_family()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("harmonic-history-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::memory, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::persistent, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
+	};
+	auto family_count = [](const msap1::history::HistorianStatus &status) {
+		const auto dataset = std::ranges::find_if(status.datasets,
+			[](const auto &item) {
+				return item.dataset == D::harmonic_cycles_150_180;
+			});
+		return dataset == status.datasets.end() ? 0u : dataset->block_count;
+	};
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		std::uint64_t cursor = 0;
+		for (std::uint8_t channel = 0;
+		     channel < msap1::harmonic_channel_count; ++channel) {
+			for (std::uint8_t chunk = 0;
+			     chunk < msap1::harmonic_chunks_per_channel; ++chunk) {
+				++cursor;
+				const auto completed = history.append_harmonic_record(
+					harmonic_aggregate_record(3, channel, chunk), cursor,
+					2'000'000'000 + static_cast<std::int64_t>(cursor));
+				require(completed ==
+					(cursor == msap1::harmonic_records_per_family),
+					"harmonic family became visible before its final chunk");
+			}
+		}
+		require(family_count(history.status()) == 1u,
+			"completed harmonic family was not materialized exactly once");
+		require(history.persisted_stream_high_water() ==
+			msap1::harmonic_records_per_family,
+			"harmonic staging cursor was not made durable");
+	}
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		require(family_count(history.status()) == 1u,
+			"harmonic family did not survive historian restart");
 	}
 	remove_database(path);
 }
@@ -495,6 +648,9 @@ void historian_enforces_retention_without_rescanning()
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
+			{D::harmonic_cycles_150_180, B::memory, {}},
+			{D::harmonic_minutes_10, B::persistent, {}},
+			{D::harmonic_hours_2, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 12; ++cursor)
@@ -525,6 +681,9 @@ void historian_enforces_retention_without_rescanning()
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
+			{D::harmonic_cycles_150_180, B::memory, {}},
+			{D::harmonic_minutes_10, B::persistent, {}},
+			{D::harmonic_hours_2, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 5; ++cursor)
@@ -547,6 +706,9 @@ void historian_enforces_retention_without_rescanning()
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
+			{D::harmonic_cycles_150_180, B::memory, {}},
+			{D::harmonic_minutes_10, B::persistent, {}},
+			{D::harmonic_hours_2, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 20; ++cursor)
@@ -569,6 +731,9 @@ void historian_enforces_retention_without_rescanning()
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
+			{D::harmonic_cycles_150_180, B::memory, {}},
+			{D::harmonic_minutes_10, B::persistent, {}},
+			{D::harmonic_hours_2, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 6; ++cursor)
@@ -593,6 +758,9 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 		{D::cycles_150_180, B::persistent, {}},
 		{D::minutes_10, B::persistent, {}},
 		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -659,6 +827,7 @@ int main()
 {
 	spool_is_ordered_idempotent_and_durable();
 	spool_distinguishes_source_fragments();
+	spool_atomically_publishes_record_families();
 	spool_migrates_legacy_identity_key();
 	spool_backend_switch_replaces_stale_target();
 	memory_spool_cursors_survive_restart();
@@ -668,6 +837,7 @@ int main()
 	historian_wal_stays_bounded_under_sustained_appends();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
+	historian_commits_harmonics_as_one_durable_family();
 	historian_enforces_retention_without_rescanning();
 	historian_maintenance_preserves_explicit_clear_boundary();
 }

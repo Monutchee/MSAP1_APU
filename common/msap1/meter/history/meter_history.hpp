@@ -90,6 +90,12 @@ public:
 
 	void append(const MeterUpdate &update, std::uint64_t stream_cursor,
 		std::int64_t measured_at_nanoseconds);
+	/** Stage one validated aggregate-harmonic chunk and atomically materialize
+	 * the family when all 42 fragments are durable. Base families remain
+	 * latest-only and are rejected here. */
+	[[nodiscard]] bool append_harmonic_record(const MeterRecord &record,
+		std::uint64_t stream_cursor,
+		std::int64_t measured_at_nanoseconds);
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
 	[[nodiscard]] HistorianStatus status() const;
 	/** Highest stream cursor the persistent projections have committed, or 0

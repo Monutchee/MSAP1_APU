@@ -1556,15 +1556,43 @@ struct HarmonicResult {
 	std::uint64_t families = 0;
 	std::uint64_t incomplete_families = 0;
 	bool available = false;
+	std::string period = "3s";
 	msap1::HarmonicSpectrumSnapshot snapshot{};
 };
+
+msap1::MeasurementPeriod parse_harmonic_period(
+	const std::optional<std::string> &value)
+{
+	if (!value || *value == "3s" || *value == "cycles_150_180")
+		return msap1::MeasurementPeriod::Cycles150_180;
+	if (*value == "10m" || *value == "minutes_10")
+		return msap1::MeasurementPeriod::Min10;
+	if (*value == "2h" || *value == "hours_2")
+		return msap1::MeasurementPeriod::Hour2;
+	if (*value == "base")
+		return msap1::MeasurementPeriod::Basic;
+	throw std::invalid_argument(
+		"--period must be 3s, 10m, 2h, or base");
+}
+
+std::string harmonic_period_label(msap1::MeasurementPeriod period)
+{
+	switch (period) {
+	case msap1::MeasurementPeriod::Cycles150_180: return "3s";
+	case msap1::MeasurementPeriod::Min10: return "10m";
+	case msap1::MeasurementPeriod::Hour2: return "2h";
+	case msap1::MeasurementPeriod::Basic: return "base";
+	default: throw std::invalid_argument("unsupported harmonic period");
+	}
+}
 
 class HarmonicTextGenerator final : public ResultGenerator<HarmonicResult> {
 public:
 	int write(const HarmonicResult &result,
 		  std::ostream &output) const override
 	{
-		output << "Harmonic spectrum (HARMONIC-v1, IEC subgroups)\n"
+		output << "Harmonic spectrum (" << result.period
+		       << ", IEC subgroups)\n"
 		       << "  Chunks accepted:    " << result.records << '\n'
 		       << "  Families completed: " << result.families << '\n'
 		       << "  Families incomplete:" << ' '
@@ -1578,26 +1606,34 @@ public:
 		       << "  Window:             " << spectrum.cycle_count
 		       << " cycles, " << spectrum.sample_count << " samples at "
 		       << spectrum.sample_rate_hz << " Hz\n"
-		       << "  Measured frequency: "
-		       << static_cast<double>(spectrum.measured_frequency_millihz) /
-				  1000.0
-		       << " Hz\n"
 		       << "  Qualified orders:   1.."
 		       << static_cast<unsigned>(spectrum.qualified_max_order)
 		       << (spectrum.rate_limited() ? " (rate limited)" : "")
 		       << '\n'
-		       << "  Quality:            grid=" << yes_no(spectrum.grid_locked())
-		       << ", conditioner=" << yes_no(spectrum.conditioner_valid())
-		       << ", FFT=" << yes_no(spectrum.fft_valid())
+		       << "  Quality:            valid="
+		       << yes_no(spectrum.interval_valid())
 		       << ", arithmetic="
 		       << (spectrum.arithmetic_error() ? "error" : "clean") << '\n';
+		if (spectrum.aggregate_family())
+			output << "  Contributors:       " << spectrum.contributors
+			       << ", target sample " << spectrum.target_sample
+			       << ", overshoot " << spectrum.overshoot_samples
+			       << " sample(s)\n";
+		else
+			output << "  Measured frequency: "
+			       << static_cast<double>(
+				  spectrum.measured_frequency_millihz) / 1000.0
+			       << " Hz\n";
 		static constexpr std::array<const char *, 7> names{
 			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
 		for (std::size_t channel = 0; channel < spectrum.channels.size();
 		     ++channel) {
 			const char *unit = channel < 4 ? "A" : "V";
 			output << "  " << names[channel] << " (order, magnitude "
-			       << unit << ", angle degrees relative to h*Va1):\n";
+			       << unit;
+			if (!spectrum.aggregate_family())
+				output << ", angle degrees relative to h*Va1";
+			output << "):\n";
 			for (const auto &point : spectrum.channels[channel]) {
 				if (point.order > spectrum.qualified_max_order)
 					break;
@@ -1637,12 +1673,15 @@ public:
 int run_meter_harmonics(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
-	const auto response = client.request(
-		msap1::HarmonicRequest{}, options.timeout_ms);
+	msap1::HarmonicRequest request{};
+	request.period = parse_harmonic_period(options.harmonic_period);
+	const auto response = client.request(request, options.timeout_ms);
 	require_daemon_ok(response.status);
 	HarmonicResult result{response.running, response.records,
 			      response.families, response.incomplete_families,
-			      response.has_snapshot, response.snapshot};
+			      response.has_snapshot,
+			      harmonic_period_label(response.period),
+			      response.snapshot};
 	return render_result(options, result, output, HarmonicTextGenerator{},
 			     HarmonicJsonGenerator{});
 }
@@ -1717,7 +1756,7 @@ void register_meter_commands(Application &application)
 			.supports_json = true,
 			.variants = {},
 		}));
-	meter.add_subcommand(Command(
+	Command harmonics(
 		"harmonics", "Show the latest complete harmonic spectrum",
 		run_meter_harmonics,
 		{
@@ -1726,7 +1765,15 @@ void register_meter_commands(Application &application)
 			.supports_text = true,
 			.supports_json = true,
 			.variants = {},
-		}));
+		});
+	harmonics.add_option({
+		"period", "PERIOD", "Harmonic period: 3s, 10m, 2h, or base",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.harmonic_period = value;
+		},
+	});
+	meter.add_subcommand(std::move(harmonics));
 	meter.add_subcommand(Command(
 		"snapshot", "Read one coherent meter result",
 		run_meter_snapshot,

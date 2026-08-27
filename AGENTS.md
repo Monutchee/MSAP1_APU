@@ -89,6 +89,17 @@
   `msap1-meter-historian` acknowledges its independent spool cursor only after
   its typed historical projection commits; do not bypass this ordering or let
   a lossy subscriber block either durable service.
+- Harmonic records are family-atomic. Acquisition buffers the 42 direct
+  HARMONIC-v1 chunks for one exact provenance tuple and publishes nothing
+  until the family is complete; its IPC reader drains bounded batches and must
+  never wait on SQLite. Meter-stream accepts batches of up to 256 records in
+  one transaction. R5C1 HARMONIC_AGG-v1 families have independent latest slots
+  for 150/180-cycle, 10-minute, and 2-hour periods; API/CLI default to the
+  150/180-cycle view and require an explicit period for the others. Direct
+  10/12-cycle spectra remain latest-only during target proof. The historian
+  persists only complete 42-record aggregate families in their three typed
+  datasets and acknowledges a cursor only after the selected projection is
+  durable.
 - Product-neutral Modbus framing, request handling, CRC, and asynchronous
   TCP/RTU transports live under `common/mnc/modbus`. The source-controlled
   MSAP1 register contract and its `MeterSnapshotProvider` adapter live under

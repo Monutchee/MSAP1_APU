@@ -315,8 +315,20 @@ DurableMeterSpool::~DurableMeterSpool() = default;
 
 std::uint64_t DurableMeterSpool::publish(const MeterStreamRecord &record)
 {
-	if (record.payload.empty())
-		throw std::invalid_argument("meter stream record payload is empty");
+	return publish_records(
+		std::span<const MeterStreamRecord>(&record, 1)).front();
+}
+
+std::vector<std::uint64_t> DurableMeterSpool::publish_records(
+	std::span<const MeterStreamRecord> records)
+{
+	if (records.empty() || records.size() > 256)
+		throw std::invalid_argument(
+			"meter stream publish batch must contain 1..256 records");
+	for (const auto &record : records)
+		if (record.payload.empty())
+			throw std::invalid_argument(
+				"meter stream record payload is empty");
 	std::scoped_lock lifecycle(lifecycle_mutex_);
 	std::scoped_lock lock(impl_->mutex);
 	Transaction transaction(impl_->database);
@@ -329,21 +341,6 @@ SELECT cursor FROM records
  WHERE record_format=? AND configuration_generation=? AND source_sequence=?
    AND source_fragment=? AND first_sample_index=?
 )SQL");
-	existing.bind(1, static_cast<std::int64_t>(record.record_format));
-	existing.bind(2,
-		static_cast<std::int64_t>(record.configuration_generation));
-	existing.bind(3, record.source_sequence);
-	existing.bind(4, static_cast<std::int32_t>(record.source_fragment));
-	existing.bind(5, record.timing.first_sample_index);
-	if (existing.step()) {
-		const auto cursor = static_cast<std::uint64_t>(existing.integer(0));
-		/* Never commit with a row-active statement: the WAL auto-checkpoint
-		 * runs at COMMIT and aborts while the committing connection still
-		 * has one, which is how a WAL grows without bound. */
-		existing.reset();
-		transaction.commit();
-		return cursor;
-	}
 	auto insert = impl_->database.prepare(R"SQL(
 INSERT INTO records(
  record_format, record_kind, measurement_period, source_sequence, source_fragment,
@@ -351,25 +348,55 @@ INSERT INTO records(
  cycle_count, time_quality, utc_start_ns, utc_uncertainty_ns, payload)
 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 )SQL");
-	insert.bind(1, static_cast<std::int64_t>(record.record_format));
-	insert.bind(2, static_cast<std::int32_t>(record.record_kind));
-	insert.bind(3, static_cast<std::int32_t>(record.measurement_period));
-	insert.bind(4, record.source_sequence);
-	insert.bind(5, static_cast<std::int32_t>(record.source_fragment));
-	insert.bind(6, static_cast<std::int64_t>(record.configuration_generation));
-	insert.bind(7, record.ingested_at_nanoseconds);
-	insert.bind(8, record.timing.first_sample_index);
-	insert.bind(9, static_cast<std::int64_t>(record.timing.sample_count));
-	insert.bind(10, static_cast<std::int64_t>(record.timing.cycle_count));
-	insert.bind(11, static_cast<std::int32_t>(record.timing.time_quality));
-	insert.bind(12, optional_signed(record.timing.utc_start_nanoseconds));
-	insert.bind(13, optional_unsigned(record.timing.utc_uncertainty_nanoseconds));
-	insert.bind(14, record.payload);
-	insert.execute();
+	std::vector<std::uint64_t> cursors;
+	cursors.reserve(records.size());
+	std::uint64_t inserted_bytes = 0;
+	std::uint64_t first_inserted_cursor = 0;
+	for (const auto &record : records) {
+		existing.bind(1, static_cast<std::int64_t>(record.record_format));
+		existing.bind(2,
+			static_cast<std::int64_t>(record.configuration_generation));
+		existing.bind(3, record.source_sequence);
+		existing.bind(4, static_cast<std::int32_t>(record.source_fragment));
+		existing.bind(5, record.timing.first_sample_index);
+		if (existing.step()) {
+			cursors.push_back(static_cast<std::uint64_t>(
+				existing.integer(0)));
+			existing.reset();
+			continue;
+		}
+		existing.reset();
 
-	const auto cursor = static_cast<std::uint64_t>(
-		impl_->database.last_insert_rowid());
-	impl_->tracked_payload_bytes += record.payload.size() + 128u;
+		insert.bind(1, static_cast<std::int64_t>(record.record_format));
+		insert.bind(2, static_cast<std::int32_t>(record.record_kind));
+		insert.bind(3, static_cast<std::int32_t>(record.measurement_period));
+		insert.bind(4, record.source_sequence);
+		insert.bind(5, static_cast<std::int32_t>(record.source_fragment));
+		insert.bind(6,
+			static_cast<std::int64_t>(record.configuration_generation));
+		insert.bind(7, record.ingested_at_nanoseconds);
+		insert.bind(8, record.timing.first_sample_index);
+		insert.bind(9, static_cast<std::int64_t>(record.timing.sample_count));
+		insert.bind(10, static_cast<std::int64_t>(record.timing.cycle_count));
+		insert.bind(11, static_cast<std::int32_t>(record.timing.time_quality));
+		insert.bind(12, optional_signed(record.timing.utc_start_nanoseconds));
+		insert.bind(13,
+			optional_unsigned(record.timing.utc_uncertainty_nanoseconds));
+		insert.bind(14, record.payload);
+		insert.execute();
+		insert.reset();
+
+		const auto cursor = static_cast<std::uint64_t>(
+			impl_->database.last_insert_rowid());
+		if (first_inserted_cursor == 0)
+			first_inserted_cursor = cursor;
+		inserted_bytes += record.payload.size() + 128u;
+		cursors.push_back(cursor);
+	}
+
+	const auto projected_bytes = impl_->tracked_payload_bytes + inserted_bytes;
+	std::uint64_t removed_bytes = 0;
+	std::uint64_t removed_unacknowledged = 0;
 	/*
 	 * Hard cap, enforced HERE and not only in prune(): prune() runs from the
 	 * acknowledge handler, which is exactly what stops arriving when the
@@ -377,10 +404,13 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	 * Oldest records go first, acknowledged or not; unacknowledged evictions
 	 * are counted so the loss is bounded AND visible, which beats the
 	 * alternative (an OOM-killed stream service that takes the producer's
-	 * publish path down with it).
+	 * publish path down with it). A newly inserted batch is protected as one
+	 * unit. If the configured cap
+	 * is smaller than the batch itself, the complete newest family wins over
+	 * satisfying the byte cap by tearing that family apart.
 	 */
-	if (impl_->policy.retention.maximum_bytes &&
-	    impl_->tracked_payload_bytes > *impl_->policy.retention.maximum_bytes) {
+	if (inserted_bytes != 0 && impl_->policy.retention.maximum_bytes &&
+	    projected_bytes > *impl_->policy.retention.maximum_bytes) {
 		std::uint64_t acknowledged = 0;
 		{
 			auto minimum = impl_->database.prepare(
@@ -389,17 +419,13 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			acknowledged = static_cast<std::uint64_t>(minimum.integer(0));
 		}
 		std::uint64_t remove_through = 0;
-		std::uint64_t removed_bytes = 0;
-		std::uint64_t removed_unacknowledged = 0;
 		{
-			/* The record just published is excluded: a cap smaller than
-			 * one record must degrade to keeping the newest, never to an
-			 * empty stream. */
+			/* The complete batch just published is excluded. */
 			auto victims = impl_->database.prepare(
 				"SELECT cursor, LENGTH(payload)+128 FROM records "
 				"WHERE cursor<? ORDER BY cursor");
-			victims.bind(1, cursor);
-			while (impl_->tracked_payload_bytes - removed_bytes >
+			victims.bind(1, first_inserted_cursor);
+			while (projected_bytes - removed_bytes >
 				       *impl_->policy.retention.maximum_bytes &&
 			       victims.step()) {
 				remove_through = static_cast<std::uint64_t>(
@@ -415,13 +441,13 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				"DELETE FROM records WHERE cursor<=?");
 			remove.bind(1, remove_through);
 			remove.execute();
-			impl_->tracked_payload_bytes -=
-				std::min(impl_->tracked_payload_bytes, removed_bytes);
-			impl_->dropped_unacknowledged += removed_unacknowledged;
 		}
 	}
 	transaction.commit();
-	return cursor;
+	impl_->tracked_payload_bytes = projected_bytes -
+		std::min(projected_bytes, removed_bytes);
+	impl_->dropped_unacknowledged += removed_unacknowledged;
+	return cursors;
 }
 
 void DurableMeterSpool::register_consumer(std::string_view name)

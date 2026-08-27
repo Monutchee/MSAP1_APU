@@ -12,7 +12,7 @@ namespace msap1::acquisition {
 
 /** Result of one nonblocking read from a meter-record source. */
 struct MeterRecordBatch {
-	static constexpr std::size_t capacity = 16;
+	static constexpr std::size_t capacity = 128;
 	std::array<MeterRecord, capacity> records{};
 	std::size_t count = 0;
 	std::size_t bytes = 0;

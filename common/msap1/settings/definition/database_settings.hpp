@@ -70,6 +70,11 @@ struct DatabaseSettings {
 	DatasetStorageSettings cycles_150_180{};
 	DatasetStorageSettings minutes_10{};
 	DatasetStorageSettings hours_2{};
+	DatasetStorageSettings harmonic_cycles_150_180{
+		.backend = "memory", .maximum_age_seconds = 24u * 60u * 60u,
+		.maximum_bytes = 512ull * 1024ull * 1024ull};
+	DatasetStorageSettings harmonic_minutes_10{};
+	DatasetStorageSettings harmonic_hours_2{};
 
 	void validate() const
 	{
@@ -78,6 +83,9 @@ struct DatabaseSettings {
 		cycles_150_180.validate(false);
 		minutes_10.validate(false);
 		hours_2.validate(false);
+		harmonic_cycles_150_180.validate(false);
+		harmonic_minutes_10.validate(false);
+		harmonic_hours_2.validate(false);
 	}
 
 	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
@@ -103,6 +111,12 @@ struct DatabaseSettings {
 			convert(DatabaseDataset::cycles_150_180, cycles_150_180),
 			convert(DatabaseDataset::minutes_10, minutes_10),
 			convert(DatabaseDataset::hours_2, hours_2),
+			convert(DatabaseDataset::harmonic_cycles_150_180,
+				harmonic_cycles_150_180),
+			convert(DatabaseDataset::harmonic_minutes_10,
+				harmonic_minutes_10),
+			convert(DatabaseDataset::harmonic_hours_2,
+				harmonic_hours_2),
 		};
 	}
 

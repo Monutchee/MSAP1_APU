@@ -63,6 +63,50 @@ msap1::MeterRecord make_record(std::uint32_t sequence, std::uint8_t channel,
 	return record;
 }
 
+msap1::MeterRecord make_aggregate_record(std::uint32_t sequence,
+					 std::uint8_t channel,
+					 std::uint8_t chunk)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_harmonic_aggregate_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = 0x12345678u;
+	record.words[5] = 32000u;
+	record.words[6] = 96000u;
+	record.words[7] = 0x7fu;
+	/* complete, aligned, valid, magnitudes valid, full range */
+	record.words[8] = 0x3eu;
+	record.words[9] = 0x1000u;
+	record.words[11] = 0x18700u;
+	const auto first_order = static_cast<std::uint8_t>(
+		chunk * msap1::harmonic_aggregate_orders_per_record + 1);
+	const auto count = static_cast<std::uint8_t>(std::min<std::size_t>(
+		msap1::harmonic_aggregate_orders_per_record,
+		msap1::harmonic_max_order - first_order + 1));
+	record.words[13] = channel | (static_cast<std::uint32_t>(chunk) << 3) |
+		(static_cast<std::uint32_t>(first_order) << 7) |
+		(static_cast<std::uint32_t>(count) << 15) |
+		(static_cast<std::uint32_t>(
+			 msap1::harmonic_chunks_per_channel) << 20) |
+		(static_cast<std::uint32_t>(msap1::harmonic_max_order) << 24);
+	record.words[14] = 1u | (15u << 2) | (1u << 30);
+	record.words[15] = 127u | (50u << 8) | (10u << 16) | (3u << 24);
+	for (std::size_t index = 0; index < count; ++index) {
+		const auto order = first_order + index;
+		const std::uint64_t packed =
+			(static_cast<std::uint64_t>(channel) * 1000000u + order) |
+			(std::uint64_t{1} << 60);
+		record.words[16 + index * 2] = static_cast<std::uint32_t>(packed);
+		record.words[17 + index * 2] =
+			static_cast<std::uint32_t>(packed >> 32);
+	}
+	record.words[62] = 100u;
+	record.words[63] = 114u;
+	return record;
+}
+
 template<typename Function>
 void rejects(Function function, const char *message)
 {
@@ -164,6 +208,33 @@ int main()
 				msap1::decode_harmonic_record(mismatch));
 		}, "cross-chunk provenance mismatch must be rejected");
 	}
+
+	/* R5C1 aggregate families use 23 magnitudes per chunk and reserve the
+	 * final two words for the exact base-family sequence range. */
+	assembler.reset();
+	std::optional<msap1::HarmonicSpectrumSnapshot> aggregate;
+	for (std::uint8_t channel = 0; channel < msap1::harmonic_channel_count;
+	     ++channel)
+		for (std::uint8_t chunk = 0;
+		     chunk < msap1::harmonic_chunks_per_channel; ++chunk) {
+			const auto decoded_aggregate = msap1::decode_harmonic_record(
+				make_aggregate_record(3, channel, chunk));
+			const auto update = assembler.accept(decoded_aggregate);
+			if (update.completed)
+				aggregate = update.completed;
+		}
+	require(aggregate && aggregate->period ==
+			mnc::meter::MeasurementPeriod::Cycles150_180 &&
+			aggregate->contributors == 15 && aggregate->aligned &&
+			!aggregate->contaminated && aggregate->interval_valid() &&
+			aggregate->first_source_sequence == 100 &&
+			aggregate->last_source_sequence == 114,
+		"aggregate harmonic provenance survives atomic assembly");
+	if (aggregate)
+		require(aggregate->channels[6][126].magnitude_micro_units ==
+				6000127u &&
+				!aggregate->channels[6][126].angle_valid,
+			"aggregate magnitude-only order 127 survives assembly");
 
 	if (failures != 0) {
 		std::fprintf(stderr, "FAILED: %d check(s)\n", failures);

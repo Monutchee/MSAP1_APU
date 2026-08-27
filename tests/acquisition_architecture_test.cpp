@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -70,6 +71,15 @@ public:
 		records.push_back(record);
 		return records.size();
 	}
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> family) override
+	{
+		std::vector<std::uint64_t> cursors;
+		cursors.reserve(family.size());
+		for (const auto &record : family)
+			cursors.push_back(publish(record));
+		return cursors;
+	}
 
 	std::vector<mnc::meter_stream::MeterStreamRecord> records;
 };
@@ -84,6 +94,13 @@ public:
 		if (++attempts_ == fail_on_)
 			throw std::runtime_error("deliberate spool failure");
 		return attempts_;
+	}
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> records) override
+	{
+		if (++attempts_ == fail_on_)
+			throw std::runtime_error("deliberate spool failure");
+		return std::vector<std::uint64_t>(records.size(), attempts_);
 	}
 	std::size_t attempts_ = 0;
 	std::size_t fail_on_ = 0;
@@ -337,7 +354,7 @@ msap1::MeterRecord harmonic_record(std::uint32_t sequence,
 	return record;
 }
 
-void ingestor_publishes_harmonic_chunks_before_atomic_latest()
+void ingestor_publishes_only_complete_harmonic_families()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
 	ScriptedMeterSource source;
@@ -362,9 +379,9 @@ void ingestor_publishes_harmonic_chunks_before_atomic_latest()
 				continue;
 			feed(channel, chunk);
 		}
-	require(publisher.records.size() == 41 &&
+	require(publisher.records.empty() &&
 			!ingest.latest_harmonic_spectrum().has_value(),
-		"a partial harmonic family became visible or missed the spool");
+		"a partial harmonic family entered the spool or latest state");
 	feed(6, 5);
 	require(publisher.records.size() == 42 &&
 			ingest.latest_harmonic_spectrum().has_value() &&
@@ -381,7 +398,7 @@ void ingestor_publishes_harmonic_chunks_before_atomic_latest()
 
 	/* A failed durability barrier on the completing chunk leaves latest empty. */
 	ScriptedMeterSource failing_source;
-	FailingRecordPublisher failing_publisher(42);
+	FailingRecordPublisher failing_publisher(1);
 	MeterRecordIngestor failing(failing_source, configuration, timebase,
 				    failing_publisher);
 	failing.begin_epoch();
@@ -1013,7 +1030,7 @@ int main()
 {
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
-	ingestor_publishes_harmonic_chunks_before_atomic_latest();
+	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_tracks_ten_minute_stream_independently();

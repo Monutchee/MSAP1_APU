@@ -18,6 +18,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -683,6 +684,7 @@ struct HarmonicDto {
 	std::uint64_t records = 0;
 	std::uint64_t families = 0;
 	std::uint64_t incomplete_families = 0;
+	std::string period = "cycles_150_180";
 	std::uint32_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t sample_rate_hz = 0;
@@ -697,6 +699,14 @@ struct HarmonicDto {
 	std::uint32_t status = 0;
 	std::uint32_t emit_drops = 0;
 	std::uint32_t result_drops = 0;
+	std::uint64_t target_sample = 0;
+	std::uint32_t contributors = 0;
+	std::uint32_t overshoot_samples = 0;
+	std::uint32_t first_source_sequence = 0;
+	std::uint32_t last_source_sequence = 0;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool interval_valid = false;
 	bool arithmetic_error = false;
 	bool grid_locked = false;
 	bool conditioner_valid = false;
@@ -706,6 +716,43 @@ struct HarmonicDto {
 	bool rate_limited = false;
 	std::vector<HarmonicChannelDto> channels;
 };
+
+std::string harmonic_period_name(mnc::meter::MeasurementPeriod period)
+{
+	switch (period) {
+	case mnc::meter::MeasurementPeriod::Basic:
+		return "basic";
+	case mnc::meter::MeasurementPeriod::Cycles150_180:
+		return "cycles_150_180";
+	case mnc::meter::MeasurementPeriod::Min10:
+		return "minutes_10";
+	case mnc::meter::MeasurementPeriod::Hour2:
+		return "hours_2";
+	default:
+		throw std::invalid_argument("unsupported harmonic period");
+	}
+}
+
+mnc::meter::MeasurementPeriod harmonic_period(std::string_view target)
+{
+	const auto marker = target.find("period=");
+	if (marker == std::string_view::npos)
+		return mnc::meter::MeasurementPeriod::Cycles150_180;
+	auto value = target.substr(marker + 7u);
+	if (const auto separator = value.find('&');
+	    separator != std::string_view::npos)
+		value = value.substr(0, separator);
+	if (value == "cycles_150_180" || value == "3s")
+		return mnc::meter::MeasurementPeriod::Cycles150_180;
+	if (value == "minutes_10" || value == "10m")
+		return mnc::meter::MeasurementPeriod::Min10;
+	if (value == "hours_2" || value == "2h")
+		return mnc::meter::MeasurementPeriod::Hour2;
+	if (value == "basic")
+		return mnc::meter::MeasurementPeriod::Basic;
+	throw std::invalid_argument(
+		"period must be cycles_150_180, minutes_10, or hours_2");
+}
 
 HarmonicDto harmonic_dto(const msap1::HarmonicResponse &response)
 {
@@ -717,6 +764,7 @@ HarmonicDto harmonic_dto(const msap1::HarmonicResponse &response)
 	dto.records = response.records;
 	dto.families = response.families;
 	dto.incomplete_families = response.incomplete_families;
+	dto.period = harmonic_period_name(response.period);
 	if (!response.has_snapshot)
 		return dto;
 	const auto &snapshot = response.snapshot;
@@ -735,6 +783,14 @@ HarmonicDto harmonic_dto(const msap1::HarmonicResponse &response)
 	dto.status = snapshot.status;
 	dto.emit_drops = snapshot.emit_drops;
 	dto.result_drops = snapshot.result_drops;
+	dto.target_sample = snapshot.target_sample;
+	dto.contributors = snapshot.contributors;
+	dto.overshoot_samples = snapshot.overshoot_samples;
+	dto.first_source_sequence = snapshot.first_source_sequence;
+	dto.last_source_sequence = snapshot.last_source_sequence;
+	dto.time_aligned = snapshot.aligned;
+	dto.contaminated = snapshot.contaminated;
+	dto.interval_valid = snapshot.interval_valid();
 	dto.arithmetic_error = snapshot.arithmetic_error();
 	dto.grid_locked = snapshot.grid_locked();
 	dto.conditioner_valid = snapshot.conditioner_valid();
@@ -769,13 +825,19 @@ HarmonicDto harmonic_dto(const msap1::HarmonicResponse &response)
 } // namespace
 
 webengine::Response get_meter_harmonics(AppContext &app,
-					const webengine::RequestContext &)
+					const webengine::RequestContext &context)
 {
 	try {
-		const auto response = app.acquisition.harmonics();
+		const auto target = context.request.target();
+		const auto period = harmonic_period(std::string_view{
+			target.data(), target.size()});
+		const auto response = app.acquisition.harmonics(period);
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
 				     harmonic_dto(response));
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/meter/harmonics", error);
 		return error_response(

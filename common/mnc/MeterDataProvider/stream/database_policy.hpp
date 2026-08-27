@@ -23,6 +23,11 @@ enum class DatabaseDataset : std::uint8_t {
 	cycles_150_180,
 	minutes_10,
 	hours_2,
+	/* Typed M16 magnitude families. Appended to preserve the existing IPC
+	 * values used by database policy/status messages. */
+	harmonic_cycles_150_180,
+	harmonic_minutes_10,
+	harmonic_hours_2,
 };
 
 struct RetentionPolicy {
@@ -47,6 +52,9 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::cycles_150_180:
 	case DatabaseDataset::minutes_10:
 	case DatabaseDataset::hours_2:
+	case DatabaseDataset::harmonic_cycles_150_180:
+	case DatabaseDataset::harmonic_minutes_10:
+	case DatabaseDataset::harmonic_hours_2:
 		break;
 	default:
 		throw std::invalid_argument("unknown database dataset");
@@ -76,6 +84,10 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::cycles_150_180: return "cycles_150_180";
 	case DatabaseDataset::minutes_10: return "minutes_10";
 	case DatabaseDataset::hours_2: return "hours_2";
+	case DatabaseDataset::harmonic_cycles_150_180:
+		return "harmonic_cycles_150_180";
+	case DatabaseDataset::harmonic_minutes_10: return "harmonic_minutes_10";
+	case DatabaseDataset::harmonic_hours_2: return "harmonic_hours_2";
 	}
 	return "unknown";
 }

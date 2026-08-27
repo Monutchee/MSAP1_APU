@@ -11,17 +11,26 @@ constexpr std::uint64_t magnitude_mask = (std::uint64_t{1} << 40) - 1;
 constexpr std::uint64_t angle_mask = (std::uint64_t{1} << 20) - 1;
 constexpr std::uint32_t harmonic_known_status = 0xffu;
 
-std::uint8_t expected_order_count(std::uint8_t chunk)
+std::size_t orders_per_record(mnc::meter::MeasurementPeriod period)
 {
-	const auto first = static_cast<std::size_t>(chunk) *
-			 harmonic_orders_per_record + 1;
+	return period == mnc::meter::MeasurementPeriod::Basic
+		? harmonic_orders_per_record
+		: harmonic_aggregate_orders_per_record;
+}
+
+std::uint8_t expected_order_count(std::uint8_t chunk,
+				  mnc::meter::MeasurementPeriod period)
+{
+	const auto per_record = orders_per_record(period);
+	const auto first = static_cast<std::size_t>(chunk) * per_record + 1;
 	return static_cast<std::uint8_t>(std::min(
-		harmonic_orders_per_record, harmonic_max_order - first + 1));
+		per_record, harmonic_max_order - first + 1));
 }
 
 HarmonicSpectrumSnapshot snapshot_from(const HarmonicRecordChunk &chunk)
 {
 	HarmonicSpectrumSnapshot result{};
+	result.period = chunk.period;
 	result.sequence = chunk.sequence;
 	result.configuration_generation = chunk.configuration_generation;
 	result.sample_rate_hz = chunk.sample_rate_hz;
@@ -31,6 +40,13 @@ HarmonicSpectrumSnapshot snapshot_from(const HarmonicRecordChunk &chunk)
 	result.first_sample = chunk.first_sample;
 	result.emit_drops = chunk.emit_drops;
 	result.result_drops = chunk.result_drops;
+	result.target_sample = chunk.target_sample;
+	result.contributors = chunk.contributors;
+	result.overshoot_samples = chunk.overshoot_samples;
+	result.aligned = chunk.time_aligned;
+	result.contaminated = chunk.contaminated;
+	result.first_source_sequence = chunk.first_source_sequence;
+	result.last_source_sequence = chunk.last_source_sequence;
 	result.measured_frequency_millihz =
 		chunk.measured_frequency_millihz;
 	result.qualified_max_order = chunk.qualified_max_order;
@@ -48,7 +64,8 @@ HarmonicSpectrumSnapshot snapshot_from(const HarmonicRecordChunk &chunk)
 bool same_family(const HarmonicSpectrumSnapshot &family,
 		 const HarmonicRecordChunk &chunk)
 {
-	return family.sequence == chunk.sequence &&
+	return family.period == chunk.period &&
+	       family.sequence == chunk.sequence &&
 	       family.configuration_generation == chunk.configuration_generation &&
 	       family.sample_rate_hz == chunk.sample_rate_hz &&
 	       family.sample_count == chunk.sample_count &&
@@ -57,6 +74,13 @@ bool same_family(const HarmonicSpectrumSnapshot &family,
 	       family.first_sample == chunk.first_sample &&
 	       family.emit_drops == chunk.emit_drops &&
 	       family.result_drops == chunk.result_drops &&
+	       family.target_sample == chunk.target_sample &&
+	       family.contributors == chunk.contributors &&
+	       family.overshoot_samples == chunk.overshoot_samples &&
+	       family.aligned == chunk.time_aligned &&
+	       family.contaminated == chunk.contaminated &&
+	       family.first_source_sequence == chunk.first_source_sequence &&
+	       family.last_source_sequence == chunk.last_source_sequence &&
 	       family.measured_frequency_millihz ==
 		       chunk.measured_frequency_millihz &&
 	       family.qualified_max_order == chunk.qualified_max_order &&
@@ -76,7 +100,8 @@ bool forward_of(std::uint32_t candidate, std::uint32_t baseline)
 HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 {
 	if (!record.header_valid() ||
-	    record.record_format() != meter_harmonic_format)
+	    (record.record_format() != meter_harmonic_format &&
+	     record.record_format() != meter_harmonic_aggregate_format))
 		throw std::invalid_argument("invalid harmonic record header");
 	if (record.sample_rate_hz() == 0u || record.block_sample_count() == 0u)
 		throw std::invalid_argument("harmonic record has an empty sample span");
@@ -87,6 +112,30 @@ HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 		throw std::invalid_argument("harmonic record status is malformed");
 
 	HarmonicRecordChunk result{};
+	if (record.record_format() == meter_harmonic_aggregate_format) {
+		const auto shape = record.word(14);
+		const auto period = shape & 0x3u;
+		if (period < static_cast<std::uint32_t>(
+				mnc::meter::MeasurementPeriod::Cycles150_180) ||
+		    period > static_cast<std::uint32_t>(
+				mnc::meter::MeasurementPeriod::Hour2))
+			throw std::invalid_argument(
+				"harmonic aggregate period is malformed");
+		result.period = static_cast<mnc::meter::MeasurementPeriod>(period);
+		result.target_sample = record.unsigned64(11);
+		result.contributors = static_cast<std::uint16_t>((shape >> 2) & 0xfffu);
+		result.overshoot_samples = static_cast<std::uint16_t>(
+			(shape >> 14) & 0xffffu);
+		result.time_aligned = (shape & (1u << 30)) != 0u;
+		result.contaminated = (shape & (1u << 31)) != 0u;
+		result.first_source_sequence = record.word(62);
+		result.last_source_sequence = record.word(63);
+		if (result.contributors == 0u || !result.time_aligned ||
+		    ((record.status() & 0x4u) != 0u) != result.time_aligned ||
+		    ((record.status() & 0x8u) != 0u) == result.contaminated)
+			throw std::invalid_argument(
+				"harmonic aggregate provenance is malformed");
+	}
 	result.sequence = record.sequence();
 	result.configuration_generation = record.configuration_generation();
 	result.sample_rate_hz = record.sample_rate_hz();
@@ -94,8 +143,10 @@ HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 	result.valid_mask = record.valid_mask();
 	result.status = record.status();
 	result.first_sample = record.first_sample_index();
-	result.emit_drops = record.emit_drops();
-	result.result_drops = record.result_drops();
+	if (result.period == mnc::meter::MeasurementPeriod::Basic) {
+		result.emit_drops = record.emit_drops();
+		result.result_drops = record.result_drops();
+	}
 
 	const auto header = record.word(13);
 	result.channel = static_cast<std::uint8_t>(header & 0x7u);
@@ -108,12 +159,12 @@ HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 	    result.chunk >= harmonic_chunks_per_channel ||
 	    result.chunk_count != harmonic_chunks_per_channel ||
 	    result.max_order != harmonic_max_order ||
-	    result.first_order !=
-		    result.chunk * harmonic_orders_per_record + 1 ||
-	    result.order_count != expected_order_count(result.chunk))
+	    result.first_order != result.chunk * orders_per_record(result.period) + 1 ||
+	    result.order_count != expected_order_count(result.chunk, result.period))
 		throw std::invalid_argument("harmonic record chunk geometry is malformed");
 
-	result.measured_frequency_millihz = record.word(14);
+	if (result.period == mnc::meter::MeasurementPeriod::Basic)
+		result.measured_frequency_millihz = record.word(14);
 	const auto metadata = record.word(15);
 	result.qualified_max_order = static_cast<std::uint8_t>(metadata);
 	result.nominal_frequency_hz = static_cast<std::uint8_t>(metadata >> 8);
@@ -129,11 +180,13 @@ HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 	if (result.qualified_max_order < harmonic_max_order &&
 	    (result.status & 0x80u) == 0u)
 		throw std::invalid_argument("limited harmonic range lacks rate-limit status");
-	if ((result.status & 0x4u) != 0u &&
+	if (result.period == mnc::meter::MeasurementPeriod::Basic &&
+	    (result.status & 0x4u) != 0u &&
 	    result.measured_frequency_millihz == 0u)
 		throw std::invalid_argument("grid-locked harmonic record has zero frequency");
 
-	for (std::size_t index = 0; index < harmonic_orders_per_record; ++index) {
+	const auto entry_slots = orders_per_record(result.period);
+	for (std::size_t index = 0; index < entry_slots; ++index) {
 		const auto packed = record.unsigned64(16 + index * 2);
 		if (index >= result.order_count) {
 			if (packed != 0u)

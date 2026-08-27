@@ -6,6 +6,7 @@
  */
 
 #include "msap1/meter/meter_record.hpp"
+#include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
 
 #include <array>
 #include <cstddef>
@@ -17,6 +18,7 @@ namespace msap1 {
 inline constexpr std::size_t harmonic_channel_count = 7;
 inline constexpr std::size_t harmonic_max_order = 127;
 inline constexpr std::size_t harmonic_orders_per_record = 24;
+inline constexpr std::size_t harmonic_aggregate_orders_per_record = 23;
 inline constexpr std::size_t harmonic_chunks_per_channel = 6;
 inline constexpr std::size_t harmonic_records_per_family =
 	harmonic_channel_count * harmonic_chunks_per_channel;
@@ -32,6 +34,8 @@ struct HarmonicPoint {
 
 /** One validated 256-byte HARMONIC-v1 record projected to typed fields. */
 struct HarmonicRecordChunk {
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Basic;
 	std::uint32_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t sample_rate_hz = 0;
@@ -41,6 +45,13 @@ struct HarmonicRecordChunk {
 	std::uint64_t first_sample = 0;
 	std::uint32_t emit_drops = 0;
 	std::uint32_t result_drops = 0;
+	std::uint64_t target_sample = 0;
+	std::uint16_t contributors = 0;
+	std::uint16_t overshoot_samples = 0;
+	bool time_aligned = false;
+	bool contaminated = false;
+	std::uint32_t first_source_sequence = 0;
+	std::uint32_t last_source_sequence = 0;
 	std::uint8_t channel = 0;
 	std::uint8_t chunk = 0;
 	std::uint8_t first_order = 0;
@@ -57,6 +68,8 @@ struct HarmonicRecordChunk {
 
 /** A complete family. No partially assembled spectrum is externally visible. */
 struct HarmonicSpectrumSnapshot {
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Basic;
 	std::uint32_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::uint32_t sample_rate_hz = 0;
@@ -66,6 +79,13 @@ struct HarmonicSpectrumSnapshot {
 	std::uint64_t first_sample = 0;
 	std::uint32_t emit_drops = 0;
 	std::uint32_t result_drops = 0;
+	std::uint64_t target_sample = 0;
+	std::uint16_t contributors = 0;
+	std::uint16_t overshoot_samples = 0;
+	bool aligned = false;
+	bool contaminated = false;
+	std::uint32_t first_source_sequence = 0;
+	std::uint32_t last_source_sequence = 0;
 	std::uint32_t measured_frequency_millihz = 0;
 	std::uint8_t qualified_max_order = 0;
 	std::uint8_t nominal_frequency_hz = 0;
@@ -84,9 +104,18 @@ struct HarmonicSpectrumSnapshot {
 		return (status & 0x40u) != 0;
 	}
 	[[nodiscard]] bool rate_limited() const { return (status & 0x80u) != 0; }
+	[[nodiscard]] bool aggregate_family() const
+	{
+		return period != mnc::meter::MeasurementPeriod::Basic;
+	}
+	[[nodiscard]] bool interval_valid() const
+	{
+		return aggregate_family() ? (status & 0x8u) != 0
+					  : conditioner_valid() && fft_valid();
+	}
 };
 
-/** Decode and fully validate one HARMONIC-v1 chunk. */
+/** Decode and fully validate one base or R5-aggregated harmonic chunk. */
 [[nodiscard]] HarmonicRecordChunk decode_harmonic_record(
 	const MeterRecord &record);
 

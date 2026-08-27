@@ -14,6 +14,8 @@
 #include "mnc/MeterDataProvider/stream/meter_record_publisher.hpp"
 #include "support/time.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -204,8 +206,16 @@ public:
 	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
 	latest_harmonic_spectrum() const
 	{
-		return latest_harmonic_spectrum_;
+		return latest_harmonic_spectra_[0];
 	}
+	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
+	latest_harmonic_spectrum(msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t harmonic_records(
+		msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t harmonic_families(
+		msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t incomplete_harmonic_families(
+		msap1::MeasurementPeriod period) const;
 	/** @brief Missing AGGREGATE records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
 	{
@@ -279,13 +289,31 @@ private:
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_{};
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
 	/* M16 publishes one spectrum only after all 42 channel/chunk records
-	 * agree. The bounded assembler retains at most one partial family. */
-	msap1::HarmonicFamilyAssembler harmonic_assembler_{};
+	 * agree. The bounded assembler and publication buffer each retain at most
+	 * one partial family; incomplete/mismatched families never reach the
+	 * durable stream. */
+	struct PendingHarmonicFamily {
+		std::uint32_t sequence = 0;
+		std::array<std::optional<mnc::meter_stream::MeterStreamRecord>,
+			msap1::harmonic_records_per_family> records{};
+		std::size_t count = 0;
+	};
+	static constexpr std::size_t harmonic_period_count = 4;
+	std::array<msap1::HarmonicFamilyAssembler, harmonic_period_count>
+		harmonic_assemblers_{};
+	std::array<std::optional<PendingHarmonicFamily>, harmonic_period_count>
+		pending_harmonic_families_{};
 	std::uint64_t harmonic_records_ = 0;
 	std::uint64_t harmonic_families_ = 0;
 	std::uint64_t incomplete_harmonic_families_ = 0;
-	std::optional<msap1::HarmonicSpectrumSnapshot>
-		latest_harmonic_spectrum_{};
+	std::array<std::uint64_t, harmonic_period_count>
+		harmonic_records_by_period_{};
+	std::array<std::uint64_t, harmonic_period_count>
+		harmonic_families_by_period_{};
+	std::array<std::uint64_t, harmonic_period_count>
+		incomplete_harmonic_families_by_period_{};
+	std::array<std::optional<msap1::HarmonicSpectrumSnapshot>,
+		harmonic_period_count> latest_harmonic_spectra_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
 	std::uint64_t two_hour_sequence_gaps_ = 0;

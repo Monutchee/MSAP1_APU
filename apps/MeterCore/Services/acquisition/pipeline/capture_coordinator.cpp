@@ -768,14 +768,22 @@ msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
 	return response;
 }
 
-msap1::HarmonicResponse CaptureCoordinator::harmonic_response() const
+msap1::HarmonicResponse CaptureCoordinator::harmonic_response(
+	msap1::MeasurementPeriod period) const
 {
+	if (period != msap1::MeasurementPeriod::Cycles150_180 &&
+	    period != msap1::MeasurementPeriod::Min10 &&
+	    period != msap1::MeasurementPeriod::Hour2 &&
+	    period != msap1::MeasurementPeriod::Basic)
+		throw std::invalid_argument("unsupported harmonic period");
 	msap1::HarmonicResponse response{};
 	response.running = running_;
-	response.records = ingest_.harmonic_records();
-	response.families = ingest_.harmonic_families();
-	response.incomplete_families = ingest_.incomplete_harmonic_families();
-	const auto &latest = ingest_.latest_harmonic_spectrum();
+	response.period = period;
+	response.records = ingest_.harmonic_records(period);
+	response.families = ingest_.harmonic_families(period);
+	response.incomplete_families =
+		ingest_.incomplete_harmonic_families(period);
+	const auto &latest = ingest_.latest_harmonic_spectrum(period);
 	response.has_snapshot = latest.has_value();
 	if (latest)
 		response.snapshot = *latest;

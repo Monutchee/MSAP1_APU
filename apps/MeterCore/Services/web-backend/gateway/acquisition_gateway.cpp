@@ -67,9 +67,12 @@ PowerQualityResponse AcquisitionGateway::power_quality(int timeout_ms)
 	return client_.request(PowerQualityRequest{}, timeout_ms);
 }
 
-HarmonicResponse AcquisitionGateway::harmonics(int timeout_ms)
+HarmonicResponse AcquisitionGateway::harmonics(
+	mnc::meter::MeasurementPeriod period, int timeout_ms)
 {
-	return client_.request(HarmonicRequest{}, timeout_ms);
+	HarmonicRequest request{};
+	request.period = period;
+	return client_.request(request, timeout_ms);
 }
 
 SimulatorEventResponse AcquisitionGateway::simulator_event(

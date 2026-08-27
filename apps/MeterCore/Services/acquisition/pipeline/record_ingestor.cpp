@@ -6,10 +6,22 @@
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace msap1::acquisition::daemon {
 namespace {
+
+constexpr std::size_t maximum_drain_batches_per_wake = 8;
+
+std::size_t harmonic_period_index(msap1::MeasurementPeriod period)
+{
+	const auto index = static_cast<std::size_t>(period);
+	if (index >= 4u)
+		throw std::invalid_argument("unsupported harmonic measurement period");
+	return index;
+}
 
 /*
  * Stamp UTC state at decode time — the PL cannot know it. This touches only
@@ -80,29 +92,32 @@ MeterRecordIngestor::MeterRecordIngestor(
 
 void MeterRecordIngestor::read_available()
 {
-	msap1::acquisition::MeterRecordBatch batch{};
-	try {
-		batch = meter_.read_available();
-	} catch (const std::exception &error) {
-		++dma_read_errors_;
-		log_message(dma_log, mnc::logging::Priority::error,
-			"meter DMA read failed: " + std::string(error.what()),
-			"dma_read_failed");
-		return;
+	for (std::size_t drain = 0; drain < maximum_drain_batches_per_wake;
+	     ++drain) {
+		msap1::acquisition::MeterRecordBatch batch{};
+		try {
+			batch = meter_.read_available();
+		} catch (const std::exception &error) {
+			++dma_read_errors_;
+			log_message(dma_log, mnc::logging::Priority::error,
+				"meter DMA read failed: " + std::string(error.what()),
+				"dma_read_failed");
+			return;
+		}
+		if (batch.bytes == 0)
+			return;
+		dma_bytes_ += batch.bytes;
+		if (batch.partial_record) {
+			++invalid_records_;
+			log_message(dma_log, mnc::logging::Priority::warning,
+				"meter DMA returned a partial record",
+				"dma_partial_record",
+				{{"MNC_DMA_BYTES", std::to_string(batch.bytes)}});
+			return;
+		}
+		for (std::size_t index = 0; index < batch.count; ++index)
+			accept(batch.records[index]);
 	}
-	if (batch.bytes == 0)
-		return;
-	dma_bytes_ += batch.bytes;
-	if (batch.partial_record) {
-		++invalid_records_;
-		log_message(dma_log, mnc::logging::Priority::warning,
-			"meter DMA returned a partial record",
-			"dma_partial_record",
-			{{"MNC_DMA_BYTES", std::to_string(batch.bytes)}});
-		return;
-	}
-	for (std::size_t index = 0; index < batch.count; ++index)
-		accept(batch.records[index]);
 }
 
 void MeterRecordIngestor::begin_epoch()
@@ -120,9 +135,14 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
-	harmonic_assembler_.reset();
-	latest_harmonic_spectrum_.reset();
+	for (auto &assembler : harmonic_assemblers_)
+		assembler.reset();
+	for (auto &pending : pending_harmonic_families_)
+		pending.reset();
+	for (auto &latest : latest_harmonic_spectra_)
+		latest.reset();
 	incomplete_harmonic_families_ = 0;
+	incomplete_harmonic_families_by_period_.fill(0);
 }
 
 void MeterRecordIngestor::clear_latest()
@@ -139,8 +159,38 @@ void MeterRecordIngestor::clear_latest()
 		msap1::meter::TimeQuality::Unsynchronized;
 	last_record_time_.reset();
 	last_aggregate_record_time_.reset();
-	harmonic_assembler_.reset();
-	latest_harmonic_spectrum_.reset();
+	for (auto &assembler : harmonic_assemblers_)
+		assembler.reset();
+	for (auto &pending : pending_harmonic_families_)
+		pending.reset();
+	for (auto &latest : latest_harmonic_spectra_)
+		latest.reset();
+}
+
+const std::optional<msap1::HarmonicSpectrumSnapshot> &
+MeterRecordIngestor::latest_harmonic_spectrum(
+	msap1::MeasurementPeriod period) const
+{
+	return latest_harmonic_spectra_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::harmonic_records(
+	msap1::MeasurementPeriod period) const
+{
+	return harmonic_records_by_period_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::harmonic_families(
+	msap1::MeasurementPeriod period) const
+{
+	return harmonic_families_by_period_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::incomplete_harmonic_families(
+	msap1::MeasurementPeriod period) const
+{
+	return incomplete_harmonic_families_by_period_[
+		harmonic_period_index(period)];
 }
 
 bool MeterRecordIngestor::matches_configuration(
@@ -525,17 +575,19 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 
 	/*
-	 * HARMONIC-v1 is a latest-only product family on its own sequence space.
-	 * Decode and family-validate first, durably publish the exact chunk, and
-	 * only then expose a newly completed 42-record spectrum. A partial family
-	 * can therefore never replace the previous complete snapshot.
+	 * HARMONIC-v1 is a product family on its own sequence space. Decode and
+	 * family-validate all 42 chunks first, then commit those exact records in
+	 * one IPC request and one spool transaction. A partial family can neither
+	 * enter the durable stream nor replace the previous complete snapshot.
 	 */
-	if (record.record_format() == msap1::meter_harmonic_format) {
+	if (record.record_format() == msap1::meter_harmonic_format ||
+	    record.record_format() == msap1::meter_harmonic_aggregate_format) {
 		msap1::HarmonicRecordChunk chunk{};
 		msap1::HarmonicAssemblyUpdate assembly{};
 		try {
 			chunk = msap1::decode_harmonic_record(record);
-			assembly = harmonic_assembler_.accept(chunk);
+			assembly = harmonic_assemblers_[
+				harmonic_period_index(chunk.period)].accept(chunk);
 		} catch (const std::exception &error) {
 			++invalid_records_;
 			log_rejected_record(
@@ -562,8 +614,8 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		stream_record.record_format = record.record_format();
 		stream_record.record_kind = static_cast<std::uint16_t>(
 			msap1::RecordKind::harmonic);
-		stream_record.measurement_period = static_cast<std::uint8_t>(
-			msap1::MeasurementPeriod::Basic);
+		stream_record.measurement_period =
+			static_cast<std::uint8_t>(chunk.period);
 		stream_record.source_sequence = chunk.sequence;
 		stream_record.source_fragment = static_cast<std::uint16_t>(
 			chunk.channel * msap1::harmonic_chunks_per_channel +
@@ -586,13 +638,50 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			timing.utc_uncertainty_ns;
 		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
 		stream_record.payload.assign(bytes, bytes + sizeof(record));
-		(void)publisher_.publish(stream_record);
+
+		const auto period_index = harmonic_period_index(chunk.period);
+		auto &pending_family = pending_harmonic_families_[period_index];
+		if (!pending_family ||
+		    pending_family->sequence != chunk.sequence) {
+			pending_family.emplace();
+			pending_family->sequence = chunk.sequence;
+		}
+		const auto record_index = static_cast<std::size_t>(
+			stream_record.source_fragment);
+		if (pending_family->records[record_index])
+			throw std::logic_error(
+				"harmonic publication buffer received a duplicate chunk");
+		pending_family->records[record_index] =
+			std::move(stream_record);
+		++pending_family->count;
 
 		++harmonic_records_;
+		++harmonic_records_by_period_[period_index];
 		incomplete_harmonic_families_ += assembly.incomplete_families;
+		incomplete_harmonic_families_by_period_[period_index] +=
+			assembly.incomplete_families;
 		if (assembly.completed) {
-			latest_harmonic_spectrum_ = std::move(*assembly.completed);
+			if (pending_family->count !=
+			    msap1::harmonic_records_per_family)
+				throw std::logic_error(
+					"complete harmonic family has a partial publication buffer");
+			std::vector<mnc::meter_stream::MeterStreamRecord> family;
+			family.reserve(msap1::harmonic_records_per_family);
+			for (auto &pending : pending_family->records) {
+				if (!pending)
+					throw std::logic_error(
+						"complete harmonic family is missing a publication chunk");
+				family.push_back(std::move(*pending));
+			}
+			const auto cursors = publisher_.publish_records(family);
+			if (cursors.size() != family.size())
+				throw std::runtime_error(
+					"harmonic family publish returned the wrong cursor count");
+			latest_harmonic_spectra_[period_index] =
+				std::move(*assembly.completed);
 			++harmonic_families_;
+			++harmonic_families_by_period_[period_index];
+			pending_family.reset();
 		}
 		++meter_records_;
 		return;
