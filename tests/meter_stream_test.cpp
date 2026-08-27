@@ -5,6 +5,7 @@
 #include "msap1/meter/history/meter_history.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
@@ -227,6 +228,66 @@ void spool_atomically_publishes_record_families()
 	require(decoded.size() == family.size() &&
 			decoded.back().source_fragment == 41,
 		"record family did not round trip through meter-stream IPC");
+	remove_database(path);
+}
+
+void spool_age_pruning_is_indexed_and_preserves_fresh_records()
+{
+	using namespace mnc::meter_stream;
+	const auto path = temporary_database("spool-age-index-test");
+	remove_database(path);
+	{
+		DatabaseStoragePolicy policy{DatabaseDataset::raw_record_spool,
+			StorageBackend::persistent,
+			{std::chrono::hours(1), std::nullopt}};
+		DurableMeterSpool spool(path, policy);
+		spool.register_consumer("historian");
+		const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::system_clock::now().time_since_epoch()).count();
+		auto expired = record(1);
+		expired.ingested_at_nanoseconds = now -
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::hours(2)).count();
+		auto fresh = record(2);
+		fresh.ingested_at_nanoseconds = now;
+		const std::array family{expired, fresh};
+		const auto cursors = spool.publish_records(family);
+		spool.acknowledge("historian", cursors.back());
+		spool.prune();
+		const auto status = spool.status();
+		require(status.record_count == 1,
+			"age prune did not remove exactly the expired record");
+		spool.register_consumer("historian-audit");
+		const auto survivors = spool.read_after("historian-audit", 4);
+		require(survivors.size() == 1 &&
+			survivors.front().source_sequence == fresh.source_sequence,
+			"age prune removed the fresh record");
+	}
+	{
+		mnc::storage::sqlite::Database database(path);
+		bool found_index = false;
+		auto indexes = database.prepare("PRAGMA index_list(records)");
+		while (indexes.step())
+			found_index = found_index ||
+				indexes.text(1) == "records_retention_age";
+		require(found_index,
+			"spool age-retention index was not created");
+
+		bool indexed_plan = false;
+		auto plan = database.prepare(
+			"EXPLAIN QUERY PLAN SELECT COALESCE("
+			"SUM(LENGTH(payload)+128),0) FROM records "
+			"INDEXED BY records_retention_age "
+			"WHERE cursor<=? AND ingested_at_ns<?");
+		plan.bind(1, std::numeric_limits<std::int64_t>::max());
+		plan.bind(2, std::numeric_limits<std::int64_t>::max());
+		while (plan.step())
+			indexed_plan = indexed_plan ||
+				plan.text(3).find("records_retention_age") !=
+					std::string::npos;
+		require(indexed_plan,
+			"age-prune query plan does not use the retention index");
+	}
 	remove_database(path);
 }
 
@@ -828,6 +889,7 @@ int main()
 	spool_is_ordered_idempotent_and_durable();
 	spool_distinguishes_source_fragments();
 	spool_atomically_publishes_record_families();
+	spool_age_pruning_is_indexed_and_preserves_fresh_records();
 	spool_migrates_legacy_identity_key();
 	spool_backend_switch_replaces_stale_target();
 	memory_spool_cursors_survive_restart();

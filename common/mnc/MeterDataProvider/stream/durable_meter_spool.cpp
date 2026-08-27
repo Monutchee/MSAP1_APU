@@ -213,6 +213,17 @@ DROP TABLE records_without_fragments;
 )SQL");
 			migration.commit();
 		}
+		/* Age retention is evaluated after every consumer acknowledgement.
+		 * Without a time-leading index, SQLite chooses the cursor primary key
+		 * and walks the complete acknowledged spool even when no row is old
+		 * enough to expire.  At the M16 base-family rate that work monopolizes
+		 * the single meter-stream IPC worker.  This index turns the empty common
+		 * case into a logarithmic lookup and bounds a real prune by the number of
+		 * expired rows.  Create it after the legacy table migration so it always
+		 * belongs to the replacement records table. */
+		database.execute(
+			"CREATE INDEX IF NOT EXISTS records_retention_age "
+			"ON records(ingested_at_ns, cursor)");
 		seed_cursor_space();
 		{
 			auto usage = database.prepare(
@@ -690,6 +701,7 @@ void DurableMeterSpool::prune()
 		{
 			auto victims = impl_->database.prepare(
 				"SELECT COALESCE(SUM(LENGTH(payload)+128),0) FROM records "
+				"INDEXED BY records_retention_age "
 				"WHERE cursor<=? AND ingested_at_ns<?");
 			victims.bind(1, acknowledged);
 			victims.bind(2, cutoff);
@@ -697,7 +709,8 @@ void DurableMeterSpool::prune()
 			removed_bytes = static_cast<std::uint64_t>(victims.integer(0));
 		}
 		auto remove = impl_->database.prepare(
-			"DELETE FROM records WHERE cursor<=? AND ingested_at_ns<?");
+			"DELETE FROM records INDEXED BY records_retention_age "
+			"WHERE cursor<=? AND ingested_at_ns<?");
 		remove.bind(1, acknowledged);
 		remove.bind(2, cutoff);
 		remove.execute();
