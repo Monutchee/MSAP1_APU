@@ -40,11 +40,18 @@ struct MeterConversionSettings {
 };
 
 struct MeteringSettings {
+	static constexpr double min_system_nominal_voltage_v = 1.0;
+	static constexpr double max_system_nominal_voltage_v = 1'000'000.0;
+
 	std::uint32_t sample_rate_hz = 0;
 	/* Nominal grid frequency in Hz — metrology-wide configuration that
 	 * selects the cycles-per-basic-block rule (50 -> 10, 60 -> 12) and
 	 * the PL free-run fallback window. Never inferred from measurement. */
 	std::uint32_t nominal_frequency_hz = 60;
+	/* Declared line-to-neutral system voltage used as the presentation
+	 * reference for voltage phasors. It does not rescale measurements or
+	 * cross the RPU/PL configuration ABI. */
+	double system_nominal_voltage_v = 120.0;
 	RmsSettings rms;
 	FrequencyConfig frequency;
 	/* IEC 61000-4-30 Urms(1/2) event detection. A zero reference is
@@ -61,6 +68,10 @@ struct MeteringSettings {
 		if (nominal_frequency_hz != 50u && nominal_frequency_hz != 60u)
 			throw std::runtime_error(
 				"nominal frequency must be 50 or 60 Hz");
+		if (!(system_nominal_voltage_v >= min_system_nominal_voltage_v &&
+		      system_nominal_voltage_v <= max_system_nominal_voltage_v))
+			throw std::runtime_error(
+				"system nominal voltage must be 1..1000000 V");
 		rms.validate();
 	}
 };

@@ -49,6 +49,7 @@ void test_first_boot_and_direct_save()
 		handler.initialize();
 		const auto initial = handler.active();
 		assert(initial.settings.metering.sample_rate_hz == 128000u);
+		assert(initial.settings.metering.system_nominal_voltage_v == 120.0);
 		assert(!initial.content_hash.empty());
 		assert(std::filesystem::exists(tree.data / "active.json"));
 
@@ -92,6 +93,58 @@ void test_nominal_frequency_validation()
 	}
 	assert(rejected);
 	assert(handler.active().settings.metering.nominal_frequency_hz == 60u);
+}
+
+void test_system_nominal_voltage_validation()
+{
+	TestTree tree("system-nominal-voltage");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	assert(handler.active().settings.metering.system_nominal_voltage_v ==
+	       120.0);
+
+	auto settings = handler.active().settings;
+	settings.metering.system_nominal_voltage_v = 230.0;
+	assert(handler.save(settings)
+		       .settings.metering.system_nominal_voltage_v == 230.0);
+	settings.metering.system_nominal_voltage_v = 0.0;
+	[[maybe_unused]] bool rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	assert(rejected);
+	assert(handler.active().settings.metering.system_nominal_voltage_v ==
+	       230.0);
+}
+
+void test_existing_settings_default_system_nominal_voltage()
+{
+	TestTree tree("existing-system-nominal-voltage");
+	std::ifstream input(tree.factory);
+	std::string json((std::istreambuf_iterator<char>(input)),
+			 std::istreambuf_iterator<char>());
+	const std::string member =
+		"    \"system_nominal_voltage_v\": 120.0,\n";
+	const auto member_position = json.find(member);
+	assert(member_position != std::string::npos);
+	json.erase(member_position, member.size());
+
+	const std::string original_pretrigger =
+		"\"default_pretrigger_ms\": 3000";
+	const auto pretrigger_position = json.find(original_pretrigger);
+	assert(pretrigger_position != std::string::npos);
+	json.replace(pretrigger_position, original_pretrigger.size(),
+		     "\"default_pretrigger_ms\": 4321");
+	std::filesystem::create_directories(tree.data);
+	std::ofstream(tree.data / "active.json") << json;
+
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
+	assert(handler.active().settings.metering.system_nominal_voltage_v ==
+	       120.0);
 }
 
 void test_failed_apply_preserves_active()
@@ -224,6 +277,8 @@ int main()
 {
 	test_first_boot_and_direct_save();
 	test_nominal_frequency_validation();
+	test_system_nominal_voltage_validation();
+	test_existing_settings_default_system_nominal_voltage();
 	test_failed_apply_preserves_active();
 	test_empty_active_recovers_factory_defaults();
 	test_invalid_active_recovers_factory_defaults();

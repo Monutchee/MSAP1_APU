@@ -3,6 +3,7 @@
   "metering": {
     "sample_rate_hz": 128000,
     "nominal_frequency_hz": 60,
+    "system_nominal_voltage_v": 120.0,
     "rms": {
       "window_ms": 200,
       "remove_dc": true

@@ -104,6 +104,11 @@ DMA.
 producing AC RMS about the window mean. Saving the settings hot-applies the
 change; no process or device reboot is required.
 
+`metering.system_nominal_voltage_v` declares the line-to-neutral presentation
+reference used by voltage phasor diagrams and defaults to 120 V. It does not
+rescale meter results and is deliberately absent from the PL/RPU configuration
+ABI, so changing only this field does not restart capture.
+
 Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
 ```text
