@@ -195,6 +195,30 @@ dropped into holdover. Frequency is intentionally unavailable in the
 10-minute and 2-hour results because the standardized frequency product uses
 its own 10-second interval.
 
+Every available meter attribute exposes `key`, `unit`, `value`, the legacy
+`valid` boolean, exact `quality`, and `source_sequence`. `quality` is one of
+`valid`, `unavailable`, `invalid`, `out_of_range`, `timed_out`, or
+`arithmetic_error`; consumers must not collapse those states into a numeric
+zero. `valid` remains equivalent to `quality == "valid"` for API-v1 clients.
+Available basic, 150/180-cycle, 10-minute, and two-hour records also expose
+`record_complete`. It is true only when every supported derived attribute was
+published from the record's top-level sequence. The pending
+`{"available": false}` shapes are unchanged. Basic timing and available
+aggregate records may expose `utc_start_nanoseconds` and
+`utc_uncertainty_nanoseconds`; absence means measurement UTC is unavailable
+and must not be replaced with HTTP request time.
+
+The power catalog uses the meter's authoritative totals. Positive active power
+means import and negative active power means export. The current
+`power.reactive.*` result is the signed fundamental reactive power Q₁:
+positive is inductive/lagging and negative is capacitive/leading. Backend
+apparent power S is an independent authoritative quantity and need not equal
+the conventional P–Q₁ resultant `sqrt(P² + Q₁²)` in distorted or unbalanced
+conditions. Clients must not sum phase values to construct totals or label the
+difference as distortion power. The API does not currently publish THD,
+fundamental P₁/S₁, measurement topology, or power algorithm profile/version;
+those fields must remain unavailable rather than inferred.
+
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
 require the viewer role; changing ADC capture requires the admin role.

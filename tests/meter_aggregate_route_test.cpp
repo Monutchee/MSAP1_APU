@@ -1,6 +1,7 @@
 #include "meter_dto.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <glaze/glaze.hpp>
 
@@ -74,6 +76,8 @@ msap1::MeterSnapshotResponse contract_response()
 	timing.source_interval_count = 15;
 	timing.first_source_sequence = 100;
 	timing.last_source_sequence = 114;
+	timing.utc_start_nanoseconds = 1'788'000'200'200'000'000LL;
+	timing.utc_uncertainty_nanoseconds = 250;
 	response.snapshot.timing = timing;
 	response.snapshot.values = {
 		/* Informative only: the typed value deliberately remains unavailable. */
@@ -142,6 +146,7 @@ void a_typed_aggregate_exposes_derived_attributes()
 	const auto aggregate = meter_aggregate_dto(contract_response());
 	require(aggregate.has_value(), "the aggregate was not rendered");
 	require(aggregate->available && aggregate->sequence == 7 &&
+		aggregate->record_complete &&
 		aggregate->configuration_generation == 3'545'159'487u &&
 		aggregate->sample_rate_hz == 128'000 &&
 		aggregate->sample_count == 384'015 &&
@@ -152,7 +157,10 @@ void a_typed_aggregate_exposes_derived_attributes()
 		aggregate->cycle_count == 180 &&
 		aggregate->nominal_frequency_hz == 60 &&
 		!aggregate->arithmetic_error &&
-		aggregate->time_quality == "synchronized",
+		aggregate->time_quality == "synchronized" &&
+		aggregate->utc_start_nanoseconds ==
+			1'788'000'200'200'000'000LL &&
+		aggregate->utc_uncertainty_nanoseconds == 250,
 		"the aggregate identity or provenance changed");
 
 	require(aggregate->channels[0].name == "ILA" &&
@@ -179,7 +187,8 @@ void a_typed_aggregate_exposes_derived_attributes()
 	const auto voltage_b = attribute("phase.angle.voltage.b");
 	const auto current_c = attribute("phase.angle.current.c");
 	require(power != aggregate->attributes.end() && power->valid &&
-		power->unit == "W" && power->value == 720.0,
+		power->unit == "W" && power->value == 720.0 &&
+		power->quality == "valid" && power->source_sequence == 7,
 		"aggregate power was not exposed");
 	require(voltage_b != aggregate->attributes.end() && voltage_b->valid &&
 		voltage_b->unit == "deg" && voltage_b->value == 240.0 &&
@@ -194,6 +203,48 @@ void a_typed_aggregate_exposes_derived_attributes()
 		body.find(R"("frequency":{"millihz":60000,"informative":true})") !=
 			std::string::npos,
 		"the aggregate JSON does not expose the pinned derived contract");
+}
+
+void exact_quality_and_family_completeness_are_exposed()
+{
+	using msap1::web::api::attribute_dto;
+	const std::array qualities{
+		std::pair{Quality::Valid, std::string_view{"valid"}},
+		std::pair{Quality::Unavailable, std::string_view{"unavailable"}},
+		std::pair{Quality::Invalid, std::string_view{"invalid"}},
+		std::pair{Quality::OutOfRange, std::string_view{"out_of_range"}},
+		std::pair{Quality::TimedOut, std::string_view{"timed_out"}},
+		std::pair{Quality::ArithmeticError,
+			std::string_view{"arithmetic_error"}},
+	};
+	for (const auto &[quality, expected] : qualities) {
+		const auto dto = attribute_dto(value(
+			Id::ActivePowerTotal, Unit::Picowatts, 1, quality));
+		require(dto.quality == expected && dto.source_sequence == 7 &&
+			dto.valid == (quality == Quality::Valid),
+			"attribute quality or compatibility validity changed");
+	}
+
+	auto partial = contract_response();
+	partial.snapshot.values.back().source_sequence = 6;
+	const auto projected = meter_aggregate_dto(partial);
+	require(projected && !projected->record_complete,
+		"a mixed-sequence aggregate was marked complete");
+	partial.snapshot.values.back().source_sequence = partial.snapshot.sequence;
+	const auto completed = meter_aggregate_dto(partial);
+	require(completed && completed->record_complete,
+		"a converged sibling family did not become complete");
+
+	auto unsynchronized = contract_response();
+	unsynchronized.snapshot.timing->quality =
+		mnc::meter::TimeQuality::Unsynchronized;
+	unsynchronized.snapshot.timing->utc_start_nanoseconds.reset();
+	unsynchronized.snapshot.timing->utc_uncertainty_nanoseconds.reset();
+	const auto without_utc = meter_aggregate_dto(unsynchronized);
+	require(without_utc && without_utc->time_quality == "unsynchronized" &&
+		!without_utc->utc_start_nanoseconds &&
+		!without_utc->utc_uncertainty_nanoseconds,
+		"unsynchronized measurement UTC was invented");
 }
 
 void measurement_quality_and_malformed_snapshots_are_preserved()
@@ -239,6 +290,7 @@ int main()
 		selection_requests_the_complete_catalog();
 		absence_renders_the_unavailable_shape();
 		a_typed_aggregate_exposes_derived_attributes();
+		exact_quality_and_family_completeness_are_exposed();
 		measurement_quality_and_malformed_snapshots_are_preserved();
 	} catch (const std::exception &error) {
 		std::cerr << "meter aggregate route test failed: "
