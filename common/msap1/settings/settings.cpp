@@ -90,10 +90,11 @@ std::string encode_document(const T &document, bool pretty)
 ProductSettings SettingsCodec::decode(std::string_view json)
 {
 	auto settings = decode_document<ProductSettings>(json, "product settings");
-	// Schema 1 predates MQTT. Missing members already receive typed defaults;
-	// advancing the version here provides a lossless in-memory migration and
-	// the next successful save persists schema 2.
-	if (settings.schema_version == 1)
+	// Schema 1 predates MQTT and schema 3 adds presentation-only measurement
+	// topology. Missing members already receive typed defaults; advancing old
+	// documents here provides a lossless in-memory migration and the next
+	// successful save persists the current schema.
+	if (settings.schema_version == 1 || settings.schema_version == 2)
 		settings.schema_version = ProductSettings::supported_schema_version;
 	return settings;
 }

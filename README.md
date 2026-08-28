@@ -104,10 +104,14 @@ DMA.
 producing AC RMS about the window mean. Saving the settings hot-applies the
 change; no process or device reboot is required.
 
-`metering.system_nominal_voltage_v` declares the line-to-neutral presentation
-reference used by voltage phasor diagrams and defaults to 120 V. It does not
-rescale meter results and is deliberately absent from the PL/RPU configuration
-ABI, so changing only this field does not restart capture.
+`metering.measurement_topology` declares whether the three voltage inputs are
+`wye` (star) or `delta` and defaults to `wye`. It is presentation metadata:
+the setting changes operator labels and zero-sequence guidance but does not
+alter the PL/RPU sequence algorithm. `metering.system_nominal_voltage_v` is the
+corresponding presentation reference—line-to-neutral for wye and line-to-line
+for delta—and defaults to 120 V. Neither field rescales meter results or enters
+the PL/RPU configuration ABI, so changing only these fields does not restart
+capture.
 
 Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
@@ -216,7 +220,7 @@ apparent power S is an independent authoritative quantity and need not equal
 the conventional P–Q₁ resultant `sqrt(P² + Q₁²)` in distorted or unbalanced
 conditions. Clients must not sum phase values to construct totals or label the
 difference as distortion power. The API does not currently publish THD,
-fundamental P₁/S₁, measurement topology, or power algorithm profile/version;
+fundamental P₁/S₁ or power algorithm profile/version;
 those fields must remain unavailable rather than inferred.
 
 External responses use JSON. The development login is `admin` / `admin`.

@@ -48,7 +48,9 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
+		assert(initial.settings.schema_version == 3u);
 		assert(initial.settings.metering.sample_rate_hz == 128000u);
+		assert(initial.settings.metering.measurement_topology == "wye");
 		assert(initial.settings.metering.system_nominal_voltage_v == 120.0);
 		assert(!initial.content_hash.empty());
 		assert(std::filesystem::exists(tree.data / "active.json"));
@@ -119,12 +121,47 @@ void test_system_nominal_voltage_validation()
 	       230.0);
 }
 
+void test_measurement_topology_validation()
+{
+	TestTree tree("measurement-topology");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	assert(handler.active().settings.metering.measurement_topology == "wye");
+
+	auto settings = handler.active().settings;
+	settings.metering.measurement_topology = "delta";
+	const auto saved = handler.save(settings);
+	assert(saved.settings.metering.measurement_topology == "delta");
+	assert(msap1::settings::SettingsCodec::encode(saved.settings, false)
+		       .find("\"measurement_topology\":\"delta\"") !=
+	       std::string::npos);
+
+	settings.metering.measurement_topology = "open-delta";
+	[[maybe_unused]] bool rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	assert(rejected);
+	assert(handler.active().settings.metering.measurement_topology == "delta");
+}
+
 void test_existing_settings_default_system_nominal_voltage()
 {
 	TestTree tree("existing-system-nominal-voltage");
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 			 std::istreambuf_iterator<char>());
+	const std::string schema = "\"schema_version\": 3";
+	const auto schema_position = json.find(schema);
+	assert(schema_position != std::string::npos);
+	json.replace(schema_position, schema.size(), "\"schema_version\": 2");
+	const std::string topology =
+		"    \"measurement_topology\": \"wye\",\n";
+	const auto topology_position = json.find(topology);
+	assert(topology_position != std::string::npos);
+	json.erase(topology_position, topology.size());
 	const std::string member =
 		"    \"system_nominal_voltage_v\": 120.0,\n";
 	const auto member_position = json.find(member);
@@ -142,7 +179,9 @@ void test_existing_settings_default_system_nominal_voltage()
 
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
+	assert(handler.active().settings.schema_version == 3u);
 	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
+	assert(handler.active().settings.metering.measurement_topology == "wye");
 	assert(handler.active().settings.metering.system_nominal_voltage_v ==
 	       120.0);
 }
@@ -278,6 +317,7 @@ int main()
 	test_first_boot_and_direct_save();
 	test_nominal_frequency_validation();
 	test_system_nominal_voltage_validation();
+	test_measurement_topology_validation();
 	test_existing_settings_default_system_nominal_voltage();
 	test_failed_apply_preserves_active();
 	test_empty_active_recovers_factory_defaults();

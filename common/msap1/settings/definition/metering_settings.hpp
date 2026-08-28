@@ -48,9 +48,14 @@ struct MeteringSettings {
 	 * selects the cycles-per-basic-block rule (50 -> 10, 60 -> 12) and
 	 * the PL free-run fallback window. Never inferred from measurement. */
 	std::uint32_t nominal_frequency_hz = 60;
-	/* Declared line-to-neutral system voltage used as the presentation
-	 * reference for voltage phasors. It does not rescale measurements or
-	 * cross the RPU/PL configuration ABI. */
+	/* Presentation topology for the three voltage inputs. "wye" means the
+	 * channel magnitudes and nominal reference are line-to-neutral; "delta"
+	 * means line-to-line. This field supplies operator context only and does
+	 * not cross the RPU/PL configuration ABI or alter sequence algorithms. */
+	std::string measurement_topology = "wye";
+	/* Declared voltage reference used for presentation: line-to-neutral for
+	 * wye, line-to-line for delta. It does not rescale measurements or cross
+	 * the RPU/PL configuration ABI. */
 	double system_nominal_voltage_v = 120.0;
 	RmsSettings rms;
 	FrequencyConfig frequency;
@@ -68,6 +73,10 @@ struct MeteringSettings {
 		if (nominal_frequency_hz != 50u && nominal_frequency_hz != 60u)
 			throw std::runtime_error(
 				"nominal frequency must be 50 or 60 Hz");
+		if (measurement_topology != "wye" &&
+		    measurement_topology != "delta")
+			throw std::runtime_error(
+				"measurement topology must be wye or delta");
 		if (!(system_nominal_voltage_v >= min_system_nominal_voltage_v &&
 		      system_nominal_voltage_v <= max_system_nominal_voltage_v))
 			throw std::runtime_error(
