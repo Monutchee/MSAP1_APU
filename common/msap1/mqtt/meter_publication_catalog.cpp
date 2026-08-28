@@ -19,6 +19,10 @@ std::string unit_id(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::Picovars: return "var";
 	case mnc::meter::MeterUnit::Millidegrees: return "deg";
 	case mnc::meter::MeterUnit::RatioMillionths: return "%";
+	case mnc::meter::MeterUnit::MicroWattHours: return "uWh";
+	case mnc::meter::MeterUnit::MicroVarHours: return "uvarh";
+	case mnc::meter::MeterUnit::MicroVoltAmpereHours: return "uVAh";
+	case mnc::meter::MeterUnit::MicroWatts: return "uW";
 	}
 	return "unknown";
 }

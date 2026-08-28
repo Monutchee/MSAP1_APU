@@ -597,6 +597,25 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 		request.selection)) {
 		response.has_snapshot = true;
 		response.snapshot = *snapshot;
+		/* The SQLite ledger owns lifetime values and reset epochs. Overlay it
+		 * at read time so REST/MQTT/Modbus cannot retain pre-reset peaks until
+		 * the next (potentially ten-minute) RPU family. */
+		try {
+			if (request.selection.period ==
+			    mnc::meter::MeasurementPeriod::Basic) {
+				if (const auto energy = meter_stream_.energy())
+					msap1::meter::overlay_authoritative_energy(
+						response.snapshot, *energy);
+			} else if (request.selection.period ==
+				   mnc::meter::MeasurementPeriod::Min10) {
+				if (const auto demand = meter_stream_.demand())
+					msap1::meter::overlay_authoritative_demand(
+						response.snapshot, *demand);
+			}
+		} catch (const std::exception &) {
+			/* Preserve the last acknowledged durable view while meter-stream is
+			 * temporarily unavailable; the next request retries the authority. */
+		}
 	}
 
 	/* MTR1 transport diagnostics are meaningful only for the current basic

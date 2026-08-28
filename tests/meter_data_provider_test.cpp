@@ -57,9 +57,14 @@ void describes_protocol_independent_attributes()
 
 	const auto defined = mnc::meter::attributes_in(
 		mnc::meter::MeterAttributeGroup::AllDefined);
-	require(defined.size() == 11 &&
+	require(defined.size() == 87 &&
 			defined.front().id == MeterAttributeId::Frequency,
 		"AllDefined no longer describes the canonical catalog");
+	const auto quadrant = mnc::meter::describe(MeterAttributeKey{
+		MeterAttributeId::ReactiveEnergyQuadrantIIITotal, std::nullopt});
+	require(quadrant.key == "energy.reactive.quadrant_iii.total" &&
+			quadrant.unit == MeterUnit::MicroVarHours,
+		"quadrant-III energy descriptor changed");
 }
 
 void capabilities_advertise_only_supported_periods()

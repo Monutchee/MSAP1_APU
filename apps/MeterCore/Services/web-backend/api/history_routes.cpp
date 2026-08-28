@@ -4,9 +4,11 @@
 #include "routes.hpp"
 
 #include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
+#include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 
 #include <array>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,8 +33,9 @@ struct HistoryPointDto {
 	std::int64_t measured_at_nanoseconds = 0;
 	std::uint64_t source_sequence = 0;
 	std::string attribute;
-	std::int64_t value = 0;
+	std::string value;
 	std::string quality;
+	std::optional<std::string> reset_epoch;
 };
 
 struct HistoryResponseDto {
@@ -52,10 +55,17 @@ struct HistoryCapabilitiesDto {
 	std::uint32_t maximum_points = 50000;
 };
 
-constexpr std::array<Attribute, 8> historical_attributes = {
-	Attribute::Frequency, Attribute::VanRms, Attribute::VbnRms,
-	Attribute::VcnRms, Attribute::IaRms, Attribute::IbRms,
-	Attribute::IcRms, Attribute::InRms};
+const std::vector<Attribute> historical_attributes = [] {
+	std::vector<Attribute> result{
+		Attribute::Frequency, Attribute::VanRms, Attribute::VbnRms,
+		Attribute::VcnRms, Attribute::IaRms, Attribute::IbRms,
+		Attribute::IcRms, Attribute::InRms};
+	for (const auto group : {mnc::meter::MeterAttributeGroup::Energy,
+		mnc::meter::MeterAttributeGroup::Demand})
+		for (const auto key : mnc::meter::attributes_in(group))
+			result.push_back(key.id);
+	return result;
+}();
 
 std::string unit_name(mnc::meter::MeterUnit unit)
 {
@@ -69,6 +79,10 @@ std::string unit_name(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::Picovars: return "pvar";
 	case mnc::meter::MeterUnit::Millidegrees: return "mdeg";
 	case mnc::meter::MeterUnit::RatioMillionths: return "ratio_e6";
+	case mnc::meter::MeterUnit::MicroWattHours: return "uWh";
+	case mnc::meter::MeterUnit::MicroVarHours: return "uvarh";
+	case mnc::meter::MeterUnit::MicroVoltAmpereHours: return "uVAh";
+	case mnc::meter::MeterUnit::MicroWatts: return "uW";
 	}
 	return "unknown";
 }
@@ -198,7 +212,11 @@ webengine::Response post_history_query(
 				point.source_sequence,
 				std::string(mnc::meter::describe(
 					{point.attribute, std::nullopt}).key),
-				point.value, quality_name(point.quality)});
+				std::to_string(point.value), quality_name(point.quality),
+				point.reset_epoch
+					? std::optional<std::string>(
+						std::to_string(*point.reset_epoch))
+					: std::nullopt});
 		}
 		return json_response(webengine::http::status::ok, response);
 	} catch (const std::invalid_argument &error) {

@@ -58,6 +58,7 @@ struct RecordIntervalIdentity {
 	case msap1::meter_power_format:
 	case msap1::meter_phasor_format:
 	case msap1::meter_unbalance_format:
+	case msap1::meter_energy_format:
 	case msap1::meter_harmonic_format:
 		return {RecordIntervalCategory::basic, "basic",
 			"10/12-cycle"};
@@ -71,6 +72,7 @@ struct RecordIntervalIdentity {
 	case msap1::meter_ten_minute_power_format:
 	case msap1::meter_ten_minute_phasor_format:
 	case msap1::meter_ten_minute_unbalance_format:
+	case msap1::meter_demand_format:
 		return {RecordIntervalCategory::minutes_10, "minutes_10",
 			"10-minute"};
 	case msap1::meter_two_hour_format:

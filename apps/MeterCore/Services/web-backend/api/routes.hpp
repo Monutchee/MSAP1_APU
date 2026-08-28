@@ -80,6 +80,14 @@ webengine::Response get_meter_power_quality(AppContext &,
 /** @brief GET /api/v1/meter/harmonics — latest complete M16 spectrum. */
 webengine::Response get_meter_harmonics(AppContext &,
 					const webengine::RequestContext &);
+webengine::Response get_meter_energy(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_meter_demand(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response post_meter_energy_reset(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response post_meter_demand_peaks_reset(AppContext &,
+	const webengine::RequestContext &);
 
 /** @brief GET /api/v1/meter/single-cycle — SCYC diagnostic snapshot. */
 webengine::Response get_meter_single_cycle(AppContext &,
@@ -277,6 +285,18 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/harmonics",
 	 webengine::Role::Viewer, &get_meter_harmonics,
 	 "Latest complete seven-channel harmonic subgroup spectrum"},
+	{webengine::http::verb::get, "/api/v1/meter/energy",
+	 webengine::Role::Viewer, &get_meter_energy,
+	 "Durable four-quadrant lifetime energy"},
+	{webengine::http::verb::get, "/api/v1/meter/demand",
+	 webengine::Role::Viewer, &get_meter_demand,
+	 "Latest completed ten-minute active demand and peaks"},
+	{webengine::http::verb::post, "/api/v1/meter/energy/reset",
+	 webengine::Role::Admin, &post_meter_energy_reset,
+	 "Reset all authoritative energy counters"},
+	{webengine::http::verb::post, "/api/v1/meter/demand/peaks/reset",
+	 webengine::Role::Admin, &post_meter_demand_peaks_reset,
+	 "Reset all authoritative demand peaks"},
 	{webengine::http::verb::get, "/api/v1/meter/configuration/frequency",
 	 webengine::Role::Viewer, &get_frequency_configuration,
 	 "Active frequency measurement configuration"},

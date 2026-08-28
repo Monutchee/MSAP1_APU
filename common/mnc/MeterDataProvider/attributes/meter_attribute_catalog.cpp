@@ -39,6 +39,26 @@ constexpr std::array catalog{
 	key(Id::NegativeSequenceVoltage),
 	key(Id::ZeroSequenceCurrent), key(Id::PositiveSequenceCurrent),
 	key(Id::NegativeSequenceCurrent),
+	key(Id::ActiveImportEnergyA), key(Id::ActiveImportEnergyB),
+	key(Id::ActiveImportEnergyC), key(Id::ActiveImportEnergyTotal),
+	key(Id::ActiveExportEnergyA), key(Id::ActiveExportEnergyB),
+	key(Id::ActiveExportEnergyC), key(Id::ActiveExportEnergyTotal),
+	key(Id::ApparentEnergyA), key(Id::ApparentEnergyB),
+	key(Id::ApparentEnergyC), key(Id::ApparentEnergyTotal),
+	key(Id::ReactiveEnergyQuadrantIA), key(Id::ReactiveEnergyQuadrantIB),
+	key(Id::ReactiveEnergyQuadrantIC), key(Id::ReactiveEnergyQuadrantITotal),
+	key(Id::ReactiveEnergyQuadrantIIA), key(Id::ReactiveEnergyQuadrantIIB),
+	key(Id::ReactiveEnergyQuadrantIIC), key(Id::ReactiveEnergyQuadrantIITotal),
+	key(Id::ReactiveEnergyQuadrantIIIA), key(Id::ReactiveEnergyQuadrantIIIB),
+	key(Id::ReactiveEnergyQuadrantIIIC), key(Id::ReactiveEnergyQuadrantIIITotal),
+	key(Id::ReactiveEnergyQuadrantIVA), key(Id::ReactiveEnergyQuadrantIVB),
+	key(Id::ReactiveEnergyQuadrantIVC), key(Id::ReactiveEnergyQuadrantIVTotal),
+	key(Id::CurrentActiveDemandA), key(Id::CurrentActiveDemandB),
+	key(Id::CurrentActiveDemandC), key(Id::CurrentActiveDemandTotal),
+	key(Id::ImportDemandPeakA), key(Id::ImportDemandPeakB),
+	key(Id::ImportDemandPeakC), key(Id::ImportDemandPeakTotal),
+	key(Id::ExportDemandPeakA), key(Id::ExportDemandPeakB),
+	key(Id::ExportDemandPeakC), key(Id::ExportDemandPeakTotal),
 };
 
 } // namespace
@@ -168,6 +188,86 @@ MeterAttributeDescriptor describe(MeterAttributeKey attribute)
 	case Id::NegativeSequenceCurrent:
 		return {attribute, "sequence.current.negative.rms",
 			MeterUnit::MicroAmperes};
+	case Id::ActiveImportEnergyA:
+		return {attribute, "energy.active.import.a", MeterUnit::MicroWattHours};
+	case Id::ActiveImportEnergyB:
+		return {attribute, "energy.active.import.b", MeterUnit::MicroWattHours};
+	case Id::ActiveImportEnergyC:
+		return {attribute, "energy.active.import.c", MeterUnit::MicroWattHours};
+	case Id::ActiveImportEnergyTotal:
+		return {attribute, "energy.active.import.total", MeterUnit::MicroWattHours};
+	case Id::ActiveExportEnergyA:
+		return {attribute, "energy.active.export.a", MeterUnit::MicroWattHours};
+	case Id::ActiveExportEnergyB:
+		return {attribute, "energy.active.export.b", MeterUnit::MicroWattHours};
+	case Id::ActiveExportEnergyC:
+		return {attribute, "energy.active.export.c", MeterUnit::MicroWattHours};
+	case Id::ActiveExportEnergyTotal:
+		return {attribute, "energy.active.export.total", MeterUnit::MicroWattHours};
+	case Id::ApparentEnergyA:
+		return {attribute, "energy.apparent.a", MeterUnit::MicroVoltAmpereHours};
+	case Id::ApparentEnergyB:
+		return {attribute, "energy.apparent.b", MeterUnit::MicroVoltAmpereHours};
+	case Id::ApparentEnergyC:
+		return {attribute, "energy.apparent.c", MeterUnit::MicroVoltAmpereHours};
+	case Id::ApparentEnergyTotal:
+		return {attribute, "energy.apparent.total", MeterUnit::MicroVoltAmpereHours};
+	case Id::ReactiveEnergyQuadrantIA:
+		return {attribute, "energy.reactive.quadrant_i.a", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIB:
+		return {attribute, "energy.reactive.quadrant_i.b", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIC:
+		return {attribute, "energy.reactive.quadrant_i.c", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantITotal:
+		return {attribute, "energy.reactive.quadrant_i.total", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIA:
+		return {attribute, "energy.reactive.quadrant_ii.a", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIB:
+		return {attribute, "energy.reactive.quadrant_ii.b", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIC:
+		return {attribute, "energy.reactive.quadrant_ii.c", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIITotal:
+		return {attribute, "energy.reactive.quadrant_ii.total", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIIA:
+		return {attribute, "energy.reactive.quadrant_iii.a", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIIB:
+		return {attribute, "energy.reactive.quadrant_iii.b", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIIC:
+		return {attribute, "energy.reactive.quadrant_iii.c", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIIITotal:
+		return {attribute, "energy.reactive.quadrant_iii.total", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIVA:
+		return {attribute, "energy.reactive.quadrant_iv.a", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIVB:
+		return {attribute, "energy.reactive.quadrant_iv.b", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIVC:
+		return {attribute, "energy.reactive.quadrant_iv.c", MeterUnit::MicroVarHours};
+	case Id::ReactiveEnergyQuadrantIVTotal:
+		return {attribute, "energy.reactive.quadrant_iv.total", MeterUnit::MicroVarHours};
+	case Id::CurrentActiveDemandA:
+		return {attribute, "demand.active.current.a", MeterUnit::MicroWatts};
+	case Id::CurrentActiveDemandB:
+		return {attribute, "demand.active.current.b", MeterUnit::MicroWatts};
+	case Id::CurrentActiveDemandC:
+		return {attribute, "demand.active.current.c", MeterUnit::MicroWatts};
+	case Id::CurrentActiveDemandTotal:
+		return {attribute, "demand.active.current.total", MeterUnit::MicroWatts};
+	case Id::ImportDemandPeakA:
+		return {attribute, "demand.active.import_peak.a", MeterUnit::MicroWatts};
+	case Id::ImportDemandPeakB:
+		return {attribute, "demand.active.import_peak.b", MeterUnit::MicroWatts};
+	case Id::ImportDemandPeakC:
+		return {attribute, "demand.active.import_peak.c", MeterUnit::MicroWatts};
+	case Id::ImportDemandPeakTotal:
+		return {attribute, "demand.active.import_peak.total", MeterUnit::MicroWatts};
+	case Id::ExportDemandPeakA:
+		return {attribute, "demand.active.export_peak.a", MeterUnit::MicroWatts};
+	case Id::ExportDemandPeakB:
+		return {attribute, "demand.active.export_peak.b", MeterUnit::MicroWatts};
+	case Id::ExportDemandPeakC:
+		return {attribute, "demand.active.export_peak.c", MeterUnit::MicroWatts};
+	case Id::ExportDemandPeakTotal:
+		return {attribute, "demand.active.export_peak.total", MeterUnit::MicroWatts};
 	}
 	throw std::invalid_argument("unknown meter attribute");
 }
@@ -233,12 +333,45 @@ std::vector<MeterAttributeKey> attributes_in(MeterAttributeGroup group)
 			key(Id::ZeroSequenceCurrent),
 			key(Id::PositiveSequenceCurrent),
 			key(Id::NegativeSequenceCurrent)};
+	case MeterAttributeGroup::Energy:
+		return {key(Id::ActiveImportEnergyA),
+			key(Id::ActiveImportEnergyB), key(Id::ActiveImportEnergyC),
+			key(Id::ActiveImportEnergyTotal), key(Id::ActiveExportEnergyA),
+			key(Id::ActiveExportEnergyB), key(Id::ActiveExportEnergyC),
+			key(Id::ActiveExportEnergyTotal), key(Id::ApparentEnergyA),
+			key(Id::ApparentEnergyB), key(Id::ApparentEnergyC),
+			key(Id::ApparentEnergyTotal),
+			key(Id::ReactiveEnergyQuadrantIA),
+			key(Id::ReactiveEnergyQuadrantIB),
+			key(Id::ReactiveEnergyQuadrantIC),
+			key(Id::ReactiveEnergyQuadrantITotal),
+			key(Id::ReactiveEnergyQuadrantIIA),
+			key(Id::ReactiveEnergyQuadrantIIB),
+			key(Id::ReactiveEnergyQuadrantIIC),
+			key(Id::ReactiveEnergyQuadrantIITotal),
+			key(Id::ReactiveEnergyQuadrantIIIA),
+			key(Id::ReactiveEnergyQuadrantIIIB),
+			key(Id::ReactiveEnergyQuadrantIIIC),
+			key(Id::ReactiveEnergyQuadrantIIITotal),
+			key(Id::ReactiveEnergyQuadrantIVA),
+			key(Id::ReactiveEnergyQuadrantIVB),
+			key(Id::ReactiveEnergyQuadrantIVC),
+			key(Id::ReactiveEnergyQuadrantIVTotal)};
+	case MeterAttributeGroup::Demand:
+		return {key(Id::CurrentActiveDemandA),
+			key(Id::CurrentActiveDemandB), key(Id::CurrentActiveDemandC),
+			key(Id::CurrentActiveDemandTotal), key(Id::ImportDemandPeakA),
+			key(Id::ImportDemandPeakB), key(Id::ImportDemandPeakC),
+			key(Id::ImportDemandPeakTotal), key(Id::ExportDemandPeakA),
+			key(Id::ExportDemandPeakB), key(Id::ExportDemandPeakC),
+			key(Id::ExportDemandPeakTotal)};
 	case MeterAttributeGroup::Fundamental:
-	case MeterAttributeGroup::AllDefined:
 		return {key(Id::Frequency), key(Id::VanRms), key(Id::VbnRms),
 			key(Id::VcnRms), key(Id::VabRms), key(Id::VbcRms),
 			key(Id::VcaRms), key(Id::IaRms), key(Id::IbRms),
 			key(Id::IcRms), key(Id::InRms)};
+	case MeterAttributeGroup::AllDefined:
+		return std::vector<MeterAttributeKey>(catalog.begin(), catalog.end());
 	}
 	return {};
 }

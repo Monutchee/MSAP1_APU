@@ -1,6 +1,7 @@
 #include "meter_historian_service.hpp"
 
 #include "msap1/settings/settings_ipc.hpp"
+#include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 
 #include <boost/asio/post.hpp>
 
@@ -28,17 +29,16 @@ constexpr std::array<MeasurementPeriod, 4> supported_periods = {
 	MeasurementPeriod::Hour2,
 };
 
-constexpr std::array<mnc::meter::MeterAttributeId, 8>
-	supported_attributes = {
-		mnc::meter::MeterAttributeId::Frequency,
-		mnc::meter::MeterAttributeId::VanRms,
-		mnc::meter::MeterAttributeId::VbnRms,
-		mnc::meter::MeterAttributeId::VcnRms,
-		mnc::meter::MeterAttributeId::IaRms,
-		mnc::meter::MeterAttributeId::IbRms,
-		mnc::meter::MeterAttributeId::IcRms,
-		mnc::meter::MeterAttributeId::InRms,
-	};
+const std::vector<mnc::meter::MeterAttributeId> supported_attributes = [] {
+	using Id = mnc::meter::MeterAttributeId;
+	std::vector<Id> result{Id::Frequency, Id::VanRms, Id::VbnRms,
+		Id::VcnRms, Id::IaRms, Id::IbRms, Id::IcRms, Id::InRms};
+	for (const auto group : {mnc::meter::MeterAttributeGroup::Energy,
+		mnc::meter::MeterAttributeGroup::Demand})
+		for (const auto key : mnc::meter::attributes_in(group))
+			result.push_back(key.id);
+	return result;
+}();
 
 mnc::ipc::Frame reply(const mnc::ipc::Frame &request, ByteWriter writer,
 	mnc::ipc::FrameKind kind = mnc::ipc::FrameKind::response)
@@ -256,6 +256,10 @@ bool MeterHistorianService::rebuilds_volatile_period(
 bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
+	/* ENERGY is an atomic two-record family already committed by meter-stream.
+	 * It is sampled into history together with DEMAND at the UTC boundary. */
+	if (envelope.record_format == msap1::meter_energy_format)
+		return false;
 	/* Base HARMONIC-v1 remains the high-rate diagnostic/fallback family. R5C1
 	 * emits the interval families used by history, so retaining base chunks
 	 * would reproduce the write amplification this offload removes. */
@@ -330,6 +334,16 @@ bool MeterHistorianService::ingest(
 	if (update.period == MeasurementPeriod::Min10Live ||
 	    update.period == MeasurementPeriod::Hour2Live)
 		return false;
+	if (update.kind == RecordKind::demand) {
+		/* The decoded RPU record contains volatile session values. History must
+		 * store the lifetime/reset-aware ledger authority, captured as one
+		 * coherent ten-minute snapshot. */
+		update.energy = stream_.energy();
+		update.demand = stream_.demand();
+		if (!update.demand)
+			throw std::runtime_error(
+				"durable DEMAND checkpoint is missing at history boundary");
+	}
 	store_->append(update, envelope.cursor,
 		envelope.timing.utc_start_nanoseconds.value_or(
 			envelope.ingested_at_nanoseconds));
@@ -560,8 +574,9 @@ void MeterHistorianService::handle(
 				output.u64(point.source_sequence);
 				output.u16(static_cast<std::uint16_t>(point.attribute));
 				output.u8(static_cast<std::uint8_t>(point.quality));
-				output.u8(0);
+				output.u8(point.reset_epoch.has_value());
 				output.i64(point.value);
+				output.u64(point.reset_epoch.value_or(0));
 			}
 			break;
 		}

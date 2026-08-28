@@ -7,6 +7,7 @@
 #include <boost/asio/io_context.hpp>
 
 #include <cassert>
+#include <array>
 #include <chrono>
 #include <optional>
 #include <stdexcept>
@@ -124,6 +125,44 @@ void test_payload_quality_and_units()
 		std::string::npos);
 }
 
+void test_exact_energy_payload_and_metadata()
+{
+	mnc::meter::MeterSnapshot snapshot;
+	snapshot.period = mnc::meter::MeasurementPeriod::Basic;
+	snapshot.energy = mnc::meter::EnergySnapshotMetadata{
+		.session_id = 0xfedcba9876543210ULL,
+		.reset_epoch = 9,
+		.last_sample_index = 100,
+		.accepted_samples = 90,
+		.skipped_samples = 10,
+		.accepted_blocks = 8,
+		.skipped_blocks = 1,
+		.incomplete_input = true,
+		.discontinuity = true,
+	};
+	const mnc::meter::MeterAttributeKey attribute{
+		mnc::meter::MeterAttributeId::ReactiveEnergyQuadrantIVTotal,
+		std::nullopt};
+	snapshot.values.push_back({
+		.attribute = attribute,
+		.unit = mnc::meter::MeterUnit::MicroVarHours,
+		.quality = mnc::meter::ReadingQuality::Valid,
+		.value = 9007199254740993LL,
+		.source_sequence = 7,
+	});
+	const std::array selected{attribute};
+	const auto json = msap1::mqtt::MeterSnapshotPayloadEncoder{}.encode(
+		snapshot, "energy", selected);
+	assert(json.find("\"value\":\"9007199254740993\"") !=
+		std::string::npos);
+	assert(json.find("\"session_id\":\"18364758544493064720\"") !=
+		std::string::npos);
+	assert(json.find("\"reset_epoch\":\"9\"") != std::string::npos);
+	assert(json.find("\"discontinuity\":true") != std::string::npos);
+	assert(json.find("energy.reactive.quadrant_iv.total") !=
+		std::string::npos);
+}
+
 void test_catalog_and_newest_pending_payload()
 {
 	boost::asio::io_context context;
@@ -216,6 +255,7 @@ int main()
 {
 	test_server_uris();
 	test_payload_quality_and_units();
+	test_exact_energy_payload_and_metadata();
 	test_catalog_and_newest_pending_payload();
 	test_settings_validation();
 }

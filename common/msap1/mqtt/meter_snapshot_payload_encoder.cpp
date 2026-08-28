@@ -12,12 +12,13 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <variant>
 
 namespace msap1::mqtt {
 namespace {
 
 struct PayloadValue {
-	std::optional<double> value;
+	std::optional<std::variant<double, std::string>> value;
 	std::string unit;
 	std::string quality;
 	std::uint64_t source_sequence = 0;
@@ -29,6 +30,33 @@ struct MeasurementTiming {
 	std::optional<std::string> window_end;
 };
 
+struct EnergyMetadata {
+	std::string session_id;
+	std::string reset_epoch;
+	std::string last_sample_index;
+	std::string accepted_samples;
+	std::string skipped_samples;
+	std::uint32_t accepted_blocks = 0;
+	std::uint32_t skipped_blocks = 0;
+	bool incomplete_accumulation = false;
+	bool saturated = false;
+	bool discontinuity = false;
+};
+
+struct DemandMetadata {
+	std::string session_id;
+	std::string peak_reset_epoch;
+	std::string last_sample_index;
+	std::string interval_target_sample;
+	std::uint32_t source_interval_count = 0;
+	std::uint32_t source_status = 0;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+	bool incomplete_accumulation = false;
+	bool saturated = false;
+};
+
 struct SnapshotPayload {
 	std::string schema = "mnc.meter.snapshot.v1";
 	std::string device = "msap1";
@@ -38,6 +66,8 @@ struct SnapshotPayload {
 	std::uint32_t configuration_generation = 0;
 	std::string published_at;
 	MeasurementTiming measurement;
+	std::optional<EnergyMetadata> energy;
+	std::optional<DemandMetadata> demand;
 	std::map<std::string, PayloadValue> values;
 };
 
@@ -101,6 +131,14 @@ std::pair<double, std::string> engineering(std::int64_t value,
 	case mnc::meter::MeterUnit::RatioMillionths:
 		/* millionths of the positive sequence -> percent. */
 		return {static_cast<double>(value) / 10000.0, "%"};
+	case mnc::meter::MeterUnit::MicroWattHours:
+		return {0.0, "uWh"};
+	case mnc::meter::MeterUnit::MicroVarHours:
+		return {0.0, "uvarh"};
+	case mnc::meter::MeterUnit::MicroVoltAmpereHours:
+		return {0.0, "uVAh"};
+	case mnc::meter::MeterUnit::MicroWatts:
+		return {0.0, "uW"};
 	}
 	return {0.0, "unknown"};
 }
@@ -132,6 +170,29 @@ std::string MeterSnapshotPayloadEncoder::encode(
 			payload.measurement.measured_at = iso_utc(start);
 		}
 	}
+	if (snapshot.energy) {
+		const auto &energy = *snapshot.energy;
+		payload.energy = EnergyMetadata{
+			std::to_string(energy.session_id),
+			std::to_string(energy.reset_epoch),
+			std::to_string(energy.last_sample_index),
+			std::to_string(energy.accepted_samples),
+			std::to_string(energy.skipped_samples), energy.accepted_blocks,
+			energy.skipped_blocks, energy.incomplete_input,
+			energy.saturated, energy.discontinuity};
+	}
+	if (snapshot.demand) {
+		const auto &demand = *snapshot.demand;
+		payload.demand = DemandMetadata{
+			std::to_string(demand.session_id),
+			std::to_string(demand.peak_reset_epoch),
+			std::to_string(demand.last_sample_index),
+			std::to_string(demand.interval_target_sample),
+			demand.source_interval_count, demand.source_status,
+			demand.time_aligned, demand.contaminated,
+			demand.boundary_valid, demand.incomplete_input,
+			demand.saturated};
+	}
 
 	for (const auto attribute : selected) {
 		const auto descriptor = mnc::meter::describe(attribute);
@@ -144,8 +205,21 @@ std::string MeterSnapshotPayloadEncoder::encode(
 		if (found != snapshot.values.end()) {
 			output.quality = quality(found->quality);
 			output.source_sequence = found->source_sequence;
-			if (found->quality == mnc::meter::ReadingQuality::Valid)
-				output.value = engineering(found->value, found->unit).first;
+			if (found->quality == mnc::meter::ReadingQuality::Valid) {
+				const bool exact_integer = found->unit ==
+					mnc::meter::MeterUnit::MicroWattHours ||
+					found->unit == mnc::meter::MeterUnit::MicroVarHours ||
+					found->unit ==
+						mnc::meter::MeterUnit::MicroVoltAmpereHours ||
+					found->unit == mnc::meter::MeterUnit::MicroWatts;
+				output.value = exact_integer
+					? std::variant<double, std::string>{
+						std::in_place_type<std::string>,
+						std::to_string(found->value)}
+					: std::variant<double, std::string>{
+						std::in_place_type<double>,
+						engineering(found->value, found->unit).first};
+			}
 		} else {
 			output.quality = "unavailable";
 		}

@@ -93,6 +93,48 @@ enum class MeterAttributeId : std::uint16_t {
 	ZeroSequenceCurrent,
 	PositiveSequenceCurrent,
 	NegativeSequenceCurrent,
+	/* M17 cumulative energy. Appended — never renumber. */
+	ActiveImportEnergyA,
+	ActiveImportEnergyB,
+	ActiveImportEnergyC,
+	ActiveImportEnergyTotal,
+	ActiveExportEnergyA,
+	ActiveExportEnergyB,
+	ActiveExportEnergyC,
+	ActiveExportEnergyTotal,
+	ApparentEnergyA,
+	ApparentEnergyB,
+	ApparentEnergyC,
+	ApparentEnergyTotal,
+	ReactiveEnergyQuadrantIA,
+	ReactiveEnergyQuadrantIB,
+	ReactiveEnergyQuadrantIC,
+	ReactiveEnergyQuadrantITotal,
+	ReactiveEnergyQuadrantIIA,
+	ReactiveEnergyQuadrantIIB,
+	ReactiveEnergyQuadrantIIC,
+	ReactiveEnergyQuadrantIITotal,
+	ReactiveEnergyQuadrantIIIA,
+	ReactiveEnergyQuadrantIIIB,
+	ReactiveEnergyQuadrantIIIC,
+	ReactiveEnergyQuadrantIIITotal,
+	ReactiveEnergyQuadrantIVA,
+	ReactiveEnergyQuadrantIVB,
+	ReactiveEnergyQuadrantIVC,
+	ReactiveEnergyQuadrantIVTotal,
+	/* M17 signed 10-minute active demand and resettable peaks. */
+	CurrentActiveDemandA,
+	CurrentActiveDemandB,
+	CurrentActiveDemandC,
+	CurrentActiveDemandTotal,
+	ImportDemandPeakA,
+	ImportDemandPeakB,
+	ImportDemandPeakC,
+	ImportDemandPeakTotal,
+	ExportDemandPeakA,
+	ExportDemandPeakB,
+	ExportDemandPeakC,
+	ExportDemandPeakTotal,
 };
 
 /**
@@ -131,6 +173,8 @@ enum class MeterAttributeGroup : std::uint8_t {
 	PhaseAngle,
 	Unbalance,
 	SequenceComponents,
+	Energy,
+	Demand,
 	AllDefined,
 };
 
@@ -151,6 +195,10 @@ enum class MeterUnit : std::uint8_t {
 	/* Unsigned ratio in millionths of the positive-sequence magnitude
 	 * (20000 = 2%); undefined (Unavailable) when that magnitude is 0. */
 	RatioMillionths,
+	MicroWattHours,
+	MicroVarHours,
+	MicroVoltAmpereHours,
+	MicroWatts,
 };
 
 enum class ReadingQuality : std::uint8_t {

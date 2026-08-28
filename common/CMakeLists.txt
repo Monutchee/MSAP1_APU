@@ -193,6 +193,7 @@ target_compile_options(mnc_meter_data_provider PRIVATE
 # Product data types and latest-state publication deliberately have no
 # dependency on IPC, WebEngine, persistence, or command-line presentation.
 msap1_library(msap1_meter msap1::meter
+	msap1/meter/energy_demand.cpp
 	msap1/meter/harmonic_spectrum.cpp
     msap1/meter/meter_data.cpp
     msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.cpp
@@ -209,6 +210,7 @@ target_link_libraries(msap1_meter PRIVATE
 
 msap1_library(msap1_meter_data_provider_stream
     msap1::meter-data-provider-stream
+	msap1/meter/energy_ledger.cpp
     msap1/meter/MeterDataProvider/stream/meter_stream_ipc.cpp
     msap1/meter/history/meter_history.cpp
     msap1/meter/history/historian_ipc.cpp
@@ -217,6 +219,9 @@ target_link_libraries(msap1_meter_data_provider_stream PUBLIC
     msap1::meter
     mnc::meter-data-provider-stream
     mnc::ipc
+)
+target_link_libraries(msap1_meter_data_provider_stream PRIVATE
+	mnc::sqlite
 )
 
 add_library(mnc_settings STATIC
@@ -428,6 +433,30 @@ if(BUILD_TESTING)
 	target_compile_options(harmonic_decode_test PRIVATE
 		-Wall -Wextra -Wpedantic)
 	add_test(NAME harmonic_decode_test COMMAND harmonic_decode_test)
+
+	# M17 ENERGY-v1 two-part family and DEMAND-v1 typed decode.
+	add_executable(energy_demand_decode_test
+		${PROJECT_SOURCE_DIR}/tests/energy_demand_decode_test.cpp)
+	target_link_libraries(energy_demand_decode_test PRIVATE msap1::meter)
+	target_compile_options(energy_demand_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME energy_demand_decode_test COMMAND energy_demand_decode_test)
+
+	add_executable(energy_ledger_test
+		${PROJECT_SOURCE_DIR}/tests/energy_ledger_test.cpp)
+	target_link_libraries(energy_ledger_test PRIVATE
+		msap1::meter-data-provider-stream)
+	target_compile_options(energy_ledger_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME energy_ledger_test COMMAND energy_ledger_test)
+
+	add_executable(energy_dto_test
+		${PROJECT_SOURCE_DIR}/tests/energy_dto_test.cpp)
+	target_include_directories(energy_dto_test PRIVATE
+		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
+	target_link_libraries(energy_dto_test PRIVATE msap1::meter glaze::glaze)
+	target_compile_options(energy_dto_test PRIVATE -Wall -Wextra -Wpedantic)
+	add_test(NAME energy_dto_test COMMAND energy_dto_test)
 
     # GET /api/v1/meter/aggregate is pinned by its typed snapshot selection
     # and JSON payload. The projection is deliberately WebEngine-free, so the

@@ -20,6 +20,7 @@ enum class DataType : std::uint8_t {
 	int32,
 	float32,
 	uint64,
+	int64,
 };
 
 /** Product registers which are not backed directly by a meter attribute. */
@@ -31,6 +32,31 @@ enum class SpecialRegister : std::uint8_t {
 	period,
 	source_sequence,
 	configuration_generation,
+	energy_session_id,
+	energy_reset_epoch,
+	energy_last_sample,
+	energy_accepted_samples,
+	energy_skipped_samples,
+	energy_accepted_blocks,
+	energy_skipped_blocks,
+	energy_flags,
+	energy_quality_mask,
+	demand_session_id,
+	demand_reset_epoch,
+	demand_last_sample,
+	demand_interval_target_sample,
+	demand_source_interval_count,
+	demand_source_status,
+	demand_flags,
+	demand_quality_mask,
+	demand_import_peak_sample_a,
+	demand_import_peak_sample_b,
+	demand_import_peak_sample_c,
+	demand_import_peak_sample_total,
+	demand_export_peak_sample_a,
+	demand_export_peak_sample_b,
+	demand_export_peak_sample_c,
+	demand_export_peak_sample_total,
 };
 
 /** A measurement value selected from one independently calculated period. */
@@ -91,7 +117,8 @@ struct SpecialDefinition {
 	case DataType::uint32:
 	case DataType::int32:
 	case DataType::float32: return 2;
-	case DataType::uint64: return 4;
+	case DataType::uint64:
+	case DataType::int64: return 4;
 	}
 	return 0;
 }

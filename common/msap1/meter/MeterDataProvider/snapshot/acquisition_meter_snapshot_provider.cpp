@@ -1,5 +1,7 @@
 #include "msap1/meter/MeterDataProvider/snapshot/acquisition_meter_snapshot_provider.hpp"
 
+#include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
+
 #include <stdexcept>
 
 namespace msap1::meter {
@@ -43,6 +45,13 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 			      Id::PositiveSequenceCurrent,
 			      Id::NegativeSequenceCurrent})
 		result.push_back({id, std::nullopt});
+	const auto m17_group = period == mnc::meter::MeasurementPeriod::Basic
+		? mnc::meter::MeterAttributeGroup::Energy
+		: mnc::meter::MeterAttributeGroup::Demand;
+	if (period == mnc::meter::MeasurementPeriod::Basic ||
+	    period == mnc::meter::MeasurementPeriod::Min10)
+		for (const auto attribute : mnc::meter::attributes_in(m17_group))
+			result.push_back(attribute);
 	return result;
 }
 

@@ -51,6 +51,11 @@ std::vector<std::uint16_t> encode_i32(std::int32_t value)
 	return encode_u32(std::bit_cast<std::uint32_t>(value));
 }
 
+std::vector<std::uint16_t> encode_i64(std::int64_t value)
+{
+	return encode_u64(std::bit_cast<std::uint64_t>(value));
+}
+
 std::vector<std::uint16_t> encode_float(float value)
 {
 	return encode_u32(std::bit_cast<std::uint32_t>(value));

@@ -2,6 +2,7 @@
 #include "core/result_output.hpp"
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/meter/meter_health.hpp"
 
 #include <array>
@@ -12,12 +13,15 @@
 #include <iomanip>
 #include <limits>
 #include <optional>
+#include <pwd.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace msap1::cli {
 namespace {
@@ -1202,6 +1206,22 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			value = static_cast<double>(reading.value) / 10000.0;
 			unit = "%";
 			break;
+		case mnc::meter::MeterUnit::MicroWattHours:
+			value = static_cast<double>(reading.value);
+			unit = "uWh";
+			break;
+		case mnc::meter::MeterUnit::MicroVarHours:
+			value = static_cast<double>(reading.value);
+			unit = "uvarh";
+			break;
+		case mnc::meter::MeterUnit::MicroVoltAmpereHours:
+			value = static_cast<double>(reading.value);
+			unit = "uVAh";
+			break;
+		case mnc::meter::MeterUnit::MicroWatts:
+			value = static_cast<double>(reading.value);
+			unit = "uW";
+			break;
 		}
 		result.readings.push_back({std::string(descriptor.key),
 					   unit, valid, value});
@@ -1705,6 +1725,280 @@ int run_meter_harmonics(const Options &options, std::ostream &output)
 			     HarmonicJsonGenerator{});
 }
 
+struct ExactPhaseTotal {
+	std::string phase_a;
+	std::string phase_b;
+	std::string phase_c;
+	std::string total;
+};
+
+template<typename Unit>
+ExactPhaseTotal exact(const msap1::PhaseABCTotal<msap1::Reading<Unit>> &group)
+{
+	return {std::to_string(group.phase_a.value),
+		std::to_string(group.phase_b.value),
+		std::to_string(group.phase_c.value),
+		std::to_string(group.total.value)};
+}
+
+struct EnergyResult {
+	ExactPhaseTotal active_import_uwh;
+	ExactPhaseTotal active_export_uwh;
+	ExactPhaseTotal apparent_uvah;
+	std::array<ExactPhaseTotal, 4> reactive_quadrants_uvarh;
+	std::string session_id;
+	std::string last_sample_index;
+	std::string accepted_samples;
+	std::string skipped_samples;
+	std::uint32_t accepted_blocks = 0;
+	std::uint32_t skipped_blocks = 0;
+	std::string reset_epoch;
+	bool incomplete_accumulation = false;
+	bool saturated = false;
+	bool discontinuity = false;
+};
+
+EnergyResult energy_result(const msap1::EnergyValues &values)
+{
+	return {exact(values.active_import), exact(values.active_export),
+		exact(values.apparent),
+		{exact(values.reactive_quadrants[0]),
+		 exact(values.reactive_quadrants[1]),
+		 exact(values.reactive_quadrants[2]),
+		 exact(values.reactive_quadrants[3])},
+		std::to_string(values.session_id),
+		std::to_string(values.last_sample_index),
+		std::to_string(values.accepted_samples),
+		std::to_string(values.skipped_samples), values.accepted_blocks,
+		values.skipped_blocks, std::to_string(values.reset_epoch),
+		values.incomplete_input, values.saturated, values.discontinuity};
+}
+
+void print_exact_group(std::ostream &output, std::string_view label,
+	const ExactPhaseTotal &group, std::string_view unit)
+{
+	output << "  " << std::left << std::setw(30) << label << std::right
+	       << " A=" << group.phase_a << " B=" << group.phase_b
+	       << " C=" << group.phase_c << " total=" << group.total << ' '
+	       << unit << '\n';
+}
+
+class EnergyTextGenerator final : public ResultGenerator<EnergyResult> {
+public:
+	int write(const EnergyResult &result, std::ostream &output) const override
+	{
+		output << "Four-quadrant lifetime energy\n";
+		print_exact_group(output, "Active import", result.active_import_uwh,
+			"uWh");
+		print_exact_group(output, "Active export", result.active_export_uwh,
+			"uWh");
+		print_exact_group(output, "Apparent", result.apparent_uvah, "uVAh");
+		static constexpr std::array labels{
+			"Quadrant I  (P>=0, Q1>0)",
+			"Quadrant II (P<0,  Q1>0)",
+			"Quadrant III(P<0,  Q1<0)",
+			"Quadrant IV (P>=0, Q1<0)"};
+		for (std::size_t index = 0; index < labels.size(); ++index)
+			print_exact_group(output, labels[index],
+				result.reactive_quadrants_uvarh[index], "uvarh");
+		output << "  Session ID: " << result.session_id
+		       << "  reset epoch: " << result.reset_epoch
+		       << "  last sample: " << result.last_sample_index << '\n'
+		       << "  Accepted/skipped: " << result.accepted_samples << '/'
+		       << result.skipped_samples << " samples, "
+		       << result.accepted_blocks << '/' << result.skipped_blocks
+		       << " blocks\n  Incomplete: "
+		       << yes_no(result.incomplete_accumulation)
+		       << "  saturated: " << yes_no(result.saturated)
+		       << "  discontinuity: " << yes_no(result.discontinuity) << '\n';
+		return 0;
+	}
+};
+
+class EnergyJsonGenerator final : public ResultGenerator<EnergyResult> {
+public:
+	int write(const EnergyResult &result, std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_energy(const Options &options, std::ostream &output)
+{
+	msap1::meter_stream::MeterRecordStreamClient client;
+	const auto values = client.energy();
+	if (!values)
+		throw std::runtime_error("no durable ENERGY checkpoint exists");
+	const auto result = energy_result(*values);
+	return render_result(options, result, output, EnergyTextGenerator{},
+		EnergyJsonGenerator{});
+}
+
+struct DemandResult {
+	ExactPhaseTotal current_active_uw;
+	ExactPhaseTotal import_peak_uw;
+	ExactPhaseTotal export_peak_uw;
+	std::string session_id;
+	std::string last_sample_index;
+	std::string interval_target_sample;
+	std::string peak_reset_epoch;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+	bool incomplete_accumulation = false;
+	bool saturated = false;
+};
+
+DemandResult demand_result(const msap1::DemandValues &values)
+{
+	return {exact(values.current_active), exact(values.import_peak),
+		exact(values.export_peak), std::to_string(values.session_id),
+		std::to_string(values.last_sample_index),
+		std::to_string(values.interval_target_sample),
+		std::to_string(values.peak_reset_epoch), values.time_aligned,
+		values.contaminated, values.boundary_valid, values.incomplete_input,
+		values.saturated};
+}
+
+class DemandTextGenerator final : public ResultGenerator<DemandResult> {
+public:
+	int write(const DemandResult &result, std::ostream &output) const override
+	{
+		output << "Ten-minute active demand\n";
+		print_exact_group(output, "Current signed demand",
+			result.current_active_uw, "uW");
+		print_exact_group(output, "Session import peaks",
+			result.import_peak_uw, "uW");
+		print_exact_group(output, "Session export peaks",
+			result.export_peak_uw, "uW");
+		output << "  Session ID: " << result.session_id
+		       << "  peak reset epoch: " << result.peak_reset_epoch
+		       << "  interval target: " << result.interval_target_sample
+		       << "\n  Aligned: " << yes_no(result.time_aligned)
+		       << "  boundary valid: " << yes_no(result.boundary_valid)
+		       << "  contaminated: " << yes_no(result.contaminated)
+		       << "  incomplete: " << yes_no(result.incomplete_accumulation)
+		       << "  saturated: " << yes_no(result.saturated) << '\n';
+		return 0;
+	}
+};
+
+class DemandJsonGenerator final : public ResultGenerator<DemandResult> {
+public:
+	int write(const DemandResult &result, std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_demand(const Options &options, std::ostream &output)
+{
+	msap1::meter_stream::MeterRecordStreamClient client;
+	const auto values = client.demand();
+	if (!values)
+		throw std::runtime_error("no durable DEMAND checkpoint exists");
+	const auto result = demand_result(*values);
+	return render_result(options, result, output, DemandTextGenerator{},
+		DemandJsonGenerator{});
+}
+
+std::string cli_actor()
+{
+	if (const auto *entry = ::getpwuid(::geteuid()); entry && entry->pw_name)
+		return entry->pw_name;
+	return "local-cli";
+}
+
+msap1::energy_ledger::ResetRequest reset_request(const Options &options)
+{
+	if (!options.meter_reset_confirm)
+		throw std::invalid_argument("meter reset requires explicit --yes");
+	if (!options.meter_reset_expected_epoch)
+		throw std::invalid_argument("meter reset requires --expected-epoch");
+	if (!options.meter_reset_idempotency_key ||
+	    options.meter_reset_idempotency_key->empty())
+		throw std::invalid_argument("meter reset requires --idempotency-key");
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	return {*options.meter_reset_expected_epoch,
+		*options.meter_reset_idempotency_key, cli_actor(),
+		"mnc-" + std::to_string(now), now};
+}
+
+struct ResetResult {
+	std::string reset_epoch;
+	bool replayed = false;
+};
+
+int render_reset(const Options &options,
+	const msap1::energy_ledger::ResetResult &reset, std::ostream &output)
+{
+	const ResetResult result{std::to_string(reset.epoch), reset.replayed};
+	if (options.output_format == OutputFormat::json)
+		write_json_success(output, result);
+	else
+		output << "Reset committed at epoch " << result.reset_epoch
+		       << (result.replayed ? " (idempotent replay)" : "") << '\n';
+	return 0;
+}
+
+int run_meter_energy_reset(const Options &options, std::ostream &output)
+{
+	msap1::meter_stream::MeterRecordStreamClient client;
+	return render_reset(options, client.reset_energy(reset_request(options)),
+		output);
+}
+
+int run_meter_demand_reset(const Options &options, std::ostream &output)
+{
+	msap1::meter_stream::MeterRecordStreamClient client;
+	return render_reset(options,
+		client.reset_demand_peaks(reset_request(options)), output);
+}
+
+std::uint64_t parse_reset_epoch(const std::string &value)
+{
+	std::size_t end = 0;
+	std::uint64_t result = 0;
+	try {
+		result = std::stoull(value, &end, 10);
+	} catch (const std::exception &) {
+		throw std::invalid_argument(
+			"--expected-epoch requires an unsigned decimal integer");
+	}
+	if (end != value.size())
+		throw std::invalid_argument(
+			"--expected-epoch requires an unsigned decimal integer");
+	return result;
+}
+
+void add_reset_options(Command &command)
+{
+	command.add_option({
+		"expected-epoch", "EPOCH", "Require the current reset epoch",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.meter_reset_expected_epoch = parse_reset_epoch(value);
+		},
+	});
+	command.add_option({
+		"idempotency-key", "KEY", "Stable retry key for this reset",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.meter_reset_idempotency_key = value;
+		},
+	});
+	command.add_option({
+		"yes", "", "Confirm resetting all values",
+		CompletionKind::none,
+		[](Options &options, const std::string &) {
+			options.meter_reset_confirm = true;
+		}, false,
+	});
+}
+
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -1793,6 +2087,52 @@ void register_meter_commands(Application &application)
 		},
 	});
 	meter.add_subcommand(std::move(harmonics));
+	Command energy(
+		"energy", "Show durable four-quadrant lifetime energy",
+		run_meter_energy,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	Command energy_reset(
+		"reset", "Reset all authoritative lifetime energy counters",
+		run_meter_energy_reset,
+		{
+			.access = AccessLevel::maintenance,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	add_reset_options(energy_reset);
+	energy.add_subcommand(std::move(energy_reset));
+	meter.add_subcommand(std::move(energy));
+	Command demand(
+		"demand", "Show ten-minute active demand and session peaks",
+		run_meter_demand,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	Command demand_reset(
+		"peaks-reset", "Reset all authoritative demand peaks",
+		run_meter_demand_reset,
+		{
+			.access = AccessLevel::maintenance,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	add_reset_options(demand_reset);
+	demand.add_subcommand(std::move(demand_reset));
+	meter.add_subcommand(std::move(demand));
 	meter.add_subcommand(Command(
 		"snapshot", "Read one coherent meter result",
 		run_meter_snapshot,

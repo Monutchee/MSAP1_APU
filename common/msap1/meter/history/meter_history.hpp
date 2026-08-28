@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -19,6 +20,8 @@ struct HistoryPoint {
 		mnc::meter::MeterAttributeId::Frequency;
 	std::int64_t value = 0;
 	MeasurementQuality quality = MeasurementQuality::unavailable;
+	/** Present for M17 energy/demand points so clients can break reset epochs. */
+	std::optional<std::uint64_t> reset_epoch;
 };
 
 struct HistoryQuery {

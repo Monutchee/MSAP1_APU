@@ -13,6 +13,7 @@ add_library(mnc_cli STATIC
 target_link_libraries(mnc_cli PUBLIC
     msap1::acquisition
     msap1::meter
+	msap1::meter-data-provider-stream
     msap1::service-protocol
     msap1::system
     msap1::settings

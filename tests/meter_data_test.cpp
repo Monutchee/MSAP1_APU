@@ -600,10 +600,10 @@ void subscriptions_and_registry_extension()
 	require(std::chrono::steady_clock::now() - started < 50ms,
 		"slow latest-state subscriber blocked meter ingestion");
 
-	/* Record type 0x0002 is the real MTR2 aggregate, so the demo of
-	 * registering a future decoder uses the next unassigned type. */
+	/* Use a deliberately private test type; 0x0003 and 0x0004 are the real
+	 * M17 ENERGY and DEMAND record families. */
 	msap1::MeterDecoderRegistry registry;
-	constexpr std::uint32_t future_format = 0x00030001;
+	constexpr std::uint32_t future_format = 0x00ff0001;
 	registry.register_decoder(future_format,
 		[](const msap1::MeterRecord &, msap1::SystemTime) {
 			msap1::MeterUpdate update{};

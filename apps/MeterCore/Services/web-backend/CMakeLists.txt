@@ -7,6 +7,7 @@ add_executable(msap1-web-backend
     auth/msap1_auth_provider.cpp
     api/health_routes.cpp
     api/meter_routes.cpp
+	api/energy_routes.cpp
     api/adc_routes.cpp
     api/waveform_routes.cpp
     api/settings_routes.cpp

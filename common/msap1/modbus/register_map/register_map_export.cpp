@@ -115,6 +115,7 @@ std::string_view type_name(DataType type)
 	case DataType::int32: return "int32";
 	case DataType::float32: return "float32";
 	case DataType::uint64: return "uint64";
+	case DataType::int64: return "int64";
 	}
 	return "unknown";
 }
@@ -156,6 +157,49 @@ std::string_view special_name(SpecialRegister field)
 	case SpecialRegister::source_sequence: return "measurement.source_sequence";
 	case SpecialRegister::configuration_generation:
 		return "measurement.configuration_generation";
+	case SpecialRegister::energy_session_id: return "energy.session_id";
+	case SpecialRegister::energy_reset_epoch: return "energy.reset_epoch";
+	case SpecialRegister::energy_last_sample: return "energy.last_sample";
+	case SpecialRegister::energy_accepted_samples:
+		return "energy.accepted_samples";
+	case SpecialRegister::energy_skipped_samples:
+		return "energy.skipped_samples";
+	case SpecialRegister::energy_accepted_blocks:
+		return "energy.accepted_blocks";
+	case SpecialRegister::energy_skipped_blocks:
+		return "energy.skipped_blocks";
+	case SpecialRegister::energy_flags: return "energy.flags";
+	case SpecialRegister::energy_quality_mask:
+		return "energy.quality_mask";
+	case SpecialRegister::demand_session_id: return "demand.session_id";
+	case SpecialRegister::demand_reset_epoch:
+		return "demand.peak_reset_epoch";
+	case SpecialRegister::demand_last_sample: return "demand.last_sample";
+	case SpecialRegister::demand_interval_target_sample:
+		return "demand.interval_target_sample";
+	case SpecialRegister::demand_source_interval_count:
+		return "demand.source_interval_count";
+	case SpecialRegister::demand_source_status:
+		return "demand.source_status";
+	case SpecialRegister::demand_flags: return "demand.flags";
+	case SpecialRegister::demand_quality_mask:
+		return "demand.quality_mask";
+	case SpecialRegister::demand_import_peak_sample_a:
+		return "demand.import_peak_sample.a";
+	case SpecialRegister::demand_import_peak_sample_b:
+		return "demand.import_peak_sample.b";
+	case SpecialRegister::demand_import_peak_sample_c:
+		return "demand.import_peak_sample.c";
+	case SpecialRegister::demand_import_peak_sample_total:
+		return "demand.import_peak_sample.total";
+	case SpecialRegister::demand_export_peak_sample_a:
+		return "demand.export_peak_sample.a";
+	case SpecialRegister::demand_export_peak_sample_b:
+		return "demand.export_peak_sample.b";
+	case SpecialRegister::demand_export_peak_sample_c:
+		return "demand.export_peak_sample.c";
+	case SpecialRegister::demand_export_peak_sample_total:
+		return "demand.export_peak_sample.total";
 	}
 	return "unknown";
 }

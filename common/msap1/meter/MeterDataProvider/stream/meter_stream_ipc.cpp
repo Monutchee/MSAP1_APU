@@ -1,5 +1,6 @@
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 
+#include <chrono>
 #include <stdexcept>
 
 namespace msap1::meter_stream {
@@ -50,7 +51,91 @@ void require_ok(ByteReader &reader)
 	const auto status = static_cast<Status>(reader.u32());
 	if (status == Status::ok)
 		return;
-	throw std::runtime_error(read_string(reader));
+	const auto message = read_string(reader);
+	if (status == Status::unavailable)
+		throw energy_ledger::Unavailable(message);
+	if (status == Status::conflict)
+		throw energy_ledger::Conflict(message);
+	if (status == Status::invalid_request)
+		throw std::invalid_argument(message);
+	throw std::runtime_error(message);
+}
+
+template<typename Unit>
+void write_reading(ByteWriter &writer, const Reading<Unit> &reading)
+{
+	writer.i64(reading.value);
+	writer.u8(static_cast<std::uint8_t>(reading.quality));
+	writer.u8(0);
+	writer.u16(0);
+	writer.u64(reading.source_sequence);
+	writer.i64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		reading.measured_at.time_since_epoch()).count());
+	writer.u32(reading.calculation_window.sample_count);
+	writer.u32(0);
+	writer.i64(reading.calculation_window.duration.count());
+}
+
+template<typename Unit>
+Reading<Unit> read_reading(ByteReader &reader)
+{
+	Reading<Unit> result;
+	result.value = reader.i64();
+	const auto quality = reader.u8();
+	if (quality > static_cast<std::uint8_t>(
+		MeasurementQuality::arithmetic_error))
+		throw std::invalid_argument(
+			"invalid measurement quality in meter-stream snapshot");
+	result.quality = static_cast<MeasurementQuality>(quality);
+	if (reader.u8() != 0 || reader.u16() != 0)
+		throw std::invalid_argument(
+			"nonzero meter-stream snapshot reserved field");
+	result.source_sequence = reader.u64();
+	result.measured_at = SystemTime(std::chrono::nanoseconds(reader.i64()));
+	result.calculation_window.sample_count = reader.u32();
+	if (reader.u32() != 0)
+		throw std::invalid_argument(
+			"nonzero meter-stream snapshot reserved word");
+	const auto duration = reader.i64();
+	if (duration < 0)
+		throw std::invalid_argument("negative meter-stream snapshot duration");
+	result.calculation_window.duration = std::chrono::nanoseconds(duration);
+	return result;
+}
+
+template<typename Unit>
+void write_group(ByteWriter &writer,
+	const PhaseABCTotal<Reading<Unit>> &group)
+{
+	write_reading(writer, group.phase_a);
+	write_reading(writer, group.phase_b);
+	write_reading(writer, group.phase_c);
+	write_reading(writer, group.total);
+}
+
+template<typename Unit>
+PhaseABCTotal<Reading<Unit>> read_group(ByteReader &reader)
+{
+	return {
+		read_reading<Unit>(reader),
+		read_reading<Unit>(reader),
+		read_reading<Unit>(reader),
+		read_reading<Unit>(reader),
+	};
+}
+
+void write_samples(ByteWriter &writer,
+	const PhaseABCTotal<std::uint64_t> &samples)
+{
+	writer.u64(samples.phase_a);
+	writer.u64(samples.phase_b);
+	writer.u64(samples.phase_c);
+	writer.u64(samples.total);
+}
+
+PhaseABCTotal<std::uint64_t> read_samples(ByteReader &reader)
+{
+	return {reader.u64(), reader.u64(), reader.u64(), reader.u64()};
 }
 
 } // namespace
@@ -134,6 +219,98 @@ std::vector<mnc::meter_stream::MeterStreamRecord> decode_records(
 	for (std::uint32_t index = 0; index < count; ++index)
 		records.push_back(decode_record(reader));
 	return records;
+}
+
+std::vector<std::byte> encode_energy_values(const EnergyValues &values)
+{
+	ByteWriter writer;
+	write_group(writer, values.active_import);
+	write_group(writer, values.active_export);
+	write_group(writer, values.apparent);
+	for (const auto &quadrant : values.reactive_quadrants)
+		write_group(writer, quadrant);
+	writer.u64(values.session_id);
+	writer.u64(values.last_sample_index);
+	writer.u64(values.accepted_samples);
+	writer.u64(values.skipped_samples);
+	writer.u32(values.accepted_blocks);
+	writer.u32(values.skipped_blocks);
+	writer.u64(values.reset_epoch);
+	writer.u32(static_cast<std::uint32_t>(values.saturated) |
+		(static_cast<std::uint32_t>(values.incomplete_input) << 1));
+	writer.u32(0);
+	return writer.take();
+}
+
+EnergyValues decode_energy_values(ByteReader &reader)
+{
+	EnergyValues result;
+	result.active_import = read_group<MicroWattHours>(reader);
+	result.active_export = read_group<MicroWattHours>(reader);
+	result.apparent = read_group<MicroVoltAmpereHours>(reader);
+	for (auto &quadrant : result.reactive_quadrants)
+		quadrant = read_group<MicroVarHours>(reader);
+	result.session_id = reader.u64();
+	result.last_sample_index = reader.u64();
+	result.accepted_samples = reader.u64();
+	result.skipped_samples = reader.u64();
+	result.accepted_blocks = reader.u32();
+	result.skipped_blocks = reader.u32();
+	result.reset_epoch = reader.u64();
+	const auto flags = reader.u32();
+	if ((flags & ~0x3u) != 0 || reader.u32() != 0)
+		throw std::invalid_argument("invalid ENERGY snapshot flags");
+	result.saturated = (flags & 1u) != 0;
+	result.incomplete_input = (flags & 2u) != 0;
+	return result;
+}
+
+std::vector<std::byte> encode_demand_values(const DemandValues &values)
+{
+	ByteWriter writer;
+	write_group(writer, values.current_active);
+	write_group(writer, values.import_peak);
+	write_group(writer, values.export_peak);
+	write_samples(writer, values.import_peak_sample);
+	write_samples(writer, values.export_peak_sample);
+	writer.u64(values.session_id);
+	writer.u64(values.last_sample_index);
+	writer.u64(values.interval_target_sample);
+	writer.u32(values.source_interval_count);
+	writer.u32(values.source_status);
+	writer.u64(values.peak_reset_epoch);
+	writer.u32(static_cast<std::uint32_t>(values.time_aligned) |
+		(static_cast<std::uint32_t>(values.contaminated) << 1) |
+		(static_cast<std::uint32_t>(values.boundary_valid) << 2) |
+		(static_cast<std::uint32_t>(values.saturated) << 3) |
+		(static_cast<std::uint32_t>(values.incomplete_input) << 4));
+	writer.u32(0);
+	return writer.take();
+}
+
+DemandValues decode_demand_values(ByteReader &reader)
+{
+	DemandValues result;
+	result.current_active = read_group<MicroWatts>(reader);
+	result.import_peak = read_group<MicroWatts>(reader);
+	result.export_peak = read_group<MicroWatts>(reader);
+	result.import_peak_sample = read_samples(reader);
+	result.export_peak_sample = read_samples(reader);
+	result.session_id = reader.u64();
+	result.last_sample_index = reader.u64();
+	result.interval_target_sample = reader.u64();
+	result.source_interval_count = reader.u32();
+	result.source_status = reader.u32();
+	result.peak_reset_epoch = reader.u64();
+	const auto flags = reader.u32();
+	if ((flags & ~0x1fu) != 0 || reader.u32() != 0)
+		throw std::invalid_argument("invalid DEMAND snapshot flags");
+	result.time_aligned = (flags & 1u) != 0;
+	result.contaminated = (flags & 2u) != 0;
+	result.boundary_valid = (flags & 4u) != 0;
+	result.saturated = (flags & 8u) != 0;
+	result.incomplete_input = (flags & 16u) != 0;
+	return result;
 }
 
 MeterRecordStreamClient::MeterRecordStreamClient(std::string path)
@@ -269,6 +446,90 @@ void MeterRecordStreamClient::apply_policy(DatabaseStoragePolicy policy)
 	ByteReader reader(response.payload);
 	require_ok(reader);
 	reader.require_finished();
+}
+
+std::optional<EnergyValues> MeterRecordStreamClient::energy() const
+{
+	auto response = request(Command::get_energy_snapshot);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const bool present = reader.u8() != 0;
+	if (reader.u8() != 0 || reader.u16() != 0)
+		throw std::runtime_error("invalid ENERGY snapshot presence header");
+	if (!present) {
+		reader.require_finished();
+		return std::nullopt;
+	}
+	auto result = decode_energy_values(reader);
+	reader.require_finished();
+	return result;
+}
+
+std::optional<DemandValues> MeterRecordStreamClient::demand() const
+{
+	auto response = request(Command::get_demand_snapshot);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const bool present = reader.u8() != 0;
+	if (reader.u8() != 0 || reader.u16() != 0)
+		throw std::runtime_error("invalid DEMAND snapshot presence header");
+	if (!present) {
+		reader.require_finished();
+		return std::nullopt;
+	}
+	auto result = decode_demand_values(reader);
+	reader.require_finished();
+	return result;
+}
+
+namespace {
+
+std::vector<std::byte> encode_reset_request(
+	const energy_ledger::ResetRequest &reset)
+{
+	ByteWriter writer;
+	writer.u64(reset.expected_epoch);
+	writer.i64(reset.requested_at_nanoseconds);
+	write_string(writer, reset.idempotency_key);
+	write_string(writer, reset.actor);
+	write_string(writer, reset.request_id);
+	return writer.take();
+}
+
+energy_ledger::ResetResult decode_reset_result(ByteReader &reader)
+{
+	energy_ledger::ResetResult result;
+	result.epoch = reader.u64();
+	result.replayed = reader.u8() != 0;
+	if (reader.u8() != 0 || reader.u16() != 0)
+		throw std::runtime_error("invalid reset response reserved field");
+	return result;
+}
+
+} // namespace
+
+energy_ledger::ResetResult MeterRecordStreamClient::reset_energy(
+	const energy_ledger::ResetRequest &reset)
+{
+	auto response = request(Command::reset_energy,
+		encode_reset_request(reset), 10000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	auto result = decode_reset_result(reader);
+	reader.require_finished();
+	return result;
+}
+
+energy_ledger::ResetResult MeterRecordStreamClient::reset_demand_peaks(
+	const energy_ledger::ResetRequest &reset)
+{
+	auto response = request(Command::reset_demand_peaks,
+		encode_reset_request(reset), 10000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	auto result = decode_reset_result(reader);
+	reader.require_finished();
+	return result;
 }
 
 } // namespace msap1::meter_stream

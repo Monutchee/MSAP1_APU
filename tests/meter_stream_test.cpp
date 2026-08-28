@@ -584,6 +584,97 @@ msap1::MeterUpdate fundamental_update()
 	return update;
 }
 
+msap1::MeterUpdate energy_demand_history_update()
+{
+	msap1::MeterUpdate update;
+	update.period = msap1::MeasurementPeriod::Min10;
+	update.kind = msap1::RecordKind::demand;
+	update.sequence = 600;
+	update.configuration_generation = 9;
+	update.energy.emplace();
+	update.demand.emplace();
+	update.energy->reset_epoch = 41;
+	update.demand->peak_reset_epoch = 42;
+	msap1::EnergyCounterArray counters{};
+	for (std::size_t index = 0; index < counters.size(); ++index)
+		counters[index] = 9'007'199'254'740'993ll +
+			static_cast<std::int64_t>(index);
+	msap1::assign_energy_counters(*update.energy, counters);
+	const auto stamp = [](auto &group, std::uint64_t sequence) {
+		for (auto *reading : {&group.phase_a, &group.phase_b,
+			&group.phase_c, &group.total}) {
+			reading->quality = msap1::MeasurementQuality::valid;
+			reading->source_sequence = sequence;
+		}
+	};
+	stamp(update.energy->active_import, 599);
+	stamp(update.energy->active_export, 599);
+	stamp(update.energy->apparent, 599);
+	for (auto &quadrant : update.energy->reactive_quadrants)
+		stamp(quadrant, 599);
+	msap1::DemandValueArray current{-11, 12, -13, 14};
+	msap1::DemandValueArray import{21, 22, 23, 24};
+	msap1::DemandValueArray export_values{31, 32, 33, 34};
+	msap1::assign_demand_values(update.demand->current_active, current);
+	msap1::assign_demand_values(update.demand->import_peak, import);
+	msap1::assign_demand_values(update.demand->export_peak, export_values);
+	stamp(update.demand->current_active, 600);
+	stamp(update.demand->import_peak, 600);
+	stamp(update.demand->export_peak, 600);
+	return update;
+}
+
+void historian_persists_atomic_m17_boundary_snapshots()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-m17-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::memory, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
+	};
+	const msap1::history::HistoryQuery query{
+		.period = msap1::MeasurementPeriod::Min10,
+		.attributes = {
+			mnc::meter::MeterAttributeId::ActiveImportEnergyA,
+			mnc::meter::MeterAttributeId::ReactiveEnergyQuadrantIVTotal,
+			mnc::meter::MeterAttributeId::CurrentActiveDemandA,
+			mnc::meter::MeterAttributeId::ExportDemandPeakTotal,
+		},
+		.start_nanoseconds = 0,
+		.end_nanoseconds = 700'000'000'000ll,
+		.limit = 64,
+	};
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		history.append(energy_demand_history_update(), 600,
+			600'000'000'000ll);
+		const auto points = history.query(query);
+		require(points.size() == 4,
+			"M17 ten-minute history did not commit all selected groups atomically");
+		require(points.front().value == 9'007'199'254'740'993ll,
+			"M17 historian narrowed an energy value above JavaScript safe integer");
+		for (const auto &point : points) {
+			const bool energy = point.attribute <=
+				mnc::meter::MeterAttributeId::ReactiveEnergyQuadrantIVTotal;
+			require(point.reset_epoch == (energy ? 41u : 42u),
+				"M17 historian lost an energy/demand reset epoch");
+		}
+	}
+	{
+		msap1::history::MeterHistoryStore reopened(path, policies);
+		require(reopened.query(query).size() == 4,
+			"M17 energy/demand boundary snapshot was not persistent");
+	}
+	remove_database(path);
+}
+
 void historian_wal_stays_bounded_under_sustained_appends()
 {
 	using D = mnc::meter_stream::DatabaseDataset;
@@ -997,6 +1088,7 @@ int main()
 	historian_wal_stays_bounded_under_sustained_appends();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
+	historian_persists_atomic_m17_boundary_snapshots();
 	historian_status_reports_incremental_storage_and_indexed_range();
 	historian_commits_harmonics_as_one_durable_family();
 	historian_enforces_retention_without_rescanning();
