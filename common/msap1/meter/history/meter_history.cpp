@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace msap1::history {
@@ -169,6 +170,49 @@ FROM harmonic_families WHERE period=?
 	usage.bind(1, period_value(period));
 	(void)usage.step();
 	return static_cast<std::uint64_t>(usage.integer(0));
+}
+
+struct DatasetRange {
+	std::uint64_t count = 0;
+	std::optional<std::int64_t> oldest;
+	std::optional<std::int64_t> newest;
+};
+
+DatasetRange dataset_range(Database &database, MeasurementPeriod period,
+	bool harmonic)
+{
+	const std::string table = harmonic
+		? "harmonic_families"
+		: "measurement_blocks";
+	DatasetRange result;
+	auto count = database.prepare(
+		"SELECT COUNT(*) FROM " + table + " WHERE period=?");
+	count.bind(1, period_value(period));
+	(void)count.step();
+	result.count = static_cast<std::uint64_t>(count.integer(0));
+	if (result.count == 0)
+		return result;
+
+	/*
+	 * MIN()/MAX() combined with COUNT() scans every matching index entry.
+	 * Keep the exact count, but obtain each endpoint with an ordered LIMIT so
+	 * the (period, measured_at_ns) covering index can seek directly to it.
+	 * This matters for forever-retained aggregate history: on the target an
+	 * 825k-row combined range scan took 640 ms while both seeks took <10 ms.
+	 */
+	auto boundary = [&](std::string_view direction) {
+		auto statement = database.prepare("SELECT measured_at_ns FROM " +
+			table + " WHERE period=? ORDER BY measured_at_ns " +
+			std::string(direction) + " LIMIT 1");
+		statement.bind(1, period_value(period));
+		if (!statement.step())
+			throw std::runtime_error(
+				"historian range changed while status lock was held");
+		return statement.integer(0);
+	};
+	result.oldest = boundary("ASC");
+	result.newest = boundary("DESC");
+	return result;
 }
 
 std::uint64_t delete_oldest_harmonic_families(Database &database,
@@ -827,23 +871,19 @@ HistorianStatus MeterHistoryStore::status() const
 			: period_for(policy.dataset);
 		auto &database = harmonic ? impl_->database_for(policy.dataset)
 			: impl_->database(period);
-		auto range = database.prepare(harmonic
-			? "SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
-			  "FROM harmonic_families WHERE period=?"
-			: "SELECT COUNT(*),MIN(measured_at_ns),MAX(measured_at_ns) "
-			  "FROM measurement_blocks WHERE period=?");
-		range.bind(1, period_value(period)); (void)range.step();
+		const auto range = dataset_range(database, period, harmonic);
 		HistorianStatus::DatasetStatus item;
 		item.dataset = policy.dataset; item.backend = policy.backend;
-		item.block_count = static_cast<std::uint64_t>(range.integer(0));
+		item.block_count = range.count;
 		result.block_count += item.block_count;
-		if (item.block_count != 0) {
-			item.oldest_nanoseconds = range.integer(1);
-			item.newest_nanoseconds = range.integer(2);
-		}
+		item.oldest_nanoseconds = range.oldest;
+		item.newest_nanoseconds = range.newest;
+		/* append() and the retention paths maintain these exact totals after
+		 * their one-time seed. Reusing them here prevents every UI health poll
+		 * from joining and counting all measurement_values in retained history. */
 		item.storage_bytes = harmonic
-			? logical_harmonic_bytes(database, period)
-			: logical_period_bytes(database, period);
+			? impl_->tracked_harmonic_bytes(database, period)
+			: impl_->tracked_bytes(database, period);
 		if (policy.backend == mnc::meter_stream::StorageBackend::memory)
 			result.storage_bytes += item.storage_bytes;
 		result.datasets.push_back(item);

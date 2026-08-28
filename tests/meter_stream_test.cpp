@@ -627,6 +627,57 @@ void historian_preserves_quality_and_storage_routing()
 	remove_database(path);
 }
 
+void historian_status_reports_incremental_storage_and_indexed_range()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-status-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::persistent, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
+	};
+	auto verify = [](const msap1::history::HistorianStatus &status) {
+		const auto basic = std::ranges::find_if(status.datasets,
+			[](const auto &item) { return item.dataset == D::basic; });
+		require(basic != status.datasets.end(),
+			"basic dataset is missing from historian status");
+		require(basic->block_count == 3,
+			"historian status block count drifted from committed rows");
+		require(basic->storage_bytes == 3u * (96u + 8u * 40u),
+			"historian status did not use exact incremental storage bytes");
+		require(basic->oldest_nanoseconds == 10'000'000'000ll &&
+			basic->newest_nanoseconds == 30'000'000'000ll,
+			"historian status did not report exact indexed time bounds");
+	};
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		for (const auto &[cursor, measured_at] :
+		     std::array<std::pair<std::uint64_t, std::int64_t>, 3>{
+			     {{1, 30'000'000'000ll}, {2, 10'000'000'000ll},
+			      {3, 20'000'000'000ll}}}) {
+			auto update = fundamental_update();
+			update.sequence = cursor;
+			history.append(update, cursor, measured_at);
+		}
+		verify(history.status());
+		verify(history.status());
+	}
+	{
+		/* A restart drops only the in-process counter. Its one-time seed must
+		 * recover the same exact total; later status polls reuse that value. */
+		msap1::history::MeterHistoryStore history(path, policies);
+		verify(history.status());
+		verify(history.status());
+	}
+	remove_database(path);
+}
+
 void historian_commits_harmonics_as_one_durable_family()
 {
 	using D = mnc::meter_stream::DatabaseDataset;
@@ -899,6 +950,7 @@ int main()
 	historian_wal_stays_bounded_under_sustained_appends();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
+	historian_status_reports_incremental_storage_and_indexed_range();
 	historian_commits_harmonics_as_one_durable_family();
 	historian_enforces_retention_without_rescanning();
 	historian_maintenance_preserves_explicit_clear_boundary();
