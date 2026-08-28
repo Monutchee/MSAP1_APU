@@ -61,7 +61,25 @@ struct MeterAttributeDto {
 	std::string unit;
 	bool valid;
 	double value;
+	std::string quality;
+	std::uint64_t source_sequence;
 };
+
+/** Stable JSON spelling for the provider's complete electrical quality. */
+[[nodiscard]] inline const char *
+reading_quality_name(mnc::meter::ReadingQuality quality)
+{
+	switch (quality) {
+	case mnc::meter::ReadingQuality::Unavailable: return "unavailable";
+	case mnc::meter::ReadingQuality::Valid: return "valid";
+	case mnc::meter::ReadingQuality::Invalid: return "invalid";
+	case mnc::meter::ReadingQuality::OutOfRange: return "out_of_range";
+	case mnc::meter::ReadingQuality::TimedOut: return "timed_out";
+	case mnc::meter::ReadingQuality::ArithmeticError:
+		return "arithmetic_error";
+	}
+	return "unavailable";
+}
 
 /** Convert a strongly typed provider reading to its public engineering unit. */
 [[nodiscard]] inline MeterAttributeDto attribute_dto(
@@ -109,7 +127,36 @@ struct MeterAttributeDto {
 		break;
 	}
 	return {std::string(descriptor.key), unit,
-		reading.quality == mnc::meter::ReadingQuality::Valid, value};
+		reading.quality == mnc::meter::ReadingQuality::Valid, value,
+		reading_quality_name(reading.quality), reading.source_sequence};
+}
+
+/**
+ * A typed snapshot is assembled from a fundamental record and its derived
+ * siblings.  During the very short interval between those records, the store
+ * can contain a new fundamental together with the previous derived values.
+ * Consumers that require one atomic family must wait until every returned
+ * derived value carries the snapshot sequence.
+ */
+[[nodiscard]] inline bool
+derived_record_complete(const mnc::meter::MeterSnapshot &snapshot)
+{
+	using Id = mnc::meter::MeterAttributeId;
+	bool has_derived_value = false;
+	for (const auto &reading : snapshot.values) {
+		switch (reading.attribute.id) {
+		case Id::Frequency: case Id::VanRms: case Id::VbnRms:
+		case Id::VcnRms: case Id::IaRms: case Id::IbRms:
+		case Id::IcRms: case Id::InRms:
+			continue;
+		default:
+			has_derived_value = true;
+			if (reading.source_sequence != snapshot.sequence)
+				return false;
+			break;
+		}
+	}
+	return has_derived_value;
 }
 
 /** JSON name for the acquisition daemon's measurement time quality. */
@@ -188,6 +235,9 @@ struct MeterAggregateDto {
 		channels;
 	std::vector<MeterAttributeDto> attributes;
 	MeterAggregateFrequencyDto frequency;
+	bool record_complete = false;
+	std::optional<std::int64_t> utc_start_nanoseconds;
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
 /**
@@ -230,6 +280,9 @@ struct MeterTenMinuteDto {
 	bool time_aligned = false;
 	bool contaminated = false;
 	bool boundary_valid = false;
+	bool record_complete = false;
+	std::optional<std::int64_t> utc_start_nanoseconds;
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 };
 
 /** No aligned ten-minute interval has closed since acquisition started. */
@@ -288,7 +341,7 @@ meter_long_interval_dto(const msap1::MeterSnapshotResponse &response,
 		static_cast<std::uint32_t>(std::min<std::int64_t>(
 			age_ms64, std::numeric_limits<std::uint32_t>::max())), {}, {},
 		false, false, 0, 0, 0, std::nullopt, std::nullopt, 0,
-		false, false, false,
+		false, false, false, false, std::nullopt, std::nullopt,
 	};
 	result.open_interval = expected_period ==
 		mnc::meter::MeasurementPeriod::Min10Live ||
@@ -340,6 +393,10 @@ meter_long_interval_dto(const msap1::MeterSnapshotResponse &response,
 			break;
 		}
 	}
+	result.record_complete = derived_record_complete(snapshot);
+	result.utc_start_nanoseconds = snapshot.timing->utc_start_nanoseconds;
+	result.utc_uncertainty_nanoseconds =
+		snapshot.timing->utc_uncertainty_nanoseconds;
 	return result;
 }
 
@@ -463,6 +520,9 @@ meter_aggregate_dto(const msap1::MeterSnapshotResponse &response)
 		{},
 		{},
 		{static_cast<std::uint32_t>(frequency->value), true},
+		false,
+		std::nullopt,
+		std::nullopt,
 	};
 	const std::array<Id, msap1::meter_channel_count> channel_ids{
 		Id::IaRms, Id::IbRms, Id::IcRms, Id::InRms,
@@ -495,6 +555,10 @@ meter_aggregate_dto(const msap1::MeterSnapshotResponse &response)
 			break;
 		}
 	}
+	result.record_complete = derived_record_complete(snapshot);
+	result.utc_start_nanoseconds = timing.utc_start_nanoseconds;
+	result.utc_uncertainty_nanoseconds =
+		timing.utc_uncertainty_nanoseconds;
 	return result;
 }
 

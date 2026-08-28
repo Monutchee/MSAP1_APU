@@ -134,6 +134,9 @@
   waveform defaults must be saved through the settings authority and
   hot-applied by acquisition. `mnc adc rate --sps` remains an explicitly
   temporary diagnostic override.
+- `metering.measurement_topology` is presentation-only `wye`/`delta` metadata.
+  It controls L-N/L-L labels and operator guidance but must not change the
+  existing sequence algorithms or cross the RPU/PL configuration ABI.
 - Source and simulator changes must use the daemon's coordinated stop,
   configure, readback, rollback, DMA re-arm, and restart transaction. Convert
   engineering RMS settings to signed-24-bit peak counts before crossing RPMsg;

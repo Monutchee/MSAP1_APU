@@ -4,7 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+
+#include <glaze/glaze.hpp>
 
 namespace {
 
@@ -17,6 +20,14 @@ void require(bool condition, const char *message)
 {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+
+std::string json(const auto &value)
+{
+	auto text = glz::write_json(value);
+	if (!text)
+		throw std::runtime_error("failed to serialize the DTO");
+	return *text;
 }
 
 mnc::meter::MeterAttributeValue value(Id id, Unit unit,
@@ -49,6 +60,8 @@ msap1::MeterSnapshotResponse response(
 	timing.sample_count = sample_count;
 	timing.cycle_count = cycle_count;
 	timing.nominal_frequency_hz = 60;
+	timing.utc_start_nanoseconds = 1'788'000'200'200'000'000LL;
+	timing.utc_uncertainty_nanoseconds = 500;
 	result.snapshot.timing = timing;
 	result.snapshot.values = {
 		value(Id::VanRms, Unit::MicroVolts, 120'000'000),
@@ -87,6 +100,7 @@ void projects_the_finalized_two_hour_snapshot()
 		mnc::meter::MeasurementPeriod::Hour2, 230'400'000, 432'000));
 	require(projected.has_value(), "two-hour snapshot was unavailable");
 	require(projected->sequence == 42 &&
+		projected->record_complete &&
 		projected->sample_count == 230'400'000 &&
 		projected->cycle_count == 432'000 &&
 		projected->channels[6].valid &&
@@ -111,7 +125,10 @@ void projects_the_finalized_ten_minute_snapshot()
 		projected->sample_count == 19'200'000 &&
 		projected->cycle_count == 36'000 &&
 		projected->nominal_frequency_hz == 60 &&
-		projected->time_quality == "synchronized",
+		projected->time_quality == "synchronized" &&
+		projected->utc_start_nanoseconds ==
+			1'788'000'200'200'000'000LL &&
+		projected->utc_uncertainty_nanoseconds == 500,
 		"ten-minute identity or provenance was changed");
 	require(projected->channels[0].valid &&
 		projected->channels[0].rms == 1.0 &&
@@ -124,6 +141,8 @@ void projects_the_finalized_ten_minute_snapshot()
 		projected->attributes[0].value == 208.0 &&
 		projected->attributes[1].key == "power.active.total" &&
 		projected->attributes[1].value == 720.0 &&
+		projected->attributes[1].quality == "valid" &&
+		projected->attributes[1].source_sequence == 42 &&
 		attribute(*projected, "phase.angle.voltage.b") &&
 		attribute(*projected, "phase.angle.voltage.b")->valid &&
 		attribute(*projected, "phase.angle.voltage.b")->value == 240.0 &&
@@ -131,10 +150,22 @@ void projects_the_finalized_ten_minute_snapshot()
 		attribute(*projected, "phase.angle.current.c")->valid &&
 		attribute(*projected, "phase.angle.current.c")->value == 110.0,
 		"derived attributes were not projected in engineering units");
+
+	auto partial = response();
+	partial.snapshot.values.back().source_sequence = 41;
+	const auto incomplete = msap1::web::api::meter_ten_minute_dto(partial);
+	require(incomplete && !incomplete->record_complete,
+		"a mixed-sequence ten-minute family was marked complete");
 }
 
 void absence_and_malformed_period_are_distinct()
 {
+	require(json(msap1::web::api::MeterTenMinuteUnavailableDto{}) ==
+			R"({"available":false})" &&
+		json(msap1::web::api::MeterTwoHourUnavailableDto{}) ==
+			R"({"available":false})",
+		"long-interval pending response shape changed");
+
 	auto missing = response();
 	missing.has_snapshot = false;
 	require(!msap1::web::api::meter_ten_minute_dto(missing),

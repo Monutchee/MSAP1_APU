@@ -1,8 +1,9 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "metering": {
     "sample_rate_hz": 128000,
     "nominal_frequency_hz": 60,
+    "measurement_topology": "wye",
     "system_nominal_voltage_v": 120.0,
     "rms": {
       "window_ms": 200,

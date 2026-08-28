@@ -102,6 +102,7 @@ struct MeterReadingsDto {
 	std::vector<MeterAttributeDto> attributes;
 	/* Absent (omitted from the JSON) until timing provenance exists. */
 	std::optional<MeterTimingDto> timing;
+	bool record_complete = false;
 };
 
 /* time_quality_name(), the channel name table, the per-channel unit, and the
@@ -134,6 +135,8 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 		 diagnostics.frequency.cycles_used},
 		{},
 		{},
+		{},
+		false,
 	};
 	/* Non-channel catalog attributes (VLL, power, PF): everything the
 	 * provider supplies beyond the per-channel RMS and frequency. */
@@ -148,6 +151,7 @@ MeterReadingsDto readings(const msap1::MeterSnapshotResponse &response)
 			result.attributes.push_back(attribute_dto(reading));
 		}
 	}
+	result.record_complete = derived_record_complete(snapshot);
 
 	/* Prefer the timing carried by the typed snapshot. The diagnostics timing
 	 * is retained as a compatibility fallback and supplies the product-specific
@@ -459,8 +463,10 @@ webengine::Response get_meter_health(AppContext &app,
 /**
  * @brief GET /api/v1/meter/readings (Viewer)
  *
- * Returns the newest coherent meter record: per-channel RMS and mean
- * values, capture statistics, and the frequency measurement.
+ * Returns the newest meter snapshot: per-channel RMS and mean values, capture
+ * statistics, frequency, and the derived sibling catalog. `record_complete`
+ * tells atomic-family consumers when every derived source sequence has
+ * converged on the top-level sequence.
  *
  * @return 200 with the readings document, or 503 when capture is stopped,
  *         no record is available yet, or the daemon is unreachable.
