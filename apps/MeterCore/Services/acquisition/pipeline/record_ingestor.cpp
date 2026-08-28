@@ -452,38 +452,44 @@ bool MeterRecordIngestor::track_two_hour_continuity(
  * rejection dumps the raw words so the truncation-point distribution
  * localizes the failing PL stage.
  *
- * Rate limited to one entry per 2 s across all reasons: the observed fault
- * rejects one record per 3 s window (each passes), while a storm stays
- * bounded below the record rate. Suppressed rejections are counted and
- * reported on the next emitted entry, so the journal can never falsely
- * confirm a one-per-window pattern.
+ * Rate limited to one entry per 2 s within each interval category: the
+ * observed fault rejects one record per 3 s window (each passes), while a
+ * storm stays bounded below the record rate. Keeping independent limiters
+ * ensures suppressed 10/12-cycle records can never be reported as belonging
+ * to a visible 150/180-cycle, ten-minute, or two-hour warning.
  */
 void MeterRecordIngestor::log_rejected_record(const std::string &reason,
 	const char *event, const msap1::MeterRecord &record)
 {
+	const auto interval = record_interval_identity(record);
+	auto &log_state = reject_log_states_[
+		static_cast<std::size_t>(interval.category)];
 	const auto now = Clock::now();
-	if (last_reject_log_ &&
-	    now - *last_reject_log_ < std::chrono::seconds(2)) {
-		++suppressed_reject_logs_;
+	if (log_state.last_log &&
+	    now - *log_state.last_log < std::chrono::seconds(2)) {
+		++log_state.suppressed;
 		return;
 	}
-	last_reject_log_ = now;
-	const auto suppressed = suppressed_reject_logs_;
-	suppressed_reject_logs_ = 0;
+	log_state.last_log = now;
+	const auto suppressed = log_state.suppressed;
+	log_state.suppressed = 0;
 
 	const auto header_words = header_words_hex(record);
 	const auto sample_index_words = sample_index_words_hex(record);
 	log_message(dma_log, mnc::logging::Priority::warning,
-		"meter record rejected: " + reason +
+		"meter record rejected: interval=" +
+			std::string(interval.label) + "; " + reason +
 			"; seq=" + std::to_string(record.word(3)) +
 			" words[0..15]=" + header_words +
 			" words[9..10]=" + sample_index_words +
 			(suppressed != 0
 				 ? " (+" + std::to_string(suppressed) +
-					   " rejections suppressed)"
+					   " same-interval rejections suppressed)"
 				 : ""),
 		event,
 		{{"MNC_REJECT_REASON", reason},
+		 {"MNC_INTERVAL_CATEGORY", std::string(interval.code)},
+		 {"MNC_INTERVAL_LABEL", std::string(interval.label)},
 		 {"MNC_SEQUENCE", std::to_string(record.word(3))},
 		 {"MNC_RECORD_FORMAT", hex_word(record.word(1))},
 		 {"MNC_CONFIGURATION_GENERATION",
@@ -751,18 +757,24 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		update = decoders_.decode(record, received_at);
 	} catch (const std::exception &error) {
 		++invalid_records_;
+		const auto interval = record_interval_identity(record);
 		/* Same raw-word dump as the silent rejection paths: a decoder
 		 * rejection is the partially-emitted record whose truncation
 		 * landed past the sequence word, and its intact/zeroed word
 		 * boundary is the forensic payload. Not rate limited — this
 		 * path was always logged and is rare. */
 		log_message(dma_log, mnc::logging::Priority::warning,
-			"meter record rejected by decoder: " +
+			"meter record rejected by decoder: interval=" +
+				std::string(interval.label) + "; " +
 				std::string(error.what()) +
 				"; words[0..15]=" + header_words_hex(record) +
 				" words[9..10]=" + sample_index_words_hex(record),
 			"meter_record_decode_rejected",
-			{{"MNC_SEQUENCE", std::to_string(record.sequence())},
+			{{"MNC_REJECT_REASON", error.what()},
+			 {"MNC_INTERVAL_CATEGORY", std::string(interval.code)},
+			 {"MNC_INTERVAL_LABEL", std::string(interval.label)},
+			 {"MNC_SEQUENCE", std::to_string(record.sequence())},
+			 {"MNC_RECORD_FORMAT", hex_word(record.record_format())},
 			 {"MNC_HEADER_WORDS", header_words_hex(record)},
 			 {"MNC_SAMPLE_INDEX_WORDS",
 			  sample_index_words_hex(record)}});

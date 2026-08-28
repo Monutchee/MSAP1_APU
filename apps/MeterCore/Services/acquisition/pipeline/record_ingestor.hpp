@@ -6,6 +6,7 @@
  */
 
 #include "msap1/acquisition/dma/meter_record_source.hpp"
+#include "pipeline/record_interval_category.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
 #include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/meter_config.hpp"
@@ -321,12 +322,15 @@ private:
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
 	std::uint64_t last_transport_overruns_ = 0;
-	/* Rate limit for configuration-mismatch forensics: the observed
-	 * one-rejection-per-window fault passes, a total-mismatch storm stays
-	 * bounded below the record rate, and anything suppressed is counted
-	 * and reported on the next emitted entry. */
-	std::optional<Clock::time_point> last_reject_log_;
-	std::uint64_t suppressed_reject_logs_ = 0;
+	/* Rate-limit independently per interval category. A storm stays bounded,
+	 * while a 10/12-cycle rejection can never hide or absorb the count for a
+	 * 150/180-cycle, ten-minute, or two-hour rejection. */
+	struct RejectLogState {
+		std::optional<Clock::time_point> last_log{};
+		std::uint64_t suppressed = 0;
+	};
+	std::array<RejectLogState, record_interval_category_count>
+		reject_log_states_{};
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache), the newest accepted aggregate
 	 * sequence, the newest accepted ten-minute sequence, and the newest

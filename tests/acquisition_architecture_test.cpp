@@ -1,9 +1,11 @@
 #include "msap1/acquisition/dma/meter_record_source.hpp"
 #include "msap1/acquisition/rpu/rpu_control.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "pipeline/record_interval_category.hpp"
 #include "pipeline/record_ingestor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
@@ -18,6 +20,46 @@ void require(bool condition, const char *message)
 {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+
+void rejection_interval_categories_cover_meter_tiers()
+{
+	using msap1::acquisition::daemon::record_interval_identity;
+	struct Case {
+		std::uint32_t format;
+		std::uint32_t harmonic_period;
+		std::string_view code;
+		std::string_view label;
+	};
+	constexpr std::array cases{
+		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_aggregate_format, 0, "cycles_150_180",
+			"150/180-cycle"},
+		Case{msap1::meter_ten_minute_open_format, 0, "minutes_10_live",
+			"10-minute live partial"},
+		Case{msap1::meter_harmonic_aggregate_format, 1,
+			"cycles_150_180", "150/180-cycle"},
+		Case{msap1::meter_harmonic_aggregate_format, 2, "minutes_10",
+			"10-minute"},
+		Case{msap1::meter_harmonic_aggregate_format, 3, "hours_2",
+			"2-hour"},
+	};
+
+	for (const auto &test : cases) {
+		msap1::MeterRecord record{};
+		record.words[1] = test.format;
+		record.words[14] = test.harmonic_period;
+		const auto identity = record_interval_identity(record);
+		require(identity.code == test.code && identity.label == test.label,
+			"meter record interval category is wrong");
+	}
+
+	msap1::MeterRecord malformed_aggregate{};
+	malformed_aggregate.words[1] = msap1::meter_harmonic_aggregate_format;
+	const auto unknown = record_interval_identity(malformed_aggregate);
+	require(unknown.code == "unknown" && unknown.label == "unknown interval",
+		"malformed harmonic aggregate period was guessed");
 }
 
 class FakeMeterSource final : public msap1::acquisition::MeterRecordSource {
@@ -1028,6 +1070,7 @@ void malformed_and_unknown_requests_are_rejected()
 
 int main()
 {
+	rejection_interval_categories_cover_meter_tiers();
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
 	ingestor_publishes_only_complete_harmonic_families();
