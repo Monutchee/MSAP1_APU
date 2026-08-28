@@ -202,18 +202,17 @@
   Only a bit-3 record may have a physical span shorter than its summed
   contribution count. The word layout is pinned in
   `docs/System_Architecture/TIMING_MODEL.md`.
-- The newest aggregate is cached beside — never inside — the basic latest
-  record, travels in `InfoResponse` behind its own presence, age, and
-  time-quality fields (acquisition IPC version 19), and is published by
-  `GET /api/v1/meter/aggregate`. The aggregate's `time_quality` is the
-  provenance stamped at ingest (`aggregate_time_quality`), never
-  `InfoResponse::time_quality`, which is the daemon's live clock state at
-  reply time. `GET /api/v1/meter/readings` keeps
-  reporting basic records only. The aggregate frequency is informative
+- The newest raw aggregate remains cached beside — never inside — the basic
+  latest record and travels in `InfoResponse` for compatibility diagnostics.
+  `GET /api/v1/meter/aggregate` reads the typed `Cycles150_180` snapshot so
+  the fundamental, power, phasor, and unbalance siblings are exposed from one
+  period view. Its `time_quality` is the provenance stamped at ingest, never
+  the daemon's live clock state at reply time. `GET /api/v1/meter/readings`
+  keeps reporting basic records only. The aggregate frequency is informative
   only: the standardized Class A frequency product is defined over its own
   10 s interval, which is not implemented, so the decoder keeps that
-  reading's quality `unavailable` and the API publishes `informative`
-  rather than a validity flag.
+  reading's quality `unavailable` and the API publishes `informative` rather
+  than a validity flag.
 
 ## Build and verification
 

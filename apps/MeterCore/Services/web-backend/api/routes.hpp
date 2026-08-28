@@ -255,7 +255,7 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	 "Latest RMS and frequency readings"},
 	{webengine::http::verb::get, "/api/v1/meter/aggregate",
 	 webengine::Role::Viewer, &get_meter_aggregate,
-	 "Newest 150/180-cycle aggregate RMS values"},
+	 "Newest 150/180-cycle aggregate meter values"},
 	{webengine::http::verb::get, "/api/v1/meter/minutes-10",
 	 webengine::Role::Viewer, &get_meter_ten_minute,
 	 "Newest clock-aligned ten-minute aggregate"},

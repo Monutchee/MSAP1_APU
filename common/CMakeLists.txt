@@ -429,8 +429,8 @@ if(BUILD_TESTING)
 		-Wall -Wextra -Wpedantic)
 	add_test(NAME harmonic_decode_test COMMAND harmonic_decode_test)
 
-    # GET /api/v1/meter/aggregate is pinned by its JSON payload, and the
-    # projection that renders it is deliberately WebEngine-free, so the
+    # GET /api/v1/meter/aggregate is pinned by its typed snapshot selection
+    # and JSON payload. The projection is deliberately WebEngine-free, so the
     # contract is tested without linking the HTTP stack.
     add_executable(meter_aggregate_route_test
         ${PROJECT_SOURCE_DIR}/tests/meter_aggregate_route_test.cpp)

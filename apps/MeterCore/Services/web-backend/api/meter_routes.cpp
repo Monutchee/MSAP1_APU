@@ -485,8 +485,9 @@ webengine::Response get_meter_readings(AppContext &app,
  * @brief GET /api/v1/meter/aggregate (Viewer)
  *
  * Returns the newest 150/180-cycle aggregate: 15 consecutive eligible basic
- * blocks folded by the PL into one cycle-defined interval (150 cycles at a
- * 50 Hz nominal, 180 at 60 Hz).
+ * blocks folded by R5C1 into one cycle-defined interval (150 cycles at a
+ * 50 Hz nominal, 180 at 60 Hz). The typed snapshot includes the finalized
+ * POWER/PHASOR/UNBAL sibling values for the same measurement period.
  *
  * The document always reports `available`.  There is legitimately no
  * aggregate during the first ~3 s after a start, while capture is stopped,
@@ -888,7 +889,8 @@ webengine::Response get_meter_aggregate(AppContext &app,
 					const webengine::RequestContext &)
 {
 	try {
-		const auto response = app.acquisition.information();
+		const auto response = app.acquisition.meter_snapshot(
+			meter_aggregate_snapshot_selection());
 		require_acquisition_ok(response.status);
 		const auto aggregate = meter_aggregate_dto(response);
 		if (!aggregate)

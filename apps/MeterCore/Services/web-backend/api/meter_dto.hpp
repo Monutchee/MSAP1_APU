@@ -11,7 +11,7 @@
  * units the same way; duplicating the table would let the documents drift.
  *
  * The aggregate projection is deliberately free of WebEngine: it maps one
- * acquisition InfoResponse onto the response DTO and nothing else, so the
+ * typed acquisition snapshot onto the response DTO and nothing else, so the
  * pinned JSON contract is directly testable without an HTTP stack.
  */
 
@@ -186,6 +186,7 @@ struct MeterAggregateDto {
 	std::uint32_t age_ms;
 	std::array<MeterAggregateChannelDto, msap1::meter_channel_count>
 		channels;
+	std::vector<MeterAttributeDto> attributes;
 	MeterAggregateFrequencyDto frequency;
 };
 
@@ -375,97 +376,125 @@ meter_two_hour_live_dto(const msap1::MeterSnapshotResponse &response)
 }
 
 /**
- * @brief Project the cached MTR2 record of @p response onto the aggregate DTO.
+ * Select every scalar catalog value for the 150/180-cycle endpoint.
  *
- * The record is decoded through the shared decoder registry rather than read
- * word by word, so the endpoint inherits the decoder's identity validation
- * and its aggregate RMS quality rules (an aggregation arithmetic error
- * outranks the per-channel valid mask).
- *
- * @return The rendered aggregate, or std::nullopt when none is available.
- * @throws std::invalid_argument when the cached record is malformed.
+ * Frequency is not advertised as a standardized aggregate capability, but
+ * this endpoint has always carried the R5C1 mean as an explicitly informative
+ * diagnostic. An explicit all-catalog selection preserves that field while
+ * also retrieving the POWER/PHASOR/UNBAL sibling values for the same period.
  */
-[[nodiscard]] inline std::optional<MeterAggregateDto>
-meter_aggregate_dto(const msap1::InfoResponse &response)
+[[nodiscard]] inline mnc::meter::MeterSnapshotRequest
+meter_aggregate_snapshot_selection()
 {
-	if (!response.running || !response.has_aggregate_record)
+	mnc::meter::MeterSnapshotRequest result{};
+	result.period = mnc::meter::MeasurementPeriod::Cycles150_180;
+	const auto attributes = mnc::meter::defined_attributes();
+	result.attributes.assign(attributes.begin(), attributes.end());
+	return result;
+}
+
+/** Project the typed 150/180-cycle provider view without recomputing values. */
+[[nodiscard]] inline std::optional<MeterAggregateDto>
+meter_aggregate_dto(const msap1::MeterSnapshotResponse &response)
+{
+	using Id = mnc::meter::MeterAttributeId;
+	using Quality = mnc::meter::ReadingQuality;
+	using Unit = mnc::meter::MeterUnit;
+	if (!response.running || !response.has_snapshot)
 		return std::nullopt;
-	/* One immutable registry for the process: building the decoder table
-	 * per request would allocate on every poll. */
-	static const msap1::MeterDecoderRegistry decoders =
-		msap1::MeterDecoderRegistry::with_builtin_decoders();
-	const auto &record = response.latest_aggregate_record;
-	const auto update = decoders.decode(record);
-	if (!update.aggregate_timing || !update.fundamental ||
-	    update.period != msap1::MeasurementPeriod::Cycles150_180)
+	const auto &snapshot = response.snapshot;
+	if (snapshot.period != mnc::meter::MeasurementPeriod::Cycles150_180)
 		throw std::invalid_argument(
-			"cached meter record is not a 150/180-cycle aggregate");
-	const auto &timing = *update.aggregate_timing;
-	const auto &fundamental = *update.fundamental;
+			"cached meter snapshot is not a 150/180-cycle aggregate");
+	if (!snapshot.timing || !snapshot.timing->first_sample_index ||
+	    !snapshot.timing->sample_count || !snapshot.timing->sample_rate_hz ||
+	    !snapshot.timing->cycle_count ||
+	    !snapshot.timing->nominal_frequency_hz ||
+	    !snapshot.timing->source_interval_count ||
+	    !snapshot.timing->first_source_sequence ||
+	    !snapshot.timing->last_source_sequence)
+		throw std::invalid_argument(
+			"150/180-cycle aggregate has incomplete timing provenance");
+	const auto &timing = *snapshot.timing;
+	if (*timing.source_interval_count != meter::basic_blocks_per_aggregate ||
+	    *timing.first_source_sequence >
+		std::numeric_limits<std::uint32_t>::max() ||
+	    *timing.last_source_sequence >
+		std::numeric_limits<std::uint32_t>::max())
+		throw std::invalid_argument(
+			"150/180-cycle aggregate has invalid source provenance");
 
-	/* Decoded readings, back in hardware channel order. Channel 7 (VCM)
-	 * is a debug channel the aggregate record does not measure, so it is
-	 * reported present-but-invalid rather than as a valid zero. */
-	struct ChannelSource {
-		std::int64_t micro_units;
-		bool valid;
+	const auto find = [&snapshot](Id id) -> const mnc::meter::MeterAttributeValue * {
+		const auto it = std::find_if(snapshot.values.begin(), snapshot.values.end(),
+			[id](const auto &value) {
+				return value.attribute.id == id && !value.attribute.index;
+			});
+		return it == snapshot.values.end() ? nullptr : &*it;
 	};
-	const std::array<ChannelSource, msap1::meter_channel_count> sources{{
-		{fundamental.current.phase_a.value,
-		 fundamental.current.phase_a.valid()},
-		{fundamental.current.phase_b.value,
-		 fundamental.current.phase_b.valid()},
-		{fundamental.current.phase_c.value,
-		 fundamental.current.phase_c.valid()},
-		{fundamental.current.neutral.value,
-		 fundamental.current.neutral.valid()},
-		{fundamental.voltage_ln.phase_c.value,
-		 fundamental.voltage_ln.phase_c.valid()},
-		{fundamental.voltage_ln.phase_b.value,
-		 fundamental.voltage_ln.phase_b.valid()},
-		{fundamental.voltage_ln.phase_a.value,
-		 fundamental.voltage_ln.phase_a.valid()},
-		{0, false},
-	}};
+	const auto *frequency = find(Id::Frequency);
+	if (!frequency || frequency->unit != Unit::MilliHertz ||
+	    frequency->value < 0 ||
+	    static_cast<std::uint64_t>(frequency->value) >
+		std::numeric_limits<std::uint32_t>::max())
+		throw std::invalid_argument(
+			"150/180-cycle aggregate has no informative frequency");
 
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	const auto age_ns = std::max<std::int64_t>(
+		0, now - snapshot.updated_at_nanoseconds);
+	const auto age_ms64 = age_ns / 1'000'000;
 	MeterAggregateDto result{
 		true,
-		timing.sequence,
-		timing.configuration_generation,
-		record.sample_rate_hz(),
-		timing.sample_count,
-		timing.first_sample_index,
-		timing.first_basic_sequence,
-		timing.last_basic_sequence,
-		timing.basic_block_count,
-		timing.cycle_count,
-		static_cast<std::uint32_t>(timing.nominal_frequency),
-		timing.arithmetic_error,
-		/* Measurement-time provenance, NOT the daemon's live clock
-		 * state: this is the quality stamped when THIS aggregate was
-		 * ingested, carried across IPC beside the cached record.
-		 * response.time_quality describes the moment of the HTTP
-		 * request instead, so an aggregate measured while
-		 * synchronized but read back during holdover would be
-		 * mislabelled by it. Do not swap this back. The decoded
-		 * timing above cannot supply it either — the raw PL record
-		 * holds no UTC state, so the registry decoder leaves
-		 * timing.time_quality at its default. */
-		time_quality_name(response.aggregate_time_quality),
-		response.aggregate_record_age_ms,
+		snapshot.sequence,
+		snapshot.configuration_generation,
+		*timing.sample_rate_hz,
+		*timing.sample_count,
+		*timing.first_sample_index,
+		static_cast<std::uint32_t>(*timing.first_source_sequence),
+		static_cast<std::uint32_t>(*timing.last_source_sequence),
+		*timing.source_interval_count,
+		*timing.cycle_count,
+		*timing.nominal_frequency_hz,
+		false,
+		time_quality_name(timing.quality),
+		static_cast<std::uint32_t>(std::min<std::int64_t>(
+			age_ms64, std::numeric_limits<std::uint32_t>::max())),
 		{},
-		{static_cast<std::uint32_t>(fundamental.frequency.value), true},
+		{},
+		{static_cast<std::uint32_t>(frequency->value), true},
 	};
-	for (std::size_t index = 0; index < result.channels.size(); ++index)
+	const std::array<Id, msap1::meter_channel_count> channel_ids{
+		Id::IaRms, Id::IbRms, Id::IcRms, Id::InRms,
+		Id::VcnRms, Id::VbnRms, Id::VanRms, Id::Frequency,
+	};
+	for (std::size_t index = 0; index < result.channels.size(); ++index) {
+		const auto *reading = index == 7 ? nullptr : find(channel_ids[index]);
+		const bool valid = reading && reading->quality == Quality::Valid;
 		result.channels[index] = {
-			static_cast<std::uint32_t>(index),
-			meter_channel_names[index],
-			meter_channel_unit(index),
-			sources[index].valid,
-			sources[index].valid
-				? meter_units(sources[index].micro_units)
-				: 0.0,
+			static_cast<std::uint32_t>(index), meter_channel_names[index],
+			meter_channel_unit(index), valid,
+			valid ? meter_units(reading->value) : 0.0,
 		};
+	}
+	for (const auto &reading : snapshot.values) {
+		if (reading.quality == Quality::ArithmeticError)
+			result.arithmetic_error = true;
+		switch (reading.attribute.id) {
+		case Id::Frequency:
+		case Id::VanRms:
+		case Id::VbnRms:
+		case Id::VcnRms:
+		case Id::IaRms:
+		case Id::IbRms:
+		case Id::IcRms:
+		case Id::InRms:
+			break;
+		default:
+			result.attributes.push_back(attribute_dto(reading));
+			break;
+		}
+	}
 	return result;
 }
 
