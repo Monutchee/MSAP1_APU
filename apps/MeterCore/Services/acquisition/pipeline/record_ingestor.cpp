@@ -6,10 +6,22 @@
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace msap1::acquisition::daemon {
 namespace {
+
+constexpr std::size_t maximum_drain_batches_per_wake = 8;
+
+std::size_t harmonic_period_index(msap1::MeasurementPeriod period)
+{
+	const auto index = static_cast<std::size_t>(period);
+	if (index >= 4u)
+		throw std::invalid_argument("unsupported harmonic measurement period");
+	return index;
+}
 
 /*
  * Stamp UTC state at decode time — the PL cannot know it. This touches only
@@ -80,33 +92,37 @@ MeterRecordIngestor::MeterRecordIngestor(
 
 void MeterRecordIngestor::read_available()
 {
-	msap1::acquisition::MeterRecordBatch batch{};
-	try {
-		batch = meter_.read_available();
-	} catch (const std::exception &error) {
-		++dma_read_errors_;
-		log_message(dma_log, mnc::logging::Priority::error,
-			"meter DMA read failed: " + std::string(error.what()),
-			"dma_read_failed");
-		return;
+	for (std::size_t drain = 0; drain < maximum_drain_batches_per_wake;
+	     ++drain) {
+		msap1::acquisition::MeterRecordBatch batch{};
+		try {
+			batch = meter_.read_available();
+		} catch (const std::exception &error) {
+			++dma_read_errors_;
+			log_message(dma_log, mnc::logging::Priority::error,
+				"meter DMA read failed: " + std::string(error.what()),
+				"dma_read_failed");
+			return;
+		}
+		if (batch.bytes == 0)
+			return;
+		dma_bytes_ += batch.bytes;
+		if (batch.partial_record) {
+			note_invalid_record();
+			log_message(dma_log, mnc::logging::Priority::warning,
+				"meter DMA returned a partial record",
+				"dma_partial_record",
+				{{"MNC_DMA_BYTES", std::to_string(batch.bytes)}});
+			return;
+		}
+		for (std::size_t index = 0; index < batch.count; ++index)
+			accept(batch.records[index]);
 	}
-	if (batch.bytes == 0)
-		return;
-	dma_bytes_ += batch.bytes;
-	if (batch.partial_record) {
-		++invalid_records_;
-		log_message(dma_log, mnc::logging::Priority::warning,
-			"meter DMA returned a partial record",
-			"dma_partial_record",
-			{{"MNC_DMA_BYTES", std::to_string(batch.bytes)}});
-		return;
-	}
-	for (std::size_t index = 0; index < batch.count; ++index)
-		accept(batch.records[index]);
 }
 
 void MeterRecordIngestor::begin_epoch()
 {
+	invalid_records_ = 0;
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
@@ -120,6 +136,14 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
+	for (auto &assembler : harmonic_assemblers_)
+		assembler.reset();
+	for (auto &pending : pending_harmonic_families_)
+		pending.reset();
+	for (auto &latest : latest_harmonic_spectra_)
+		latest.reset();
+	incomplete_harmonic_families_ = 0;
+	incomplete_harmonic_families_by_period_.fill(0);
 }
 
 void MeterRecordIngestor::clear_latest()
@@ -136,6 +160,38 @@ void MeterRecordIngestor::clear_latest()
 		msap1::meter::TimeQuality::Unsynchronized;
 	last_record_time_.reset();
 	last_aggregate_record_time_.reset();
+	for (auto &assembler : harmonic_assemblers_)
+		assembler.reset();
+	for (auto &pending : pending_harmonic_families_)
+		pending.reset();
+	for (auto &latest : latest_harmonic_spectra_)
+		latest.reset();
+}
+
+const std::optional<msap1::HarmonicSpectrumSnapshot> &
+MeterRecordIngestor::latest_harmonic_spectrum(
+	msap1::MeasurementPeriod period) const
+{
+	return latest_harmonic_spectra_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::harmonic_records(
+	msap1::MeasurementPeriod period) const
+{
+	return harmonic_records_by_period_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::harmonic_families(
+	msap1::MeasurementPeriod period) const
+{
+	return harmonic_families_by_period_[harmonic_period_index(period)];
+}
+
+std::uint64_t MeterRecordIngestor::incomplete_harmonic_families(
+	msap1::MeasurementPeriod period) const
+{
+	return incomplete_harmonic_families_by_period_[
+		harmonic_period_index(period)];
 }
 
 bool MeterRecordIngestor::matches_configuration(
@@ -217,7 +273,7 @@ bool MeterRecordIngestor::track_basic_continuity(
 			 * sequence word lands, so it dumps forensics like every
 			 * other rejection.
 			 */
-			++invalid_records_;
+			note_invalid_record();
 			log_rejected_record(
 				"stale or out-of-order basic sequence (expected " +
 					std::to_string(expected) + ", received " +
@@ -302,7 +358,7 @@ bool MeterRecordIngestor::track_aggregate_continuity(
 		return true;
 	}
 	/* Stale/out-of-order, same half-range rule as the basic stream. */
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order aggregate sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -342,7 +398,7 @@ bool MeterRecordIngestor::track_ten_minute_continuity(
 			 {"MNC_SEQUENCE", std::to_string(received)}});
 		return true;
 	}
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order ten-minute sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -378,7 +434,7 @@ bool MeterRecordIngestor::track_two_hour_continuity(
 			 {"MNC_SEQUENCE", std::to_string(received)}});
 		return true;
 	}
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order two-hour sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -397,38 +453,44 @@ bool MeterRecordIngestor::track_two_hour_continuity(
  * rejection dumps the raw words so the truncation-point distribution
  * localizes the failing PL stage.
  *
- * Rate limited to one entry per 2 s across all reasons: the observed fault
- * rejects one record per 3 s window (each passes), while a storm stays
- * bounded below the record rate. Suppressed rejections are counted and
- * reported on the next emitted entry, so the journal can never falsely
- * confirm a one-per-window pattern.
+ * Rate limited to one entry per 2 s within each interval category: the
+ * observed fault rejects one record per 3 s window (each passes), while a
+ * storm stays bounded below the record rate. Keeping independent limiters
+ * ensures suppressed 10/12-cycle records can never be reported as belonging
+ * to a visible 150/180-cycle, ten-minute, or two-hour warning.
  */
 void MeterRecordIngestor::log_rejected_record(const std::string &reason,
 	const char *event, const msap1::MeterRecord &record)
 {
+	const auto interval = record_interval_identity(record);
+	auto &log_state = reject_log_states_[
+		static_cast<std::size_t>(interval.category)];
 	const auto now = Clock::now();
-	if (last_reject_log_ &&
-	    now - *last_reject_log_ < std::chrono::seconds(2)) {
-		++suppressed_reject_logs_;
+	if (log_state.last_log &&
+	    now - *log_state.last_log < std::chrono::seconds(2)) {
+		++log_state.suppressed;
 		return;
 	}
-	last_reject_log_ = now;
-	const auto suppressed = suppressed_reject_logs_;
-	suppressed_reject_logs_ = 0;
+	log_state.last_log = now;
+	const auto suppressed = log_state.suppressed;
+	log_state.suppressed = 0;
 
 	const auto header_words = header_words_hex(record);
 	const auto sample_index_words = sample_index_words_hex(record);
 	log_message(dma_log, mnc::logging::Priority::warning,
-		"meter record rejected: " + reason +
+		"meter record rejected: interval=" +
+			std::string(interval.label) + "; " + reason +
 			"; seq=" + std::to_string(record.word(3)) +
 			" words[0..15]=" + header_words +
 			" words[9..10]=" + sample_index_words +
 			(suppressed != 0
 				 ? " (+" + std::to_string(suppressed) +
-					   " rejections suppressed)"
+					   " same-interval rejections suppressed)"
 				 : ""),
 		event,
 		{{"MNC_REJECT_REASON", reason},
+		 {"MNC_INTERVAL_CATEGORY", std::string(interval.code)},
+		 {"MNC_INTERVAL_LABEL", std::string(interval.label)},
 		 {"MNC_SEQUENCE", std::to_string(record.word(3))},
 		 {"MNC_RECORD_FORMAT", hex_word(record.word(1))},
 		 {"MNC_CONFIGURATION_GENERATION",
@@ -467,7 +529,7 @@ void MeterRecordIngestor::log_configuration_mismatch(
 void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 {
 	if (!matches_configuration(record)) {
-		++invalid_records_;
+		note_invalid_record();
 		log_configuration_mismatch(record);
 		return;
 	}
@@ -510,12 +572,125 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 					++pq_events_;
 			}
 		} catch (const std::exception &error) {
-			++invalid_records_;
+			note_invalid_record();
 			log_rejected_record(
 				std::string("power-quality record: ") +
 					error.what(),
 				"meter_record_decode_rejected", record);
 		}
+		return;
+	}
+
+	/*
+	 * HARMONIC-v1 is a product family on its own sequence space. Decode and
+	 * family-validate all 42 chunks first, then commit those exact records in
+	 * one IPC request and one spool transaction. A partial family can neither
+	 * enter the durable stream nor replace the previous complete snapshot.
+	 */
+	if (record.record_format() == msap1::meter_harmonic_format ||
+	    record.record_format() == msap1::meter_harmonic_aggregate_format) {
+		msap1::HarmonicRecordChunk chunk{};
+		msap1::HarmonicAssemblyUpdate assembly{};
+		try {
+			chunk = msap1::decode_harmonic_record(record);
+			assembly = harmonic_assemblers_[
+				harmonic_period_index(chunk.period)].accept(chunk);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("harmonic record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = chunk.sequence;
+		timing.configuration_generation = chunk.configuration_generation;
+		timing.first_sample_index = chunk.first_sample;
+		timing.sample_count = chunk.sample_count;
+		timing.sample_rate_hz = chunk.sample_rate_hz;
+		timing.cycle_count = chunk.cycle_count;
+		timing.nominal_frequency = chunk.nominal_frequency_hz == 50u
+			? msap1::meter::NominalFrequency::Hz50
+			: msap1::meter::NominalFrequency::Hz60;
+		timing.cycle_locked = (chunk.status & 0x4u) != 0u;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::harmonic);
+		stream_record.measurement_period =
+			static_cast<std::uint8_t>(chunk.period);
+		stream_record.source_sequence = chunk.sequence;
+		stream_record.source_fragment = static_cast<std::uint16_t>(
+			chunk.channel * msap1::harmonic_chunks_per_channel +
+			chunk.chunk);
+		stream_record.configuration_generation =
+			chunk.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = chunk.first_sample;
+		stream_record.timing.sample_count = chunk.sample_count;
+		stream_record.timing.cycle_count = chunk.cycle_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+
+		const auto period_index = harmonic_period_index(chunk.period);
+		auto &pending_family = pending_harmonic_families_[period_index];
+		if (!pending_family ||
+		    pending_family->sequence != chunk.sequence) {
+			pending_family.emplace();
+			pending_family->sequence = chunk.sequence;
+		}
+		const auto record_index = static_cast<std::size_t>(
+			stream_record.source_fragment);
+		if (pending_family->records[record_index])
+			throw std::logic_error(
+				"harmonic publication buffer received a duplicate chunk");
+		pending_family->records[record_index] =
+			std::move(stream_record);
+		++pending_family->count;
+
+		++harmonic_records_;
+		++harmonic_records_by_period_[period_index];
+		incomplete_harmonic_families_ += assembly.incomplete_families;
+		incomplete_harmonic_families_by_period_[period_index] +=
+			assembly.incomplete_families;
+		if (assembly.completed) {
+			if (pending_family->count !=
+			    msap1::harmonic_records_per_family)
+				throw std::logic_error(
+					"complete harmonic family has a partial publication buffer");
+			std::vector<mnc::meter_stream::MeterStreamRecord> family;
+			family.reserve(msap1::harmonic_records_per_family);
+			for (auto &pending : pending_family->records) {
+				if (!pending)
+					throw std::logic_error(
+						"complete harmonic family is missing a publication chunk");
+				family.push_back(std::move(*pending));
+			}
+			const auto cursors = publisher_.publish_records(family);
+			if (cursors.size() != family.size())
+				throw std::runtime_error(
+					"harmonic family publish returned the wrong cursor count");
+			latest_harmonic_spectra_[period_index] =
+				std::move(*assembly.completed);
+			++harmonic_families_;
+			++harmonic_families_by_period_[period_index];
+			pending_family.reset();
+		}
+		++meter_records_;
 		return;
 	}
 
@@ -582,19 +757,25 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	try {
 		update = decoders_.decode(record, received_at);
 	} catch (const std::exception &error) {
-		++invalid_records_;
+		note_invalid_record();
+		const auto interval = record_interval_identity(record);
 		/* Same raw-word dump as the silent rejection paths: a decoder
 		 * rejection is the partially-emitted record whose truncation
 		 * landed past the sequence word, and its intact/zeroed word
 		 * boundary is the forensic payload. Not rate limited — this
 		 * path was always logged and is rare. */
 		log_message(dma_log, mnc::logging::Priority::warning,
-			"meter record rejected by decoder: " +
+			"meter record rejected by decoder: interval=" +
+				std::string(interval.label) + "; " +
 				std::string(error.what()) +
 				"; words[0..15]=" + header_words_hex(record) +
 				" words[9..10]=" + sample_index_words_hex(record),
 			"meter_record_decode_rejected",
-			{{"MNC_SEQUENCE", std::to_string(record.sequence())},
+			{{"MNC_REJECT_REASON", error.what()},
+			 {"MNC_INTERVAL_CATEGORY", std::string(interval.code)},
+			 {"MNC_INTERVAL_LABEL", std::string(interval.label)},
+			 {"MNC_SEQUENCE", std::to_string(record.sequence())},
+			 {"MNC_RECORD_FORMAT", hex_word(record.record_format())},
 			 {"MNC_HEADER_WORDS", header_words_hex(record)},
 			 {"MNC_SAMPLE_INDEX_WORDS",
 			  sample_index_words_hex(record)}});

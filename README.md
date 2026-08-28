@@ -104,6 +104,11 @@ DMA.
 producing AC RMS about the window mean. Saving the settings hot-applies the
 change; no process or device reboot is required.
 
+`metering.system_nominal_voltage_v` declares the line-to-neutral presentation
+reference used by voltage phasor diagrams and defaults to 120 V. It does not
+rescale meter results and is deliberately absent from the PL/RPU configuration
+ABI, so changing only this field does not restart capture.
+
 Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
 ```text
@@ -112,12 +117,11 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
 little-endian product payloads. Acquisition IPC version 20 adds typed meter
-snapshot selection by period and attribute set. `MeterDataProvider` currently
-publishes typed latest values for the Basic (10/12-cycle), 150/180-cycle, and
-clock-aligned 10-minute measurement periods. The generic period vocabulary
-reserves 2 h for a future PL product, but provider capabilities do not
-advertise a period until its measurements exist. Unavailable values are never
-represented as valid zero and values never inherit between periods. See
+snapshot selection by period and attribute set. `MeterDataProvider` publishes
+typed latest values for the Basic (10/12-cycle), 150/180-cycle, clock-aligned
+10-minute, and 2-hour measurement periods, plus non-normative live partials
+for the two long periods. Unavailable values are never represented as valid
+zero and values never inherit between periods. See
 [IPC, meter data, and service architecture](docs/IPC_SERVICE_ARCHITECTURE.md).
 Latest subscriptions are intentionally lossy and are suitable for Web, CLI,
 Modbus, and telemetry publishers. Durable historian delivery is implemented
@@ -139,6 +143,11 @@ The authenticated external API is:
 - `GET /api/v1/meter/minutes-10` (newest finalized clock-aligned 10-minute
   aggregate; always 200 while acquisition answers, with
   `{"available": false}` until the first clean interval exists)
+- `GET /api/v1/meter/hours-2` (newest finalized two-hour aggregate; always 200
+  while acquisition answers, with `{"available": false}` until twelve clean
+  ten-minute intervals have completed)
+- `GET /api/v1/meter/minutes-10/live` and
+  `GET /api/v1/meter/hours-2/live` (non-normative open-interval previews)
 - `GET /api/v1/meter/history/capabilities`
 - `POST /api/v1/meter/history/query`
 - `GET /api/v1/meter/history/health`
@@ -167,11 +176,13 @@ The authenticated external API is:
 - `POST /api/v1/settings/factory-reset` (administrator only)
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
-`GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate the PL
-folded from 15 basic blocks; and `GET /api/v1/meter/minutes-10` reports the
-independently aligned 10-minute aggregate produced by the PL. The periods
-never inherit from one another. The 150/180-cycle aggregate's `frequency`
-object is
+`GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
+folded from 15 basic blocks; `GET /api/v1/meter/minutes-10` reports the
+independently aligned 10-minute aggregate; and `GET /api/v1/meter/hours-2`
+reports twelve consecutive clean ten-minute intervals. Each finalized
+aggregate endpoint exposes the typed RMS, line-line, power, phasor, and
+unbalance values produced for that period. The periods never inherit from one
+another. The 150/180-cycle aggregate's `frequency` object is
 **informative only** — the standardized Class A frequency product is defined
 over its own 10 s interval, which is not implemented — so it carries
 `"informative": true` and deliberately no validity flag, and consumers must
@@ -181,8 +192,8 @@ UTC synchronization state captured when that aggregate was measured, not the
 daemon's state when the request arrived: an aggregate measured while
 synchronized keeps reporting `"synchronized"` even if the clock has since
 dropped into holdover. Frequency is intentionally unavailable in the
-10-minute result because the standardized frequency product uses its own
-10-second interval.
+10-minute and 2-hour results because the standardized frequency product uses
+its own 10-second interval.
 
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
@@ -301,6 +312,13 @@ needed. One failed SPI audit is retained as a pending confirmation and retried
 after one second; only two consecutive failures replace a known-good health
 snapshot. Recovered per-register retries and the last malformed register/header
 are included in the output.
+
+Record-rejection health is scoped to the current deliberate capture epoch, so
+a recovered configuration test does not leave the meter permanently failed.
+The process-lifetime rejection total remains beside it for forensics. In ADC
+simulator mode, the full report labels SPI, physical DCLK, and the AD7771
+register snapshot as not applicable rather than presenting zero-valued
+physical diagnostics as failures.
 
 Both summaries carry a `DMA transport` line with the kernel driver's own ring
 accounting: blocks produced, blocks consumed, overruns, cyclic completion

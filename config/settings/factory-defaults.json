@@ -3,6 +3,7 @@
   "metering": {
     "sample_rate_hz": 128000,
     "nominal_frequency_hz": 60,
+    "system_nominal_voltage_v": 120.0,
     "rms": {
       "window_ms": 200,
       "remove_dc": true
@@ -66,7 +67,10 @@
     "basic": {"backend": "memory", "maximum_age_seconds": 86400, "maximum_bytes": 536870912, "volatile_spool_acknowledged": false},
     "cycles_150_180": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
     "minutes_10": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
-	"hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false}
+	"hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
+	"harmonic_cycles_150_180": {"backend": "memory", "maximum_age_seconds": 86400, "maximum_bytes": 536870912, "volatile_spool_acknowledged": false},
+	"harmonic_minutes_10": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
+	"harmonic_hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false}
 	},
 	"modbus": {
 		"enabled": true,

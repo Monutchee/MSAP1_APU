@@ -265,24 +265,33 @@ void harmonic_wire_packing()
 				      {5u, 3.0, 0.0, "current"}};
 	const auto prepared =
 		msap1::prepare_meter_configuration(source, 32000);
-	/* Slot 0 word0: order 3, mask 0x70, fraction round(0.05 * 65536). */
-	require(prepared.wire.simulator_harmonics[0] ==
-			(3u | (0x70u << 8) | (3277u << 16)),
-		"harmonic word0 packs order, mask, and Q16 fraction");
-	require(prepared.wire.simulator_harmonics[1] == 0x40000000u,
-		"harmonic word1 packs the Q0.32 phase");
-	require(prepared.wire.simulator_harmonics[2] ==
-			(5u | (0x0fu << 8) | (1966u << 16)),
+	/* Each slot is ratio Q16.16, lane mask + amplitude Q16, phase Q0.32. */
+	require(prepared.wire.simulator_harmonics[0] == (3u << 16),
+		"harmonic word0 packs the Q16.16 ratio");
+	require(prepared.wire.simulator_harmonics[1] ==
+			(0x70u | (3277u << 16)),
+		"harmonic word1 packs mask and Q16 fraction");
+	require(prepared.wire.simulator_harmonics[2] == 0x40000000u,
+		"harmonic word2 packs the Q0.32 phase");
+	require(prepared.wire.simulator_harmonics[3] == (5u << 16) &&
+			prepared.wire.simulator_harmonics[4] ==
+				(0x0fu | (1966u << 16)),
 		"second slot packs independently");
 	require(prepared.wire.simulator_harmonics[6] == 0u &&
-			prepared.wire.simulator_harmonics[7] == 0u,
+			prepared.wire.simulator_harmonics[11] == 0u,
 		"unused slots stay zero");
+
+	source.simulator.harmonics = {{3.1, 5.0, 0.0, "voltage"}};
+	const auto interharmonic =
+		msap1::prepare_meter_configuration(source, 32000);
+	require(interharmonic.wire.simulator_harmonics[0] == 203162u,
+		"fractional 3.1x ratio is retained in Q16.16");
 
 	/* Rejections: order 1, over-range percent, over-Nyquist order. */
 	for (const msap1::SimulatorHarmonicConfig bad :
-	     {msap1::SimulatorHarmonicConfig{1u, 5.0, 0.0, "voltage"},
-	      msap1::SimulatorHarmonicConfig{3u, 100.0, 0.0, "voltage"},
-	      msap1::SimulatorHarmonicConfig{63u, 5.0, 0.0, "voltage"}}) {
+	     {msap1::SimulatorHarmonicConfig{1.0, 5.0, 0.0, "voltage"},
+	      msap1::SimulatorHarmonicConfig{3.0, 100.0, 0.0, "voltage"},
+	      msap1::SimulatorHarmonicConfig{63.0, 5.0, 0.0, "voltage"}}) {
 		auto rejected = simulator_profile();
 		rejected.simulator.frequency_hz = 60.0 * 5.0;
 		rejected.simulator.harmonics = {bad};

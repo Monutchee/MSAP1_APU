@@ -79,6 +79,32 @@ struct HistorianStatus {
 		session_start_cursor > persisted_high_water;
 }
 
+/**
+ * A replay is required only when a dataset is newly routed to volatile
+ * memory. Retention-only changes and moves to persistent storage preserve an
+ * already materialized target and must not trigger a full spool scan.
+ */
+[[nodiscard]] constexpr bool historian_policy_transition_requires_backfill(
+	std::span<const mnc::meter_stream::DatabaseStoragePolicy> current,
+	std::span<const mnc::meter_stream::DatabaseStoragePolicy> candidate)
+{
+	using mnc::meter_stream::StorageBackend;
+	for (const auto &next : candidate) {
+		if (next.backend != StorageBackend::memory)
+			continue;
+		bool already_memory = false;
+		for (const auto &prior : current) {
+			if (prior.dataset == next.dataset) {
+				already_memory = prior.backend == StorageBackend::memory;
+				break;
+			}
+		}
+		if (!already_memory)
+			return true;
+	}
+	return false;
+}
+
 /** Routes each typed PL result to the configured volatile/persistent store. */
 class MeterHistoryStore final {
 public:
@@ -89,6 +115,12 @@ public:
 	MeterHistoryStore &operator=(const MeterHistoryStore &) = delete;
 
 	void append(const MeterUpdate &update, std::uint64_t stream_cursor,
+		std::int64_t measured_at_nanoseconds);
+	/** Stage one validated aggregate-harmonic chunk and atomically materialize
+	 * the family when all 42 fragments are durable. Base families remain
+	 * latest-only and are rejected here. */
+	[[nodiscard]] bool append_harmonic_record(const MeterRecord &record,
+		std::uint64_t stream_cursor,
 		std::int64_t measured_at_nanoseconds);
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
 	[[nodiscard]] HistorianStatus status() const;

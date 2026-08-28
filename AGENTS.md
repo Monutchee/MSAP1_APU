@@ -89,6 +89,17 @@
   `msap1-meter-historian` acknowledges its independent spool cursor only after
   its typed historical projection commits; do not bypass this ordering or let
   a lossy subscriber block either durable service.
+- Harmonic records are family-atomic. Acquisition buffers the 42 direct
+  HARMONIC-v1 chunks for one exact provenance tuple and publishes nothing
+  until the family is complete; its IPC reader drains bounded batches and must
+  never wait on SQLite. Meter-stream accepts batches of up to 256 records in
+  one transaction. R5C1 HARMONIC_AGG-v1 families have independent latest slots
+  for 150/180-cycle, 10-minute, and 2-hour periods; API/CLI default to the
+  150/180-cycle view and require an explicit period for the others. Direct
+  10/12-cycle spectra remain latest-only during target proof. The historian
+  persists only complete 42-record aggregate families in their three typed
+  datasets and acknowledges a cursor only after the selected projection is
+  durable.
 - Product-neutral Modbus framing, request handling, CRC, and asynchronous
   TCP/RTU transports live under `common/mnc/modbus`. The source-controlled
   MSAP1 register contract and its `MeterSnapshotProvider` adapter live under
@@ -191,18 +202,17 @@
   Only a bit-3 record may have a physical span shorter than its summed
   contribution count. The word layout is pinned in
   `docs/System_Architecture/TIMING_MODEL.md`.
-- The newest aggregate is cached beside — never inside — the basic latest
-  record, travels in `InfoResponse` behind its own presence, age, and
-  time-quality fields (acquisition IPC version 19), and is published by
-  `GET /api/v1/meter/aggregate`. The aggregate's `time_quality` is the
-  provenance stamped at ingest (`aggregate_time_quality`), never
-  `InfoResponse::time_quality`, which is the daemon's live clock state at
-  reply time. `GET /api/v1/meter/readings` keeps
-  reporting basic records only. The aggregate frequency is informative
+- The newest raw aggregate remains cached beside — never inside — the basic
+  latest record and travels in `InfoResponse` for compatibility diagnostics.
+  `GET /api/v1/meter/aggregate` reads the typed `Cycles150_180` snapshot so
+  the fundamental, power, phasor, and unbalance siblings are exposed from one
+  period view. Its `time_quality` is the provenance stamped at ingest, never
+  the daemon's live clock state at reply time. `GET /api/v1/meter/readings`
+  keeps reporting basic records only. The aggregate frequency is informative
   only: the standardized Class A frequency product is defined over its own
   10 s interval, which is not implemented, so the decoder keeps that
-  reading's quality `unavailable` and the API publishes `informative`
-  rather than a validity flag.
+  reading's quality `unavailable` and the API publishes `informative` rather
+  than a validity flag.
 
 ## Build and verification
 

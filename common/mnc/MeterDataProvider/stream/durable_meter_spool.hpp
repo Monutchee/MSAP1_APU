@@ -22,6 +22,8 @@ public:
 	DurableMeterSpool &operator=(const DurableMeterSpool &) = delete;
 
 	std::uint64_t publish(const MeterStreamRecord &record) override;
+	std::vector<std::uint64_t> publish_records(
+		std::span<const MeterStreamRecord> records) override;
 	void register_consumer(std::string_view name) override;
 	void unregister_consumer(std::string_view name) override;
 	std::vector<MeterStreamRecord> read_after(

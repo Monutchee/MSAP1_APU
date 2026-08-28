@@ -6,13 +6,17 @@
  */
 
 #include "msap1/acquisition/dma/meter_record_source.hpp"
+#include "pipeline/record_interval_category.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
+#include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
 #include "msap1/meter/meter_record.hpp"
 #include "mnc/MeterDataProvider/stream/meter_record_publisher.hpp"
 #include "support/time.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -149,7 +153,13 @@ public:
 	[[nodiscard]] std::uint64_t meter_records() const { return meter_records_; }
 	[[nodiscard]] std::uint64_t dma_bytes() const { return dma_bytes_; }
 	[[nodiscard]] std::uint64_t dma_read_errors() const { return dma_read_errors_; }
+	/** Rejections since the most recent deliberate capture epoch began. */
 	[[nodiscard]] std::uint64_t invalid_records() const { return invalid_records_; }
+	/** Process-lifetime rejection total retained for forensic diagnostics. */
+	[[nodiscard]] std::uint64_t lifetime_invalid_records() const
+	{
+		return lifetime_invalid_records_;
+	}
 	/** @brief Missing BASIC records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t sequence_gaps() const { return sequence_gaps_; }
 	[[nodiscard]] std::uint64_t single_cycle_records() const
@@ -185,6 +195,34 @@ public:
 	{
 		return latest_power_quality_event_;
 	}
+	/** @brief Accepted HARMONIC-v1 chunks, including incomplete families. */
+	[[nodiscard]] std::uint64_t harmonic_records() const
+	{
+		return harmonic_records_;
+	}
+	/** @brief Complete 42-record spectrum families made externally visible. */
+	[[nodiscard]] std::uint64_t harmonic_families() const
+	{
+		return harmonic_families_;
+	}
+	/** @brief Partial or wholly skipped producer families. */
+	[[nodiscard]] std::uint64_t incomplete_harmonic_families() const
+	{
+		return incomplete_harmonic_families_;
+	}
+	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
+	latest_harmonic_spectrum() const
+	{
+		return latest_harmonic_spectra_[0];
+	}
+	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
+	latest_harmonic_spectrum(msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t harmonic_records(
+		msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t harmonic_families(
+		msap1::MeasurementPeriod period) const;
+	[[nodiscard]] std::uint64_t incomplete_harmonic_families(
+		msap1::MeasurementPeriod period) const;
 	/** @brief Missing AGGREGATE records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t aggregate_sequence_gaps() const
 	{
@@ -216,6 +254,11 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
+	void note_invalid_record()
+	{
+		++invalid_records_;
+		++lifetime_invalid_records_;
+	}
 	/** Rate-limited raw-word forensics shared by every silent rejection
 	 * path — the datum that localizes a PL emission fault. */
 	void log_rejected_record(const std::string &reason, const char *event,
@@ -243,7 +286,10 @@ private:
 	std::uint64_t meter_records_ = 0;
 	std::uint64_t dma_bytes_ = 0;
 	std::uint64_t dma_read_errors_ = 0;
+	/* Health uses the current capture epoch; the lifetime total remains
+	 * observable without making a recovered pipeline permanently unhealthy. */
 	std::uint64_t invalid_records_ = 0;
+	std::uint64_t lifetime_invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
 	/* Single-cycle diagnostic records: acceptance count and the latest
 	 * decoded snapshot (verification tooling; never published to the
@@ -257,6 +303,32 @@ private:
 	std::uint64_t pq_events_ = 0;
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_{};
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
+	/* M16 publishes one spectrum only after all 42 channel/chunk records
+	 * agree. The bounded assembler and publication buffer each retain at most
+	 * one partial family; incomplete/mismatched families never reach the
+	 * durable stream. */
+	struct PendingHarmonicFamily {
+		std::uint32_t sequence = 0;
+		std::array<std::optional<mnc::meter_stream::MeterStreamRecord>,
+			msap1::harmonic_records_per_family> records{};
+		std::size_t count = 0;
+	};
+	static constexpr std::size_t harmonic_period_count = 4;
+	std::array<msap1::HarmonicFamilyAssembler, harmonic_period_count>
+		harmonic_assemblers_{};
+	std::array<std::optional<PendingHarmonicFamily>, harmonic_period_count>
+		pending_harmonic_families_{};
+	std::uint64_t harmonic_records_ = 0;
+	std::uint64_t harmonic_families_ = 0;
+	std::uint64_t incomplete_harmonic_families_ = 0;
+	std::array<std::uint64_t, harmonic_period_count>
+		harmonic_records_by_period_{};
+	std::array<std::uint64_t, harmonic_period_count>
+		harmonic_families_by_period_{};
+	std::array<std::uint64_t, harmonic_period_count>
+		incomplete_harmonic_families_by_period_{};
+	std::array<std::optional<msap1::HarmonicSpectrumSnapshot>,
+		harmonic_period_count> latest_harmonic_spectra_{};
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
 	std::uint64_t two_hour_sequence_gaps_ = 0;
@@ -264,12 +336,15 @@ private:
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
 	std::uint64_t last_transport_overruns_ = 0;
-	/* Rate limit for configuration-mismatch forensics: the observed
-	 * one-rejection-per-window fault passes, a total-mismatch storm stays
-	 * bounded below the record rate, and anything suppressed is counted
-	 * and reported on the next emitted entry. */
-	std::optional<Clock::time_point> last_reject_log_;
-	std::uint64_t suppressed_reject_logs_ = 0;
+	/* Rate-limit independently per interval category. A storm stays bounded,
+	 * while a 10/12-cycle rejection can never hide or absorb the count for a
+	 * 150/180-cycle, ten-minute, or two-hour rejection. */
+	struct RejectLogState {
+		std::optional<Clock::time_point> last_log{};
+		std::uint64_t suppressed = 0;
+	};
+	std::array<RejectLogState, record_interval_category_count>
+		reject_log_states_{};
 	/* Continuity baselines are per format: the newest accepted basic
 	 * record (also the readings cache), the newest accepted aggregate
 	 * sequence, the newest accepted ten-minute sequence, and the newest

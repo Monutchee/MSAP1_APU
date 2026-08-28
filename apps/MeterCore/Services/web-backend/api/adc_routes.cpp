@@ -50,8 +50,8 @@ struct AdcSimulatorChannelDto {
 
 /** One harmonic slot in GET/PUT /api/v1/adc/simulator (at most 4). */
 struct AdcSimulatorHarmonicDto {
-	/** Harmonic order, 2..63. */
-	std::uint32_t order = 0;
+	/** Harmonic/interharmonic frequency ratio, >1 and <128. */
+	double order = 0.0;
 	/** Amplitude, percent of each receiving lane's fundamental. */
 	double percent = 0.0;
 	/** Extra phase (degrees) on top of the physical order*lane rule. */
@@ -177,7 +177,8 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 		throw std::invalid_argument(
 			"simulator supports at most 4 harmonic slots");
 	for (const auto &harmonic : configuration.harmonics) {
-		if (harmonic.order < 2u || harmonic.order > 63u ||
+		if (!std::isfinite(harmonic.order) || harmonic.order <= 1.0 ||
+		    harmonic.order >= 128.0 ||
 		    !std::isfinite(harmonic.percent) ||
 		    harmonic.percent < 0.0 || harmonic.percent > 99.9 ||
 		    !std::isfinite(harmonic.phase_degrees) ||
@@ -185,7 +186,7 @@ msap1::SimulatorIpcConfiguration adc_simulator_ipc(
 		     harmonic.channels != "current" &&
 		     harmonic.channels != "all"))
 			throw std::invalid_argument(
-				"simulator harmonics need order 2-63, percent "
+				"simulator tones need a ratio greater than 1 and less than 128, percent "
 				"0-99.9, finite phase, and voltage/current/all "
 				"channels");
 		result.harmonics.push_back({harmonic.order, harmonic.percent,

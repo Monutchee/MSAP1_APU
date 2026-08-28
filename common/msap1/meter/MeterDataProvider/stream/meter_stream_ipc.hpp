@@ -5,18 +5,23 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace msap1::meter_stream {
 
 inline constexpr std::string_view socket_path =
 	"/run/monutchee/meter-stream.sock";
 /* Version 2 appended session_start_cursor and dropped_unacknowledged_records
- * to the get_stream_status reply.  The version is not carried on the wire —
- * all peers ship in one image and the decoder's require_finished() turns any
- * accidental mix into a loud error frame. */
-inline constexpr std::uint32_t protocol_version = 2;
+ * to the get_stream_status reply. Version 3 assigns the record envelope's
+ * reserved u16 to source_fragment for multi-record producer families.
+ * Version 4 adds an atomic bounded publish_records request. The version is
+ * not carried on the wire — all peers ship in one image and the decoder's
+ * require_finished() turns any accidental mix into a loud error frame. */
+inline constexpr std::uint32_t protocol_version = 4;
+inline constexpr std::size_t maximum_publish_records = 256;
 
 /* A maximum ReadRecords reply can contain 4096 complete 256-byte PL records
  * plus timing metadata. Keep that bounded batch valid without relaxing the
@@ -37,6 +42,7 @@ enum class Command : std::uint32_t {
 	get_storage_policy,
 	apply_storage_policy,
 	subscribe_stream_events,
+	publish_records,
 };
 
 enum class Status : std::uint32_t {
@@ -58,6 +64,10 @@ enum class Event : std::uint32_t {
 	const mnc::meter_stream::MeterStreamRecord &record);
 [[nodiscard]] mnc::meter_stream::MeterStreamRecord decode_record(
 	mnc::ipc::ByteReader &reader);
+[[nodiscard]] std::vector<std::byte> encode_records(
+	std::span<const mnc::meter_stream::MeterStreamRecord> records);
+[[nodiscard]] std::vector<mnc::meter_stream::MeterStreamRecord> decode_records(
+	mnc::ipc::ByteReader &reader);
 
 /** Typed synchronous adapter used by acquisition and historian. */
 class MeterRecordStreamClient final
@@ -68,6 +78,8 @@ public:
 		std::string path = std::string(socket_path));
 	std::uint64_t publish(
 		const mnc::meter_stream::MeterStreamRecord &record) override;
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> records) override;
 	void register_consumer(std::string_view name) override;
 	void unregister_consumer(std::string_view name) override;
 	std::vector<mnc::meter_stream::MeterStreamRecord> read_after(

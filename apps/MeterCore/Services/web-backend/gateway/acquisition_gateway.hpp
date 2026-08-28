@@ -36,6 +36,10 @@ public:
 		int timeout_ms = 1000);
 	[[nodiscard]] SingleCycleResponse single_cycle(int timeout_ms = 1000);
 	[[nodiscard]] PowerQualityResponse power_quality(int timeout_ms = 1000);
+	[[nodiscard]] HarmonicResponse harmonics(
+		mnc::meter::MeasurementPeriod period =
+			mnc::meter::MeasurementPeriod::Cycles150_180,
+		int timeout_ms = 1000);
 	[[nodiscard]] SimulatorEventResponse simulator_event(
 		const SimulatorEventRequest &request, int timeout_ms = 3000);
 	[[nodiscard]] CaptureResponse set_capture(

@@ -47,12 +47,15 @@ The provider currently advertises:
 | `Basic` | 10 complete cycles at 50 Hz or 12 at 60 Hz | Supported |
 | `Cycles150_180` | 15 Basic blocks (150/180 cycles) | Supported |
 | `Min10` | Clock-aligned ten-minute aggregate | Supported |
-| `Hour2` | Two-hour aggregate | Reserved |
+| `Hour2` | Clock-aligned two-hour aggregate | Supported |
+| `Min10Live` | Current open ten-minute interval | Supported, non-normative |
+| `Hour2Live` | Current open two-hour interval | Supported, non-normative |
 
-Reserved periods are not advertised until their PL record and decoder exist.
-The 10-minute view is independent of the Basic and 150/180-cycle views and
-retains the PL-provided target, actual boundary, overshoot, contamination,
-time-quality, and sample-window provenance.
+The finalized long-interval views are independent of the Basic and
+150/180-cycle views and retain the R5C1-provided target, actual boundary,
+overshoot, contamination, time-quality, and sample-window provenance. Their
+live counterparts expose the still-open interval explicitly and must not be
+treated as normative finalized results.
 
 ## 2. Headers and linking
 
@@ -170,9 +173,9 @@ Groups are insertion ordered and duplicate-free:
 | --- | --- |
 | `Frequency` | Grid frequency |
 | `VoltageLnRms` | VLA, VLB, VLC |
-| `VoltageLlRms` | VAB, VBC, VCA (defined, currently unavailable) |
+| `VoltageLlRms` | VAB, VBC, VCA |
 | `CurrentRms` | ILA, ILB, ILC, ILN |
-| `Fundamental` / `AllDefined` | Canonical fundamental set |
+| `Fundamental` / `AllDefined` | Canonical scalar catalog, including power, phasor, sequence, and unbalance |
 
 ## 6. Reading values safely
 
@@ -217,8 +220,9 @@ calculation window.
 ## 7. Unsupported and malformed requests
 
 Known attributes not implemented for a period are returned as `Unavailable`.
-For example, line-to-line voltage attributes are defined in the catalogue but
-not produced by the current Basic decoder.
+Frequency, for example, is a standardized Basic-period product; the finalized
+aggregate periods expose their line-line voltage, power, phasor, sequence, and
+unbalance values without reconstructing them in a consumer.
 
 Malformed IDs or invalid indexed keys are configuration/programming errors and
 cause `std::invalid_argument`. Reject user-supplied selectors at the API
@@ -291,7 +295,8 @@ frontend parses MTR1 or accesses DMA.
 7. Keep callbacks short and queue expensive work in the consumer.
 8. Use the future durable stream for historians.
 
-Test no-first-record, both supported periods, empty/grouped selection, ordering,
-duplicates, unsupported fields, malformed selectors, timing provenance, valid
-zero versus unavailable, subscription lifetime, and callback coalescing. See
+Test no-first-record for every supported period, empty/grouped selection,
+ordering, duplicates, unsupported fields, malformed selectors, timing
+provenance, valid zero versus unavailable, subscription lifetime, and callback
+coalescing. See
 `docs/IPC_SERVICE_ARCHITECTURE.md` for the authoritative transport description.

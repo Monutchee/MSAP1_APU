@@ -45,6 +45,8 @@ struct Options {
 	/* Raw --harmonics spec ("none" or "order:pct[:phase[:lanes]],..."),
 	 * parsed by the adc command. */
 	std::optional<std::string> simulator_harmonics;
+	/* Harmonic output period: 3s (default), 10m, 2h, or base. */
+	std::optional<std::string> harmonic_period;
 	/* Event sequencer (roadmap M12): the burst description for
 	 * `mnc adc simulator event`. `event_action` selects arm, cancel,
 	 * clear, or query; the rest describe an ARM. */

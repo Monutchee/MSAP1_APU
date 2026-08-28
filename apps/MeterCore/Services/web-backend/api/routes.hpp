@@ -77,6 +77,9 @@ webengine::Response get_meter_readings(AppContext &,
 /** @brief GET /api/v1/meter/power-quality — Urms(1/2) record and event. */
 webengine::Response get_meter_power_quality(AppContext &,
 					    const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/harmonics — latest complete M16 spectrum. */
+webengine::Response get_meter_harmonics(AppContext &,
+					const webengine::RequestContext &);
 
 /** @brief GET /api/v1/meter/single-cycle — SCYC diagnostic snapshot. */
 webengine::Response get_meter_single_cycle(AppContext &,
@@ -252,7 +255,7 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	 "Latest RMS and frequency readings"},
 	{webengine::http::verb::get, "/api/v1/meter/aggregate",
 	 webengine::Role::Viewer, &get_meter_aggregate,
-	 "Newest 150/180-cycle aggregate RMS values"},
+	 "Newest 150/180-cycle aggregate meter values"},
 	{webengine::http::verb::get, "/api/v1/meter/minutes-10",
 	 webengine::Role::Viewer, &get_meter_ten_minute,
 	 "Newest clock-aligned ten-minute aggregate"},
@@ -271,6 +274,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/power-quality",
 	 webengine::Role::Viewer, &get_meter_power_quality,
 	 "Latest Urms(1/2) record and the newest sag/swell/interruption"},
+	{webengine::http::verb::get, "/api/v1/meter/harmonics",
+	 webengine::Role::Viewer, &get_meter_harmonics,
+	 "Latest complete seven-channel harmonic subgroup spectrum"},
 	{webengine::http::verb::get, "/api/v1/meter/configuration/frequency",
 	 webengine::Role::Viewer, &get_frequency_configuration,
 	 "Active frequency measurement configuration"},

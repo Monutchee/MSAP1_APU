@@ -552,6 +552,7 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.dma_bytes = ingest_.dma_bytes();
 	response.dma_read_errors = ingest_.dma_read_errors();
 	response.invalid_records = ingest_.invalid_records();
+	response.lifetime_invalid_records = ingest_.lifetime_invalid_records();
 	response.sequence_gaps = ingest_.sequence_gaps();
 	/* One sample of the whole kernel accounting, so produced, consumed,
 	 * overrun, and callbacks on the wire all describe the same instant. */
@@ -765,6 +766,28 @@ msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
 	response.has_event = event.has_value();
 	if (event)
 		response.event = power_quality_ipc(*event);
+	return response;
+}
+
+msap1::HarmonicResponse CaptureCoordinator::harmonic_response(
+	msap1::MeasurementPeriod period) const
+{
+	if (period != msap1::MeasurementPeriod::Cycles150_180 &&
+	    period != msap1::MeasurementPeriod::Min10 &&
+	    period != msap1::MeasurementPeriod::Hour2 &&
+	    period != msap1::MeasurementPeriod::Basic)
+		throw std::invalid_argument("unsupported harmonic period");
+	msap1::HarmonicResponse response{};
+	response.running = running_;
+	response.period = period;
+	response.records = ingest_.harmonic_records(period);
+	response.families = ingest_.harmonic_families(period);
+	response.incomplete_families =
+		ingest_.incomplete_harmonic_families(period);
+	const auto &latest = ingest_.latest_harmonic_spectrum(period);
+	response.has_snapshot = latest.has_value();
+	if (latest)
+		response.snapshot = *latest;
 	return response;
 }
 

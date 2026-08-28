@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -23,6 +24,11 @@ enum class DatabaseDataset : std::uint8_t {
 	cycles_150_180,
 	minutes_10,
 	hours_2,
+	/* Typed M16 magnitude families. Appended to preserve the existing IPC
+	 * values used by database policy/status messages. */
+	harmonic_cycles_150_180,
+	harmonic_minutes_10,
+	harmonic_hours_2,
 };
 
 struct RetentionPolicy {
@@ -30,13 +36,44 @@ struct RetentionPolicy {
 	std::optional<std::chrono::seconds> maximum_age;
 	/** Null means no explicit byte cap. */
 	std::optional<std::uint64_t> maximum_bytes;
+
+	bool operator==(const RetentionPolicy &) const = default;
 };
 
 struct DatabaseStoragePolicy {
 	DatabaseDataset dataset = DatabaseDataset::raw_record_spool;
 	StorageBackend backend = StorageBackend::persistent;
 	RetentionPolicy retention{};
+
+	bool operator==(const DatabaseStoragePolicy &) const = default;
 };
+
+/** Compare complete policy sets without making their wire order significant. */
+[[nodiscard]] constexpr bool same_database_policies(
+	std::span<const DatabaseStoragePolicy> left,
+	std::span<const DatabaseStoragePolicy> right)
+{
+	if (left.size() != right.size())
+		return false;
+	for (const auto &candidate : left) {
+		std::size_t left_count = 0;
+		std::size_t right_count = 0;
+		bool equal = false;
+		for (const auto &peer : left) {
+			if (candidate.dataset == peer.dataset)
+				++left_count;
+		}
+		for (const auto &current : right) {
+			if (candidate.dataset == current.dataset) {
+				++right_count;
+				equal = candidate == current;
+			}
+		}
+		if (left_count != 1 || right_count != 1 || !equal)
+			return false;
+	}
+	return true;
+}
 
 /** Reject malformed policies before they can select a database or retention path. */
 inline void validate_database_policy(const DatabaseStoragePolicy &policy)
@@ -47,6 +84,9 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::cycles_150_180:
 	case DatabaseDataset::minutes_10:
 	case DatabaseDataset::hours_2:
+	case DatabaseDataset::harmonic_cycles_150_180:
+	case DatabaseDataset::harmonic_minutes_10:
+	case DatabaseDataset::harmonic_hours_2:
 		break;
 	default:
 		throw std::invalid_argument("unknown database dataset");
@@ -76,6 +116,10 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::cycles_150_180: return "cycles_150_180";
 	case DatabaseDataset::minutes_10: return "minutes_10";
 	case DatabaseDataset::hours_2: return "hours_2";
+	case DatabaseDataset::harmonic_cycles_150_180:
+		return "harmonic_cycles_150_180";
+	case DatabaseDataset::harmonic_minutes_10: return "harmonic_minutes_10";
+	case DatabaseDataset::harmonic_hours_2: return "harmonic_hours_2";
 	}
 	return "unknown";
 }

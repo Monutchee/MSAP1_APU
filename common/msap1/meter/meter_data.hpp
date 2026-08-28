@@ -31,6 +31,7 @@ enum class RecordKind : std::uint16_t {
 	power_quality = 5,
 	phasor = 6,
 	unbalance = 7,
+	harmonic = 8,
 };
 
 enum class MeasurementQuality : std::uint8_t {

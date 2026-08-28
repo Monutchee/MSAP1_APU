@@ -1,11 +1,15 @@
 #include "msap1/acquisition/dma/meter_record_source.hpp"
 #include "msap1/acquisition/rpu/rpu_control.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "pipeline/record_interval_category.hpp"
 #include "pipeline/record_ingestor.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -16,6 +20,46 @@ void require(bool condition, const char *message)
 {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+
+void rejection_interval_categories_cover_meter_tiers()
+{
+	using msap1::acquisition::daemon::record_interval_identity;
+	struct Case {
+		std::uint32_t format;
+		std::uint32_t harmonic_period;
+		std::string_view code;
+		std::string_view label;
+	};
+	constexpr std::array cases{
+		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_aggregate_format, 0, "cycles_150_180",
+			"150/180-cycle"},
+		Case{msap1::meter_ten_minute_open_format, 0, "minutes_10_live",
+			"10-minute live partial"},
+		Case{msap1::meter_harmonic_aggregate_format, 1,
+			"cycles_150_180", "150/180-cycle"},
+		Case{msap1::meter_harmonic_aggregate_format, 2, "minutes_10",
+			"10-minute"},
+		Case{msap1::meter_harmonic_aggregate_format, 3, "hours_2",
+			"2-hour"},
+	};
+
+	for (const auto &test : cases) {
+		msap1::MeterRecord record{};
+		record.words[1] = test.format;
+		record.words[14] = test.harmonic_period;
+		const auto identity = record_interval_identity(record);
+		require(identity.code == test.code && identity.label == test.label,
+			"meter record interval category is wrong");
+	}
+
+	msap1::MeterRecord malformed_aggregate{};
+	malformed_aggregate.words[1] = msap1::meter_harmonic_aggregate_format;
+	const auto unknown = record_interval_identity(malformed_aggregate);
+	require(unknown.code == "unknown" && unknown.label == "unknown interval",
+		"malformed harmonic aggregate period was guessed");
 }
 
 class FakeMeterSource final : public msap1::acquisition::MeterRecordSource {
@@ -69,8 +113,39 @@ public:
 		records.push_back(record);
 		return records.size();
 	}
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> family) override
+	{
+		std::vector<std::uint64_t> cursors;
+		cursors.reserve(family.size());
+		for (const auto &record : family)
+			cursors.push_back(publish(record));
+		return cursors;
+	}
 
 	std::vector<mnc::meter_stream::MeterStreamRecord> records;
+};
+
+class FailingRecordPublisher final
+	: public mnc::meter_stream::MeterRecordPublisher {
+public:
+	explicit FailingRecordPublisher(std::size_t fail_on) : fail_on_(fail_on) {}
+	std::uint64_t publish(
+		const mnc::meter_stream::MeterStreamRecord &) override
+	{
+		if (++attempts_ == fail_on_)
+			throw std::runtime_error("deliberate spool failure");
+		return attempts_;
+	}
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> records) override
+	{
+		if (++attempts_ == fail_on_)
+			throw std::runtime_error("deliberate spool failure");
+		return std::vector<std::uint64_t>(records.size(), attempts_);
+	}
+	std::size_t attempts_ = 0;
+	std::size_t fail_on_ = 0;
 };
 
 void device_interfaces_are_substitutable()
@@ -208,6 +283,46 @@ void typed_commands_round_trip_through_the_registry()
 		snapshot_response.snapshot.values.size() == 1 &&
 		snapshot_response.snapshot.values[0].value == 120'000'000,
 		"typed meter snapshot did not round trip");
+
+	/* IPC v32 carries a complete, already-atomic M16 family. */
+	registry.on<msap1::HarmonicRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::HarmonicRequest &request) {
+			require(request.version == msap1::acquisition_ipc_version,
+				"wrong decoded harmonic request version");
+			msap1::HarmonicResponse response{};
+			response.running = true;
+			response.records = 84;
+			response.families = 2;
+			response.incomplete_families = 1;
+			response.has_snapshot = true;
+			response.snapshot.sequence = 0x12345678u;
+			response.snapshot.qualified_max_order = 127;
+			response.snapshot.channels[6][126] = {
+				.order = 127,
+				.magnitude_micro_units = 230'000'000,
+				.angle_millidegrees = 359'999,
+				.magnitude_valid = true,
+				.angle_valid = true,
+			};
+			return response;
+		});
+	const auto harmonic_reply = registry.dispatch(
+		msap1::encode_acquisition_request(msap1::HarmonicRequest{}));
+	const auto harmonic_response =
+		msap1::decode_acquisition_payload<msap1::HarmonicResponse>(
+			harmonic_reply);
+	const auto &order_127 = harmonic_response.snapshot.channels[6][126];
+	require(harmonic_response.running && harmonic_response.records == 84 &&
+		harmonic_response.families == 2 &&
+		harmonic_response.incomplete_families == 1 &&
+		harmonic_response.has_snapshot &&
+		harmonic_response.snapshot.sequence == 0x12345678u &&
+		order_127.order == 127 &&
+		order_127.magnitude_micro_units == 230'000'000 &&
+		order_127.angle_millidegrees == 359'999 &&
+		order_127.magnitude_valid && order_127.angle_valid,
+		"typed harmonic family did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */
@@ -248,6 +363,104 @@ msap1::MeterRecord basic_record(std::uint32_t sequence,
 	record.words[13] = 60u | (12u << 8) | (1u << 16) |
 		(utc_resynchronized ? (1u << 19) : 0u);
 	return record;
+}
+
+msap1::MeterRecord harmonic_record(std::uint32_t sequence,
+				   std::uint8_t channel, std::uint8_t chunk,
+				   std::uint32_t generation)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_harmonic_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 128000;
+	record.words[6] = 25600;
+	record.words[7] = 0x7f;
+	record.words[8] = 0x3e; /* complete, locked, conditioned, FFT, full */
+	record.words[9] = 1'000'000;
+	const auto first = static_cast<std::uint32_t>(chunk) * 24u + 1u;
+	const auto count = std::min(24u, 128u - first);
+	record.words[13] = channel | (static_cast<std::uint32_t>(chunk) << 3) |
+		(first << 7) | (count << 15) | (6u << 20) | (127u << 24);
+	record.words[14] = 50000;
+	record.words[15] = 127u | (50u << 8) | (10u << 16) | (1u << 24);
+	for (std::uint32_t entry = 0; entry < count; ++entry) {
+		const std::uint64_t packed = (first + entry) |
+			(std::uint64_t{1} << 60);
+		record.words[16 + entry * 2] = static_cast<std::uint32_t>(packed);
+		record.words[17 + entry * 2] =
+			static_cast<std::uint32_t>(packed >> 32);
+	}
+	return record;
+}
+
+void ingestor_publishes_only_complete_harmonic_families()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefu;
+	configuration.wire.sample_rate_hz = 128000;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](std::uint8_t channel, std::uint8_t chunk) {
+		source.next = {};
+		source.next.records[0] = harmonic_record(
+			9, channel, chunk, configuration.wire.generation);
+		source.next.count = 1;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+	for (std::uint8_t channel = 0; channel < 7; ++channel)
+		for (std::uint8_t chunk = 0; chunk < 6; ++chunk) {
+			if (channel == 6 && chunk == 5)
+				continue;
+			feed(channel, chunk);
+		}
+	require(publisher.records.empty() &&
+			!ingest.latest_harmonic_spectrum().has_value(),
+		"a partial harmonic family entered the spool or latest state");
+	feed(6, 5);
+	require(publisher.records.size() == 42 &&
+			ingest.latest_harmonic_spectrum().has_value() &&
+			ingest.harmonic_records() == 42 &&
+			ingest.harmonic_families() == 1,
+		"the final durably published chunk did not expose the family");
+	require(publisher.records.back().record_format ==
+			msap1::meter_harmonic_format &&
+			publisher.records.back().record_kind ==
+				static_cast<std::uint16_t>(msap1::RecordKind::harmonic) &&
+			publisher.records.back().payload.size() ==
+				sizeof(msap1::MeterRecord),
+		"harmonic spool envelope lost its exact record identity");
+
+	/* A failed durability barrier on the completing chunk leaves latest empty. */
+	ScriptedMeterSource failing_source;
+	FailingRecordPublisher failing_publisher(1);
+	MeterRecordIngestor failing(failing_source, configuration, timebase,
+				    failing_publisher);
+	failing.begin_epoch();
+	bool threw = false;
+	try {
+		for (std::uint8_t channel = 0; channel < 7; ++channel)
+			for (std::uint8_t chunk = 0; chunk < 6; ++chunk) {
+				failing_source.next = {};
+				failing_source.next.records[0] = harmonic_record(
+					10, channel, chunk,
+					configuration.wire.generation);
+				failing_source.next.count = 1;
+				failing_source.next.bytes = sizeof(msap1::MeterRecord);
+				failing.read_available();
+			}
+	} catch (const std::runtime_error &) {
+		threw = true;
+	}
+	require(threw && !failing.latest_harmonic_spectrum().has_value(),
+		"latest crossed a failed harmonic durability barrier");
 }
 
 void ingestor_validates_sample_range_continuity()
@@ -684,9 +897,11 @@ void ingestor_tracks_interleaved_aggregate_stream()
 			"the aggregate cache did not refill after a swap");
 		ingest.begin_epoch();
 		require(!ingest.latest_aggregate_record().has_value() &&
+			ingest.invalid_records() == 0 &&
+			ingest.lifetime_invalid_records() == 2 &&
 			ingest.aggregate_record_age_ms() ==
 				msap1::acquisition_age_unavailable,
-			"begin_epoch() did not reset the aggregate cache");
+			"begin_epoch() did not reset epoch health while retaining diagnostics");
 	}
 }
 
@@ -857,8 +1072,10 @@ void malformed_and_unknown_requests_are_rejected()
 
 int main()
 {
+	rejection_interval_categories_cover_meter_tiers();
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
+	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_tracks_ten_minute_stream_independently();

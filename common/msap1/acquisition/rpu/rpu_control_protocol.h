@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 6u
+#define MSAP1_RPU_VERSION 7u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -263,10 +263,11 @@ struct msap1_meter_config_payload {
 	 * white noise in +/- level (RMS contribution level/sqrt(3)); 0 keeps
 	 * the channel noise-free. */
 	uint32_t simulator_noise_level_counts[8];
-	/* Four harmonic slots, two packed words each (word0 = order[7:0] |
-	 * channel mask[15:8] | Q16 fraction-of-fundamental[31:16]; word1 =
-	 * phase, Q0.32 turns). All-zero slots are disabled. */
-	uint32_t simulator_harmonics[8];
+	/* Four harmonic/interharmonic slots, three packed words each: word0 =
+	 * Q16.16 frequency ratio; word1 = channel mask[7:0] |
+	 * Q16 fraction-of-fundamental[31:16]; word2 = phase, Q0.32 turns.
+	 * A zero ratio disables the slot. */
+	uint32_t simulator_harmonics[12];
 	/* MSAP1_SIMULATOR_FLAG_* bits. */
 	uint32_t simulator_flags;
 	/*

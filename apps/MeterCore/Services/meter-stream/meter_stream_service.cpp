@@ -113,6 +113,24 @@ mnc::ServiceHealth MeterStreamService::health() const
 		: mnc::ServiceHealth{true, "durable stream ready"};
 }
 
+void MeterStreamService::report_dropped_records()
+{
+	const auto dropped = spool_->dropped_unacknowledged_records();
+	if (dropped == reported_dropped_records_)
+		return;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last_drop_report_ < std::chrono::seconds(10))
+		return;
+	(void)logger().write(mnc::logging::Priority::warning,
+		"spool byte cap evicted " +
+			std::to_string(dropped - reported_dropped_records_) +
+			" unacknowledged records (" + std::to_string(dropped) +
+			" total); a consumer is not keeping up",
+		"spool_records_dropped");
+	reported_dropped_records_ = dropped;
+	last_drop_report_ = now;
+}
+
 void MeterStreamService::handle(mnc::ipc::UnixStreamServer::Connection connection,
 	mnc::ipc::Frame frame)
 {
@@ -125,24 +143,20 @@ void MeterStreamService::handle(mnc::ipc::UnixStreamServer::Connection connectio
 		case Command::publish_record: {
 			auto record = decode_record(input); input.require_finished();
 			const auto cursor = spool_->publish(record);
-			const auto dropped = spool_->dropped_unacknowledged_records();
-			if (dropped != reported_dropped_records_) {
-				const auto now = std::chrono::steady_clock::now();
-				if (now - last_drop_report_ >= std::chrono::seconds(10)) {
-					(void)logger().write(mnc::logging::Priority::warning,
-						"spool byte cap evicted " +
-							std::to_string(dropped -
-								reported_dropped_records_) +
-							" unacknowledged records (" +
-							std::to_string(dropped) +
-							" total); a consumer is not keeping up",
-						"spool_records_dropped");
-					reported_dropped_records_ = dropped;
-					last_drop_report_ = now;
-				}
-			}
+			report_dropped_records();
 			output.u32(static_cast<std::uint32_t>(Status::ok)); output.u64(cursor);
 			publish_event(Event::record_committed, cursor);
+			break;
+		}
+		case Command::publish_records: {
+			auto records = decode_records(input); input.require_finished();
+			const auto cursors = spool_->publish_records(records);
+			report_dropped_records();
+			output.u32(static_cast<std::uint32_t>(Status::ok));
+			output.u32(static_cast<std::uint32_t>(cursors.size()));
+			for (const auto cursor : cursors)
+				output.u64(cursor);
+			publish_event(Event::record_committed, cursors.back());
 			break;
 		}
 		case Command::register_consumer:

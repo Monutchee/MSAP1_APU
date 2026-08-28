@@ -159,6 +159,10 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.power_quality_response();
 		});
+	registry.on<msap1::HarmonicRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const msap1::HarmonicRequest &request) {
+			return coordinator.harmonic_response(request.period);
+		});
 	/* Not a configuration path: arming a burst must not restart the
 	 * generator, so this never touches the apply/restart machinery. */
 	registry.on<msap1::SimulatorEventRequest>(

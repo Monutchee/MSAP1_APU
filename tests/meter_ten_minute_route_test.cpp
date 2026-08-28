@@ -1,8 +1,10 @@
 #include "meter_dto.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 
@@ -58,8 +60,25 @@ msap1::MeterSnapshotResponse response(
 		value(Id::InRms, Unit::MicroAmperes, 0),
 		value(Id::VabRms, Unit::MicroVolts, 208'000'000),
 		value(Id::ActivePowerTotal, Unit::Picowatts, 720'000'000'000'000),
+		value(Id::VoltagePhaseAngleA, Unit::Millidegrees, 0),
+		value(Id::VoltagePhaseAngleB, Unit::Millidegrees, 240'000),
+		value(Id::VoltagePhaseAngleC, Unit::Millidegrees, 120'000),
+		value(Id::CurrentPhaseAngleA, Unit::Millidegrees, 350'000),
+		value(Id::CurrentPhaseAngleB, Unit::Millidegrees, 230'000),
+		value(Id::CurrentPhaseAngleC, Unit::Millidegrees, 110'000),
 	};
 	return result;
+}
+
+const msap1::web::api::MeterAttributeDto *attribute(
+	const msap1::web::api::MeterTenMinuteDto &snapshot,
+	std::string_view key)
+{
+	const auto found = std::find_if(snapshot.attributes.begin(),
+		snapshot.attributes.end(), [key](const auto &candidate) {
+			return candidate.key == key;
+		});
+	return found == snapshot.attributes.end() ? nullptr : &*found;
 }
 
 void projects_the_finalized_two_hour_snapshot()
@@ -73,6 +92,13 @@ void projects_the_finalized_two_hour_snapshot()
 		projected->channels[6].valid &&
 		projected->channels[6].rms == 120.0,
 		"two-hour identity, provenance, or channel projection changed");
+	const auto *voltage_b = attribute(*projected,
+		"phase.angle.voltage.b");
+	const auto *current_c = attribute(*projected,
+		"phase.angle.current.c");
+	require(voltage_b && voltage_b->valid && voltage_b->value == 240.0 &&
+		current_c && current_c->valid && current_c->value == 110.0,
+		"two-hour phase angles were not projected");
 }
 
 void projects_the_finalized_ten_minute_snapshot()
@@ -93,11 +119,17 @@ void projects_the_finalized_ten_minute_snapshot()
 		projected->channels[6].rms == 120.0 &&
 		!projected->channels[7].valid,
 		"hardware channel order was not preserved");
-	require(projected->attributes.size() == 2 &&
+	require(projected->attributes.size() == 8 &&
 		projected->attributes[0].key == "voltage.ll.ab.rms" &&
 		projected->attributes[0].value == 208.0 &&
 		projected->attributes[1].key == "power.active.total" &&
-		projected->attributes[1].value == 720.0,
+		projected->attributes[1].value == 720.0 &&
+		attribute(*projected, "phase.angle.voltage.b") &&
+		attribute(*projected, "phase.angle.voltage.b")->valid &&
+		attribute(*projected, "phase.angle.voltage.b")->value == 240.0 &&
+		attribute(*projected, "phase.angle.current.c") &&
+		attribute(*projected, "phase.angle.current.c")->valid &&
+		attribute(*projected, "phase.angle.current.c")->value == 110.0,
 		"derived attributes were not projected in engineering units");
 }
 

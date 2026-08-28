@@ -464,23 +464,32 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			"simulator supports at most 4 harmonic slots");
 	for (std::size_t slot = 0; slot < simulator.harmonics.size(); ++slot) {
 		const auto &harmonic = simulator.harmonics[slot];
-		if (harmonic.order < 2u || harmonic.order > 63u)
+		if (!std::isfinite(harmonic.order) || harmonic.order <= 1.0 ||
+		    harmonic.order >= 128.0)
 			throw std::runtime_error(
-				"simulator harmonic order must be 2 through 63");
+				"simulator harmonic ratio must be greater than 1 and less than 128");
 		if (!std::isfinite(harmonic.percent) ||
 		    harmonic.percent < 0.0 || harmonic.percent > 99.9)
 			throw std::runtime_error(
 				"simulator harmonic percent must be 0 through 99.9");
-		if (harmonic.order * simulator.frequency_hz >=
-		    static_cast<double>(sample_rate_hz) / 2.0)
+		const auto ratio_q16 = static_cast<std::uint32_t>(
+			std::llround(harmonic.order * q16_scale));
+		if (ratio_q16 <= 0x00010000u || ratio_q16 >= 0x00800000u)
+			throw std::runtime_error(
+				"simulator harmonic ratio is not representable in range");
+		const std::uint64_t tone_millihz =
+			(static_cast<std::uint64_t>(ratio_q16) *
+			 result.wire.simulator_frequency_millihz) >> 16;
+		if (tone_millihz * 2u >=
+		    static_cast<std::uint64_t>(sample_rate_hz) * 1000u)
 			throw std::runtime_error(
 				"simulator harmonic exceeds the Nyquist limit");
 		const auto fraction = static_cast<std::uint32_t>(
 			std::llround(harmonic.percent / 100.0 * q16_scale));
-		result.wire.simulator_harmonics[slot * 2] = harmonic.order |
-			(harmonic_channel_mask(harmonic.channels) << 8) |
-			(fraction << 16);
-		result.wire.simulator_harmonics[slot * 2 + 1] =
+		result.wire.simulator_harmonics[slot * 3] = ratio_q16;
+		result.wire.simulator_harmonics[slot * 3 + 1] =
+			harmonic_channel_mask(harmonic.channels) | (fraction << 16);
+		result.wire.simulator_harmonics[slot * 3 + 2] =
 			phase_q32(harmonic.phase_degrees);
 	}
 

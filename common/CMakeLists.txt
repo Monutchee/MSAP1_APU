@@ -193,6 +193,7 @@ target_compile_options(mnc_meter_data_provider PRIVATE
 # Product data types and latest-state publication deliberately have no
 # dependency on IPC, WebEngine, persistence, or command-line presentation.
 msap1_library(msap1_meter msap1::meter
+	msap1/meter/harmonic_spectrum.cpp
     msap1/meter/meter_data.cpp
     msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.cpp
     msap1/meter/meter_config.cpp
@@ -420,8 +421,16 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME pq_event_decode_test COMMAND pq_event_decode_test)
 
-    # GET /api/v1/meter/aggregate is pinned by its JSON payload, and the
-    # projection that renders it is deliberately WebEngine-free, so the
+	# M16 HARMONIC-v1 decode and atomic 42-record family assembly.
+	add_executable(harmonic_decode_test
+		${PROJECT_SOURCE_DIR}/tests/harmonic_decode_test.cpp)
+	target_link_libraries(harmonic_decode_test PRIVATE msap1::meter)
+	target_compile_options(harmonic_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME harmonic_decode_test COMMAND harmonic_decode_test)
+
+    # GET /api/v1/meter/aggregate is pinned by its typed snapshot selection
+    # and JSON payload. The projection is deliberately WebEngine-free, so the
     # contract is tested without linking the HTTP stack.
     add_executable(meter_aggregate_route_test
         ${PROJECT_SOURCE_DIR}/tests/meter_aggregate_route_test.cpp)

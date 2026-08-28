@@ -72,7 +72,9 @@ std::vector<std::byte> encode_record(
 	writer.u32(record.timing.cycle_count);
 	writer.u8(record.timing.utc_start_nanoseconds.has_value());
 	writer.u8(record.timing.utc_uncertainty_nanoseconds.has_value());
-	writer.u16(0);
+	/* This field was reserved as zero before fragmented producer families;
+	 * consuming it preserves the record wire size and field offsets. */
+	writer.u16(record.source_fragment);
 	writer.i64(record.timing.utc_start_nanoseconds.value_or(0));
 	writer.u64(record.timing.utc_uncertainty_nanoseconds.value_or(0));
 	writer.u32(static_cast<std::uint32_t>(record.payload.size()));
@@ -96,7 +98,7 @@ mnc::meter_stream::MeterStreamRecord decode_record(ByteReader &reader)
 	record.timing.cycle_count = reader.u32();
 	const bool has_utc = reader.u8() != 0;
 	const bool has_uncertainty = reader.u8() != 0;
-	(void)reader.u16();
+	record.source_fragment = reader.u16();
 	const auto utc = reader.i64();
 	const auto uncertainty = reader.u64();
 	if (has_utc)
@@ -105,6 +107,33 @@ mnc::meter_stream::MeterStreamRecord decode_record(ByteReader &reader)
 		record.timing.utc_uncertainty_nanoseconds = uncertainty;
 	record.payload = reader.bytes(reader.u32());
 	return record;
+}
+
+std::vector<std::byte> encode_records(
+	std::span<const mnc::meter_stream::MeterStreamRecord> records)
+{
+	if (records.empty() || records.size() > maximum_publish_records)
+		throw std::invalid_argument(
+			"meter-stream publish batch must contain 1..256 records");
+	ByteWriter writer;
+	writer.u32(static_cast<std::uint32_t>(records.size()));
+	for (const auto &record : records)
+		writer.bytes(encode_record(record));
+	return writer.take();
+}
+
+std::vector<mnc::meter_stream::MeterStreamRecord> decode_records(
+	ByteReader &reader)
+{
+	const auto count = reader.u32();
+	if (count == 0 || count > maximum_publish_records)
+		throw std::invalid_argument(
+			"meter-stream publish batch must contain 1..256 records");
+	std::vector<mnc::meter_stream::MeterStreamRecord> records;
+	records.reserve(count);
+	for (std::uint32_t index = 0; index < count; ++index)
+		records.push_back(decode_record(reader));
+	return records;
 }
 
 MeterRecordStreamClient::MeterRecordStreamClient(std::string path)
@@ -132,6 +161,25 @@ std::uint64_t MeterRecordStreamClient::publish(
 	const auto cursor = reader.u64();
 	reader.require_finished();
 	return cursor;
+}
+
+std::vector<std::uint64_t> MeterRecordStreamClient::publish_records(
+	std::span<const mnc::meter_stream::MeterStreamRecord> records)
+{
+	auto response = request(Command::publish_records, encode_records(records),
+		10000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const auto count = reader.u32();
+	if (count != records.size())
+		throw std::runtime_error(
+			"meter-stream publish batch cursor count mismatch");
+	std::vector<std::uint64_t> cursors;
+	cursors.reserve(count);
+	for (std::uint32_t index = 0; index < count; ++index)
+		cursors.push_back(reader.u64());
+	reader.require_finished();
+	return cursors;
 }
 
 void MeterRecordStreamClient::register_consumer(std::string_view name)

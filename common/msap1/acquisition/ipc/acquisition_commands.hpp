@@ -15,6 +15,7 @@
 
 #include "msap1/meter/meter_record.hpp"
 #include "msap1/meter/meter_data.hpp"
+#include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/meter_timing.hpp"
 #include "mnc/MeterDataProvider/snapshot/meter_snapshot.hpp"
 #include "msap1/acquisition/rpu/rpu_control_protocol.h"
@@ -58,8 +59,12 @@ inline constexpr const char *acquisition_socket_path =
  * 30: R5C1 aggregation health adds bounded-worker scheduling, software-ring
  * pressure, and hardware-FIFO occupancy telemetry.
  * 31: R5C1 aggregation health adds deterministic input-drop provenance,
- * software-ring push failures, and hardware-FIFO programmable-full edges. */
-inline constexpr std::uint16_t acquisition_ipc_version = 31;
+ * software-ring push failures, and hardware-FIFO programmable-full edges.
+ * 32: M16 adds the latest complete 7x127 harmonic spectrum command.
+ * 33: The simulator tone ratio becomes fractional for interharmonic injection.
+ * 34: InfoResponse distinguishes current-capture-epoch record rejections
+ * from the process-lifetime forensic total. */
+inline constexpr std::uint16_t acquisition_ipc_version = 34;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -134,8 +139,9 @@ struct SimulatorIpcChannel {
 };
 
 struct SimulatorIpcHarmonic {
-	/* Harmonic order (2..63); 0 marks an unused slot. */
-	std::uint32_t order = 0;
+	/* Frequency ratio (>1, <128). Integer values are harmonics and
+	 * fractional values are interharmonics. */
+	double order = 0.0;
 	/* Amplitude, percent of each receiving lane's fundamental peak. */
 	double percent = 0.0;
 	/* Extra phase (degrees) on top of the physical order*lane rule. */
@@ -236,7 +242,10 @@ struct InfoResponse {
 	std::uint64_t meter_records = 0;
 	std::uint64_t dma_bytes = 0;
 	std::uint64_t dma_read_errors = 0;
+	/* Current deliberate capture epoch; this counter participates in health. */
 	std::uint64_t invalid_records = 0;
+	/* Process-lifetime forensic total; never participates in health. */
+	std::uint64_t lifetime_invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
 	/* Kernel DMA transport accounting, sampled as a whole at reply time.
 	 * These are the driver's own totals, not ingest counters: they say
@@ -423,6 +432,19 @@ struct PowerQualityResponse {
 	PowerQualityIpcSnapshot event{};
 };
 
+/** Latest complete M16 family. Partial 42-record families are never exposed. */
+struct HarmonicResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Cycles150_180;
+	std::uint64_t records = 0;
+	std::uint64_t families = 0;
+	std::uint64_t incomplete_families = 0;
+	bool has_snapshot = false;
+	HarmonicSpectrumSnapshot snapshot{};
+};
+
 /* Simulator event-sequencer state after the requested action. */
 struct SimulatorEventResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
@@ -557,6 +579,15 @@ struct PowerQualityRequest {
 	std::uint16_t version = acquisition_ipc_version;
 };
 
+/** Latest complete IEC-style harmonic subgroup spectrum (roadmap M16). */
+struct HarmonicRequest {
+	static constexpr std::string_view command = "meter-harmonics";
+	using Response = HarmonicResponse;
+	std::uint16_t version = acquisition_ipc_version;
+	mnc::meter::MeasurementPeriod period =
+		mnc::meter::MeasurementPeriod::Cycles150_180;
+};
+
 /**
  * Drives the simulator's amplitude-envelope sequencer (roadmap M12).
  *
@@ -596,6 +627,7 @@ using AcquisitionCommandList = std::tuple<
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
 	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
+	HarmonicRequest,
 	SimulatorEventRequest, ConfigurationApplyRequest>;
 
 namespace detail {

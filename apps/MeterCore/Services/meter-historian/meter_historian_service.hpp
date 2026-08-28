@@ -11,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -32,6 +33,14 @@ protected:
 	[[nodiscard]] mnc::ServiceHealth health() const override;
 
 private:
+	struct BackfillSession {
+		std::unique_ptr<msap1::meter_stream::MeterRecordStreamClient>
+			stream;
+		std::uint64_t through_cursor = 0;
+		std::uint64_t generation = 0;
+	};
+	enum class BackfillPageResult { progress, complete, cancelled };
+
 	void consume();
 	/**
 	 * Project one spooled record. Returns false when the record itself is
@@ -40,6 +49,13 @@ private:
 	 */
 	bool ingest(const mnc::meter_stream::MeterStreamRecord &record);
 	void backfill();
+	[[nodiscard]] BackfillSession begin_backfill(
+		std::uint64_t generation);
+	[[nodiscard]] BackfillPageResult backfill_page(
+		BackfillSession &session, bool enforce_generation);
+	void end_backfill(BackfillSession &session) noexcept;
+	[[nodiscard]] bool service_policy_backfill(
+		std::optional<BackfillSession> &session);
 	[[nodiscard]] bool rebuilds_volatile_period(
 		const mnc::meter_stream::MeterStreamRecord &record) const;
 	void handle(mnc::ipc::UnixStreamServer::Connection connection,
@@ -65,7 +81,12 @@ private:
 	 * is durable, so such a record persists across restarts: it must cost
 	 * one record, never the whole projection. */
 	std::atomic<std::uint64_t> undecodable_records_{0};
+	/* The live consumer and policy replay share one writer thread. A policy
+	 * update only holds this mutex for the routing switch; the consumer then
+	 * alternates live pages with bounded replay pages. */
 	std::mutex migration_mutex_;
+	std::uint64_t policy_backfill_generation_ = 0;
+	bool policy_backfill_requested_ = false;
 	std::vector<std::weak_ptr<mnc::ipc::FramedConnection>> subscribers_;
 };
 

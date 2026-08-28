@@ -432,8 +432,7 @@ std::vector<msap1::SimulatorHarmonicConfig> parse_harmonics(
 			throw std::invalid_argument(
 				"--harmonics slot needs at least ORDER:PERCENT");
 		msap1::SimulatorHarmonicConfig harmonic;
-		harmonic.order = static_cast<std::uint32_t>(
-			std::stoul(parts[0]));
+		harmonic.order = std::stod(parts[0]);
 		harmonic.percent = std::stod(parts[1]);
 		if (count > 2 && !parts[2].empty())
 			harmonic.phase_degrees = std::stod(parts[2]);

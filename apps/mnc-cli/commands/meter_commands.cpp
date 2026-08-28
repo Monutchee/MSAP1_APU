@@ -310,7 +310,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "unavailable";
 		output << " measured frame/s\n"
 		       << "  Data-path errors:    DMA " << response.dma_read_errors
-		       << ", invalid " << response.invalid_records << ", gaps "
+		       << ", invalid " << response.invalid_records << " epoch/"
+		       << response.lifetime_invalid_records << " lifetime, gaps "
 		       << response.sequence_gaps << ", FIFO "
 		       << health.overflow_count << ", headers "
 		       << health.header_error_count << '\n'
@@ -462,7 +463,10 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << "  Meter records:        " << response.meter_records << '\n'
 	       << "  DMA bytes:            " << response.dma_bytes << '\n'
 	       << "  DMA read errors:      " << response.dma_read_errors << '\n'
-	       << "  Invalid records:      " << response.invalid_records << '\n'
+	       << "  Invalid records:      " << response.invalid_records
+	       << " current epoch\n"
+	       << "  Invalid records total: " << response.lifetime_invalid_records
+	       << " process lifetime\n"
 	       << "  Sequence gaps:        " << response.sequence_gaps << '\n'
 	       << "  DMA transport:        " << transport_counters(response)
 	       << '\n'
@@ -472,14 +476,21 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << yes_no(status.meter_generation_match) << '\n'
 	       << "  Meter configured:     " << yes_no(status.meter_configured) << '\n'
 	       << "  DC offset removal:    " << yes_no(status.dc_offset_removal) << '\n'
-	       << "  ADC SPI responsive:   " << yes_no(status.spi_responsive) << '\n'
+	       << "  ADC SPI responsive:   ";
+	if (status.physical_diagnostics_applicable)
+		output << yes_no(status.spi_responsive) << '\n';
+	else
+		output << "not applicable (simulator)\n";
+	output
 	       << "  ADC rate match:       " << yes_no(status.rate_match) << '\n'
 	       << "  Capture active:       " << yes_no(status.capture_active) << '\n'
 	       << "  Sample rate:          " << health.sample_rate_hz << " frame/s\n"
 	       << "  PL frames:            " << health.frame_count << '\n'
 	       << "  ADC packets:          " << health.packet_count << '\n'
 	       << "  ADC DCLK:             ";
-	if (health.dclk_frequency_hz != 0u)
+	if (!status.physical_diagnostics_applicable)
+		output << "not applicable (simulator)\n";
+	else if (health.dclk_frequency_hz != 0u)
 		output << health.dclk_frequency_hz << " Hz\n";
 	else
 		output << "unavailable\n";
@@ -489,25 +500,27 @@ int write_meter_health_text(const MeterHealthResult &result,
 	else
 		output << "unavailable\n";
 	output << "  FIFO overflows:       " << health.overflow_count << '\n'
-	       << "  Header errors:        " << health.header_error_count << '\n'
-	       << "  SPI protocol errors:  "
-	       << health.spi_protocol_error_count << '\n'
-	       << "  SPI retry recoveries: "
-	       << health.spi_retry_recovery_count << '\n'
-	       << "  Config mismatches:    "
-	       << health.spi_config_read_mismatch_count << '\n'
-	       << "  GEN_ERR_REG_1 events: "
-	       << health.spi_general_error_1_events << '\n'
-	       << "  Last SPI failure:     register 0x" << std::hex
-	       << static_cast<unsigned int>(health.spi_last_failed_register)
-	       << ", header 0x"
-	       << static_cast<unsigned int>(health.spi_last_received_header)
-	       << std::dec << '\n';
+	       << "  Header errors:        " << health.header_error_count << '\n';
+	if (status.physical_diagnostics_applicable) {
+		output << "  SPI protocol errors:  "
+		       << health.spi_protocol_error_count << '\n'
+		       << "  SPI retry recoveries: "
+		       << health.spi_retry_recovery_count << '\n'
+		       << "  Config mismatches:    "
+		       << health.spi_config_read_mismatch_count << '\n'
+		       << "  GEN_ERR_REG_1 events: "
+		       << health.spi_general_error_1_events << '\n'
+		       << "  Last SPI failure:     register 0x" << std::hex
+		       << static_cast<unsigned int>(health.spi_last_failed_register)
+		       << ", header 0x"
+		       << static_cast<unsigned int>(health.spi_last_received_header)
+		       << std::dec << '\n';
+	}
 	/* Only the shape of the bad-header distribution distinguishes a
 	 * systematic corruption from random mis-sampling, so print the
 	 * populated buckets rather than a single most-recent sample.
 	 * Silent when the bus is clean. */
-	{
+	if (status.physical_diagnostics_applicable) {
 		std::ostringstream buckets;
 		for (std::size_t bucket = 0; bucket < 16; ++bucket) {
 			if (health.spi_header_histogram[bucket] == 0)
@@ -523,7 +536,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 	}
 	/* GEN_ERR_REG_1 is clear-on-read, so the sweep that samples it also
 	 * destroys it. Name whichever bits were ever seen; silent if none. */
-	if (health.spi_general_error_1_sticky != 0u) {
+	if (status.physical_diagnostics_applicable &&
+	    health.spi_general_error_1_sticky != 0u) {
 		static constexpr std::array<const char *, 8> gen_err_1_bits{
 			nullptr, "SPI_CRC_ERR", "SPI_INVALID_WRITE_ERR",
 			"SPI_INVALID_READ_ERR", "SPI_CLK_COUNT_ERR",
@@ -561,7 +575,9 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "    - [" << reason.code << "] "
 			       << reason.message << '\n';
 	}
-	if (status.spi_responsive)
+	if (!status.physical_diagnostics_applicable)
+		output << "\n  AD7771 register snapshot: not applicable (simulator)\n";
+	else if (status.spi_responsive)
 		print_adc_registers(output, health);
 	else
 		output << "\n  AD7771 register snapshot: unavailable\n";
@@ -600,6 +616,7 @@ struct AcquisitionHealthDto {
 	std::uint64_t dma_bytes = 0;
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
+	std::uint64_t lifetime_invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
 	TransportHealthDto dma_transport;
 };
@@ -821,6 +838,8 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.dma_bytes = response.dma_bytes,
 			.dma_read_errors = response.dma_read_errors,
 			.invalid_records = response.invalid_records,
+			.lifetime_invalid_records =
+				response.lifetime_invalid_records,
 			.sequence_gaps = response.sequence_gaps,
 			.dma_transport = {
 				.produced_blocks =
@@ -1550,6 +1569,142 @@ int run_meter_power_quality(const Options &options, std::ostream &output)
 			     PowerQualityJsonGenerator{});
 }
 
+struct HarmonicResult {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t families = 0;
+	std::uint64_t incomplete_families = 0;
+	bool available = false;
+	std::string period = "3s";
+	msap1::HarmonicSpectrumSnapshot snapshot{};
+};
+
+msap1::MeasurementPeriod parse_harmonic_period(
+	const std::optional<std::string> &value)
+{
+	if (!value || *value == "3s" || *value == "cycles_150_180")
+		return msap1::MeasurementPeriod::Cycles150_180;
+	if (*value == "10m" || *value == "minutes_10")
+		return msap1::MeasurementPeriod::Min10;
+	if (*value == "2h" || *value == "hours_2")
+		return msap1::MeasurementPeriod::Hour2;
+	if (*value == "base")
+		return msap1::MeasurementPeriod::Basic;
+	throw std::invalid_argument(
+		"--period must be 3s, 10m, 2h, or base");
+}
+
+std::string harmonic_period_label(msap1::MeasurementPeriod period)
+{
+	switch (period) {
+	case msap1::MeasurementPeriod::Cycles150_180: return "3s";
+	case msap1::MeasurementPeriod::Min10: return "10m";
+	case msap1::MeasurementPeriod::Hour2: return "2h";
+	case msap1::MeasurementPeriod::Basic: return "base";
+	default: throw std::invalid_argument("unsupported harmonic period");
+	}
+}
+
+class HarmonicTextGenerator final : public ResultGenerator<HarmonicResult> {
+public:
+	int write(const HarmonicResult &result,
+		  std::ostream &output) const override
+	{
+		output << "Harmonic spectrum (" << result.period
+		       << ", IEC subgroups)\n"
+		       << "  Chunks accepted:    " << result.records << '\n'
+		       << "  Families completed: " << result.families << '\n'
+		       << "  Families incomplete:" << ' '
+		       << result.incomplete_families << '\n';
+		if (!result.available) {
+			output << "  No complete 42-record family yet\n";
+			return 0;
+		}
+		const auto &spectrum = result.snapshot;
+		output << "  Sequence:           " << spectrum.sequence << '\n'
+		       << "  Window:             " << spectrum.cycle_count
+		       << " cycles, " << spectrum.sample_count << " samples at "
+		       << spectrum.sample_rate_hz << " Hz\n"
+		       << "  Qualified orders:   1.."
+		       << static_cast<unsigned>(spectrum.qualified_max_order)
+		       << (spectrum.rate_limited() ? " (rate limited)" : "")
+		       << '\n'
+		       << "  Quality:            valid="
+		       << yes_no(spectrum.interval_valid())
+		       << ", arithmetic="
+		       << (spectrum.arithmetic_error() ? "error" : "clean") << '\n';
+		if (spectrum.aggregate_family())
+			output << "  Contributors:       " << spectrum.contributors
+			       << ", target sample " << spectrum.target_sample
+			       << ", overshoot " << spectrum.overshoot_samples
+			       << " sample(s)\n";
+		else
+			output << "  Measured frequency: "
+			       << static_cast<double>(
+				  spectrum.measured_frequency_millihz) / 1000.0
+			       << " Hz\n";
+		static constexpr std::array<const char *, 7> names{
+			"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+		for (std::size_t channel = 0; channel < spectrum.channels.size();
+		     ++channel) {
+			const char *unit = channel < 4 ? "A" : "V";
+			output << "  " << names[channel] << " (order, magnitude "
+			       << unit;
+			if (!spectrum.aggregate_family())
+				output << ", angle degrees relative to h*Va1";
+			output << "):\n";
+			for (const auto &point : spectrum.channels[channel]) {
+				if (point.order > spectrum.qualified_max_order)
+					break;
+				output << "    " << std::setw(3)
+				       << static_cast<unsigned>(point.order) << "  ";
+				if (!point.magnitude_valid) {
+					output << "unavailable\n";
+					continue;
+				}
+				output << static_cast<double>(
+						  point.magnitude_micro_units) /
+						  1e6
+				       << ' ' << unit << "  ";
+				if (point.angle_valid)
+					output << static_cast<double>(
+						  point.angle_millidegrees) /
+						  1000.0
+					       << " deg\n";
+				else
+					output << "angle unavailable\n";
+			}
+		}
+		return 0;
+	}
+};
+
+class HarmonicJsonGenerator final : public ResultGenerator<HarmonicResult> {
+public:
+	int write(const HarmonicResult &result,
+		  std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_harmonics(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	msap1::HarmonicRequest request{};
+	request.period = parse_harmonic_period(options.harmonic_period);
+	const auto response = client.request(request, options.timeout_ms);
+	require_daemon_ok(response.status);
+	HarmonicResult result{response.running, response.records,
+			      response.families, response.incomplete_families,
+			      response.has_snapshot,
+			      harmonic_period_label(response.period),
+			      response.snapshot};
+	return render_result(options, result, output, HarmonicTextGenerator{},
+			     HarmonicJsonGenerator{});
+}
+
 int run_meter_snapshot(const Options &options, std::ostream &output)
 {
 	AcquisitionClient client(options.socket_path);
@@ -1620,6 +1775,24 @@ void register_meter_commands(Application &application)
 			.supports_json = true,
 			.variants = {},
 		}));
+	Command harmonics(
+		"harmonics", "Show the latest complete harmonic spectrum",
+		run_meter_harmonics,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	harmonics.add_option({
+		"period", "PERIOD", "Harmonic period: 3s, 10m, 2h, or base",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.harmonic_period = value;
+		},
+	});
+	meter.add_subcommand(std::move(harmonics));
 	meter.add_subcommand(Command(
 		"snapshot", "Read one coherent meter result",
 		run_meter_snapshot,

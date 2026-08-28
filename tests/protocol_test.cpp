@@ -236,14 +236,11 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Coordinated APU/RPU ABI layout introduced in wire version 5 and
-	 * retained by version 6: the four packed harmonic
-	 * slots (8 words) sit between the noise levels and the simulator
-	 * flags, and the five Urms(1/2) detection fields close the payload
-	 * after nominal_frequency_hz, growing it from 244 to 276 to 296
-	 * bytes (frame 16+296 = 312 <= 384). */
-	static_assert(sizeof(msap1_meter_config_payload) == 296,
-		      "meter config payload must be 296 packed bytes");
+	/* Wire v7 expands each of the four simulator tone slots from two words
+	 * to three: Q16.16 frequency ratio, lane-mask/Q16 amplitude, and Q0.32
+	 * phase. The complete frame remains below the 384-byte RPMsg cap. */
+	static_assert(sizeof(msap1_meter_config_payload) == 312,
+		      "meter config payload must be 312 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_dc_offset_counts) == 172,
 		      "DC offsets must follow the simulator phase step");
@@ -254,24 +251,26 @@ void meter_config_wire_layout()
 			       simulator_harmonics) == 236,
 		      "harmonic slots must follow the noise levels");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       simulator_flags) == 268,
+			       simulator_flags) == 284,
 		      "simulator flags must follow the harmonic slots");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       nominal_frequency_hz) == 272,
+			       nominal_frequency_hz) == 288,
 		      "nominal_frequency_hz must follow the simulator flags");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       pq_reference_microvolts) == 276,
+			       pq_reference_microvolts) == 292,
 		      "the PQ reference must follow the nominal frequency");
 	static_assert(offsetof(msap1_meter_config_payload,
-			       pq_hysteresis_e4) == 292,
+			       pq_hysteresis_e4) == 308,
 		      "the PQ hysteresis must be the trailing field");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
 	payload.simulator_dc_offset_counts[2] = -12345;
 	payload.simulator_noise_level_counts[6] = 777;
-	/* Slot 1 word0: 5% (0x0ccd Q16) 3rd harmonic on the voltage lanes. */
-	payload.simulator_harmonics[2] = 0x0ccd7003u;
+	/* Slot 0: 3.0x, 5% (0x0ccd Q16), voltage lanes, 90 degree phase. */
+	payload.simulator_harmonics[0] = 0x00030000u;
+	payload.simulator_harmonics[1] = 0x0ccd0070u;
+	payload.simulator_harmonics[2] = 0x40000000u;
 	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
 	payload.pq_reference_microvolts = 230000000u;
 	payload.pq_hysteresis_e4 = 200u;
@@ -281,7 +280,7 @@ void meter_config_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"meter config payload size changed on the wire");
 	std::uint32_t nominal = 0;
-	std::memcpy(&nominal, decoded.payload.data() + 272, sizeof(nominal));
+	std::memcpy(&nominal, decoded.payload.data() + 288, sizeof(nominal));
 	require(nominal == 50,
 		"nominal frequency was not encoded at the trailing offset");
 	std::int32_t dc = 0;
@@ -293,20 +292,24 @@ void meter_config_wire_layout()
 	require(noise == 777,
 		"noise level was not encoded at its normative offset");
 	std::uint32_t harmonic = 0;
-	std::memcpy(&harmonic, decoded.payload.data() + 236 + 2 * 4,
+	std::memcpy(&harmonic, decoded.payload.data() + 236,
 		    sizeof(harmonic));
-	require(harmonic == 0x0ccd7003u,
-		"harmonic slot was not encoded at its normative offset");
+	require(harmonic == 0x00030000u,
+		"harmonic ratio was not encoded at its normative offset");
+	std::memcpy(&harmonic, decoded.payload.data() + 236 + 4,
+		    sizeof(harmonic));
+	require(harmonic == 0x0ccd0070u,
+		"harmonic amplitude/mask was not encoded at its normative offset");
 	std::uint32_t flags = 0;
-	std::memcpy(&flags, decoded.payload.data() + 268, sizeof(flags));
+	std::memcpy(&flags, decoded.payload.data() + 284, sizeof(flags));
 	require(flags == MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE,
 		"simulator flags were not encoded at their normative offset");
 	std::uint32_t reference = 0;
-	std::memcpy(&reference, decoded.payload.data() + 276, sizeof(reference));
+	std::memcpy(&reference, decoded.payload.data() + 292, sizeof(reference));
 	require(reference == 230000000u,
 		"the PQ reference was not encoded at its normative offset");
 	std::uint32_t hysteresis = 0;
-	std::memcpy(&hysteresis, decoded.payload.data() + 292,
+	std::memcpy(&hysteresis, decoded.payload.data() + 308,
 		    sizeof(hysteresis));
 	require(hysteresis == 200u,
 		"the PQ hysteresis was not encoded at its normative offset");
@@ -337,8 +340,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 6u,
-		"the simulator event message belongs to wire version 6");
+			MSAP1_RPU_VERSION == 7u,
+		"the simulator event message belongs to wire version 7");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -712,6 +715,9 @@ void meter_health_evaluation()
 	response.has_meter_record = true;
 	response.meter_record_age_ms = 0;
 	response.configuration_generation = 0x1234;
+	/* Historical rejections remain observable but must not poison a clean
+	 * capture epoch forever. */
+	response.lifetime_invalid_records = 58;
 	rpu_health.health_flags =
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
 		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH |
@@ -734,6 +740,13 @@ void meter_health_evaluation()
 		"ADC rate-match health flag was not exposed");
 	require(healthy.adc_degraded_reasons.empty(),
 		"healthy ADC response reported degradation reasons");
+
+	response.invalid_records = 1;
+	const auto current_rejection = msap1::evaluate_meter_health(response);
+	require(!current_rejection.healthy &&
+			!current_rejection.acquisition_healthy,
+		"current-epoch rejection did not degrade acquisition health");
+	response.invalid_records = 0;
 
 	msap1_aggregation_health_payload aggregation{};
 	aggregation.health_flags =
