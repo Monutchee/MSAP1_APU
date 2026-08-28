@@ -153,7 +153,13 @@ public:
 	[[nodiscard]] std::uint64_t meter_records() const { return meter_records_; }
 	[[nodiscard]] std::uint64_t dma_bytes() const { return dma_bytes_; }
 	[[nodiscard]] std::uint64_t dma_read_errors() const { return dma_read_errors_; }
+	/** Rejections since the most recent deliberate capture epoch began. */
 	[[nodiscard]] std::uint64_t invalid_records() const { return invalid_records_; }
+	/** Process-lifetime rejection total retained for forensic diagnostics. */
+	[[nodiscard]] std::uint64_t lifetime_invalid_records() const
+	{
+		return lifetime_invalid_records_;
+	}
 	/** @brief Missing BASIC records detected by sequence tracking. */
 	[[nodiscard]] std::uint64_t sequence_gaps() const { return sequence_gaps_; }
 	[[nodiscard]] std::uint64_t single_cycle_records() const
@@ -248,6 +254,11 @@ public:
 
 private:
 	void accept(const msap1::MeterRecord &record);
+	void note_invalid_record()
+	{
+		++invalid_records_;
+		++lifetime_invalid_records_;
+	}
 	/** Rate-limited raw-word forensics shared by every silent rejection
 	 * path — the datum that localizes a PL emission fault. */
 	void log_rejected_record(const std::string &reason, const char *event,
@@ -275,7 +286,10 @@ private:
 	std::uint64_t meter_records_ = 0;
 	std::uint64_t dma_bytes_ = 0;
 	std::uint64_t dma_read_errors_ = 0;
+	/* Health uses the current capture epoch; the lifetime total remains
+	 * observable without making a recovered pipeline permanently unhealthy. */
 	std::uint64_t invalid_records_ = 0;
+	std::uint64_t lifetime_invalid_records_ = 0;
 	std::uint64_t sequence_gaps_ = 0;
 	/* Single-cycle diagnostic records: acceptance count and the latest
 	 * decoded snapshot (verification tooling; never published to the

@@ -500,6 +500,52 @@ void backfill_predicate_reports_lost_coverage()
 		"a covering session was reported incomplete");
 }
 
+void database_policy_updates_are_idempotent_and_replay_only_when_needed()
+{
+	using mnc::meter_stream::DatabaseDataset;
+	using mnc::meter_stream::DatabaseStoragePolicy;
+	using mnc::meter_stream::StorageBackend;
+	using mnc::meter_stream::same_database_policies;
+	using msap1::history::historian_policy_transition_requires_backfill;
+
+	const std::vector<DatabaseStoragePolicy> current{
+		{DatabaseDataset::basic, StorageBackend::memory,
+			{std::chrono::hours(24), 1024}},
+		{DatabaseDataset::minutes_10, StorageBackend::persistent, {}},
+	};
+	auto reordered = current;
+	std::ranges::reverse(reordered);
+	require(same_database_policies(current, reordered),
+		"policy equality depends on wire order");
+	auto duplicate = reordered;
+	duplicate.back() = duplicate.front();
+	require(!same_database_policies(current, duplicate),
+		"duplicate dataset policies compared equal");
+	require(!historian_policy_transition_requires_backfill(
+			current, reordered),
+		"identical historian policy requested a replay");
+
+	auto retention_only = current;
+	retention_only.front().retention.maximum_bytes = 2048;
+	require(!same_database_policies(current, retention_only),
+		"retention policy change was treated as identical");
+	require(!historian_policy_transition_requires_backfill(
+			current, retention_only),
+		"retention-only policy change requested a replay");
+
+	auto newly_volatile = current;
+	newly_volatile.back().backend = StorageBackend::memory;
+	require(historian_policy_transition_requires_backfill(
+			current, newly_volatile),
+		"persistent-to-memory policy change did not request replay");
+
+	auto newly_persistent = current;
+	newly_persistent.front().backend = StorageBackend::persistent;
+	require(!historian_policy_transition_requires_backfill(
+			current, newly_persistent),
+		"memory-to-persistent policy change requested a replay");
+}
+
 void malformed_policies_are_rejected()
 {
 	using namespace mnc::meter_stream;
@@ -947,6 +993,7 @@ int main()
 	publish_enforces_hard_byte_cap();
 	register_consumer_preserves_acknowledged_cursor();
 	backfill_predicate_reports_lost_coverage();
+	database_policy_updates_are_idempotent_and_replay_only_when_needed();
 	historian_wal_stays_bounded_under_sustained_appends();
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();

@@ -307,6 +307,13 @@ after one second; only two consecutive failures replace a known-good health
 snapshot. Recovered per-register retries and the last malformed register/header
 are included in the output.
 
+Record-rejection health is scoped to the current deliberate capture epoch, so
+a recovered configuration test does not leave the meter permanently failed.
+The process-lifetime rejection total remains beside it for forensics. In ADC
+simulator mode, the full report labels SPI, physical DCLK, and the AD7771
+register snapshot as not applicable rather than presenting zero-valued
+physical diagnostics as failures.
+
 Both summaries carry a `DMA transport` line with the kernel driver's own ring
 accounting: blocks produced, blocks consumed, overruns, cyclic completion
 callbacks, and the ring depth. The Xilinx cyclic callback fires per interrupt

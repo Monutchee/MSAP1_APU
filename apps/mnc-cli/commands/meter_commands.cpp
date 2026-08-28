@@ -310,7 +310,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "unavailable";
 		output << " measured frame/s\n"
 		       << "  Data-path errors:    DMA " << response.dma_read_errors
-		       << ", invalid " << response.invalid_records << ", gaps "
+		       << ", invalid " << response.invalid_records << " epoch/"
+		       << response.lifetime_invalid_records << " lifetime, gaps "
 		       << response.sequence_gaps << ", FIFO "
 		       << health.overflow_count << ", headers "
 		       << health.header_error_count << '\n'
@@ -462,7 +463,10 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << "  Meter records:        " << response.meter_records << '\n'
 	       << "  DMA bytes:            " << response.dma_bytes << '\n'
 	       << "  DMA read errors:      " << response.dma_read_errors << '\n'
-	       << "  Invalid records:      " << response.invalid_records << '\n'
+	       << "  Invalid records:      " << response.invalid_records
+	       << " current epoch\n"
+	       << "  Invalid records total: " << response.lifetime_invalid_records
+	       << " process lifetime\n"
 	       << "  Sequence gaps:        " << response.sequence_gaps << '\n'
 	       << "  DMA transport:        " << transport_counters(response)
 	       << '\n'
@@ -472,14 +476,21 @@ int write_meter_health_text(const MeterHealthResult &result,
 	       << yes_no(status.meter_generation_match) << '\n'
 	       << "  Meter configured:     " << yes_no(status.meter_configured) << '\n'
 	       << "  DC offset removal:    " << yes_no(status.dc_offset_removal) << '\n'
-	       << "  ADC SPI responsive:   " << yes_no(status.spi_responsive) << '\n'
+	       << "  ADC SPI responsive:   ";
+	if (status.physical_diagnostics_applicable)
+		output << yes_no(status.spi_responsive) << '\n';
+	else
+		output << "not applicable (simulator)\n";
+	output
 	       << "  ADC rate match:       " << yes_no(status.rate_match) << '\n'
 	       << "  Capture active:       " << yes_no(status.capture_active) << '\n'
 	       << "  Sample rate:          " << health.sample_rate_hz << " frame/s\n"
 	       << "  PL frames:            " << health.frame_count << '\n'
 	       << "  ADC packets:          " << health.packet_count << '\n'
 	       << "  ADC DCLK:             ";
-	if (health.dclk_frequency_hz != 0u)
+	if (!status.physical_diagnostics_applicable)
+		output << "not applicable (simulator)\n";
+	else if (health.dclk_frequency_hz != 0u)
 		output << health.dclk_frequency_hz << " Hz\n";
 	else
 		output << "unavailable\n";
@@ -489,25 +500,27 @@ int write_meter_health_text(const MeterHealthResult &result,
 	else
 		output << "unavailable\n";
 	output << "  FIFO overflows:       " << health.overflow_count << '\n'
-	       << "  Header errors:        " << health.header_error_count << '\n'
-	       << "  SPI protocol errors:  "
-	       << health.spi_protocol_error_count << '\n'
-	       << "  SPI retry recoveries: "
-	       << health.spi_retry_recovery_count << '\n'
-	       << "  Config mismatches:    "
-	       << health.spi_config_read_mismatch_count << '\n'
-	       << "  GEN_ERR_REG_1 events: "
-	       << health.spi_general_error_1_events << '\n'
-	       << "  Last SPI failure:     register 0x" << std::hex
-	       << static_cast<unsigned int>(health.spi_last_failed_register)
-	       << ", header 0x"
-	       << static_cast<unsigned int>(health.spi_last_received_header)
-	       << std::dec << '\n';
+	       << "  Header errors:        " << health.header_error_count << '\n';
+	if (status.physical_diagnostics_applicable) {
+		output << "  SPI protocol errors:  "
+		       << health.spi_protocol_error_count << '\n'
+		       << "  SPI retry recoveries: "
+		       << health.spi_retry_recovery_count << '\n'
+		       << "  Config mismatches:    "
+		       << health.spi_config_read_mismatch_count << '\n'
+		       << "  GEN_ERR_REG_1 events: "
+		       << health.spi_general_error_1_events << '\n'
+		       << "  Last SPI failure:     register 0x" << std::hex
+		       << static_cast<unsigned int>(health.spi_last_failed_register)
+		       << ", header 0x"
+		       << static_cast<unsigned int>(health.spi_last_received_header)
+		       << std::dec << '\n';
+	}
 	/* Only the shape of the bad-header distribution distinguishes a
 	 * systematic corruption from random mis-sampling, so print the
 	 * populated buckets rather than a single most-recent sample.
 	 * Silent when the bus is clean. */
-	{
+	if (status.physical_diagnostics_applicable) {
 		std::ostringstream buckets;
 		for (std::size_t bucket = 0; bucket < 16; ++bucket) {
 			if (health.spi_header_histogram[bucket] == 0)
@@ -523,7 +536,8 @@ int write_meter_health_text(const MeterHealthResult &result,
 	}
 	/* GEN_ERR_REG_1 is clear-on-read, so the sweep that samples it also
 	 * destroys it. Name whichever bits were ever seen; silent if none. */
-	if (health.spi_general_error_1_sticky != 0u) {
+	if (status.physical_diagnostics_applicable &&
+	    health.spi_general_error_1_sticky != 0u) {
 		static constexpr std::array<const char *, 8> gen_err_1_bits{
 			nullptr, "SPI_CRC_ERR", "SPI_INVALID_WRITE_ERR",
 			"SPI_INVALID_READ_ERR", "SPI_CLK_COUNT_ERR",
@@ -561,7 +575,9 @@ int write_meter_health_text(const MeterHealthResult &result,
 			output << "    - [" << reason.code << "] "
 			       << reason.message << '\n';
 	}
-	if (status.spi_responsive)
+	if (!status.physical_diagnostics_applicable)
+		output << "\n  AD7771 register snapshot: not applicable (simulator)\n";
+	else if (status.spi_responsive)
 		print_adc_registers(output, health);
 	else
 		output << "\n  AD7771 register snapshot: unavailable\n";
@@ -600,6 +616,7 @@ struct AcquisitionHealthDto {
 	std::uint64_t dma_bytes = 0;
 	std::uint64_t dma_read_errors = 0;
 	std::uint64_t invalid_records = 0;
+	std::uint64_t lifetime_invalid_records = 0;
 	std::uint64_t sequence_gaps = 0;
 	TransportHealthDto dma_transport;
 };
@@ -821,6 +838,8 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			.dma_bytes = response.dma_bytes,
 			.dma_read_errors = response.dma_read_errors,
 			.invalid_records = response.invalid_records,
+			.lifetime_invalid_records =
+				response.lifetime_invalid_records,
 			.sequence_gaps = response.sequence_gaps,
 			.dma_transport = {
 				.produced_blocks =

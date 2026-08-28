@@ -897,9 +897,11 @@ void ingestor_tracks_interleaved_aggregate_stream()
 			"the aggregate cache did not refill after a swap");
 		ingest.begin_epoch();
 		require(!ingest.latest_aggregate_record().has_value() &&
+			ingest.invalid_records() == 0 &&
+			ingest.lifetime_invalid_records() == 2 &&
 			ingest.aggregate_record_age_ms() ==
 				msap1::acquisition_age_unavailable,
-			"begin_epoch() did not reset the aggregate cache");
+			"begin_epoch() did not reset epoch health while retaining diagnostics");
 	}
 }
 

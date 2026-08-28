@@ -108,7 +108,7 @@ void MeterRecordIngestor::read_available()
 			return;
 		dma_bytes_ += batch.bytes;
 		if (batch.partial_record) {
-			++invalid_records_;
+			note_invalid_record();
 			log_message(dma_log, mnc::logging::Priority::warning,
 				"meter DMA returned a partial record",
 				"dma_partial_record",
@@ -122,6 +122,7 @@ void MeterRecordIngestor::read_available()
 
 void MeterRecordIngestor::begin_epoch()
 {
+	invalid_records_ = 0;
 	latest_record_.reset();
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
@@ -272,7 +273,7 @@ bool MeterRecordIngestor::track_basic_continuity(
 			 * sequence word lands, so it dumps forensics like every
 			 * other rejection.
 			 */
-			++invalid_records_;
+			note_invalid_record();
 			log_rejected_record(
 				"stale or out-of-order basic sequence (expected " +
 					std::to_string(expected) + ", received " +
@@ -357,7 +358,7 @@ bool MeterRecordIngestor::track_aggregate_continuity(
 		return true;
 	}
 	/* Stale/out-of-order, same half-range rule as the basic stream. */
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order aggregate sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -397,7 +398,7 @@ bool MeterRecordIngestor::track_ten_minute_continuity(
 			 {"MNC_SEQUENCE", std::to_string(received)}});
 		return true;
 	}
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order ten-minute sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -433,7 +434,7 @@ bool MeterRecordIngestor::track_two_hour_continuity(
 			 {"MNC_SEQUENCE", std::to_string(received)}});
 		return true;
 	}
-	++invalid_records_;
+	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order two-hour sequence (expected " +
 			std::to_string(expected) + ", received " +
@@ -528,7 +529,7 @@ void MeterRecordIngestor::log_configuration_mismatch(
 void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 {
 	if (!matches_configuration(record)) {
-		++invalid_records_;
+		note_invalid_record();
 		log_configuration_mismatch(record);
 		return;
 	}
@@ -571,7 +572,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 					++pq_events_;
 			}
 		} catch (const std::exception &error) {
-			++invalid_records_;
+			note_invalid_record();
 			log_rejected_record(
 				std::string("power-quality record: ") +
 					error.what(),
@@ -595,7 +596,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			assembly = harmonic_assemblers_[
 				harmonic_period_index(chunk.period)].accept(chunk);
 		} catch (const std::exception &error) {
-			++invalid_records_;
+			note_invalid_record();
 			log_rejected_record(
 				std::string("harmonic record: ") + error.what(),
 				"meter_record_decode_rejected", record);
@@ -756,7 +757,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	try {
 		update = decoders_.decode(record, received_at);
 	} catch (const std::exception &error) {
-		++invalid_records_;
+		note_invalid_record();
 		const auto interval = record_interval_identity(record);
 		/* Same raw-word dump as the silent rejection paths: a decoder
 		 * rejection is the partially-emitted record whose truncation

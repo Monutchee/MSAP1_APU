@@ -552,6 +552,7 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.dma_bytes = ingest_.dma_bytes();
 	response.dma_read_errors = ingest_.dma_read_errors();
 	response.invalid_records = ingest_.invalid_records();
+	response.lifetime_invalid_records = ingest_.lifetime_invalid_records();
 	response.sequence_gaps = ingest_.sequence_gaps();
 	/* One sample of the whole kernel accounting, so produced, consumed,
 	 * overrun, and callbacks on the wire all describe the same instant. */

@@ -25,9 +25,15 @@ void apply_to_database_services(
 	const msap1::settings::ProductSettings &settings)
 {
 	msap1::meter_stream::MeterRecordStreamClient stream;
-	stream.apply_policy(settings.database.spool_policy());
-	msap1::history::ipc::HistorianClient{}.apply_policies(
-		settings.database.historian_policies());
+	const auto spool_policy = settings.database.spool_policy();
+	if (stream.policy() != spool_policy)
+		stream.apply_policy(spool_policy);
+
+	msap1::history::ipc::HistorianClient historian;
+	const auto historian_policies = settings.database.historian_policies();
+	if (!mnc::meter_stream::same_database_policies(
+		    historian.policies(), historian_policies))
+		historian.apply_policies(historian_policies);
 }
 
 void apply_to_mqtt_service(const msap1::settings::ProductSettings &settings)

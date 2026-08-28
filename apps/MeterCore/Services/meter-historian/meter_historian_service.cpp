@@ -153,32 +153,33 @@ void MeterHistorianService::consume()
 		backfilling_ = false;
 	}
 
+	std::optional<BackfillSession> policy_backfill;
 	while (!stopping_) {
+		bool worked = false;
+		auto idle_delay = std::chrono::milliseconds(100);
 		try {
 			auto records = stream_.read_after("historian", 256);
-			if (records.empty()) {
-				consumer_healthy_ = true;
-				std::this_thread::sleep_for(
-					std::chrono::milliseconds(100));
-				continue;
+			if (!records.empty()) {
+				/* Serialize only this bounded commit page with the routing
+				 * switch. A potentially long replay runs cooperatively below
+				 * and never holds live ingestion behind it. */
+				{
+					std::scoped_lock migration(migration_mutex_);
+					for (const auto &record : records) {
+						/* A skipped record still advances the cursor via
+						 * the acknowledgement below; only a committed one
+						 * is announced to subscribers. */
+						if (ingest(record))
+							post_event(ipc::Event::record_committed,
+								   record.cursor);
+					}
+				}
+				/* The per-record database commit is the durability boundary. A
+				 * single page acknowledgement avoids one IPC round trip per
+				 * record while retaining at-least-once replay. */
+				stream_.acknowledge("historian", records.back().cursor);
+				worked = true;
 			}
-
-			/* Policy migration holds this lock across rerouting and replay.
-			 * Live records remain safely queued in the durable stream and are
-			 * consumed after the target projection is ready. */
-			std::scoped_lock migration(migration_mutex_);
-			for (const auto &record : records) {
-				/* A skipped record still advances the cursor via
-				 * the acknowledgement below; only a committed one
-				 * is announced to subscribers. */
-				if (ingest(record))
-					post_event(ipc::Event::record_committed,
-						   record.cursor);
-			}
-			/* The per-record database commit is the durability boundary. A single
-			 * page acknowledgement avoids one IPC round trip per record while
-			 * retaining at-least-once replay if the process stops before this call. */
-			stream_.acknowledge("historian", records.back().cursor);
 			consumer_healthy_ = true;
 		} catch (const std::exception &error) {
 			consumer_healthy_ = false;
@@ -200,11 +201,17 @@ void MeterHistorianService::consume()
 					"historian_consumer_reregistered");
 			} catch (const std::exception &) {
 				/* The stream is unreachable; the retry below also
-				 * covers this. */
-			}
-			std::this_thread::sleep_for(std::chrono::seconds(1));
+					 * covers this. */
+				}
+			idle_delay = std::chrono::seconds(1);
 		}
+
+		worked = service_policy_backfill(policy_backfill) || worked;
+		if (!worked)
+			std::this_thread::sleep_for(idle_delay);
 	}
+	if (policy_backfill)
+		end_backfill(*policy_backfill);
 }
 
 bool MeterHistorianService::rebuilds_volatile_period(
@@ -331,10 +338,31 @@ bool MeterHistorianService::ingest(
 
 void MeterHistorianService::backfill()
 {
+	auto session = begin_backfill(0);
+	try {
+		while (!stopping_ &&
+		       backfill_page(session, false) ==
+			       BackfillPageResult::progress) {
+		}
+		end_backfill(session);
+	} catch (...) {
+		end_backfill(session);
+		throw;
+	}
+}
+
+MeterHistorianService::BackfillSession
+MeterHistorianService::begin_backfill(std::uint64_t generation)
+{
 	constexpr std::string_view consumer = "historian-policy-backfill";
-	stream_.unregister_consumer(consumer);
-	stream_.register_consumer(consumer);
-	const auto stream_status = stream_.status();
+	BackfillSession session;
+	session.stream = std::make_unique<
+		msap1::meter_stream::MeterRecordStreamClient>();
+	session.generation = generation;
+	session.stream->unregister_consumer(consumer);
+	session.stream->register_consumer(consumer);
+	const auto stream_status = session.stream->status();
+	session.through_cursor = stream_status.newest_cursor;
 	oldest_available_stream_cursor_ = stream_status.oldest_cursor;
 	backfill_incomplete_ = backfill_is_incomplete(stream_status.oldest_cursor,
 		stream_status.session_start_cursor,
@@ -344,38 +372,139 @@ void MeterHistorianService::backfill()
 			"historian backfill begins after records already pruned from the spool",
 			"historian_backfill_incomplete");
 	}
+	return session;
+}
+
+MeterHistorianService::BackfillPageResult
+MeterHistorianService::backfill_page(BackfillSession &session,
+	bool enforce_generation)
+{
+	constexpr std::string_view consumer = "historian-policy-backfill";
+	if (session.through_cursor == 0)
+		return BackfillPageResult::complete;
+
+	/* Sixty-four records bounds the replay lock hold while still carrying at
+	 * least one complete 42-record harmonic family. The live page is always
+	 * serviced before the next replay page. */
+	auto records = session.stream->read_after(consumer, 64);
+	if (records.empty())
+		return BackfillPageResult::complete;
+
+	std::uint64_t acknowledged = 0;
+	{
+		std::scoped_lock migration(migration_mutex_);
+		if (enforce_generation &&
+		    (session.generation != policy_backfill_generation_ ||
+		     !policy_backfill_requested_))
+			return BackfillPageResult::cancelled;
+		for (const auto &record : records) {
+			if (record.cursor > session.through_cursor)
+				break;
+			/* Persistent projections already retain their committed rows.
+			 * Replaying only selected volatile datasets avoids rewriting
+			 * every persistent record during a process restart. */
+			if (rebuilds_volatile_period(record))
+				(void)ingest(record);
+			acknowledged = record.cursor;
+		}
+	}
+
+	if (acknowledged != 0)
+		session.stream->acknowledge(consumer, acknowledged);
+	return acknowledged == 0 || acknowledged >= session.through_cursor
+		? BackfillPageResult::complete
+		: BackfillPageResult::progress;
+}
+
+void MeterHistorianService::end_backfill(BackfillSession &session) noexcept
+{
+	constexpr std::string_view consumer = "historian-policy-backfill";
+	try {
+		if (session.stream)
+			session.stream->unregister_consumer(consumer);
+	} catch (...) {
+	}
+	session.stream.reset();
+}
+
+bool MeterHistorianService::service_policy_backfill(
+	std::optional<BackfillSession> &session)
+{
+	std::uint64_t requested_generation = 0;
+	{
+		std::scoped_lock migration(migration_mutex_);
+		if (policy_backfill_requested_)
+			requested_generation = policy_backfill_generation_;
+	}
+
+	if (session && (requested_generation == 0 ||
+		       session->generation != requested_generation)) {
+		end_backfill(*session);
+		session.reset();
+	}
+	if (requested_generation == 0)
+		return false;
 
 	try {
-		for (;;) {
-			if (stopping_)
-				break;
-			auto records = stream_.read_after(consumer, 512);
-			if (records.empty())
-				break;
-			for (const auto &record : records) {
-				/* Persistent projections already retain their committed rows.
-				 * Replaying only the selected volatile datasets avoids rewriting
-				 * every persistent record during each process restart. */
-				if (rebuilds_volatile_period(record))
-					(void)ingest(record);
+		if (!session)
+			session.emplace(begin_backfill(requested_generation));
+		const auto result = backfill_page(*session, true);
+		if (result == BackfillPageResult::progress)
+			return true;
+
+		end_backfill(*session);
+		session.reset();
+		if (result == BackfillPageResult::cancelled)
+			return true;
+
+		bool completed = false;
+		{
+			std::scoped_lock migration(migration_mutex_);
+			if (policy_backfill_requested_ &&
+			    policy_backfill_generation_ == requested_generation) {
+				policy_backfill_requested_ = false;
+				migrating_ = false;
+				completed = true;
 			}
-			/* One acknowledgement per fetched page is safe because every row
-			 * has committed before advancing the temporary replay cursor. */
-			stream_.acknowledge(consumer, records.back().cursor);
 		}
-		stream_.unregister_consumer(consumer);
-	} catch (...) {
-		try {
-			stream_.unregister_consumer(consumer);
-		} catch (...) {
+		if (completed)
+			post_event(ipc::Event::migration_completed);
+	} catch (const std::exception &error) {
+		if (session) {
+			end_backfill(*session);
+			session.reset();
 		}
-		throw;
+		bool failed = false;
+		{
+			std::scoped_lock migration(migration_mutex_);
+			if (policy_backfill_requested_ &&
+			    policy_backfill_generation_ == requested_generation) {
+				policy_backfill_requested_ = false;
+				migrating_ = false;
+				backfill_incomplete_ = true;
+				failed = true;
+			}
+		}
+		if (failed) {
+			post_event(ipc::Event::migration_failed);
+			(void)logger().write(mnc::logging::Priority::error,
+				std::string("historian policy backfill failed: ") +
+					error.what(),
+				"historian_policy_backfill_failed");
+		}
 	}
+	return true;
 }
 
 void MeterHistorianService::on_stop() noexcept
 {
 	stopping_ = true;
+	{
+		std::scoped_lock migration(migration_mutex_);
+		++policy_backfill_generation_;
+		policy_backfill_requested_ = false;
+		migrating_ = false;
+	}
 	server_.stop();
 	context_.stop();
 	if (consumer_.joinable())
@@ -490,24 +619,41 @@ void MeterHistorianService::handle(
 			break;
 		}
 		case ipc::Command::apply_storage_policy: {
-			std::scoped_lock migration(migration_mutex_);
-			const auto old = store_->policies();
 			const auto count = input.u32();
 			std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies;
 			policies.reserve(count);
 			for (std::uint32_t index = 0; index < count; ++index)
 				policies.push_back(read_policy(input));
 			input.require_finished();
+			const auto old = store_->policies();
+			if (mnc::meter_stream::same_database_policies(old, policies)) {
+				output.u32(0);
+				break;
+			}
+			const bool requires_backfill =
+				historian_policy_transition_requires_backfill(
+					old, policies);
 			migrating_ = true;
 			post_event(ipc::Event::migration_started);
 			try {
-				store_->prepare_policy_migration(policies);
-				store_->apply_policies(policies);
-				backfill();
-				migrating_ = false;
-				post_event(ipc::Event::migration_completed);
+				{
+					std::scoped_lock migration(migration_mutex_);
+					store_->prepare_policy_migration(policies);
+					store_->apply_policies(policies);
+					++policy_backfill_generation_;
+					policy_backfill_requested_ = requires_backfill;
+				}
+				if (!requires_backfill) {
+					migrating_ = false;
+					post_event(ipc::Event::migration_completed);
+				}
 			} catch (...) {
-				store_->apply_policies(old);
+				{
+					std::scoped_lock migration(migration_mutex_);
+					store_->apply_policies(old);
+					++policy_backfill_generation_;
+					policy_backfill_requested_ = false;
+				}
 				migrating_ = false;
 				post_event(ipc::Event::migration_failed);
 				throw;

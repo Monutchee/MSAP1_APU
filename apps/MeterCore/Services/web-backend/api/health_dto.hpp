@@ -57,7 +57,10 @@ struct AcquisitionHealthDto {
 	std::uint64_t records;
 	std::uint64_t bytes;
 	std::uint64_t read_errors;
+	/** Rejections since the current capture epoch began. */
 	std::uint64_t invalid_records;
+	/** Process-lifetime forensic total. */
+	std::uint64_t lifetime_invalid_records;
 	std::uint64_t sequence_gaps;
 	TransportHealthDto dma_transport;
 	std::uint32_t configuration_generation;

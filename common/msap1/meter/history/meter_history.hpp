@@ -79,6 +79,32 @@ struct HistorianStatus {
 		session_start_cursor > persisted_high_water;
 }
 
+/**
+ * A replay is required only when a dataset is newly routed to volatile
+ * memory. Retention-only changes and moves to persistent storage preserve an
+ * already materialized target and must not trigger a full spool scan.
+ */
+[[nodiscard]] constexpr bool historian_policy_transition_requires_backfill(
+	std::span<const mnc::meter_stream::DatabaseStoragePolicy> current,
+	std::span<const mnc::meter_stream::DatabaseStoragePolicy> candidate)
+{
+	using mnc::meter_stream::StorageBackend;
+	for (const auto &next : candidate) {
+		if (next.backend != StorageBackend::memory)
+			continue;
+		bool already_memory = false;
+		for (const auto &prior : current) {
+			if (prior.dataset == next.dataset) {
+				already_memory = prior.backend == StorageBackend::memory;
+				break;
+			}
+		}
+		if (!already_memory)
+			return true;
+	}
+	return false;
+}
+
 /** Routes each typed PL result to the configured volatile/persistent store. */
 class MeterHistoryStore final {
 public:

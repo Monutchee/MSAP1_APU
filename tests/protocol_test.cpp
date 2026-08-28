@@ -715,6 +715,9 @@ void meter_health_evaluation()
 	response.has_meter_record = true;
 	response.meter_record_age_ms = 0;
 	response.configuration_generation = 0x1234;
+	/* Historical rejections remain observable but must not poison a clean
+	 * capture epoch forever. */
+	response.lifetime_invalid_records = 58;
 	rpu_health.health_flags =
 		MSAP1_ADC_HEALTH_SPI_RESPONSIVE | MSAP1_ADC_HEALTH_INITIALIZED |
 		MSAP1_ADC_HEALTH_INIT_COMPLETE | MSAP1_ADC_HEALTH_CONFIG_MATCH |
@@ -737,6 +740,13 @@ void meter_health_evaluation()
 		"ADC rate-match health flag was not exposed");
 	require(healthy.adc_degraded_reasons.empty(),
 		"healthy ADC response reported degradation reasons");
+
+	response.invalid_records = 1;
+	const auto current_rejection = msap1::evaluate_meter_health(response);
+	require(!current_rejection.healthy &&
+			!current_rejection.acquisition_healthy,
+		"current-epoch rejection did not degrade acquisition health");
+	response.invalid_records = 0;
 
 	msap1_aggregation_health_payload aggregation{};
 	aggregation.health_flags =
