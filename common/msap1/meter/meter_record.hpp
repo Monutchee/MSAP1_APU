@@ -114,9 +114,10 @@ inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x001E0002
  * and one shared producer sequence. Each record carries up to 24 packed
  * magnitude/angle entries; the completed family covers orders 1..127. */
 inline constexpr std::uint32_t meter_harmonic_format = 0x00050001u;
-/* HARMONIC-AGG v1: R5C1 magnitude-only 150/180-cycle, 10-minute,
- * and 2-hour families. The period and interval provenance live in words
- * 11..15; each of the same 42 records carries up to 23 magnitudes. */
+/* HARMONIC-AGG v1: R5C1 RMS-magnitude and magnitude-weighted circular-phase
+ * 150/180-cycle, 10-minute, and 2-hour families. The period and interval
+ * provenance live in words 11..15; each of the same 42 records carries up to
+ * 23 packed magnitude/angle entries. */
 inline constexpr std::uint32_t meter_harmonic_aggregate_format = 0x001F0001u;
 /* PQEVT v1 (metrology M12): the sliding Urms(1/2) tier's record, on its
  * OWN producer port with its own sequence space. Word 13 selects the

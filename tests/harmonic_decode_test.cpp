@@ -95,9 +95,11 @@ msap1::MeterRecord make_aggregate_record(std::uint32_t sequence,
 	record.words[15] = 127u | (50u << 8) | (10u << 16) | (3u << 24);
 	for (std::size_t index = 0; index < count; ++index) {
 		const auto order = first_order + index;
+		const std::uint64_t angle = order * 1000u;
 		const std::uint64_t packed =
 			(static_cast<std::uint64_t>(channel) * 1000000u + order) |
-			(std::uint64_t{1} << 60);
+			(angle << 40) | (std::uint64_t{1} << 60) |
+			(std::uint64_t{1} << 61);
 		record.words[16 + index * 2] = static_cast<std::uint32_t>(packed);
 		record.words[17 + index * 2] =
 			static_cast<std::uint32_t>(packed >> 32);
@@ -233,8 +235,9 @@ int main()
 	if (aggregate)
 		require(aggregate->channels[6][126].magnitude_micro_units ==
 				6000127u &&
-				!aggregate->channels[6][126].angle_valid,
-			"aggregate magnitude-only order 127 survives assembly");
+				aggregate->channels[6][126].angle_millidegrees == 127000u &&
+				aggregate->channels[6][126].angle_valid,
+			"aggregate magnitude and angle at order 127 survive assembly");
 
 	if (failures != 0) {
 		std::fprintf(stderr, "FAILED: %d check(s)\n", failures);
