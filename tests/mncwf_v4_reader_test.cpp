@@ -186,7 +186,7 @@ Section capture_section()
 	const std::array<std::string_view, 12> strings{
 		"Substation A", "Toronto lab", "Feeder 7", "MSAP1",
 		"MSAP1 neutral sensor board", "18.0.0", "build-20260829",
-		"msap1-default-32ksps", "settings-generation-7", "cal-2026-01",
+		"msap1-32ksps-decimated-fixture", "settings-generation-7", "cal-2026-01",
 		"SN0007", "synthetic conversion-readiness fixture"};
 	for (std::size_t index = 0; index < strings.size(); ++index)
 		put_string_ref(record, 160u + index * 8u,

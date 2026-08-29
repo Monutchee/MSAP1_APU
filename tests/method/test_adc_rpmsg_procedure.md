@@ -121,6 +121,7 @@ the PL RMS and frequency window sample counts, and restores the prior running
 state. Run:
 
 ```sh
+mnc adc rate --sps 128000
 mnc adc rate --sps 16000
 mnc adc rate --sps 32000
 mnc adc rate --sps 64000
@@ -130,6 +131,7 @@ Expect:
 
 | Requested | SRC integer N | Physical DRDY |
 | ---: | ---: | ---: |
+| 128,000 | 16 | approximately 128 kframe/s |
 | 16,000 | 128 | approximately 16 kframe/s |
 | 32,000 | 64 | approximately 32 kframe/s |
 | 64,000 | 32 | approximately 64 kframe/s |
@@ -148,12 +150,12 @@ the active DSP decimator or physical ADC control path requires investigation.
 Restore the normal operating point:
 
 ```sh
-mnc adc rate --sps 32000
+mnc adc rate --sps 128000
 mnc meter health
 ```
 
 The selection is temporary. Restarting `msap1-fpga-acquisition` must restore
-the packaged 32 kSPS default.
+the packaged 128 kSPS default.
 
 ## 6. Warm-reset and SRC-load diagnostic
 
