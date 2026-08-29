@@ -216,34 +216,34 @@ inline constexpr auto energy_metadata = make_special_block(
 	});
 
 inline constexpr RegisterBlock demand_current_layout{
-	blocks::minute_10.function, 0x2000, 0x0010, "minute_10.demand.current"};
+	blocks::minute_10.function, 0x2000, 0x0010, "demand.current"};
 inline constexpr RegisterBlock demand_import_peak_layout{
 	blocks::minute_10.function, 0x2010, 0x0010,
-	"minute_10.demand.import_peak"};
+	"demand.import_peak"};
 inline constexpr RegisterBlock demand_export_peak_layout{
 	blocks::minute_10.function, 0x2020, 0x0010,
-	"minute_10.demand.export_peak"};
+	"demand.export_peak"};
 inline constexpr RegisterBlock demand_metadata_layout{
-	blocks::minute_10.function, 0x2030, 0x0017,
-	"minute_10.demand.metadata"};
+	blocks::minute_10.function, 0x2030, 0x001e,
+	"demand.metadata"};
 inline constexpr RegisterBlock demand_anchor_layout{
-	blocks::minute_10.function, 0x2048, 0x0020,
-	"minute_10.demand.peak_anchors"};
+	blocks::minute_10.function, 0x2050, 0x0020,
+	"demand.peak_anchors"};
 
 inline constexpr auto current_demand = make_attribute_block(
-	demand_current_layout, Period::Min10, DataType::int64,
+	demand_current_layout, Period::Demand, DataType::int64,
 	std::array{Key{Id::CurrentActiveDemandA, std::nullopt},
 		Key{Id::CurrentActiveDemandB, std::nullopt},
 		Key{Id::CurrentActiveDemandC, std::nullopt},
 		Key{Id::CurrentActiveDemandTotal, std::nullopt}});
 inline constexpr auto import_demand_peak = make_attribute_block(
-	demand_import_peak_layout, Period::Min10, DataType::uint64,
+	demand_import_peak_layout, Period::Demand, DataType::uint64,
 	std::array{Key{Id::ImportDemandPeakA, std::nullopt},
 		Key{Id::ImportDemandPeakB, std::nullopt},
 		Key{Id::ImportDemandPeakC, std::nullopt},
 		Key{Id::ImportDemandPeakTotal, std::nullopt}});
 inline constexpr auto export_demand_peak = make_attribute_block(
-	demand_export_peak_layout, Period::Min10, DataType::uint64,
+	demand_export_peak_layout, Period::Demand, DataType::uint64,
 	std::array{Key{Id::ExportDemandPeakA, std::nullopt},
 		Key{Id::ExportDemandPeakB, std::nullopt},
 		Key{Id::ExportDemandPeakC, std::nullopt},
@@ -253,42 +253,50 @@ inline constexpr auto demand_metadata = make_special_block(
 	demand_metadata_layout,
 	std::array{
 		SpecialDefinition{SpecialRegister::demand_session_id,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_reset_epoch,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_last_sample,
-			DataType::uint64, Period::Min10},
-		SpecialDefinition{SpecialRegister::demand_interval_target_sample,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
+		SpecialDefinition{SpecialRegister::demand_interval_anchor_sample,
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_source_interval_count,
-			DataType::uint32, Period::Min10},
+			DataType::uint32, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_source_status,
-			DataType::uint32, Period::Min10},
+			DataType::uint32, Period::Demand},
+		SpecialDefinition{SpecialRegister::demand_method,
+			DataType::uint16, Period::Demand},
+		SpecialDefinition{SpecialRegister::demand_window_seconds,
+			DataType::uint32, Period::Demand},
+		SpecialDefinition{SpecialRegister::demand_update_seconds,
+			DataType::uint32, Period::Demand},
+		SpecialDefinition{SpecialRegister::demand_profile_generation,
+			DataType::uint32, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_flags,
-			DataType::uint32, Period::Min10},
+			DataType::uint32, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_quality_mask,
-			DataType::uint16, Period::Min10},
+			DataType::uint16, Period::Demand},
 	});
 
 inline constexpr auto demand_peak_anchors = make_special_block(
 	demand_anchor_layout,
 	std::array{
 		SpecialDefinition{SpecialRegister::demand_import_peak_sample_a,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_import_peak_sample_b,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_import_peak_sample_c,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_import_peak_sample_total,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_export_peak_sample_a,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_export_peak_sample_b,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_export_peak_sample_c,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 		SpecialDefinition{SpecialRegister::demand_export_peak_sample_total,
-			DataType::uint64, Period::Min10},
+			DataType::uint64, Period::Demand},
 	});
 
 /** One sorted source of truth used by runtime, tests, and map documentation. */

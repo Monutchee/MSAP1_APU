@@ -181,7 +181,7 @@ stable reserved regions so additions do not shift published fields:
 | FC04 | `0x0020–0x00FF` | Reserved legacy Basic-period growth |
 | FC04 | `0x0100–0x0FFF` | Basic extensions, including lifetime energy |
 | FC04 | `0x1000–0x1FFF` | 150/180-cycle measurements |
-| FC04 | `0x2000–0x2FFF` | 10-minute measurements |
+| FC04 | `0x2000–0x2FFF` | Demand and 10-minute measurements |
 | FC04 | `0x3000–0x3FFF` | 2-hour measurements |
 | FC04 | `0x4000–0x4FFF` | Voltage harmonics |
 | FC04 | `0x5000–0x5FFF` | Current harmonics |
@@ -231,17 +231,17 @@ first order; the range endpoints below include all four values.
 | `0x2000–0x200F` | int64 | Signed current active demand A/B/C/total | uW |
 | `0x2010–0x201F` | uint64 | Active import peaks A/B/C/total | uW |
 | `0x2020–0x202F` | uint64 | Active export peaks A/B/C/total | uW |
-| `0x2030–0x2067` | mixed | Demand session, epoch, boundary, quality, flags, and peak anchors | metadata |
+| `0x2030–0x206F` | mixed | Demand session, epoch, profile, quality, flags, and peak anchors | metadata |
 
 Energy metadata starts at `0x0170`: session ID, reset epoch, last sample,
 accepted/skipped samples and blocks, flags, then the 64-bit quality mask.
 Energy flag bits 0--2 are saturation, incomplete input, and discontinuity.
 Demand metadata starts at `0x2030`: session ID, peak reset epoch, last sample,
-interval target, interval count/status, flags, quality mask, and import/export
-peak sample anchors. Demand flag bits 0--4 are time aligned, contaminated,
-boundary valid, saturated, and incomplete input. Use the generated map export
-for every exact field address rather than copying this range summary into
-client code.
+window anchor, interval count/status, method, window seconds, update seconds,
+profile generation, flags, quality mask, and import/export peak sample anchors.
+Demand flag bits 0--4 are time aligned, contaminated, boundary valid,
+saturated, and incomplete input. Use the generated map export for every exact
+field address rather than copying this range summary into client code.
 
 Unavailable or invalid electrical values are encoded as IEEE-754 quiet NaN.
 The corresponding quality bit is clear. A valid zero is encoded as `0.0` and

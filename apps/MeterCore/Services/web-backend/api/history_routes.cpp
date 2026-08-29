@@ -106,6 +106,7 @@ MeasurementPeriod parse_period(std::string_view value)
 	if (value == "cycles_150_180") return MeasurementPeriod::Cycles150_180;
 	if (value == "minutes_10") return MeasurementPeriod::Min10;
 	if (value == "hours_2") return MeasurementPeriod::Hour2;
+	if (value == "demand") return MeasurementPeriod::Demand;
 	throw std::invalid_argument("unsupported history measurement period");
 }
 
@@ -125,6 +126,7 @@ std::string period_name(MeasurementPeriod period)
 	case MeasurementPeriod::Cycles150_180: return "cycles_150_180";
 	case MeasurementPeriod::Min10: return "minutes_10";
 	case MeasurementPeriod::Hour2: return "hours_2";
+	case MeasurementPeriod::Demand: return "demand";
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
 		throw std::invalid_argument(

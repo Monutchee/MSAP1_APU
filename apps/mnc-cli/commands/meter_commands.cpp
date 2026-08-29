@@ -1841,8 +1841,12 @@ struct DemandResult {
 	ExactPhaseTotal export_peak_uw;
 	std::string session_id;
 	std::string last_sample_index;
-	std::string interval_target_sample;
+	std::string interval_anchor_sample;
 	std::string peak_reset_epoch;
+	std::string method;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
 	bool time_aligned = false;
 	bool contaminated = false;
 	bool boundary_valid = false;
@@ -1852,20 +1856,34 @@ struct DemandResult {
 
 DemandResult demand_result(const msap1::DemandValues &values)
 {
-	return {exact(values.current_active), exact(values.import_peak),
-		exact(values.export_peak), std::to_string(values.session_id),
-		std::to_string(values.last_sample_index),
-		std::to_string(values.interval_target_sample),
-		std::to_string(values.peak_reset_epoch), values.time_aligned,
-		values.contaminated, values.boundary_valid, values.incomplete_input,
-		values.saturated};
+	return {
+		.current_active_uw = exact(values.current_active),
+		.import_peak_uw = exact(values.import_peak),
+		.export_peak_uw = exact(values.export_peak),
+		.session_id = std::to_string(values.session_id),
+		.last_sample_index = std::to_string(values.last_sample_index),
+		.interval_anchor_sample = std::to_string(values.interval_anchor_sample),
+		.peak_reset_epoch = std::to_string(values.peak_reset_epoch),
+		.method = values.method == msap1::DemandMethod::fixed_block
+			? "fixed_block" : "sliding",
+		.window_seconds = values.window_seconds,
+		.update_seconds = values.update_seconds,
+		.profile_generation = values.profile_generation,
+		.time_aligned = values.time_aligned,
+		.contaminated = values.contaminated,
+		.boundary_valid = values.boundary_valid,
+		.incomplete_accumulation = values.incomplete_input,
+		.saturated = values.saturated,
+	};
 }
 
 class DemandTextGenerator final : public ResultGenerator<DemandResult> {
 public:
 	int write(const DemandResult &result, std::ostream &output) const override
 	{
-		output << "Ten-minute active demand\n";
+		output << "Active demand (" << result.method << ", "
+		       << result.window_seconds << " s window, "
+		       << result.update_seconds << " s update)\n";
 		print_exact_group(output, "Current signed demand",
 			result.current_active_uw, "uW");
 		print_exact_group(output, "Session import peaks",
@@ -1874,7 +1892,8 @@ public:
 			result.export_peak_uw, "uW");
 		output << "  Session ID: " << result.session_id
 		       << "  peak reset epoch: " << result.peak_reset_epoch
-		       << "  interval target: " << result.interval_target_sample
+		       << "  interval anchor: " << result.interval_anchor_sample
+		       << "  profile generation: " << result.profile_generation
 		       << "\n  Aligned: " << yes_no(result.time_aligned)
 		       << "  boundary valid: " << yes_no(result.boundary_valid)
 		       << "  contaminated: " << yes_no(result.contaminated)
@@ -2111,7 +2130,7 @@ void register_meter_commands(Application &application)
 	energy.add_subcommand(std::move(energy_reset));
 	meter.add_subcommand(std::move(energy));
 	Command demand(
-		"demand", "Show ten-minute active demand and session peaks",
+		"demand", "Show configured active demand and session peaks",
 		run_meter_demand,
 		{
 			.access = AccessLevel::diagnostic,

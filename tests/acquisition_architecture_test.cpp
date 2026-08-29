@@ -461,8 +461,10 @@ msap1::MeterRecord demand_record(std::uint32_t sequence,
 	record.words[7] = 0x7fU;
 	record.words[8] = (1U << 1U) | (1U << 2U) | (1U << 4U);
 	write_record_u64(record, 9U, 1'000'000U);
-	record.words[13] = msap1::meter_demand_interval_seconds |
-		(0xfU << 16U);
+	record.words[13] = msap1::meter_demand_fixed_interval_seconds |
+		(0xfU << 16U) |
+		(static_cast<std::uint32_t>(
+			msap1::meter_demand_fixed_interval_seconds) << 22U);
 	write_record_u64(record, msap1::meter_demand_last_sample_word,
 		20'199'999U);
 	for (std::size_t index = 0; index < 4U; ++index) {
@@ -483,10 +485,11 @@ msap1::MeterRecord demand_record(std::uint32_t sequence,
 			200U + index);
 	}
 	write_record_u64(record, msap1::meter_demand_session_word, session_id);
-	write_record_u64(record, msap1::meter_demand_target_sample_word,
+	write_record_u64(record, msap1::meter_demand_interval_anchor_sample_word,
 		20'200'000U);
 	record.words[msap1::meter_demand_source_interval_count_word] = 1U;
 	record.words[msap1::meter_demand_source_status_word] = record.words[8];
+	record.words[msap1::meter_demand_profile_generation_word] = 1U;
 	return record;
 }
 

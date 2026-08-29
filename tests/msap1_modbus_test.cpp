@@ -147,9 +147,13 @@ public:
 			.session_id = 0xfedcba9876543210ULL,
 			.peak_reset_epoch = 8,
 			.last_sample_index = 9000,
-			.interval_target_sample = 10000,
+			.interval_anchor_sample = 10000,
 			.source_interval_count = 3000,
 			.source_status = 0x55aa,
+			.window_seconds = 60,
+			.update_seconds = 3,
+			.profile_generation = 4,
+			.method = 1,
 			.import_peak_samples = {11, 12, 13, 14},
 			.export_peak_samples = {21, 22, 23, 24},
 			.time_aligned = true,
@@ -315,9 +319,14 @@ void m17_energy_demand_map()
 	require(demand_session.values == energy_session.values,
 		"demand session metadata word order changed");
 	const auto import_anchor = registers.read(
-		mnc::modbus::FunctionCode::read_input_registers, 0x2048, 4);
+		mnc::modbus::FunctionCode::read_input_registers, 0x2050, 4);
 	require(import_anchor.values == (std::vector<std::uint16_t>{0, 0, 0, 11}),
 		"demand peak sample anchors are missing");
+	const auto profile = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x2044, 7);
+	require(profile.values ==
+		(std::vector<std::uint16_t>{1, 0, 60, 0, 3, 0, 4}),
+		"demand method/window/update/profile metadata changed address or order");
 }
 
 void projected_snapshot_requests()

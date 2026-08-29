@@ -235,9 +235,16 @@
   common family identity. Summary carries active import/export and apparent
   energy; quadrants carries fundamental reactive energy for quadrants I--IV,
   each for A/B/C/total. Record format `0x00040001` (DEMAND-v1) carries signed
-  current active demand and import/export session peaks for a completed UTC
-  ten-minute interval. Preserve 64-bit values as exact integers internally and
-  decimal strings in REST, CLI JSON, MQTT, and browser-facing models.
+  current active demand, import/export session peaks, and the configured
+  method/window/update/profile generation. Default demand is a 60-second
+  sliding average refreshed by each nominal three-second aggregate; supported
+  windows are 1, 5, 10, 15, and 30 minutes. Fixed mode retains the aligned UTC
+  ten-minute block. R5C1 applies configuration through its direct RPMsg
+  endpoint and the APU retries the desired profile after endpoint recovery.
+  A profile change starts a new peak epoch because peaks from different window
+  semantics are not comparable. Preserve 64-bit values as exact integers
+  internally and decimal strings in REST, CLI JSON, MQTT, and browser-facing
+  models.
 
 ## Build and verification
 

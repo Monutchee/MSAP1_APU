@@ -19,10 +19,12 @@ inline constexpr std::string_view socket_path =
  * to the get_stream_status reply. Version 3 assigns the record envelope's
  * reserved u16 to source_fragment for multi-record producer families.
  * Version 4 adds an atomic bounded publish_records request. Version 5 adds
- * authoritative energy/demand snapshots and audited reset transactions. The version is
+ * authoritative energy/demand snapshots and audited reset transactions.
+ * Version 6 revises the pre-production DEMAND-v1 snapshot with method,
+ * window, update-cadence, and profile-generation metadata. The version is
  * not carried on the wire — all peers ship in one image and the decoder's
  * require_finished() turns any accidental mix into a loud error frame. */
-inline constexpr std::uint32_t protocol_version = 5;
+inline constexpr std::uint32_t protocol_version = 6;
 inline constexpr std::size_t maximum_publish_records = 256;
 
 /* A maximum ReadRecords reply can contain 4096 complete 256-byte PL records

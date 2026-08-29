@@ -88,6 +88,8 @@ MeasurementPeriod period_for(mnc::meter_stream::DatabaseDataset dataset)
 		return MeasurementPeriod::Min10;
 	case mnc::meter_stream::DatabaseDataset::hours_2:
 		return MeasurementPeriod::Hour2;
+	case mnc::meter_stream::DatabaseDataset::demand:
+		return MeasurementPeriod::Demand;
 	case mnc::meter_stream::DatabaseDataset::raw_record_spool:
 	case mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180:
 	case mnc::meter_stream::DatabaseDataset::harmonic_minutes_10:
@@ -119,6 +121,7 @@ mnc::meter_stream::DatabaseDataset harmonic_dataset_for(
 	case MeasurementPeriod::Basic:
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
+	case MeasurementPeriod::Demand:
 		break;
 	}
 	throw std::invalid_argument("unsupported harmonic historian period");
@@ -149,6 +152,8 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 		return mnc::meter_stream::DatabaseDataset::minutes_10;
 	case MeasurementPeriod::Hour2:
 		return mnc::meter_stream::DatabaseDataset::hours_2;
+	case MeasurementPeriod::Demand:
+		return mnc::meter_stream::DatabaseDataset::demand;
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
 		throw std::invalid_argument(
@@ -160,9 +165,9 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 void validate_historian_policies(
 	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
 {
-	if (policies.size() != 7)
+	if (policies.size() != 8)
 		throw std::invalid_argument(
-			"historian requires exactly seven dataset policies");
+			"historian requires exactly eight dataset policies");
 	std::set<mnc::meter_stream::DatabaseDataset> datasets;
 	for (const auto &policy : policies) {
 		mnc::meter_stream::validate_database_policy(policy);
@@ -681,9 +686,10 @@ VALUES(?,?,?,?,?)
 		put(MeterAttributeId::IcRms, f.current.phase_c);
 		put(MeterAttributeId::InRms, f.current.neutral);
 	}
-	/* At each completed UTC ten-minute DEMAND boundary the service attaches
-	 * the authoritative ledger snapshots. Store all 28 energy counters and
-	 * all 12 demand values in the same atomic history block. */
+	/* At each completed UTC ten-minute boundary the service attaches one
+	 * authoritative ledger snapshot. Store all 28 energy counters in the
+	 * Min10 dataset and all 12 demand values in the dedicated Demand dataset;
+	 * each projection is one atomic history block with its reset epoch. */
 	if (inserted && (update.energy || update.demand)) {
 		auto statement = database.prepare(R"SQL(
 INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence,reset_epoch)
@@ -1161,6 +1167,7 @@ void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
 		mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180,
 		mnc::meter_stream::DatabaseDataset::harmonic_minutes_10,
 		mnc::meter_stream::DatabaseDataset::harmonic_hours_2,
+		mnc::meter_stream::DatabaseDataset::demand,
 	};
 	std::scoped_lock lock(impl_->mutex);
 

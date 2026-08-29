@@ -21,6 +21,17 @@ namespace msap1::acquisition::daemon {
 
 using namespace std::chrono_literals;
 
+msap1_demand_config_payload demand_configuration(
+	const msap1::settings::DemandSettings &settings)
+{
+	return {
+		settings.method == "fixed_block" ? MSAP1_DEMAND_METHOD_FIXED_BLOCK
+			: MSAP1_DEMAND_METHOD_SLIDING,
+		settings.window_seconds,
+		settings.method == "fixed_block" ? 600U : 3U,
+	};
+}
+
 CaptureCoordinator::CaptureCoordinator(const Options &options)
 	: options_(options),
 	  product_settings_(load_runtime_settings()),
@@ -53,6 +64,17 @@ CaptureCoordinator::~CaptureCoordinator()
 void CaptureCoordinator::run()
 {
 	start();
+	try {
+		(void)aggregation_health_.configure_demand(
+			demand_configuration(product_settings_.metering.demand));
+	} catch (const std::exception &error) {
+		/* R5C1 may appear after R5C0 during boot. The monitor retains the
+		 * desired profile and retries it on endpoint rediscovery. */
+		log_message(aggregation_log, mnc::logging::Priority::warning,
+			"R5C1 demand profile will be retried: " +
+				std::string(error.what()),
+			"demand_configuration_deferred");
+	}
 	log_message(lifecycle_log, mnc::logging::Priority::notice,
 		"meter acquisition started: " + std::string(meter_.name()) +
 			", configuration generation " +
@@ -406,18 +428,42 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 		candidate.metering.sample_rate_hz !=
 			configuration_.wire.sample_rate_hz ||
 		msap1::encode_meter_configuration(meter_settings, false) !=
-			msap1::encode_meter_configuration(
+		msap1::encode_meter_configuration(
 				configuration_.source, false);
-	if (pipeline_changed) {
-		auto staged = msap1::prepare_meter_configuration(
-			std::move(meter_settings),
-			candidate.metering.sample_rate_hz);
-		apply_complete_configuration(std::move(staged),
-			"central_settings_applied");
-	} else {
-		log_message(config_log, mnc::logging::Priority::notice,
-			"live service settings refreshed without restarting capture",
-			"central_settings_live_applied");
+	const bool demand_changed =
+		candidate.metering.demand.method !=
+			product_settings_.metering.demand.method ||
+		candidate.metering.demand.window_seconds !=
+			product_settings_.metering.demand.window_seconds;
+	const auto previous_demand =
+		demand_configuration(product_settings_.metering.demand);
+	try {
+		if (demand_changed)
+			(void)aggregation_health_.configure_demand(
+				demand_configuration(candidate.metering.demand));
+		if (pipeline_changed) {
+			auto staged = msap1::prepare_meter_configuration(
+				std::move(meter_settings),
+				candidate.metering.sample_rate_hz);
+			apply_complete_configuration(std::move(staged),
+				"central_settings_applied");
+		} else {
+			log_message(config_log, mnc::logging::Priority::notice,
+				"live service settings refreshed without restarting capture",
+				"central_settings_live_applied");
+		}
+	} catch (...) {
+		if (demand_changed) {
+			try {
+				(void)aggregation_health_.configure_demand(previous_demand);
+			} catch (const std::exception &rollback_error) {
+				log_message(config_log, mnc::logging::Priority::critical,
+					"demand configuration rollback failed: " +
+						std::string(rollback_error.what()),
+					"demand_configuration_rollback_failed");
+			}
+		}
+		throw;
 	}
 	product_settings_ = std::move(candidate);
 }
@@ -607,7 +653,7 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 					msap1::meter::overlay_authoritative_energy(
 						response.snapshot, *energy);
 			} else if (request.selection.period ==
-				   mnc::meter::MeasurementPeriod::Min10) {
+				   mnc::meter::MeasurementPeriod::Demand) {
 				if (const auto demand = meter_stream_.demand())
 					msap1::meter::overlay_authoritative_demand(
 						response.snapshot, *demand);

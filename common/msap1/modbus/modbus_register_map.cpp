@@ -178,14 +178,23 @@ std::vector<std::uint16_t> encode_special(const SpecialSource &source,
 		return mnc::modbus::encode_u64(demand ? demand->peak_reset_epoch : 0);
 	case SpecialRegister::demand_last_sample:
 		return mnc::modbus::encode_u64(demand ? demand->last_sample_index : 0);
-	case SpecialRegister::demand_interval_target_sample:
+	case SpecialRegister::demand_interval_anchor_sample:
 		return mnc::modbus::encode_u64(
-			demand ? demand->interval_target_sample : 0);
+			demand ? demand->interval_anchor_sample : 0);
 	case SpecialRegister::demand_source_interval_count:
 		return mnc::modbus::encode_u32(
 			demand ? demand->source_interval_count : 0);
 	case SpecialRegister::demand_source_status:
 		return mnc::modbus::encode_u32(demand ? demand->source_status : 0);
+	case SpecialRegister::demand_method:
+		return {static_cast<std::uint16_t>(demand ? demand->method : 0)};
+	case SpecialRegister::demand_window_seconds:
+		return mnc::modbus::encode_u32(demand ? demand->window_seconds : 0);
+	case SpecialRegister::demand_update_seconds:
+		return mnc::modbus::encode_u32(demand ? demand->update_seconds : 0);
+	case SpecialRegister::demand_profile_generation:
+		return mnc::modbus::encode_u32(
+			demand ? demand->profile_generation : 0);
 	case SpecialRegister::demand_flags:
 		return mnc::modbus::encode_u32(demand
 			? static_cast<std::uint32_t>(demand->time_aligned) |

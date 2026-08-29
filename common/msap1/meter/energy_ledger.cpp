@@ -240,6 +240,10 @@ struct EnergyLedger::Impl {
 		std::uint64_t session_id = 0;
 		std::uint32_t source_sequence = 0;
 		std::uint32_t generation = 0;
+		DemandMethod method = DemandMethod::sliding;
+		std::uint32_t window_seconds = 0;
+		std::uint32_t update_seconds = 0;
+		std::uint32_t profile_generation = 0;
 		DemandValueArray current{};
 		DemandValueArray raw_import{};
 		DemandValueArray raw_export{};
@@ -267,7 +271,7 @@ struct EnergyLedger::Impl {
 			"sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, "
 			"updated_ns INTEGER NOT NULL)");
 		database.execute(
-			"CREATE TABLE IF NOT EXISTS demand_state("
+			"CREATE TABLE IF NOT EXISTS demand_state_profiled("
 			"id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL, "
 			"session_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, "
 			"generation INTEGER NOT NULL, current_values BLOB NOT NULL, "
@@ -279,7 +283,9 @@ struct EnergyLedger::Impl {
 			"target_sample TEXT NOT NULL, source_count INTEGER NOT NULL, "
 			"source_status INTEGER NOT NULL, flags INTEGER NOT NULL, "
 			"sample_count INTEGER NOT NULL, sample_rate INTEGER NOT NULL, "
-			"updated_ns INTEGER NOT NULL)");
+			"updated_ns INTEGER NOT NULL, method INTEGER NOT NULL, "
+			"window_seconds INTEGER NOT NULL, update_seconds INTEGER NOT NULL, "
+			"profile_generation INTEGER NOT NULL)");
 		for (const auto table : {"energy_reset_audit", "demand_reset_audit"})
 			database.execute(std::string("CREATE TABLE IF NOT EXISTS ") + table +
 				"(idempotency_key TEXT PRIMARY KEY, request_id TEXT NOT NULL, "
@@ -292,13 +298,15 @@ struct EnergyLedger::Impl {
 			"epoch INTEGER NOT NULL, counters BLOB NOT NULL, qualities BLOB NOT NULL, "
 			"flags INTEGER NOT NULL, PRIMARY KEY(session_id,target_sample))");
 		database.execute(
-			"CREATE TABLE IF NOT EXISTS demand_history("
+			"CREATE TABLE IF NOT EXISTS demand_history_profiled("
 			"session_id TEXT NOT NULL, target_sample TEXT NOT NULL, "
 			"captured_ns INTEGER NOT NULL, "
 			"epoch INTEGER NOT NULL, current_values BLOB NOT NULL, "
 			"import_peaks BLOB NOT NULL, export_peaks BLOB NOT NULL, "
 			"qualities BLOB NOT NULL, flags INTEGER NOT NULL, "
-			"PRIMARY KEY(session_id,target_sample))");
+			"method INTEGER NOT NULL, window_seconds INTEGER NOT NULL, "
+			"update_seconds INTEGER NOT NULL, profile_generation INTEGER NOT NULL, "
+			"PRIMARY KEY(session_id,profile_generation,target_sample))");
 		load_energy();
 		load_demand();
 	}
@@ -358,7 +366,8 @@ struct EnergyLedger::Impl {
 			"raw_import,raw_export,baseline_import,baseline_export,"
 			"authoritative_import,authoritative_export,import_anchors,export_anchors,"
 			"qualities,last_sample,target_sample,source_count,source_status,flags,"
-			"sample_count,sample_rate,updated_ns FROM demand_state WHERE id=1");
+			"sample_count,sample_rate,updated_ns,method,window_seconds,"
+			"update_seconds,profile_generation FROM demand_state_profiled WHERE id=1");
 		if (!query.step())
 			return;
 		demand_state.epoch = static_cast<std::uint64_t>(query.integer(0));
@@ -395,7 +404,8 @@ struct EnergyLedger::Impl {
 		assign_demand_qualities(values, query.blob(13));
 		values.session_id = demand_state.session_id;
 		values.last_sample_index = parse_hex64(query.text(14), "demand last sample");
-		values.interval_target_sample = parse_hex64(query.text(15), "demand target");
+		values.interval_anchor_sample = parse_hex64(
+			query.text(15), "demand interval anchor");
 		values.source_interval_count = static_cast<std::uint32_t>(query.integer(16));
 		values.source_status = static_cast<std::uint32_t>(query.integer(17));
 		const auto flags = static_cast<std::uint32_t>(query.integer(18));
@@ -411,6 +421,18 @@ struct EnergyLedger::Impl {
 				static_cast<std::int64_t>(query.integer(19)) * 1000000000LL /
 				std::max<std::int64_t>(query.integer(20), 1))};
 		const auto measured_at = system_time(query.integer(21));
+		const auto method = static_cast<std::uint32_t>(query.integer(22));
+		if (method > static_cast<std::uint32_t>(DemandMethod::sliding))
+			throw std::runtime_error("invalid demand method in ledger");
+		values.method = static_cast<DemandMethod>(method);
+		values.window_seconds = static_cast<std::uint32_t>(query.integer(23));
+		values.update_seconds = static_cast<std::uint32_t>(query.integer(24));
+		values.profile_generation =
+			static_cast<std::uint32_t>(query.integer(25));
+		demand_state.method = values.method;
+		demand_state.window_seconds = values.window_seconds;
+		demand_state.update_seconds = values.update_seconds;
+		demand_state.profile_generation = values.profile_generation;
 		for_each_demand_reading(values, [&](auto &reading) {
 			reading.source_sequence = demand_state.source_sequence;
 			reading.measured_at = measured_at;
@@ -452,7 +474,7 @@ struct EnergyLedger::Impl {
 		std::int64_t updated_ns)
 	{
 		auto statement = database.prepare(
-			"INSERT OR REPLACE INTO demand_state VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+			"INSERT OR REPLACE INTO demand_state_profiled VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 		statement.bind(1, state.epoch);
 		statement.bind(2, hex64(state.session_id));
 		statement.bind(3, static_cast<std::int64_t>(state.source_sequence));
@@ -468,7 +490,7 @@ struct EnergyLedger::Impl {
 		statement.bind(13, encode_u64(state.export_anchors));
 		statement.bind(14, demand_qualities(values));
 		statement.bind(15, hex64(values.last_sample_index));
-		statement.bind(16, hex64(values.interval_target_sample));
+		statement.bind(16, hex64(values.interval_anchor_sample));
 		statement.bind(17, static_cast<std::int64_t>(values.source_interval_count));
 		statement.bind(18, static_cast<std::int64_t>(values.source_status));
 		const auto flags = static_cast<std::uint32_t>(values.time_aligned) |
@@ -480,6 +502,11 @@ struct EnergyLedger::Impl {
 		statement.bind(20, static_cast<std::int64_t>(sample_count));
 		statement.bind(21, static_cast<std::int64_t>(sample_rate));
 		statement.bind(22, updated_ns);
+		statement.bind(23, static_cast<std::int64_t>(values.method));
+		statement.bind(24, static_cast<std::int64_t>(values.window_seconds));
+		statement.bind(25, static_cast<std::int64_t>(values.update_seconds));
+		statement.bind(26,
+			static_cast<std::int64_t>(values.profile_generation));
 		statement.execute();
 	}
 
@@ -569,6 +596,9 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 	std::uint32_t source_sequence, std::uint32_t configuration_generation,
 	std::int64_t ingested_at_nanoseconds)
 {
+	if (session.profile_generation == 0 || session.window_seconds == 0 ||
+	    session.update_seconds == 0)
+		throw std::invalid_argument("invalid DEMAND profile metadata");
 	const auto current = flatten_demand_values(session.current_active);
 	const auto incoming_import = flatten_demand_values(session.import_peak);
 	const auto incoming_export = flatten_demand_values(session.export_peak);
@@ -579,15 +609,24 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 	auto next = impl_->demand_state;
 	const bool same_session = impl_->latest_demand &&
 		session.session_id == next.session_id;
-	if (same_session && source_sequence < next.source_sequence)
+	const bool same_semantics = impl_->latest_demand &&
+		session.method == next.method &&
+		session.window_seconds == next.window_seconds &&
+		session.update_seconds == next.update_seconds;
+	const bool same_profile_instance = same_session && same_semantics &&
+		session.profile_generation == next.profile_generation;
+	const bool profile_changed = impl_->latest_demand &&
+		(!same_semantics || (same_session &&
+			session.profile_generation != next.profile_generation));
+	if (same_profile_instance && source_sequence < next.source_sequence)
 		throw Conflict("stale DEMAND family sequence");
-	if (same_session && source_sequence == next.source_sequence) {
+	if (same_profile_instance && source_sequence == next.source_sequence) {
 		const auto &latest = *impl_->latest_demand;
 		if (current != next.current || incoming_import != next.raw_import ||
 		    incoming_export != next.raw_export ||
 		    configuration_generation != next.generation ||
 		    session.last_sample_index != latest.last_sample_index ||
-		    session.interval_target_sample != latest.interval_target_sample ||
+		    session.interval_anchor_sample != latest.interval_anchor_sample ||
 		    session.source_interval_count != latest.source_interval_count ||
 		    session.source_status != latest.source_status ||
 		    session.time_aligned != latest.time_aligned ||
@@ -603,7 +642,17 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 		 * interval; it cannot become the first peak of the new epoch. */
 		return latest;
 	}
-	if (!same_session) {
+	if (profile_changed) {
+		++next.epoch;
+		next.baseline_import.fill(0);
+		next.baseline_export.fill(0);
+		next.authoritative_import.fill(0);
+		next.authoritative_export.fill(0);
+		next.import_anchors.fill(0);
+		next.export_anchors.fill(0);
+		next.raw_import.fill(0);
+		next.raw_export.fill(0);
+	} else if (!same_profile_instance) {
 		next.baseline_import.fill(0);
 		next.baseline_export.fill(0);
 	} else {
@@ -660,6 +709,10 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 	next.session_id = session.session_id;
 	next.source_sequence = source_sequence;
 	next.generation = configuration_generation;
+	next.method = session.method;
+	next.window_seconds = session.window_seconds;
+	next.update_seconds = session.update_seconds;
+	next.profile_generation = session.profile_generation;
 	next.current = current;
 	next.raw_import = incoming_import;
 	next.raw_export = incoming_export;
@@ -668,12 +721,19 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 		session.current_active.phase_a.calculation_window.sample_count,
 		sample_rate(session.current_active.phase_a.calculation_window),
 		ingested_at_nanoseconds);
-	if (result.interval_target_sample != 0) {
+	/* Live sliding demand is durably replaced in demand_state_profiled every
+	 * three seconds. Its forever-history projection is deliberately sampled by
+	 * meter-historian at UTC ten-minute boundaries; duplicating every live
+	 * update here would create millions of unreachable audit rows per year.
+	 * A fixed-block record is itself the boundary and retains this local
+	 * recovery snapshot. */
+	if (result.interval_anchor_sample != 0 &&
+	    result.method == DemandMethod::fixed_block) {
 		if (impl_->latest_energy) {
 			auto history = impl_->database.prepare(
 				"INSERT OR REPLACE INTO energy_history VALUES(?,?,?,?,?,?,?)");
 			history.bind(1, hex64(impl_->energy_state.session_id));
-			history.bind(2, hex64(result.interval_target_sample));
+			history.bind(2, hex64(result.interval_anchor_sample));
 			history.bind(3, ingested_at_nanoseconds);
 			history.bind(4, impl_->energy_state.epoch);
 			history.bind(5,
@@ -688,9 +748,9 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 			history.execute();
 		}
 		auto history = impl_->database.prepare(
-			"INSERT OR REPLACE INTO demand_history VALUES(?,?,?,?,?,?,?,?,?)");
+			"INSERT OR REPLACE INTO demand_history_profiled VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
 		history.bind(1, hex64(next.session_id));
-		history.bind(2, hex64(result.interval_target_sample));
+		history.bind(2, hex64(result.interval_anchor_sample));
 		history.bind(3, ingested_at_nanoseconds);
 		history.bind(4, next.epoch);
 		history.bind(5, encode_array(current));
@@ -701,6 +761,11 @@ DemandValues EnergyLedger::ingest_demand(const DemandValues &session,
 			static_cast<std::uint32_t>(result.contaminated) |
 			(static_cast<std::uint32_t>(result.incomplete_input) << 1) |
 			(static_cast<std::uint32_t>(result.saturated) << 2)));
+		history.bind(10, static_cast<std::int64_t>(result.method));
+		history.bind(11, static_cast<std::int64_t>(result.window_seconds));
+		history.bind(12, static_cast<std::int64_t>(result.update_seconds));
+		history.bind(13,
+			static_cast<std::int64_t>(result.profile_generation));
 		history.execute();
 	}
 	transaction.commit();

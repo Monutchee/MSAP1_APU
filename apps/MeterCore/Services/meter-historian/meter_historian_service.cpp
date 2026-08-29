@@ -22,11 +22,12 @@ namespace {
 using mnc::ipc::ByteReader;
 using mnc::ipc::ByteWriter;
 
-constexpr std::array<MeasurementPeriod, 4> supported_periods = {
+constexpr std::array<MeasurementPeriod, 5> supported_periods = {
 	MeasurementPeriod::Basic,
 	MeasurementPeriod::Cycles150_180,
 	MeasurementPeriod::Min10,
 	MeasurementPeriod::Hour2,
+	MeasurementPeriod::Demand,
 };
 
 const std::vector<mnc::meter::MeterAttributeId> supported_attributes = [] {
@@ -231,6 +232,7 @@ bool MeterHistorianService::rebuilds_volatile_period(
 			case MeasurementPeriod::Basic:
 			case MeasurementPeriod::Min10Live:
 			case MeasurementPeriod::Hour2Live:
+			case MeasurementPeriod::Demand:
 				return std::nullopt;
 			}
 		}
@@ -239,6 +241,7 @@ bool MeterHistorianService::rebuilds_volatile_period(
 		case MeasurementPeriod::Cycles150_180: return Dataset::cycles_150_180;
 		case MeasurementPeriod::Min10: return Dataset::minutes_10;
 		case MeasurementPeriod::Hour2: return Dataset::hours_2;
+		case MeasurementPeriod::Demand: return Dataset::demand;
 		case MeasurementPeriod::Min10Live:
 		case MeasurementPeriod::Hour2Live:
 			return std::nullopt;
@@ -257,7 +260,7 @@ bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
 	/* ENERGY is an atomic two-record family already committed by meter-stream.
-	 * It is sampled into history together with DEMAND at the UTC boundary. */
+	 * Its durable ledger view is sampled into history at the UTC boundary. */
 	if (envelope.record_format == msap1::meter_energy_format)
 		return false;
 	/* Base HARMONIC-v1 remains the high-rate diagnostic/fallback family. R5C1
@@ -334,15 +337,35 @@ bool MeterHistorianService::ingest(
 	if (update.period == MeasurementPeriod::Min10Live ||
 	    update.period == MeasurementPeriod::Hour2Live)
 		return false;
-	if (update.kind == RecordKind::demand) {
-		/* The decoded RPU record contains volatile session values. History must
-		 * store the lifetime/reset-aware ledger authority, captured as one
-		 * coherent ten-minute snapshot. */
-		update.energy = stream_.energy();
+	if (envelope.record_format == msap1::meter_demand_format) {
+		/* DEMAND-v1 is durable at its live cadence, but persistent history stays
+		 * at one point per UTC ten-minute boundary. Fixed-block records already
+		 * are such a boundary; sliding records are sampled below when the final
+		 * ten-minute sibling arrives. */
 		update.demand = stream_.demand();
 		if (!update.demand)
 			throw std::runtime_error(
 				"durable DEMAND checkpoint is missing at history boundary");
+		if (update.demand->method == msap1::DemandMethod::sliding)
+			return false;
+	}
+	if (update.period == MeasurementPeriod::Min10 &&
+	    update.kind == RecordKind::fundamental) {
+		/* ENERGY records precede the aggregate family in the authoritative
+		 * stream, so its durable cumulative checkpoint is coherent here. */
+		update.energy = stream_.energy();
+	}
+	if (update.period == MeasurementPeriod::Min10 &&
+	    update.kind == RecordKind::unbalance) {
+		/* The 150/180-cycle sliding DEMAND record precedes a coincident
+		 * ten-minute family. Reuse this final sibling's unique stream cursor for
+		 * the dedicated demand dataset, avoiding a three-second forever log. */
+		if (auto demand = stream_.demand(); demand &&
+		    demand->method == msap1::DemandMethod::sliding) {
+			update.period = MeasurementPeriod::Demand;
+			update.kind = RecordKind::demand;
+			update.demand = std::move(demand);
+		}
 	}
 	store_->append(update, envelope.cursor,
 		envelope.timing.utc_start_nanoseconds.value_or(

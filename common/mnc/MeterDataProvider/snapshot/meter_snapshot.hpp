@@ -82,9 +82,13 @@ struct DemandSnapshotMetadata {
 	std::uint64_t session_id = 0;
 	std::uint64_t peak_reset_epoch = 0;
 	std::uint64_t last_sample_index = 0;
-	std::uint64_t interval_target_sample = 0;
+	std::uint64_t interval_anchor_sample = 0;
 	std::uint32_t source_interval_count = 0;
 	std::uint32_t source_status = 0;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint8_t method = 0;
 	std::array<std::uint64_t, 4> import_peak_samples{};
 	std::array<std::uint64_t, 4> export_peak_samples{};
 	bool time_aligned = false;

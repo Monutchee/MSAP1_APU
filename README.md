@@ -156,8 +156,8 @@ The authenticated external API is:
   `GET /api/v1/meter/hours-2/live` (non-normative open-interval previews)
 - `GET /api/v1/meter/energy` (durable lifetime active import/export, apparent,
   and fundamental reactive quadrant I--IV counters)
-- `GET /api/v1/meter/demand` (newest completed UTC 10-minute signed active
-  demand and authoritative import/export peaks)
+- `GET /api/v1/meter/demand` (newest durable configured fixed/sliding signed
+  active demand, profile metadata, and authoritative import/export peaks)
 - `POST /api/v1/meter/energy/reset` (administrator only; resets all 28 energy
   counters with expected-epoch/idempotency protection)
 - `POST /api/v1/meter/demand/peaks/reset` (administrator only; resets all

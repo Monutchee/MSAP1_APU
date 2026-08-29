@@ -78,6 +78,7 @@ std::string database_dataset_name(mnc::meter_stream::DatabaseDataset value)
 	case D::harmonic_cycles_150_180: return "harmonic_cycles_150_180";
 	case D::harmonic_minutes_10: return "harmonic_minutes_10";
 	case D::harmonic_hours_2: return "harmonic_hours_2";
+	case D::demand: return "demand";
 	}
 	return "unknown";
 }
@@ -100,6 +101,7 @@ mnc::meter_stream::DatabaseDataset historian_dataset(
 		return D::harmonic_cycles_150_180;
 	if (value == "harmonic_minutes_10") return D::harmonic_minutes_10;
 	if (value == "harmonic_hours_2") return D::harmonic_hours_2;
+	if (value == "demand") return D::demand;
 	throw std::invalid_argument("unknown historian dataset: " +
 		std::string(value));
 }

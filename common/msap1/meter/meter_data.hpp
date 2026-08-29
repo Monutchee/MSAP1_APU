@@ -262,6 +262,11 @@ struct EnergyValues {
 	}
 };
 
+enum class DemandMethod : std::uint8_t {
+	fixed_block = 0,
+	sliding = 1,
+};
+
 struct DemandValues {
 	PhaseABCTotal<Reading<MicroWatts>> current_active{};
 	PhaseABCTotal<Reading<MicroWatts>> import_peak{};
@@ -270,10 +275,14 @@ struct DemandValues {
 	PhaseABCTotal<std::uint64_t> export_peak_sample{};
 	std::uint64_t session_id = 0;
 	std::uint64_t last_sample_index = 0;
-	std::uint64_t interval_target_sample = 0;
+	std::uint64_t interval_anchor_sample = 0;
 	std::uint32_t source_interval_count = 0;
 	std::uint32_t source_status = 0;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
 	std::uint64_t peak_reset_epoch = 0;
+	DemandMethod method = DemandMethod::sliding;
 	bool time_aligned = false;
 	bool contaminated = false;
 	bool boundary_valid = false;
@@ -381,7 +390,7 @@ public:
 	latest(MeasurementPeriod period) const;
 
 private:
-	static constexpr std::size_t period_count = 6;
+	static constexpr std::size_t period_count = 7;
 	mutable std::mutex mutex_;
 	std::array<std::optional<MeterPeriodView>, period_count> views_{};
 };

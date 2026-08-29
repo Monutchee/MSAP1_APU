@@ -638,12 +638,21 @@ void historian_persists_atomic_m17_boundary_snapshots()
 		{D::harmonic_cycles_150_180, B::memory, {}},
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
 	};
-	const msap1::history::HistoryQuery query{
+	const msap1::history::HistoryQuery energy_query{
 		.period = msap1::MeasurementPeriod::Min10,
 		.attributes = {
 			mnc::meter::MeterAttributeId::ActiveImportEnergyA,
 			mnc::meter::MeterAttributeId::ReactiveEnergyQuadrantIVTotal,
+		},
+		.start_nanoseconds = 0,
+		.end_nanoseconds = 700'000'000'000ll,
+		.limit = 64,
+	};
+	const msap1::history::HistoryQuery demand_query{
+		.period = msap1::MeasurementPeriod::Demand,
+		.attributes = {
 			mnc::meter::MeterAttributeId::CurrentActiveDemandA,
 			mnc::meter::MeterAttributeId::ExportDemandPeakTotal,
 		},
@@ -653,23 +662,30 @@ void historian_persists_atomic_m17_boundary_snapshots()
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
-		history.append(energy_demand_history_update(), 600,
-			600'000'000'000ll);
-		const auto points = history.query(query);
-		require(points.size() == 4,
-			"M17 ten-minute history did not commit all selected groups atomically");
-		require(points.front().value == 9'007'199'254'740'993ll,
+		auto energy_update = energy_demand_history_update();
+		energy_update.demand.reset();
+		history.append(energy_update, 600, 600'000'000'000ll);
+		auto demand_update = energy_demand_history_update();
+		demand_update.period = msap1::MeasurementPeriod::Demand;
+		demand_update.energy.reset();
+		history.append(demand_update, 604, 600'000'000'000ll);
+		const auto energy_points = history.query(energy_query);
+		const auto demand_points = history.query(demand_query);
+		require(energy_points.size() == 2 && demand_points.size() == 2,
+			"M17 boundary history did not route energy and demand atomically");
+		require(energy_points.front().value == 9'007'199'254'740'993ll,
 			"M17 historian narrowed an energy value above JavaScript safe integer");
-		for (const auto &point : points) {
-			const bool energy = point.attribute <=
-				mnc::meter::MeterAttributeId::ReactiveEnergyQuadrantIVTotal;
-			require(point.reset_epoch == (energy ? 41u : 42u),
-				"M17 historian lost an energy/demand reset epoch");
-		}
+		for (const auto &point : energy_points)
+			require(point.reset_epoch == 41u,
+				"M17 historian lost an energy reset epoch");
+		for (const auto &point : demand_points)
+			require(point.reset_epoch == 42u,
+				"M17 historian lost a demand reset epoch");
 	}
 	{
 		msap1::history::MeterHistoryStore reopened(path, policies);
-		require(reopened.query(query).size() == 4,
+		require(reopened.query(energy_query).size() == 2 &&
+			reopened.query(demand_query).size() == 2,
 			"M17 energy/demand boundary snapshot was not persistent");
 	}
 	remove_database(path);
@@ -690,6 +706,7 @@ void historian_wal_stays_bounded_under_sustained_appends()
 			{D::harmonic_cycles_150_180, B::memory, {}},
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
+			{D::demand, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		/* Enough commits that SQLite's 1000-page auto-checkpoint must fire
@@ -731,6 +748,7 @@ void historian_preserves_quality_and_storage_routing()
 		{D::harmonic_cycles_150_180, B::memory, {}},
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -778,6 +796,7 @@ void historian_status_reports_incremental_storage_and_indexed_range()
 		{D::harmonic_cycles_150_180, B::memory, {}},
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
 	};
 	auto verify = [](const msap1::history::HistorianStatus &status) {
 		const auto basic = std::ranges::find_if(status.datasets,
@@ -829,6 +848,7 @@ void historian_commits_harmonics_as_one_durable_family()
 		{D::harmonic_cycles_150_180, B::persistent, {}},
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
 	};
 	auto family_count = [](const msap1::history::HistorianStatus &status) {
 		const auto dataset = std::ranges::find_if(status.datasets,
@@ -900,6 +920,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_cycles_150_180, B::memory, {}},
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
+			{D::demand, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 12; ++cursor)
@@ -933,6 +954,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_cycles_150_180, B::memory, {}},
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
+			{D::demand, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 5; ++cursor)
@@ -958,6 +980,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_cycles_150_180, B::memory, {}},
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
+			{D::demand, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 20; ++cursor)
@@ -983,6 +1006,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_cycles_150_180, B::memory, {}},
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
+			{D::demand, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 6; ++cursor)
@@ -1010,6 +1034,7 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 		{D::harmonic_cycles_150_180, B::memory, {}},
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);

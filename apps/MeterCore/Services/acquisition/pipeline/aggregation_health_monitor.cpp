@@ -28,6 +28,33 @@ AggregationHealthMonitor::AggregationHealthMonitor(std::string service,
 {
 }
 
+msap1_demand_config_ack_payload AggregationHealthMonitor::configure_demand(
+	const msap1_demand_config_payload &configuration)
+{
+	desired_demand_ = configuration;
+	try {
+		if (!controller_)
+			controller_ =
+				std::make_unique<msap1::acquisition::RpuController>(
+					service_, configured_device_);
+		const auto acknowledgement = msap1::decode_demand_config_ack(
+			controller_->transact(MSAP1_RPU_MSG_DEMAND_CONFIG_SET,
+				&configuration, sizeof(configuration), 1000ms));
+		if (acknowledgement.method != configuration.method ||
+		    acknowledgement.window_seconds != configuration.window_seconds ||
+		    acknowledgement.update_seconds != configuration.update_seconds)
+			throw std::runtime_error(
+				"R5C1 demand configuration readback does not match");
+		resolved_device_ = controller_->device_path();
+		demand_profile_generation_ = acknowledgement.profile_generation;
+		return acknowledgement;
+	} catch (...) {
+		controller_.reset();
+		resolved_device_.clear();
+		throw;
+	}
+}
+
 void AggregationHealthMonitor::refresh() noexcept
 {
 	try {
@@ -36,6 +63,8 @@ void AggregationHealthMonitor::refresh() noexcept
 				std::make_unique<msap1::acquisition::RpuController>(
 					service_, configured_device_);
 		const auto health = controller_->query_aggregation_health();
+		if (desired_demand_)
+			(void)configure_demand(*desired_demand_);
 		resolved_device_ = controller_->device_path();
 		cached_health_ = health;
 		has_cached_health_ = true;

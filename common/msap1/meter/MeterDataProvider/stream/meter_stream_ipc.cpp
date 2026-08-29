@@ -275,10 +275,14 @@ std::vector<std::byte> encode_demand_values(const DemandValues &values)
 	write_samples(writer, values.export_peak_sample);
 	writer.u64(values.session_id);
 	writer.u64(values.last_sample_index);
-	writer.u64(values.interval_target_sample);
+	writer.u64(values.interval_anchor_sample);
 	writer.u32(values.source_interval_count);
 	writer.u32(values.source_status);
 	writer.u64(values.peak_reset_epoch);
+	writer.u32(static_cast<std::uint32_t>(values.method));
+	writer.u32(values.window_seconds);
+	writer.u32(values.update_seconds);
+	writer.u32(values.profile_generation);
 	writer.u32(static_cast<std::uint32_t>(values.time_aligned) |
 		(static_cast<std::uint32_t>(values.contaminated) << 1) |
 		(static_cast<std::uint32_t>(values.boundary_valid) << 2) |
@@ -298,10 +302,17 @@ DemandValues decode_demand_values(ByteReader &reader)
 	result.export_peak_sample = read_samples(reader);
 	result.session_id = reader.u64();
 	result.last_sample_index = reader.u64();
-	result.interval_target_sample = reader.u64();
+	result.interval_anchor_sample = reader.u64();
 	result.source_interval_count = reader.u32();
 	result.source_status = reader.u32();
 	result.peak_reset_epoch = reader.u64();
+	const auto method = reader.u32();
+	if (method > static_cast<std::uint32_t>(DemandMethod::sliding))
+		throw std::invalid_argument("invalid DEMAND snapshot method");
+	result.method = static_cast<DemandMethod>(method);
+	result.window_seconds = reader.u32();
+	result.update_seconds = reader.u32();
+	result.profile_generation = reader.u32();
 	const auto flags = reader.u32();
 	if ((flags & ~0x1fu) != 0 || reader.u32() != 0)
 		throw std::invalid_argument("invalid DEMAND snapshot flags");

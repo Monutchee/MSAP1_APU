@@ -46,9 +46,13 @@ struct DemandResponseDto {
 	PhaseTotalStringDto export_peak_sample;
 	std::string session_id;
 	std::string last_sample_index;
-	std::string interval_target_sample;
+	std::string interval_anchor_sample;
 	std::uint32_t source_interval_count = 0;
 	std::uint32_t source_status = 0;
+	std::string method;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
 	std::string peak_reset_epoch;
 	std::string last_durable_update_nanoseconds;
 	std::string quality;
@@ -133,16 +137,30 @@ inline DemandResponseDto demand_dto(const DemandValues &values)
 	const auto updated = std::chrono::duration_cast<std::chrono::nanoseconds>(
 		values.current_active.phase_a.measured_at.time_since_epoch()).count();
 	return {
-		exact_group(values.current_active), exact_group(values.import_peak),
-		exact_group(values.export_peak), exact_samples(values.import_peak_sample),
-		exact_samples(values.export_peak_sample),
-		std::to_string(values.session_id),
-		std::to_string(values.last_sample_index),
-		std::to_string(values.interval_target_sample),
-		values.source_interval_count, values.source_status,
-		std::to_string(values.peak_reset_epoch), std::to_string(updated),
-		quality_name(quality), values.time_aligned, values.contaminated,
-		values.boundary_valid, values.incomplete_input, values.saturated,
+		.current_active_uw = exact_group(values.current_active),
+		.import_peak_uw = exact_group(values.import_peak),
+		.export_peak_uw = exact_group(values.export_peak),
+		.import_peak_sample = exact_samples(values.import_peak_sample),
+		.export_peak_sample = exact_samples(values.export_peak_sample),
+		.session_id = std::to_string(values.session_id),
+		.last_sample_index = std::to_string(values.last_sample_index),
+		.interval_anchor_sample =
+			std::to_string(values.interval_anchor_sample),
+		.source_interval_count = values.source_interval_count,
+		.source_status = values.source_status,
+		.method = values.method == DemandMethod::fixed_block
+			? "fixed_block" : "sliding",
+		.window_seconds = values.window_seconds,
+		.update_seconds = values.update_seconds,
+		.profile_generation = values.profile_generation,
+		.peak_reset_epoch = std::to_string(values.peak_reset_epoch),
+		.last_durable_update_nanoseconds = std::to_string(updated),
+		.quality = quality_name(quality),
+		.time_aligned = values.time_aligned,
+		.contaminated = values.contaminated,
+		.boundary_valid = values.boundary_valid,
+		.incomplete_accumulation = values.incomplete_input,
+		.saturated = values.saturated,
 	};
 }
 

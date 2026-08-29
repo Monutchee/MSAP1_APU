@@ -22,6 +22,8 @@ Message decode_message(const void *data, std::size_t size);
 msap1_adc_health_payload decode_adc_health(const Message &message);
 msap1_aggregation_health_payload decode_aggregation_health(
 	const Message &message);
+msap1_demand_config_ack_payload decode_demand_config_ack(
+	const Message &message);
 msap1_adc_diagnostic_payload decode_adc_diagnostic(const Message &message);
 msap1_meter_config_ack_payload decode_meter_config_ack(const Message &message);
 msap1_simulator_event_ack_payload decode_simulator_event_ack(

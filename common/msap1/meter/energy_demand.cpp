@@ -10,7 +10,7 @@ namespace {
 
 constexpr std::uint32_t energy_header_allowed_mask = 0x00000f1fu;
 constexpr std::uint32_t energy_status_allowed_mask = 0x0000001fu;
-constexpr std::uint32_t demand_header_allowed_mask = 0x000fffffu;
+constexpr std::uint32_t demand_header_allowed_mask = 0xffffffffu;
 constexpr std::uint32_t demand_status_allowed_mask = 0x0000007fu;
 
 void require(bool condition, const char *message)
@@ -147,8 +147,21 @@ void validate_demand(const MeterRecord &record)
 		"invalid DEMAND-v1 envelope");
 	require((record.word(13) & ~demand_header_allowed_mask) == 0u,
 		"DEMAND-v1 format header reserved bits are nonzero");
-	require(record.demand_interval_seconds() == meter_demand_interval_seconds,
-		"DEMAND-v1 interval is not 600 seconds");
+	const auto method = record.demand_method();
+	const auto window = record.demand_interval_seconds();
+	const auto update = record.demand_update_seconds();
+	require(method <= static_cast<std::uint8_t>(DemandMethod::sliding),
+		"DEMAND-v1 method is invalid");
+	if (method == static_cast<std::uint8_t>(DemandMethod::fixed_block)) {
+		require(window == meter_demand_fixed_interval_seconds &&
+			update == meter_demand_fixed_interval_seconds,
+			"DEMAND-v1 fixed profile is not 600/600 seconds");
+	} else {
+		require((window == 60u || window == 300u || window == 600u ||
+			window == 900u || window == 1800u) &&
+			update == meter_demand_sliding_update_seconds,
+			"DEMAND-v1 sliding profile is invalid");
+	}
 	require(record.demand_complete(), "DEMAND-v1 is not complete");
 	require((record.status() & ~demand_status_allowed_mask) == 0u,
 		"DEMAND-v1 status reserved bits are nonzero");
@@ -160,8 +173,10 @@ void validate_demand(const MeterRecord &record)
 		"DEMAND-v1 session ID is zero");
 	require(record.demand_last_sample_index() >= record.first_sample_index(),
 		"DEMAND-v1 sample anchors are reversed");
-	require_zero_words(record, 62u, 63u,
-		"DEMAND-v1 tail reserved words are nonzero");
+	require(record.demand_profile_generation() != 0u,
+		"DEMAND-v1 profile generation is zero");
+	require_zero_words(record, 63u, 63u,
+		"DEMAND-v1 reserved tail word is nonzero");
 	for (std::size_t index = 0; index < 4; ++index) {
 		(void)record.signed64(meter_demand_current_word + index * 2u);
 		(void)checked_counter(record,
@@ -341,7 +356,10 @@ MeterUpdate decode_demand_meter_record(const MeterRecord &record,
 {
 	validate_demand(record);
 	const auto window = source_window(record);
-	const bool interval_valid = record.demand_time_aligned() &&
+	const auto method = static_cast<DemandMethod>(record.demand_method());
+	const bool alignment_valid = method == DemandMethod::sliding ||
+		record.demand_time_aligned();
+	const bool interval_valid = alignment_valid &&
 		record.demand_boundary_valid() && !record.demand_contaminated();
 	DemandValues values;
 	for (std::size_t index = 0; index < 4; ++index) {
@@ -365,11 +383,15 @@ MeterUpdate decode_demand_meter_record(const MeterRecord &record,
 	}
 	values.session_id = record.demand_session_id();
 	values.last_sample_index = record.demand_last_sample_index();
-	values.interval_target_sample =
-		record.unsigned64(meter_demand_target_sample_word);
+	values.interval_anchor_sample =
+		record.unsigned64(meter_demand_interval_anchor_sample_word);
 	values.source_interval_count =
 		record.word(meter_demand_source_interval_count_word);
 	values.source_status = record.word(meter_demand_source_status_word);
+	values.method = method;
+	values.window_seconds = record.demand_interval_seconds();
+	values.update_seconds = record.demand_update_seconds();
+	values.profile_generation = record.demand_profile_generation();
 	values.time_aligned = record.demand_time_aligned();
 	values.contaminated = record.demand_contaminated();
 	values.boundary_valid = record.demand_boundary_valid();
@@ -377,7 +399,7 @@ MeterUpdate decode_demand_meter_record(const MeterRecord &record,
 	values.incomplete_input = record.demand_incomplete_input();
 
 	MeterUpdate update;
-	update.period = MeasurementPeriod::Min10;
+	update.period = MeasurementPeriod::Demand;
 	update.kind = RecordKind::demand;
 	update.sequence = record.sequence();
 	update.configuration_generation = record.configuration_generation();
@@ -393,7 +415,7 @@ MeterUpdate decode_demand_meter_record(const MeterRecord &record,
 	timing.contaminated = record.demand_contaminated();
 	timing.boundary_valid = record.demand_boundary_valid();
 	timing.target_sample_index =
-		record.unsigned64(meter_demand_target_sample_word);
+		record.unsigned64(meter_demand_interval_anchor_sample_word);
 	update.aggregate_timing = timing;
 	return update;
 }

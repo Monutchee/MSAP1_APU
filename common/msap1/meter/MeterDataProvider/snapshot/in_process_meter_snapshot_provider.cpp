@@ -192,6 +192,13 @@ void replace_group(std::vector<MeterAttributeValue> &output,
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
 	using Id = MeterAttributeId;
+	if (period == msap1::MeasurementPeriod::Demand) {
+		std::vector<MeterAttributeKey> result;
+		for (const auto &group : demand_attribute_groups)
+			for (const auto id : group)
+				result.push_back({id, std::nullopt});
+		return result;
+	}
 	std::vector<MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -245,10 +252,6 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 		for (const auto &group : energy_attribute_groups)
 			for (const auto id : group)
 				result.push_back({id, std::nullopt});
-	else if (period == msap1::MeasurementPeriod::Min10)
-		for (const auto &group : demand_attribute_groups)
-			for (const auto id : group)
-				result.push_back({id, std::nullopt});
 	return result;
 }
 
@@ -281,9 +284,13 @@ void overlay_authoritative_demand(mnc::meter::MeterSnapshot &snapshot,
 		.session_id = demand.session_id,
 		.peak_reset_epoch = demand.peak_reset_epoch,
 		.last_sample_index = demand.last_sample_index,
-		.interval_target_sample = demand.interval_target_sample,
+		.interval_anchor_sample = demand.interval_anchor_sample,
 		.source_interval_count = demand.source_interval_count,
 		.source_status = demand.source_status,
+		.window_seconds = demand.window_seconds,
+		.update_seconds = demand.update_seconds,
+		.profile_generation = demand.profile_generation,
+		.method = static_cast<std::uint8_t>(demand.method),
 		.import_peak_samples = {demand.import_peak_sample.phase_a,
 			demand.import_peak_sample.phase_b,
 			demand.import_peak_sample.phase_c,
@@ -319,6 +326,7 @@ InProcessMeterSnapshotProvider::capabilities() const
 		 supported(MeasurementPeriod::Min10Live)},
 		{MeasurementPeriod::Hour2Live,
 		 supported(MeasurementPeriod::Hour2Live)},
+		{MeasurementPeriod::Demand, supported(MeasurementPeriod::Demand)},
 	};
 }
 
@@ -353,16 +361,20 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			energy.accepted_blocks, energy.skipped_blocks,
 			energy.saturated, energy.incomplete_input, energy.discontinuity};
 	}
-	if (view.period == MeasurementPeriod::Min10 &&
+	if (view.period == MeasurementPeriod::Demand &&
 	    view.values.demand.session_id != 0) {
 		const auto &demand = view.values.demand;
 		result.demand = mnc::meter::DemandSnapshotMetadata{
 			.session_id = demand.session_id,
 			.peak_reset_epoch = demand.peak_reset_epoch,
 			.last_sample_index = demand.last_sample_index,
-			.interval_target_sample = demand.interval_target_sample,
+			.interval_anchor_sample = demand.interval_anchor_sample,
 			.source_interval_count = demand.source_interval_count,
 			.source_status = demand.source_status,
+			.window_seconds = demand.window_seconds,
+			.update_seconds = demand.update_seconds,
+			.profile_generation = demand.profile_generation,
+			.method = static_cast<std::uint8_t>(demand.method),
 			.import_peak_samples = {demand.import_peak_sample.phase_a,
 				demand.import_peak_sample.phase_b,
 				demand.import_peak_sample.phase_c,

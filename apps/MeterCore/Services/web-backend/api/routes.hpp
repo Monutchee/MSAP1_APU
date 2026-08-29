@@ -290,7 +290,7 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	 "Durable four-quadrant lifetime energy"},
 	{webengine::http::verb::get, "/api/v1/meter/demand",
 	 webengine::Role::Viewer, &get_meter_demand,
-	 "Latest completed ten-minute active demand and peaks"},
+	 "Latest durable configured active demand and peaks"},
 	{webengine::http::verb::post, "/api/v1/meter/energy/reset",
 	 webengine::Role::Admin, &post_meter_energy_reset,
 	 "Reset all authoritative energy counters"},

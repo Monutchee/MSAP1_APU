@@ -29,6 +29,8 @@ enum class MeasurementPeriod : std::uint8_t {
 	Min10Live,
 	/** Non-normative view of the currently open two-hour interval. */
 	Hour2Live,
+	/** Configured M17 active-demand profile (fixed block or sliding). */
+	Demand,
 };
 
 /**
@@ -122,7 +124,7 @@ enum class MeterAttributeId : std::uint16_t {
 	ReactiveEnergyQuadrantIVB,
 	ReactiveEnergyQuadrantIVC,
 	ReactiveEnergyQuadrantIVTotal,
-	/* M17 signed 10-minute active demand and resettable peaks. */
+	/* M17 signed configured-window active demand and resettable peaks. */
 	CurrentActiveDemandA,
 	CurrentActiveDemandB,
 	CurrentActiveDemandC,

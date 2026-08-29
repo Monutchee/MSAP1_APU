@@ -47,9 +47,13 @@ struct DemandMetadata {
 	std::string session_id;
 	std::string peak_reset_epoch;
 	std::string last_sample_index;
-	std::string interval_target_sample;
+	std::string interval_anchor_sample;
 	std::uint32_t source_interval_count = 0;
 	std::uint32_t source_status = 0;
+	std::string method;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
 	bool time_aligned = false;
 	bool contaminated = false;
 	bool boundary_valid = false;
@@ -184,14 +188,22 @@ std::string MeterSnapshotPayloadEncoder::encode(
 	if (snapshot.demand) {
 		const auto &demand = *snapshot.demand;
 		payload.demand = DemandMetadata{
-			std::to_string(demand.session_id),
-			std::to_string(demand.peak_reset_epoch),
-			std::to_string(demand.last_sample_index),
-			std::to_string(demand.interval_target_sample),
-			demand.source_interval_count, demand.source_status,
-			demand.time_aligned, demand.contaminated,
-			demand.boundary_valid, demand.incomplete_input,
-			demand.saturated};
+			.session_id = std::to_string(demand.session_id),
+			.peak_reset_epoch = std::to_string(demand.peak_reset_epoch),
+			.last_sample_index = std::to_string(demand.last_sample_index),
+			.interval_anchor_sample =
+				std::to_string(demand.interval_anchor_sample),
+			.source_interval_count = demand.source_interval_count,
+			.source_status = demand.source_status,
+			.method = demand.method == 0 ? "fixed_block" : "sliding",
+			.window_seconds = demand.window_seconds,
+			.update_seconds = demand.update_seconds,
+			.profile_generation = demand.profile_generation,
+			.time_aligned = demand.time_aligned,
+			.contaminated = demand.contaminated,
+			.boundary_valid = demand.boundary_valid,
+			.incomplete_accumulation = demand.incomplete_input,
+			.saturated = demand.saturated};
 	}
 
 	for (const auto attribute : selected) {

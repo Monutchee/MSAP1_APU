@@ -31,6 +31,10 @@ public:
 	void refresh() noexcept;
 	/** Perform the audit when its low-rate deadline has arrived. */
 	void periodic_audit() noexcept;
+	/** Apply the authoritative demand profile. Unlike health polling this is
+	 * transactional and throws so central settings can roll back. */
+	[[nodiscard]] msap1_demand_config_ack_payload configure_demand(
+		const msap1_demand_config_payload &configuration);
 
 	[[nodiscard]] bool has_cached_health() const noexcept
 	{
@@ -64,6 +68,8 @@ private:
 	std::string configured_device_;
 	std::string resolved_device_;
 	std::unique_ptr<msap1::acquisition::RpuController> controller_;
+	std::optional<msap1_demand_config_payload> desired_demand_;
+	std::optional<std::uint32_t> demand_profile_generation_;
 	msap1_aggregation_health_payload cached_health_{};
 	bool has_cached_health_ = false;
 	std::optional<Clock::time_point> last_health_time_;

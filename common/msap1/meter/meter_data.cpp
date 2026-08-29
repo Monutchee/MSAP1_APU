@@ -15,7 +15,7 @@ namespace {
 std::size_t period_index(MeasurementPeriod period)
 {
 	const auto index = static_cast<std::size_t>(period);
-	if (index >= 6)
+	if (index >= 7)
 		throw std::invalid_argument("invalid measurement period");
 	return index;
 }

@@ -12,6 +12,10 @@ static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
 static_assert(sizeof(msap1_aggregation_health_payload) == 200,
 	      "unexpected aggregation health payload layout");
+static_assert(sizeof(msap1_demand_config_payload) == 12,
+	      "unexpected demand configuration payload layout");
+static_assert(sizeof(msap1_demand_config_ack_payload) == 16,
+	      "unexpected demand configuration acknowledgement layout");
 /* Wire v7: four simulator harmonic/interharmonic slots use three words
  * apiece between the noise levels and flags. The five Urms(1/2) detection
  * fields still close the payload after nominal_frequency_hz. */
@@ -106,6 +110,23 @@ msap1_aggregation_health_payload decode_aggregation_health(
 	msap1_aggregation_health_payload health{};
 	std::memcpy(&health, message.payload.data(), sizeof(health));
 	return health;
+}
+
+msap1_demand_config_ack_payload decode_demand_config_ack(
+	const Message &message)
+{
+	if (message.header.type != MSAP1_RPU_MSG_DEMAND_CONFIG ||
+	    message.header.status != MSAP1_RPU_STATUS_OK ||
+	    message.payload.size() != sizeof(msap1_demand_config_ack_payload))
+		throw std::runtime_error(
+			"message is not a demand configuration acknowledgement");
+
+	msap1_demand_config_ack_payload acknowledgement{};
+	std::memcpy(&acknowledgement, message.payload.data(),
+		sizeof(acknowledgement));
+	if (acknowledgement.profile_generation == 0u)
+		throw std::runtime_error("R5C1 returned a zero demand profile generation");
+	return acknowledgement;
 }
 
 msap1_adc_diagnostic_payload decode_adc_diagnostic(const Message &message)

@@ -51,7 +51,11 @@ msap1::DemandValues demand(std::uint64_t session_id, std::int64_t peak)
 {
 	msap1::DemandValues result;
 	result.session_id = session_id;
-	result.interval_target_sample = 600000u + static_cast<std::uint64_t>(peak);
+	result.interval_anchor_sample = 600000u + static_cast<std::uint64_t>(peak);
+	result.method = msap1::DemandMethod::fixed_block;
+	result.window_seconds = 600u;
+	result.update_seconds = 600u;
+	result.profile_generation = 1u;
 	result.time_aligned = true;
 	result.boundary_valid = true;
 	msap1::DemandValueArray current{1, -2, 3, -4};
@@ -69,6 +73,27 @@ msap1::DemandValues demand(std::uint64_t session_id, std::int64_t peak)
 			reading->calculation_window = {19200000u,
 				std::chrono::seconds(600)};
 		}
+	};
+	stamp(result.current_active);
+	stamp(result.import_peak);
+	stamp(result.export_peak);
+	return result;
+}
+
+msap1::DemandValues sliding_demand(std::uint64_t session_id,
+	std::int64_t peak, std::uint32_t profile_generation)
+{
+	auto result = demand(session_id, peak);
+	result.method = msap1::DemandMethod::sliding;
+	result.window_seconds = 60u;
+	result.update_seconds = 3u;
+	result.profile_generation = profile_generation;
+	result.time_aligned = false;
+	const auto stamp = [](auto &group) {
+		for (auto *reading : {&group.phase_a, &group.phase_b,
+			&group.phase_c, &group.total})
+			reading->calculation_window = {1'920'000u,
+				std::chrono::seconds(60)};
 	};
 	stamp(result.current_active);
 	stamp(result.import_peak);
@@ -235,13 +260,13 @@ void test_failed_commit_retry_and_session_history()
 			"ENERGY retry after a failed commit was not accepted");
 
 		auto first_demand = demand(0x31u, 100);
-		first_demand.interval_target_sample = 700000u;
+		first_demand.interval_anchor_sample = 700000u;
 		(void)ledger.ingest_demand(first_demand, 1u, 1u, 300);
 		execute_sql(base,
-			"CREATE TRIGGER fail_demand_state BEFORE INSERT ON demand_state "
+			"CREATE TRIGGER fail_demand_state BEFORE INSERT ON demand_state_profiled "
 			"BEGIN SELECT RAISE(ABORT,'forced demand failure'); END");
 		auto second_demand = demand(0x31u, 120);
-		second_demand.interval_target_sample = 800000u;
+		second_demand.interval_anchor_sample = 800000u;
 		throws<std::runtime_error>(
 			[&] { (void)ledger.ingest_demand(second_demand, 2u, 1u, 400); },
 			"forced DEMAND commit failure did not propagate");
@@ -256,12 +281,57 @@ void test_failed_commit_retry_and_session_history()
 		 * boot session ID keeps equal target anchors as distinct snapshots. */
 		(void)ledger.ingest_energy(energy(0x32u, 1), 1u, 1u, 500);
 		auto reboot_demand = demand(0x32u, 1);
-		reboot_demand.interval_target_sample = 700000u;
+		reboot_demand.interval_anchor_sample = 700000u;
 		(void)ledger.ingest_demand(reboot_demand, 1u, 1u, 600);
 		require(scalar(base, "SELECT COUNT(*) FROM energy_history") == 3,
 			"session-scoped ENERGY history lost a reboot snapshot");
-		require(scalar(base, "SELECT COUNT(*) FROM demand_history") == 3,
+		require(scalar(base, "SELECT COUNT(*) FROM demand_history_profiled") == 3,
 			"session-scoped DEMAND history lost a reboot snapshot");
+	}
+	remove_database(base);
+}
+
+void test_demand_profile_transitions_reset_incomparable_peaks()
+{
+	const auto base = std::filesystem::temp_directory_path() /
+		("msap1-demand-profile-ledger-test-" +
+		 std::to_string(::getpid()) + ".sqlite3");
+	remove_database(base);
+	{
+		msap1::energy_ledger::EnergyLedger ledger(base);
+		auto fixed = ledger.ingest_demand(demand(0x41u, 100), 1u, 1u, 100);
+		require(fixed.peak_reset_epoch == 0u &&
+			fixed.import_peak.phase_a.value == 100,
+			"initial fixed demand peak was not authoritative");
+		auto sliding = ledger.ingest_demand(
+			sliding_demand(0x41u, 40, 2u), 2u, 1u, 200);
+		require(sliding.peak_reset_epoch == 1u &&
+			sliding.import_peak.phase_a.value == 40 &&
+			sliding.method == msap1::DemandMethod::sliding,
+			"fixed-to-sliding profile change did not start a fresh peak epoch");
+		auto duplicate = ledger.ingest_demand(
+			sliding_demand(0x41u, 40, 2u), 2u, 1u, 200);
+		require(duplicate.peak_reset_epoch == 1u,
+			"demand profile replay advanced the peak epoch");
+
+		// A firmware restart changes the session and resets its profile
+		// generation to one, but equal semantics preserve authoritative peaks.
+		auto restarted = ledger.ingest_demand(
+			sliding_demand(0x42u, 50, 1u), 1u, 1u, 300);
+		require(restarted.peak_reset_epoch == 1u &&
+			restarted.import_peak.phase_a.value == 50,
+			"new R5C1 session incorrectly reset equal-profile demand peaks");
+
+		// A new generation within that same session is a deliberate settings
+		// change, even when the selected window happens to be unchanged.
+		auto reapplied = ledger.ingest_demand(
+			sliding_demand(0x42u, 20, 2u), 2u, 1u, 400);
+		require(reapplied.peak_reset_epoch == 2u &&
+			reapplied.import_peak.phase_a.value == 20,
+			"same-session profile generation did not reset demand peaks");
+		require(scalar(base,
+			"SELECT COUNT(*) FROM demand_history_profiled") == 1,
+			"three-second sliding updates leaked into forever ledger history");
 	}
 	remove_database(base);
 }
@@ -272,5 +342,6 @@ int main()
 {
 	test_ledger();
 	test_failed_commit_retry_and_session_history();
+	test_demand_profile_transitions_reset_incomparable_peaks();
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

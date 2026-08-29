@@ -52,6 +52,9 @@ void test_first_boot_and_direct_save()
 		assert(initial.settings.metering.sample_rate_hz == 128000u);
 		assert(initial.settings.metering.measurement_topology == "wye");
 		assert(initial.settings.metering.system_nominal_voltage_v == 120.0);
+		assert(initial.settings.metering.demand.method == "sliding");
+		assert(initial.settings.metering.demand.window_seconds == 60u);
+		assert(initial.settings.database.demand.backend == "persistent");
 		assert(!initial.content_hash.empty());
 		assert(std::filesystem::exists(tree.data / "active.json"));
 
@@ -68,6 +71,37 @@ void test_first_boot_and_direct_save()
 	SettingsHandler reloaded(tree.data, tree.factory);
 	reloaded.initialize();
 	assert(reloaded.active().settings.metering.frequency.maximum_hz == 80.0);
+}
+
+void test_demand_profile_validation()
+{
+	TestTree tree("demand-profile");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	auto settings = handler.active().settings;
+	settings.metering.demand = {"sliding", 300u};
+	auto saved = handler.save(settings);
+	assert(saved.settings.metering.demand.method == "sliding");
+	assert(saved.settings.metering.demand.window_seconds == 300u);
+	settings = saved.settings;
+	settings.metering.demand = {"fixed_block", 600u};
+	saved = handler.save(settings);
+	assert(saved.settings.metering.demand.method == "fixed_block");
+
+	for (const auto &invalid : {
+		msap1::settings::DemandSettings{"sliding", 61u},
+		msap1::settings::DemandSettings{"fixed_block", 300u},
+		msap1::settings::DemandSettings{"unknown", 60u}}) {
+		settings = saved.settings;
+		settings.metering.demand = invalid;
+		bool rejected = false;
+		try {
+			(void)handler.save(settings);
+		} catch (const std::runtime_error &) {
+			rejected = true;
+		}
+		assert(rejected);
+	}
 }
 
 void test_nominal_frequency_validation()
@@ -315,6 +349,7 @@ void test_settings_ipc_round_trip()
 int main()
 {
 	test_first_boot_and_direct_save();
+	test_demand_profile_validation();
 	test_nominal_frequency_validation();
 	test_system_nominal_voltage_validation();
 	test_measurement_topology_validation();

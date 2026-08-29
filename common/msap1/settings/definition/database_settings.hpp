@@ -75,6 +75,7 @@ struct DatabaseSettings {
 		.maximum_bytes = 512ull * 1024ull * 1024ull};
 	DatasetStorageSettings harmonic_minutes_10{};
 	DatasetStorageSettings harmonic_hours_2{};
+	DatasetStorageSettings demand{};
 
 	void validate() const
 	{
@@ -86,6 +87,7 @@ struct DatabaseSettings {
 		harmonic_cycles_150_180.validate(false);
 		harmonic_minutes_10.validate(false);
 		harmonic_hours_2.validate(false);
+		demand.validate(false);
 	}
 
 	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
@@ -117,6 +119,7 @@ struct DatabaseSettings {
 				harmonic_minutes_10),
 			convert(DatabaseDataset::harmonic_hours_2,
 				harmonic_hours_2),
+			convert(DatabaseDataset::demand, demand),
 		};
 	}
 

@@ -129,6 +129,7 @@ std::string_view period_name(MeasurementPeriod period)
 	case MeasurementPeriod::Hour2: return "2-hour";
 	case MeasurementPeriod::Min10Live: return "10-minute live partial";
 	case MeasurementPeriod::Hour2Live: return "2-hour live partial";
+	case MeasurementPeriod::Demand: return "configured demand";
 	}
 	return "unknown";
 }
@@ -142,6 +143,7 @@ std::string_view period_key(MeasurementPeriod period)
 	case MeasurementPeriod::Hour2: return "hour_2";
 	case MeasurementPeriod::Min10Live: return "minute_10_live";
 	case MeasurementPeriod::Hour2Live: return "hour_2_live";
+	case MeasurementPeriod::Demand: return "demand";
 	}
 	return "unknown";
 }
@@ -175,12 +177,19 @@ std::string_view special_name(SpecialRegister field)
 	case SpecialRegister::demand_reset_epoch:
 		return "demand.peak_reset_epoch";
 	case SpecialRegister::demand_last_sample: return "demand.last_sample";
-	case SpecialRegister::demand_interval_target_sample:
-		return "demand.interval_target_sample";
+	case SpecialRegister::demand_interval_anchor_sample:
+		return "demand.interval_anchor_sample";
 	case SpecialRegister::demand_source_interval_count:
 		return "demand.source_interval_count";
 	case SpecialRegister::demand_source_status:
 		return "demand.source_status";
+	case SpecialRegister::demand_method: return "demand.method";
+	case SpecialRegister::demand_window_seconds:
+		return "demand.window_seconds";
+	case SpecialRegister::demand_update_seconds:
+		return "demand.update_seconds";
+	case SpecialRegister::demand_profile_generation:
+		return "demand.profile_generation";
 	case SpecialRegister::demand_flags: return "demand.flags";
 	case SpecialRegister::demand_quality_mask:
 		return "demand.quality_mask";

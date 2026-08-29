@@ -84,10 +84,12 @@ inline constexpr std::size_t meter_energy_skipped_samples_word = 52u;
 inline constexpr std::size_t meter_energy_accepted_blocks_word = 54u;
 inline constexpr std::size_t meter_energy_skipped_blocks_word = 55u;
 
-/* DEMAND-v1 (M17): signed current active demand and directional session
- * peaks after each completed UTC ten-minute interval. */
+/* DEMAND-v1 (M17): signed current active demand and directional profile
+ * peaks for the configured fixed-block or sliding window. */
 inline constexpr std::uint32_t meter_demand_format = 0x00040001u;
-inline constexpr std::uint16_t meter_demand_interval_seconds = 600u;
+inline constexpr std::uint16_t meter_demand_fixed_interval_seconds = 600u;
+inline constexpr std::uint16_t meter_demand_default_window_seconds = 60u;
+inline constexpr std::uint16_t meter_demand_sliding_update_seconds = 3u;
 inline constexpr std::size_t meter_demand_last_sample_word = 14u;
 inline constexpr std::size_t meter_demand_current_word = 16u;
 inline constexpr std::size_t meter_demand_import_peak_word = 24u;
@@ -95,9 +97,10 @@ inline constexpr std::size_t meter_demand_export_peak_word = 32u;
 inline constexpr std::size_t meter_demand_import_peak_anchor_word = 40u;
 inline constexpr std::size_t meter_demand_export_peak_anchor_word = 48u;
 inline constexpr std::size_t meter_demand_session_word = 56u;
-inline constexpr std::size_t meter_demand_target_sample_word = 58u;
+inline constexpr std::size_t meter_demand_interval_anchor_sample_word = 58u;
 inline constexpr std::size_t meter_demand_source_interval_count_word = 60u;
 inline constexpr std::size_t meter_demand_source_status_word = 61u;
+inline constexpr std::size_t meter_demand_profile_generation_word = 62u;
 /* AGG v3 (metrology M11/M15): the R5C1 150/180-cycle tier record
  * (Mtr2Engine retired). MTR2-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
@@ -396,6 +399,18 @@ struct MeterRecord {
 	std::uint8_t demand_valid_mask() const
 	{
 		return static_cast<std::uint8_t>((word(13) >> 16u) & 0x0fu);
+	}
+	std::uint8_t demand_method() const
+	{
+		return static_cast<std::uint8_t>((word(13) >> 20u) & 0x03u);
+	}
+	std::uint16_t demand_update_seconds() const
+	{
+		return static_cast<std::uint16_t>((word(13) >> 22u) & 0x03ffu);
+	}
+	std::uint32_t demand_profile_generation() const
+	{
+		return word(meter_demand_profile_generation_word);
 	}
 	std::uint64_t demand_last_sample_index() const
 	{

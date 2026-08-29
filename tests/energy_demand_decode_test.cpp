@@ -85,7 +85,10 @@ msap1::MeterRecord demand_record(bool contaminated = false)
 	record.words[8] = (1u << 1) | (1u << 2) | (1u << 4) |
 		(static_cast<std::uint32_t>(contaminated) << 3);
 	write_u64(record, 9, 1000000u);
-	record.words[13] = msap1::meter_demand_interval_seconds | (0xfu << 16);
+	record.words[13] = msap1::meter_demand_fixed_interval_seconds |
+		(0xfu << 16) |
+		(static_cast<std::uint32_t>(
+			msap1::meter_demand_fixed_interval_seconds) << 22);
 	write_u64(record, msap1::meter_demand_last_sample_word, 20199999u);
 	constexpr std::int64_t signed_value = -9007199254740993LL;
 	for (std::size_t index = 0; index < 4; ++index) {
@@ -104,9 +107,11 @@ msap1::MeterRecord demand_record(bool contaminated = false)
 	}
 	write_u64(record, msap1::meter_demand_session_word,
 		0xfedcba9876543210ULL);
-	write_u64(record, msap1::meter_demand_target_sample_word, 20200000u);
+	write_u64(record, msap1::meter_demand_interval_anchor_sample_word,
+		20200000u);
 	record.words[msap1::meter_demand_source_interval_count_word] = 3000u;
 	record.words[msap1::meter_demand_source_status_word] = record.words[8];
+	record.words[msap1::meter_demand_profile_generation_word] = 1u;
 	return record;
 }
 
@@ -181,7 +186,8 @@ void test_energy_atomic_family()
 void test_demand_decode()
 {
 	const auto update = msap1::decode_demand_meter_record(demand_record());
-	require(update.kind == msap1::RecordKind::demand && update.demand,
+	require(update.kind == msap1::RecordKind::demand && update.demand &&
+		update.period == msap1::MeasurementPeriod::Demand,
 		"DEMAND typed update route");
 	require(update.demand->current_active.phase_a.value ==
 			-9007199254740993LL &&
@@ -201,9 +207,33 @@ void test_demand_decode()
 			msap1::MeasurementQuality::valid,
 		"contamination invalidates current demand without erasing peaks");
 	auto reserved = demand_record();
-	reserved.words[62] = 1u;
+	reserved.words[63] = 1u;
 	rejects([&] { (void)msap1::decode_demand_meter_record(reserved); },
 		"DEMAND reserved tail word accepted");
+
+	auto sliding_record = demand_record();
+	sliding_record.words[8] &= ~(1u << 2); // sliding windows are not UTC-aligned
+	sliding_record.words[13] = 60u | (0xfu << 16) |
+		(static_cast<std::uint32_t>(msap1::DemandMethod::sliding) << 20) |
+		(3u << 22);
+	sliding_record.words[msap1::meter_demand_source_interval_count_word] = 20u;
+	sliding_record.words[msap1::meter_demand_profile_generation_word] = 42u;
+	const auto sliding = msap1::decode_demand_meter_record(sliding_record);
+	require(sliding.demand &&
+		sliding.demand->method == msap1::DemandMethod::sliding &&
+		sliding.demand->window_seconds == 60u &&
+		sliding.demand->update_seconds == 3u &&
+		sliding.demand->profile_generation == 42u &&
+		sliding.demand->current_active.phase_a.quality ==
+			msap1::MeasurementQuality::valid,
+		"sliding DEMAND-v1 decodes profile metadata without UTC alignment");
+
+	auto invalid_profile = sliding_record;
+	invalid_profile.words[13] = 61u | (0xfu << 16) |
+		(static_cast<std::uint32_t>(msap1::DemandMethod::sliding) << 20) |
+		(3u << 22);
+	rejects([&] { (void)msap1::decode_demand_meter_record(invalid_profile); },
+		"unsupported sliding DEMAND window accepted");
 }
 
 } // namespace
