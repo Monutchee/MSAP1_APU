@@ -256,6 +256,7 @@ target_link_libraries(msap1_settings PRIVATE
 # future analysis code does not acquire access to the DMA descriptor.
 msap1_library(msap1_waveform msap1::waveform
     msap1/waveform/mncwf_v4.cpp
+	msap1/waveform/mncwf_v4_export.cpp
     msap1/waveform/waveform_capture.cpp
 )
 target_link_libraries(msap1_waveform PRIVATE

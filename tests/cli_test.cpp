@@ -84,6 +84,20 @@ void option_parsing()
 	require(flow.options.diagnostic_flow == 1,
 		"ADC diagnostic flow was not parsed");
 
+	const auto waveform_export = application.parse({
+		"waveform", "export", "--session", "17", "--event",
+		"01234567-89ab-5def-8123-456789abcdef", "--format", "mncwf",
+		"--file", "/tmp/event.mncwf"});
+	require(!waveform_export.show_help &&
+			waveform_export.command->name() == "export" &&
+			waveform_export.options.waveform_session_id == 17u &&
+			waveform_export.options.waveform_event_id ==
+				"01234567-89ab-5def-8123-456789abcdef" &&
+			waveform_export.options.waveform_export_format == "mncwf" &&
+			waveform_export.options.waveform_export_file ==
+				"/tmp/event.mncwf",
+		"waveform export selection was not parsed");
+
 	const auto log = application.parse({
 		"log", "--component", "fpga-acquisition", "--module=dma",
 		"--priority", "warning", "--since", "10 minutes ago",
@@ -139,6 +153,16 @@ void help_and_errors()
 	output.str({});
 	error.str({});
 	require(application.execute(
+		{"waveform", "export", "--session", "1", "--event",
+		 "01234567-89ab-5def-8123-456789abcdef", "--format", "pqdif"},
+		output, error) == 2,
+		"unavailable PQDIF export format was accepted");
+	require(error.str().find("COMTRADE and PQDIF are not available") !=
+			std::string::npos,
+		"unavailable converter error omitted the explicit scope boundary");
+	output.str({});
+	error.str({});
+	require(application.execute(
 		{"log", "--priority", "verbose"}, output, error) == 2,
 		"unknown log priority was accepted");
 	output.str({});
@@ -191,6 +215,14 @@ void machine_interface()
 			view->metadata.access ==
 				msap1::cli::AccessLevel::local_only,
 		"meter view metadata is not local-only");
+	const auto waveform_export = find("mnc waveform export");
+	require(waveform_export != descriptors.end() &&
+			waveform_export->metadata.access ==
+				msap1::cli::AccessLevel::local_only &&
+			waveform_export->metadata.side_effect ==
+				msap1::cli::SideEffect::control &&
+			waveform_export->metadata.supports_json,
+		"waveform export metadata does not prevent remote file writes");
 
 	const msap1::cli::ExecutionPolicy restricted{
 		.maximum_access = msap1::cli::AccessLevel::diagnostic,
@@ -283,6 +315,12 @@ void completion()
 	candidates = application.complete({"adc", "testflw", "--"});
 	require(contains(candidates, "--flow"),
 		"ADC diagnostic completion omitted --flow");
+	candidates = application.complete({"waveform", "export", "--"});
+	require(contains(candidates, "--session") &&
+			contains(candidates, "--event") &&
+			contains(candidates, "--format") &&
+			contains(candidates, "--file"),
+		"waveform export completion omitted required options");
 	candidates = application.complete({"log", "--"});
 	require(contains(candidates, "--component") &&
 			contains(candidates, "--follow") &&

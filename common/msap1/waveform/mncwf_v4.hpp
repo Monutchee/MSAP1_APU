@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -381,6 +382,17 @@ struct MncwfV4LineageEntry {
 
 /** Generate an RFC-4122 variant/version-4 UUID from the kernel RNG. */
 [[nodiscard]] MncwfUuid mncwf_random_uuid();
+
+/** Canonical lower-case RFC-4122 text form (8-4-4-4-12 hexadecimal). */
+[[nodiscard]] std::string mncwf_uuid_string(const MncwfUuid &uuid);
+/** Parse only the canonical RFC-4122 text form. */
+[[nodiscard]] std::optional<MncwfUuid> mncwf_uuid_from_string(
+	std::string_view text) noexcept;
+/** True when every UUID byte is zero (the on-wire unavailable sentinel). */
+[[nodiscard]] bool mncwf_uuid_is_zero(const MncwfUuid &uuid) noexcept;
+/** Deterministic version-5 UUID for one stable R5C1 event identity. */
+[[nodiscard]] MncwfUuid mncwf_stable_event_uuid(
+	std::uint64_t session, std::uint64_t counter);
 
 /**
  * Complete typed input to the deterministic version-4 encoder.

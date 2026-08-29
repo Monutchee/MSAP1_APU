@@ -1,4 +1,5 @@
 #include "msap1/waveform/mncwf_v4.hpp"
+#include "msap1/waveform/mncwf_v4_export.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,12 +8,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -643,6 +648,48 @@ int main()
 			std::array<std::byte, 1> beyond{};
 			require(virtual_file.read(virtual_file.size(), beyond) == 0u,
 				"virtual slice read stops exactly at EOF");
+
+			const auto export_directory =
+				std::filesystem::temp_directory_path() /
+				("mncwf-v4-export-" + std::to_string(::getpid()));
+			std::filesystem::create_directories(export_directory);
+			{
+				std::ofstream output(export_directory / "capture.mncwf",
+					std::ios::binary | std::ios::trunc);
+				output.write(reinterpret_cast<const char *>(encoded.data()),
+					static_cast<std::streamsize>(encoded.size()));
+			}
+			{
+				const auto mapped = msap1::MncwfV4ExportFile::open(
+					export_directory, "capture.mncwf", selected_event);
+				Bytes streamed(static_cast<std::size_t>(mapped->size()));
+				std::uint64_t offset = 0u;
+				while (offset < mapped->size()) {
+					const auto count = mapped->read(offset,
+						std::span<std::byte>{streamed}.subspan(
+							static_cast<std::size_t>(offset),
+							static_cast<std::size_t>(std::min<std::uint64_t>(
+								17u, mapped->size() - offset))));
+					if (count == 0u)
+						throw std::logic_error("mapped export stopped before EOF");
+					offset += count;
+				}
+				require(streamed == virtual_bytes &&
+						mapped->capture_uuid() == virtual_file.capture_uuid() &&
+						mapped->first_sequence() == virtual_file.first_sequence() &&
+						mapped->last_sequence() == virtual_file.last_sequence(),
+					"mapped export preserves the validated virtual slice");
+			}
+			bool traversal_rejected = false;
+			try {
+				(void)msap1::MncwfV4ExportFile::open(export_directory,
+					"../capture.mncwf", selected_event);
+			} catch (const std::invalid_argument &) {
+				traversal_rejected = true;
+			}
+			require(traversal_rejected,
+				"mapped export rejects path traversal before openat");
+			std::filesystem::remove_all(export_directory);
 		} catch (const std::exception &error) {
 		std::fprintf(stderr, "FAIL: valid fixture rejected: %s\n", error.what());
 		++failures;
@@ -654,6 +701,20 @@ int main()
 			(std::to_integer<std::uint8_t>(uuid[6]) & 0xf0u) == 0x40u &&
 			(std::to_integer<std::uint8_t>(uuid[8]) & 0xc0u) == 0x80u,
 			"capture UUID uses the RFC-4122 random layout");
+		const auto uuid_text = msap1::mncwf_uuid_string(uuid);
+		require(uuid_text.size() == 36u &&
+				msap1::mncwf_uuid_from_string(uuid_text) == uuid &&
+				!msap1::mncwf_uuid_from_string(
+					"00000000-0000-0000-0000-00000000000G"),
+			"canonical UUID text round trip is strict");
+		const auto stable_event = msap1::mncwf_stable_event_uuid(7u, 19u);
+		require(stable_event == msap1::mncwf_stable_event_uuid(7u, 19u) &&
+				stable_event != msap1::mncwf_stable_event_uuid(7u, 20u) &&
+				(std::to_integer<std::uint8_t>(stable_event[6]) & 0xf0u) ==
+					0x50u &&
+				(std::to_integer<std::uint8_t>(stable_event[8]) & 0xc0u) ==
+					0x80u,
+			"stable event UUID is deterministic version 5");
 		const auto digest = msap1::mncwf_sha256("abc");
 		require(std::to_integer<std::uint8_t>(digest[0]) == 0xbau &&
 			std::to_integer<std::uint8_t>(digest[31]) == 0xadu,

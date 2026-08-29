@@ -402,6 +402,73 @@ MncwfUuid mncwf_random_uuid()
 	return uuid;
 }
 
+std::string mncwf_uuid_string(const MncwfUuid &uuid)
+{
+	constexpr char digits[] = "0123456789abcdef";
+	std::string result;
+	result.reserve(36u);
+	for (std::size_t index = 0; index < uuid.size(); ++index) {
+		if (index == 4u || index == 6u || index == 8u || index == 10u)
+			result.push_back('-');
+		const auto value = std::to_integer<std::uint8_t>(uuid[index]);
+		result.push_back(digits[value >> 4u]);
+		result.push_back(digits[value & 0x0fu]);
+	}
+	return result;
+}
+
+std::optional<MncwfUuid> mncwf_uuid_from_string(std::string_view text) noexcept
+{
+	if (text.size() != 36u || text[8] != '-' || text[13] != '-' ||
+	    text[18] != '-' || text[23] != '-')
+		return std::nullopt;
+	const auto nibble = [](char value) -> std::optional<std::uint8_t> {
+		if (value >= '0' && value <= '9')
+			return static_cast<std::uint8_t>(value - '0');
+		if (value >= 'a' && value <= 'f')
+			return static_cast<std::uint8_t>(value - 'a' + 10);
+		return std::nullopt;
+	};
+	MncwfUuid result{};
+	std::size_t source = 0u;
+	for (auto &byte : result) {
+		if (source == 8u || source == 13u || source == 18u || source == 23u)
+			++source;
+		const auto high = nibble(text[source++]);
+		const auto low = nibble(text[source++]);
+		if (!high || !low)
+			return std::nullopt;
+		byte = static_cast<std::byte>((*high << 4u) | *low);
+	}
+	return result;
+}
+
+bool mncwf_uuid_is_zero(const MncwfUuid &uuid) noexcept
+{
+	return std::ranges::all_of(uuid,
+		[](std::byte value) { return value == std::byte{0}; });
+}
+
+MncwfUuid mncwf_stable_event_uuid(std::uint64_t session,
+	std::uint64_t counter)
+{
+	std::array<std::byte, 16> source{};
+	for (unsigned byte = 0; byte < 8u; ++byte) {
+		source[byte] = static_cast<std::byte>(
+			(session >> (byte * 8u)) & 0xffu);
+		source[8u + byte] = static_cast<std::byte>(
+			(counter >> (byte * 8u)) & 0xffu);
+	}
+	const auto digest = mncwf_sha256(source);
+	MncwfUuid result{};
+	std::copy_n(digest.begin(), result.size(), result.begin());
+	result[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
+	result[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
+	return result;
+}
+
 namespace {
 
 using EncodedBytes = std::vector<std::byte>;

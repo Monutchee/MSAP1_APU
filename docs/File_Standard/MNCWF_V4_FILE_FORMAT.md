@@ -8,6 +8,12 @@ and whose version is `4`. The production encoder and defensive reader are
 [`mncwf_v4.cpp`](../../common/msap1/waveform/mncwf_v4.cpp). Its synthetic and
 adversarial vectors are in
 [`mncwf_v4_reader_test.cpp`](../../tests/mncwf_v4_reader_test.cpp).
+The on-device event exporter is
+[`mncwf_v4_export.hpp`](../../common/msap1/waveform/mncwf_v4_export.hpp) and
+[`mncwf_v4_export.cpp`](../../common/msap1/waveform/mncwf_v4_export.cpp).
+It opens only a daemon-reported basename beneath the daemon-reported capture
+directory, rejects symlinks with `openat(..., O_NOFOLLOW)`, maps the validated
+master read-only, and keeps that mapping alive for the streamed virtual file.
 
 The acquisition daemon writes MNCWF v4 for new captures. It freezes settings,
 device/channel identity, time quality, event descriptors, and UUID lineage at

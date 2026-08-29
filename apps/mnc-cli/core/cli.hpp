@@ -59,6 +59,10 @@ struct Options {
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
+	std::optional<std::uint64_t> waveform_session_id;
+	std::optional<std::string> waveform_event_id;
+	std::optional<std::string> waveform_export_format;
+	std::optional<std::string> waveform_export_file;
 	std::optional<std::string> log_component;
 	std::optional<std::string> log_module;
 	std::optional<std::string> log_priority;

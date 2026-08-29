@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 
 namespace {
@@ -365,6 +366,41 @@ void typed_commands_round_trip_through_the_registry()
 		order_127.angle_millidegrees == 359'999 &&
 		order_127.magnitude_valid && order_127.angle_valid,
 		"typed harmonic family did not round trip");
+
+	/* IPC v36 carries the private storage authority plus public v4 capture,
+	 * master, and continuation identities used by bounded event export. */
+	registry.on<msap1::WaveformListRequest>(
+		msap1::AcquisitionStatus::dma_error,
+		[](const msap1::WaveformListRequest &request) {
+			require(request.version == msap1::acquisition_ipc_version,
+				"wrong decoded waveform request version");
+			msap1::WaveformResponse response{};
+			response.waveform.completed_sessions = 1u;
+			response.waveform_directory = "/data/mnc/waveform";
+			msap1::WaveformSessionIpc session{};
+			session.id = 17u;
+			session.state = msap1::WaveformSessionState::complete;
+			session.filename = "waveform-17-test.mncwf";
+			session.continuation_of_session_id = 16u;
+			session.master_session_id = 15u;
+			session.capture_uuid =
+				"01234567-89ab-4def-8123-456789abcdef";
+			response.sessions.push_back(std::move(session));
+			return response;
+		});
+	const auto waveform_reply = registry.dispatch(
+		msap1::encode_acquisition_request(msap1::WaveformListRequest{}));
+	const auto waveform_response =
+		msap1::decode_acquisition_payload<msap1::WaveformResponse>(
+			waveform_reply);
+	require(waveform_response.waveform.completed_sessions == 1u &&
+			waveform_response.waveform_directory == "/data/mnc/waveform" &&
+			waveform_response.sessions.size() == 1u &&
+			waveform_response.sessions[0].continuation_of_session_id == 16u &&
+			waveform_response.sessions[0].master_session_id == 15u &&
+			waveform_response.sessions[0].capture_uuid ==
+				"01234567-89ab-4def-8123-456789abcdef",
+		"typed waveform export authority did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */

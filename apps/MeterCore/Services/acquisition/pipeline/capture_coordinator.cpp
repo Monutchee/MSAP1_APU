@@ -49,25 +49,6 @@ msap1_demand_config_payload demand_configuration(
 	};
 }
 
-MncwfUuid event_uuid(const PowerQualityEventId &id)
-{
-	std::array<std::byte, 16> source{};
-	for (unsigned byte = 0; byte < 8u; ++byte) {
-		source[byte] = static_cast<std::byte>(
-			(id.session >> (byte * 8u)) & 0xffu);
-		source[8u + byte] = static_cast<std::byte>(
-			(id.counter >> (byte * 8u)) & 0xffu);
-	}
-	const auto digest = mncwf_sha256(source);
-	MncwfUuid result{};
-	std::copy_n(digest.begin(), result.size(), result.begin());
-	result[6] = static_cast<std::byte>(
-		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
-	result[8] = static_cast<std::byte>(
-		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
-	return result;
-}
-
 std::string event_label(PowerQualityLifecycleType type)
 {
 	switch (type) {
@@ -104,7 +85,8 @@ MncwfV4EventDescriptor waveform_event_descriptor(
 	const PowerQualityEventLifecycleSnapshot &snapshot)
 {
 	MncwfV4EventDescriptor result{};
-	result.event_uuid = event_uuid(snapshot.id);
+	result.event_uuid = mncwf_stable_event_uuid(
+		snapshot.id.session, snapshot.id.counter);
 	result.taxonomy = snapshot.iec_classification
 		? MncwfEventTaxonomy::iec_61000_4_30
 		: MncwfEventTaxonomy::product_alarm;
@@ -1083,7 +1065,9 @@ msap1::WaveformResponse CaptureCoordinator::waveform_response()
 {
 	msap1::WaveformResponse response{};
 	response.waveform = waveform_.status();
-	for (const auto &session : waveform_.sessions())
+	for (const auto &session : waveform_.sessions()) {
+		const auto capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
+			? std::string{} : mncwf_uuid_string(session.capture_uuid);
 		response.sessions.push_back(
 			{session.id, session.trigger_sequence,
 			 session.first_sequence, session.last_sequence,
@@ -1091,7 +1075,11 @@ msap1::WaveformResponse CaptureCoordinator::waveform_response()
 			 session.trigger_realtime_nanoseconds,
 			 session.sample_rate_hz, session.event_count,
 			 session.state, session.decimation,
-			 std::string(session.filename.data())});
+			 std::string(session.filename.data()),
+			 session.continuation_of_session_id,
+			 session.master_session_id, capture_uuid});
+	}
+	response.waveform_directory = options_.waveform_directory;
 	return response;
 }
 

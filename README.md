@@ -171,6 +171,8 @@ The authenticated external API is:
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`
 - `POST /api/v1/waveforms/trigger` (administrator only)
+- `GET /api/v1/waveforms/export?session_id=<id>&event_id=<uuid>&format=mncwf`
+  (authenticated viewer; streamed virtual event capture)
 - `GET /protected/waveforms/view/<filename>` (authenticated viewer)
 - `GET /protected/waveforms/download/<filename>` (authenticated viewer,
   attachment)
@@ -280,6 +282,9 @@ mnc adc simulator configure --frequency-hz 60 \
 mnc waveform status
 mnc waveform trigger --pre-ms 10000 --post-ms 10000
 mnc waveform list
+mnc waveform export --session 17 \
+    --event 01234567-89ab-5def-8123-456789abcdef --format mncwf \
+    --file event-17.mncwf
 mnc log
 mnc log --component fpga-acquisition
 mnc log --module dma --priority warning
@@ -323,6 +328,12 @@ PQDIF export needs only the master file. Legacy versions 1 through 3 remain
 discoverable. See the
 [MNCWF v4 contract](docs/File_Standard/MNCWF_V4_FILE_FORMAT.md) for the exact
 binary layout. R5 firmware and RPMsg are not in this payload path.
+
+Event export validates and read-only maps the completed v4 master, rebuilds
+only the selected virtual slice's metadata/directory/CRCs, and streams the
+unchanged sample extent in bounded chunks. It does not persist a second master
+on the device. Both the API and CLI advertise only `mncwf`; `comtrade` and
+`pqdif` fail explicitly until the later protocol-gateway converters land.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

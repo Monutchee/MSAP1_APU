@@ -218,6 +218,10 @@ struct WaveformSessionIpc {
 	WaveformSessionState state = WaveformSessionState::capturing;
 	std::uint32_t decimation = 1;
 	std::string filename;
+	std::uint64_t continuation_of_session_id = 0;
+	std::uint64_t master_session_id = 0;
+	/** Canonical MNCWF capture UUID; empty for retained pre-v4 files. */
+	std::string capture_uuid;
 };
 
 /* ---- responses ------------------------------------------------------- */
@@ -382,6 +386,8 @@ struct WaveformResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	WaveformStatus waveform{};
 	std::vector<WaveformSessionIpc> sessions;
+	/** Local trusted path authority; API responses must not expose it. */
+	std::string waveform_directory;
 };
 
 struct AdcSourceResponse {

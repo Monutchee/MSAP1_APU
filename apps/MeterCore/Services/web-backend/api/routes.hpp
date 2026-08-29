@@ -160,6 +160,9 @@ webengine::Response post_waveform_trigger(AppContext &,
 /** @brief DELETE /api/v1/waveforms — delete one completed session. */
 webengine::Response
 delete_waveform_session(AppContext &, const webengine::RequestContext &);
+/** @brief GET /api/v1/waveforms/export — streamed event-specific MNCWF. */
+webengine::HandlerResult export_waveform_event(
+	AppContext &, const webengine::RequestContext &);
 
 /* ── settings_routes.cpp — persistent settings authority ───────────────── */
 
@@ -443,6 +446,11 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 				return handler(context, request);
 			},
 			route.min_role);
+
+	engine.add_streaming_download("/api/v1/waveforms/export",
+		[&context](const auto &request) {
+			return export_waveform_event(context, request);
+		}, webengine::Role::Viewer);
 
 	constexpr std::size_t certificate_limit = 1024 * 1024;
 	const std::vector<std::string> certificate_types{

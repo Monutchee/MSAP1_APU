@@ -102,3 +102,12 @@ export format. It contains every capture-time authority needed by a future
 offline COMTRADE or PQDIF converter. An M18 request for either destination
 format must fail explicitly; the product must not fabricate missing fields or
 write a lossy placeholder.
+
+Authenticated viewers request an event slice with
+`GET /api/v1/waveforms/export?session_id=...&event_id=...&format=mncwf`.
+Local operators use `mnc waveform export --session ... --event ... --format
+mncwf [--file ...]`. Both resolve only completed sessions reported by the
+acquisition daemon. The shared read-only exporter validates and maps the v4
+master, regenerates the virtual slice metadata and integrity fields, and
+delivers bounded chunks without a second waveform-sized allocation or another
+persistent on-device capture.
