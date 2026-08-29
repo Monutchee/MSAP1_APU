@@ -284,15 +284,16 @@ void typed_commands_round_trip_through_the_registry()
 			response.has_snapshot = true;
 			response.snapshot.period = request.selection.period;
 			response.snapshot.sequence = 0x1'0000'0002ull;
-			response.snapshot.timing = mnc::meter::MeterSnapshotTiming{
-				.quality = mnc::meter::TimeQuality::Synchronized,
-				.utc_start_nanoseconds = 1'700'000'000'000'000'000ll,
-				.utc_uncertainty_nanoseconds = 250,
-				.first_sample_index = 123456,
-				.sample_count = 7680,
-				.cycle_count = 12,
-				.nominal_frequency_hz = 60,
-			};
+			mnc::meter::MeterSnapshotTiming timing{};
+			timing.quality = mnc::meter::TimeQuality::Synchronized;
+			timing.utc_start_nanoseconds =
+				1'700'000'000'000'000'000ll;
+			timing.utc_uncertainty_nanoseconds = 250;
+			timing.first_sample_index = 123456;
+			timing.sample_count = 7680;
+			timing.cycle_count = 12;
+			timing.nominal_frequency_hz = 60;
+			response.snapshot.timing = timing;
 			response.snapshot.values.push_back({
 				.attribute = request.selection.attributes.front(),
 				.unit = mnc::meter::MeterUnit::MicroVolts,
