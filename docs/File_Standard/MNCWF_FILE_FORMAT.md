@@ -12,7 +12,8 @@ waveform capture files. It is intended for:
 - AI-assisted diagnostic tools.
 
 The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
-The authoritative writer and public data definitions are:
+The production writer still emits version 3. Its authoritative implementation
+and public data definitions are:
 
 ```text
 common/msap1/waveform/waveform_capture.cpp
@@ -21,6 +22,15 @@ common/msap1/waveform/waveform_capture.hpp
 
 Consumers in other repositories should link to this document instead of
 maintaining a second copy of the binary definition.
+
+The version 4 section-directory contract and implemented defensive read-only
+reader are specified separately in
+[`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Version 4 is not yet the
+production recorder output; that switch waits for the M18 capture-time settings
+and event lifecycle authorities. Future COMTRADE and PQDIF programs are
+converters from MNCWF v4, not alternate on-device recorders. Their source-field
+matrix is in
+[`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
 
 Completed captures are stored under:
 
@@ -479,6 +489,8 @@ class Mncwf:
         if self.last_sequence < self.first_sequence:
             raise ValueError("invalid sequence range")
         self.decimation = 1
+        sequence_span = self.last_sequence - self.first_sequence
+        sequence_frame_count = sequence_span + 1
 
         if self.version >= 2:
             if self.header_bytes != 256:
@@ -543,7 +555,6 @@ class Mncwf:
                 for i in range(8)
             ]
 
-        sequence_span = self.last_sequence - self.first_sequence
         if sequence_span % self.decimation:
             raise ValueError("sequence range is not decimation-aligned")
         sequence_frame_count = sequence_span // self.decimation + 1
@@ -631,10 +642,12 @@ transients; a min/max envelope is preferred.
 
 ## Integrity and security
 
-Versions 2 and 3 have no embedded checksum, signature, compression, or
-encryption. Files stored by the product are protected by filesystem and
-authenticated download policy, but an external `.mncwf` file must still be
-treated as untrusted binary input.
+Versions 1 through 3 have no embedded checksum, signature, compression, or
+encryption. Version 4 adds CRC32C integrity for the header, directory, and
+every section, as specified in the version 4 document; CRC is integrity error
+detection, not authenticity or encryption. Files stored by the product are
+protected by filesystem and authenticated download policy, but an external
+`.mncwf` file must still be treated as untrusted binary input.
 
 Structural validation can identify truncation and many corrupt layouts, but it
 cannot prove the sample payload is authentic. If transport or archival

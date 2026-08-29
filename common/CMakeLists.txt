@@ -255,6 +255,7 @@ target_link_libraries(msap1_settings PRIVATE
 # Waveform device/session ownership is isolated from the meter record path so
 # future analysis code does not acquire access to the DMA descriptor.
 msap1_library(msap1_waveform msap1::waveform
+    msap1/waveform/mncwf_v4.cpp
     msap1/waveform/waveform_capture.cpp
 )
 target_link_libraries(msap1_waveform PRIVATE mnc::logging)
@@ -563,6 +564,13 @@ if(BUILD_TESTING)
     target_compile_options(waveform_capture_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME waveform_capture_test COMMAND waveform_capture_test)
+
+    add_executable(mncwf_v4_reader_test
+        ${PROJECT_SOURCE_DIR}/tests/mncwf_v4_reader_test.cpp)
+    target_link_libraries(mncwf_v4_reader_test PRIVATE msap1::waveform)
+    target_compile_options(mncwf_v4_reader_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME mncwf_v4_reader_test COMMAND mncwf_v4_reader_test)
 
     # The ingestor continuity rules are daemon code; compile the pipeline
     # source into the test rather than opening real devices.
