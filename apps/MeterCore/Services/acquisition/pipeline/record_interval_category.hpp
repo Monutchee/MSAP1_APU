@@ -25,6 +25,7 @@ enum class RecordIntervalCategory : std::uint8_t {
 	minutes_10_live,
 	hours_2_live,
 	demand,
+	flicker,
 	count,
 };
 
@@ -55,6 +56,9 @@ struct RecordIntervalIdentity {
 	case msap1::meter_pq_event_format:
 		return {RecordIntervalCategory::urms_half, "urms_half",
 			"Urms(1/2)"};
+	case msap1::meter_flicker_format:
+		return {RecordIntervalCategory::flicker, "flicker",
+			"flicker interval"};
 	case msap1::meter_periodic_format:
 	case msap1::meter_power_format:
 	case msap1::meter_phasor_format:

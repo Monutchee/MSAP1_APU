@@ -1884,4 +1884,105 @@ decode_pq_event_lifecycle_record(const MeterRecord &record)
 	return result;
 }
 
+FlickerSnapshot decode_flicker_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_flicker_format)
+		throw std::invalid_argument("invalid FLICKER-v1 record header");
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    record.sample_rate_hz() < 2000u ||
+	    record.sample_rate_hz() > 128000u ||
+	    record.sample_rate_hz() % 2000u != 0u ||
+	    record.emit_drops() != 0u || record.result_drops() != 0u)
+		throw std::invalid_argument("invalid FLICKER-v1 common provenance");
+	if ((record.status() & ~0x5u) != 0u)
+		throw std::invalid_argument("invalid FLICKER-v1 status");
+
+	const auto identity = record.word(13u);
+	const auto kind = static_cast<std::uint8_t>(identity & 0xffu);
+	const auto phase_mask = static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	if ((identity & ~0x000007ffu) != 0u || kind > meter_flicker_kind_plt ||
+	    record.valid_mask() != static_cast<std::uint8_t>(phase_mask << 4u))
+		throw std::invalid_argument("invalid FLICKER-v1 kind or phase mask");
+
+	FlickerSnapshot result{};
+	result.kind = static_cast<FlickerRecordKind>(kind);
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation =
+		record.word(meter_flicker_profile_generation_word);
+	result.sample_rate_hz = record.sample_rate_hz();
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_flicker_last_sample_word);
+	result.sample_count = record.block_sample_count();
+	result.interval_seconds =
+		record.word(meter_flicker_interval_seconds_word);
+	result.phase_valid_mask = phase_mask;
+	const auto model = record.word(meter_flicker_model_word);
+	result.lamp_voltage = static_cast<std::uint16_t>(model & 0xffffu);
+	result.nominal_frequency_hz = static_cast<std::uint8_t>(model >> 16u);
+	result.status = record.status();
+	result.source_status = record.word(meter_flicker_source_status_word);
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		result.pinst_q16[phase] =
+			record.word(meter_flicker_pinst_word + phase);
+		result.pst_q16[phase] = record.word(meter_flicker_pst_word + phase);
+		result.plt_q16[phase] = record.word(meter_flicker_plt_word + phase);
+		result.valid_internal_samples[phase] =
+			record.word(meter_flicker_valid_count_word + phase);
+	}
+
+	const std::uint32_t expected_seconds =
+		kind == meter_flicker_kind_live ? 1u :
+		kind == meter_flicker_kind_pst ? 600u : 7200u;
+	const std::uint32_t expected_internal = expected_seconds * 2000u;
+	const auto expected_span = static_cast<std::uint64_t>(expected_seconds) *
+		result.sample_rate_hz;
+	std::uint32_t maximum_valid = 0u;
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		const auto count = result.valid_internal_samples[phase];
+		maximum_valid = std::max(maximum_valid, count);
+		if (count > expected_internal ||
+		    ((phase_mask & (1u << phase)) != 0u &&
+		     count != expected_internal))
+			throw std::invalid_argument(
+				"FLICKER-v1 phase validity is inconsistent");
+	}
+	const auto expected_count = static_cast<std::uint64_t>(maximum_valid) *
+		(result.sample_rate_hz / 2000u);
+	if (result.profile_generation != result.configuration_generation ||
+	    result.interval_seconds != expected_seconds ||
+	    result.last_sample < result.first_sample ||
+	    result.last_sample - result.first_sample + 1u != expected_span ||
+	    result.sample_count != expected_count ||
+	    record.unsigned64(meter_flicker_interval_first_word) !=
+		    result.first_sample ||
+	    (model & 0xff000000u) != 0u ||
+	    (result.lamp_voltage != 120u && result.lamp_voltage != 230u) ||
+	    (result.nominal_frequency_hz != 50u &&
+	     result.nominal_frequency_hz != 60u) ||
+	    (result.source_status & ~0xffu) != 0u)
+		throw std::invalid_argument("FLICKER-v1 provenance is inconsistent");
+	if (kind != meter_flicker_kind_live &&
+	    (result.source_status & (1u << 7u)) != 0u)
+		throw std::invalid_argument("completed FLICKER-v1 interval is settling");
+	if (kind == meter_flicker_kind_live) {
+		for (std::size_t phase = 0u; phase < 3u; ++phase)
+			if (result.pst_q16[phase] != 0u || result.plt_q16[phase] != 0u)
+				throw std::invalid_argument(
+					"live FLICKER-v1 carries completed metrics");
+	} else if (kind == meter_flicker_kind_pst) {
+		for (const auto value : result.plt_q16)
+			if (value != 0u)
+				throw std::invalid_argument(
+					"Pst FLICKER-v1 carries a Plt result");
+	} else if (phase_mask == 0u) {
+		throw std::invalid_argument("Plt FLICKER-v1 has no valid phase");
+	}
+	for (std::size_t word = 34u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument("FLICKER-v1 reserved word is nonzero");
+	return result;
+}
+
 } // namespace msap1

@@ -589,6 +589,46 @@ struct PowerQualityEventLifecycleSnapshot {
 [[nodiscard]] PowerQualityEventLifecycleSnapshot
 decode_pq_event_lifecycle_record(const MeterRecord &record);
 
+enum class FlickerRecordKind : std::uint8_t {
+	live = meter_flicker_kind_live,
+	pst = meter_flicker_kind_pst,
+	plt = meter_flicker_kind_plt,
+};
+
+/** Exact decoded view of one final R5C1 FLICKER-v1 record. */
+struct FlickerSnapshot {
+	FlickerRecordKind kind = FlickerRecordKind::live;
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t interval_seconds = 0;
+	std::uint8_t phase_valid_mask = 0;
+	std::uint16_t lamp_voltage = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::array<std::uint32_t, 3> pinst_q16{};
+	std::array<std::uint32_t, 3> pst_q16{};
+	std::array<std::uint32_t, 3> plt_q16{};
+	std::array<std::uint32_t, 3> valid_internal_samples{};
+	std::uint32_t status = 0;
+	std::uint32_t source_status = 0;
+
+	[[nodiscard]] bool first_after_gap() const noexcept
+	{
+		return (status & (1u << 2u)) != 0u;
+	}
+	[[nodiscard]] bool arithmetic_error() const noexcept
+	{
+		return (status & 1u) != 0u;
+	}
+};
+
+[[nodiscard]] FlickerSnapshot decode_flicker_record(
+	const MeterRecord &record);
+
 class MeterDecoderRegistry {
 public:
 	using Decoder = std::function<MeterUpdate(const MeterRecord &, SystemTime)>;

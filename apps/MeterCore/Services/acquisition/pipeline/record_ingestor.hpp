@@ -215,6 +215,20 @@ public:
 	{
 		return latest_pq_lifecycle_;
 	}
+	/** Accepted FLICKER-v1 records on the independent R5C1 sequence. */
+	[[nodiscard]] std::uint64_t flicker_records() const
+	{
+		return flicker_records_;
+	}
+	[[nodiscard]] std::uint64_t flicker_sequence_gaps() const
+	{
+		return flicker_sequence_gaps_;
+	}
+	[[nodiscard]] const std::optional<msap1::FlickerSnapshot> &
+	latest_flicker(msap1::FlickerRecordKind kind) const
+	{
+		return latest_flicker_[static_cast<std::size_t>(kind)];
+	}
 	/** @brief Accepted HARMONIC-v1 chunks, including incomplete families. */
 	[[nodiscard]] std::uint64_t harmonic_records() const
 	{
@@ -340,6 +354,10 @@ private:
 	std::optional<std::uint32_t> last_pq_lifecycle_sequence_{};
 	std::optional<msap1::PowerQualityEventLifecycleSnapshot>
 		latest_pq_lifecycle_{};
+	std::uint64_t flicker_records_ = 0;
+	std::uint64_t flicker_sequence_gaps_ = 0;
+	std::optional<std::uint32_t> last_flicker_sequence_{};
+	std::array<std::optional<msap1::FlickerSnapshot>, 3> latest_flicker_{};
 	/* M16 publishes one spectrum only after all 42 channel/chunk records
 	 * agree. The bounded assembler and publication buffer each retain at most
 	 * one partial family; incomplete/mismatched families never reach the

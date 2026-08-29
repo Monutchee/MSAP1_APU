@@ -35,6 +35,7 @@ void rejection_interval_categories_cover_meter_tiers()
 	constexpr std::array cases{
 		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
 		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_flicker_format, 0, "flicker", "flicker interval"},
 		Case{msap1::meter_aggregate_format, 0, "cycles_150_180",
 			"150/180-cycle"},
 		Case{msap1::meter_ten_minute_open_format, 0, "minutes_10_live",
@@ -531,6 +532,90 @@ msap1::MeterRecord pq_lifecycle_record(std::uint32_t sequence,
 	record.words[50] = 3;
 	record.words[51] = 4;
 	return record;
+}
+
+msap1::MeterRecord flicker_record(std::uint32_t sequence,
+	std::uint32_t generation, msap1::FlickerRecordKind kind,
+	std::uint64_t first)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_flicker_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000u;
+	const auto interval = kind == msap1::FlickerRecordKind::live ? 1u :
+		kind == msap1::FlickerRecordKind::pst ? 600u : 7200u;
+	record.words[6] = interval * 32000u;
+	record.words[7] = 0x70u;
+	record.words[8] = 0x4u;
+	write_record_u64(record, 9u, first);
+	record.words[13] = static_cast<std::uint32_t>(kind) | (0x7u << 8u);
+	write_record_u64(record, 14u,
+		first + static_cast<std::uint64_t>(interval) * 32000u - 1u);
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		record.words[16u + phase] = (phase + 1u) << 16u;
+		record.words[25u + phase] = interval * 2000u;
+		if (kind != msap1::FlickerRecordKind::live)
+			record.words[19u + phase] = (phase + 2u) << 16u;
+		if (kind == msap1::FlickerRecordKind::plt)
+			record.words[22u + phase] = (phase + 3u) << 16u;
+	}
+	record.words[28] = interval;
+	record.words[29] = generation;
+	record.words[30] = 120u | (60u << 16u);
+	record.words[31] = 0x3u;
+	write_record_u64(record, 32u, first);
+	return record;
+}
+
+void ingestor_isolates_and_publishes_flicker_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(flicker_record(1u, configuration.wire.generation,
+		msap1::FlickerRecordKind::live, 1000u));
+	auto malformed = flicker_record(2u, configuration.wire.generation,
+		msap1::FlickerRecordKind::pst, 33000u);
+	malformed.words[63] = 1u;
+	feed(malformed);
+	feed(flicker_record(3u, configuration.wire.generation,
+		msap1::FlickerRecordKind::pst, 33000u));
+	feed(basic_record(1u, 20'000'000u, 100u,
+		configuration.wire.generation));
+	feed(basic_record(2u, 20'000'100u, 100u,
+		configuration.wire.generation));
+
+	require(ingest.flicker_records() == 2u &&
+		ingest.flicker_sequence_gaps() == 1u &&
+		ingest.invalid_records() == 1u,
+		"FLICKER decoder/continuity did not quarantine one malformed record");
+	require(ingest.sequence_gaps() == 0u &&
+		ingest.latest_record()->sequence() == 2u,
+		"a malformed FLICKER record poisoned BASIC continuity");
+	require(ingest.latest_flicker(msap1::FlickerRecordKind::live)->sequence ==
+			1u &&
+		ingest.latest_flicker(msap1::FlickerRecordKind::pst)->sequence == 3u &&
+		publisher.records.size() == 4u &&
+		publisher.records.front().record_kind == static_cast<std::uint16_t>(
+			msap1::RecordKind::flicker),
+		"validated FLICKER records did not cross the durability barrier");
 }
 
 void ingestor_isolates_and_publishes_pq_lifecycle_records()
@@ -1339,6 +1424,7 @@ int main()
 	typed_commands_round_trip_through_the_registry();
 	ingestor_quarantines_m17_ledger_conflicts();
 	ingestor_isolates_and_publishes_pq_lifecycle_records();
+	ingestor_isolates_and_publishes_flicker_records();
 	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();

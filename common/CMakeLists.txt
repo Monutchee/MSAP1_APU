@@ -435,6 +435,14 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME pq_event_decode_test COMMAND pq_event_decode_test)
 
+	# M18 final FLICKER-v1 public record decode and reserved-field guards.
+	add_executable(flicker_decode_test
+		${PROJECT_SOURCE_DIR}/tests/flicker_decode_test.cpp)
+	target_link_libraries(flicker_decode_test PRIVATE msap1::meter)
+	target_compile_options(flicker_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME flicker_decode_test COMMAND flicker_decode_test)
+
 	# M18 durable lifecycle catalogue, replay idempotence, and waveform links.
 	add_executable(pq_event_history_test
 		${PROJECT_SOURCE_DIR}/tests/pq_event_history_test.cpp)

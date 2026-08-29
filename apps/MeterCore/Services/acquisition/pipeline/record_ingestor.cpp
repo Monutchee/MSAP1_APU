@@ -134,6 +134,9 @@ void MeterRecordIngestor::begin_epoch()
 	last_two_hour_sequence_.reset();
 	last_pq_lifecycle_sequence_.reset();
 	latest_pq_lifecycle_.reset();
+	last_flicker_sequence_.reset();
+	for (auto &latest : latest_flicker_)
+		latest.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -144,6 +147,7 @@ void MeterRecordIngestor::begin_epoch()
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
 	pq_lifecycle_sequence_gaps_ = 0;
+	flicker_sequence_gaps_ = 0;
 	for (auto &assembler : harmonic_assemblers_)
 		assembler.reset();
 	for (auto &pending : pending_harmonic_families_)
@@ -168,6 +172,9 @@ void MeterRecordIngestor::clear_latest()
 	last_two_hour_sequence_.reset();
 	last_pq_lifecycle_sequence_.reset();
 	latest_pq_lifecycle_.reset();
+	last_flicker_sequence_.reset();
+	for (auto &latest : latest_flicker_)
+		latest.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -669,6 +676,79 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		last_pq_lifecycle_sequence_ = event.sequence;
 		latest_pq_lifecycle_ = std::move(event);
 		++pq_lifecycle_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
+		return;
+	}
+
+	/* FLICKER-v1 has a private R5C1 sequence and three independently useful
+	 * latest views. Validate the complete public record before advancing that
+	 * sequence, then place the exact 256-byte source record in the durable
+	 * stream before replacing its typed latest slot. */
+	if (record.record_format() == msap1::meter_flicker_format) {
+		msap1::FlickerSnapshot flicker{};
+		try {
+			flicker = msap1::decode_flicker_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("FLICKER-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_flicker_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				flicker.sequence - (*last_flicker_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				flicker_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = flicker.sequence;
+		timing.configuration_generation =
+			flicker.configuration_generation;
+		timing.first_sample_index = flicker.first_sample;
+		timing.sample_count = flicker.sample_count;
+		timing.sample_rate_hz = flicker.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::flicker);
+		const auto period = flicker.kind == msap1::FlickerRecordKind::live
+			? msap1::MeasurementPeriod::Basic
+			: flicker.kind == msap1::FlickerRecordKind::pst
+				? msap1::MeasurementPeriod::Min10
+				: msap1::MeasurementPeriod::Hour2;
+		stream_record.measurement_period = static_cast<std::uint8_t>(period);
+		stream_record.source_sequence = flicker.sequence;
+		stream_record.configuration_generation =
+			flicker.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = flicker.first_sample;
+		stream_record.timing.sample_count = flicker.sample_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+
+		last_flicker_sequence_ = flicker.sequence;
+		latest_flicker_[static_cast<std::size_t>(flicker.kind)] = flicker;
+		++flicker_records_;
 		++meter_records_;
 		last_record_time_ = Clock::now();
 		return;
