@@ -106,7 +106,10 @@
   lifetime ledger for all 28 counters and commits a complete family before
   advancing latest state. R5C1 session counters are volatile inputs, not the
   lifetime authority. Same-session rollback is rejected, duplicates are
-  idempotent, and a new session starts its delta baseline at zero.
+  idempotent, and a new session starts its delta baseline at zero. A stale or
+  rollback ledger conflict quarantines only that ENERGY family or DEMAND
+  record; it must never terminate acquisition or suppress unrelated meter
+  products, and a later fresh R5C1 session resumes automatically.
 - Energy and demand resets are Admin-only serialized ledger transactions with
   an expected epoch and idempotency key. They require a durable source
   checkpoint, preserve an audit record, and must not be offered through

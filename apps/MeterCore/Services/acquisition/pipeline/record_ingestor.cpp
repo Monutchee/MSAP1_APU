@@ -788,7 +788,25 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			std::array<mnc::meter_stream::MeterStreamRecord, 2> family{
 				std::move(*pending_energy_family_->records[0]),
 				std::move(*pending_energy_family_->records[1])};
-			const auto cursors = publisher_.publish_records(family);
+			std::vector<std::uint64_t> cursors;
+			try {
+				cursors = publisher_.publish_records(family);
+			} catch (const msap1::energy_ledger::Conflict &error) {
+				/* A repeated R5 boot nonce can make a fresh volatile
+				 * counter stream look stale to the lifetime ledger. Preserve
+				 * the authoritative checkpoint and quarantine this family,
+				 * but never let one M17 product take down voltage/current/
+				 * power acquisition. A later family with a fresh session ID
+				 * is accepted without operator intervention. */
+				note_invalid_record();
+				++incomplete_energy_families_;
+				log_rejected_record(
+					std::string("ENERGY ledger conflict: ") +
+						error.what(),
+					"meter_energy_ledger_conflict", record);
+				pending_energy_family_.reset();
+				return;
+			}
 			if (cursors.size() != family.size())
 				throw std::runtime_error(
 					"ENERGY family publish returned the wrong cursor count");
@@ -953,7 +971,21 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 	const auto *bytes = reinterpret_cast<const std::byte *>(&record);
 	stream_record.payload.assign(bytes, bytes + sizeof(record));
-	(void)publisher_.publish(stream_record);
+	try {
+		(void)publisher_.publish(stream_record);
+	} catch (const msap1::energy_ledger::Conflict &error) {
+		if (!update.demand)
+			throw;
+		/* DEMAND shares the R5 session identity with ENERGY. Reject a
+		 * colliding/stale interval without advancing peaks, while leaving
+		 * every other record stream operational until a fresh R5 session
+		 * arrives. */
+		note_invalid_record();
+		log_rejected_record(
+			std::string("DEMAND ledger conflict: ") + error.what(),
+			"meter_demand_ledger_conflict", record);
+		return;
+	}
 	if (update.demand) {
 		if (auto *authority = dynamic_cast<
 			msap1::meter_stream::EnergyAuthority *>(&publisher_)) {
