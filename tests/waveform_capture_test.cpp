@@ -33,6 +33,7 @@ std::filesystem::path unique_path(const std::string &suffix)
 void write_test_block(const std::filesystem::path &path,
 		      std::uint64_t first_sequence = 1,
 		      bool append = false,
+		      std::uint32_t sample_rate_hz = 32000u,
 		      std::uint32_t configuration_generation = 0x12345678u)
 {
 	msap1::WaveformBlock block{};
@@ -46,7 +47,7 @@ void write_test_block(const std::filesystem::path &path,
 	block.header.first_sequence_high =
 		static_cast<std::uint32_t>(first_sequence >> 32u);
 	block.header.first_tick_low = 100;
-	block.header.measured_sample_rate_hz = 32000;
+	block.header.measured_sample_rate_hz = sample_rate_hz;
 	block.header.configuration_generation = configuration_generation;
 	block.header.block_sequence = static_cast<std::uint32_t>(
 		(first_sequence - 1u) / msap1::waveform_frames_per_block + 1u);
@@ -248,6 +249,202 @@ msap1::MncwfV4EventDescriptor pq_descriptor(
 	return event;
 }
 
+msap1::WaveformSessionSummary find_session(
+	const std::vector<msap1::WaveformSessionSummary> &sessions,
+	std::uint64_t id, const std::string &message)
+{
+	const auto found = std::ranges::find_if(sessions,
+		[id](const auto &session) { return session.id == id; });
+	require(found != sessions.end(), message);
+	return *found;
+}
+
+bool has_capture_lineage(const msap1::MncwfV4Reader &reader,
+	msap1::MncwfLineageRelation relation, const msap1::MncwfUuid &uuid)
+{
+	return std::ranges::any_of(reader.lineage(),
+		[relation, &uuid](const auto &entry) {
+			return entry.relation == relation &&
+				entry.related_capture_uuid == uuid;
+		});
+}
+
+void test_materialized_continuation_and_restart_recovery()
+{
+	const auto device = unique_path(".continuation-device");
+	const auto output = unique_path(".continuation-captures");
+	const auto discovery_device = unique_path(".continuation-discovery");
+	const auto recovery_device = unique_path(".recovery-device");
+	const auto recovery_output = unique_path(".recovery-captures");
+	constexpr std::uint32_t test_sample_rate_hz = 128'000u;
+	constexpr std::size_t test_history_frames =
+		2u * test_sample_rate_hz + 2'048u;
+	const msap1::WaveformCaptureOptions options{test_history_frames};
+	try {
+		msap1::WaveformSessionSummary master{};
+		msap1::WaveformSessionSummary continuation{};
+		{
+			write_test_block(device, 1u, false, test_sample_rate_hz);
+			msap1::WaveformCapture capture(device.string(), output,
+				test_capture_context(), options);
+			capture.start();
+			capture.read_available();
+			const auto initial = capture.status();
+			require(initial.sample_rate_hz == test_sample_rate_hz &&
+					initial.history_capacity_frames == test_history_frames &&
+					initial.max_capture_frames == 2'048u,
+				"default-rate continuation fixture has the wrong history budget");
+
+			const msap1::WaveformEventIdentity event_id{21u, 1u};
+			master = capture.track_power_quality_event(
+				event_id, msap1::WaveformEventLifecycle::start,
+				1024u, 1024u, 0u, 0u, 1u,
+				pq_descriptor(event_id,
+					msap1::WaveformEventLifecycle::start, 1024u, 1024u));
+			continuation = capture.track_power_quality_event(
+				event_id, msap1::WaveformEventLifecycle::update,
+				1024u, 3072u, 0u, 0u, 1u,
+				pq_descriptor(event_id,
+					msap1::WaveformEventLifecycle::update, 1024u, 3072u));
+			require(master.id != continuation.id &&
+					continuation.continuation_of_session_id == master.id &&
+					continuation.master_session_id == master.id &&
+					continuation.first_sequence == 3072u,
+				"capacity rollover did not create a contiguous continuation");
+
+			write_test_block(device, 1025u, true, test_sample_rate_hz);
+			write_test_block(device, 2049u, true, test_sample_rate_hz);
+			write_test_block(device, 3073u, true, test_sample_rate_hz);
+			capture.read_available();
+			(void)capture.track_power_quality_event(
+				event_id, msap1::WaveformEventLifecycle::end,
+				1024u, 4096u, 0u, 0u, 1u,
+				pq_descriptor(event_id,
+					msap1::WaveformEventLifecycle::end, 1024u, 4096u));
+			capture.read_available();
+			const auto completed_master = find_session(
+				wait_for_session(capture, master.id), master.id,
+				"materialized continuation master disappeared");
+			const auto completed_continuation = find_session(
+				wait_for_session(capture, continuation.id), continuation.id,
+				"materialized continuation disappeared");
+			require(completed_master.state ==
+					msap1::WaveformSessionState::complete &&
+					completed_continuation.state ==
+						msap1::WaveformSessionState::complete &&
+					completed_master.first_sequence == 1024u &&
+					completed_master.last_sequence == 3071u &&
+					completed_continuation.first_sequence == 3072u &&
+					completed_continuation.last_sequence == 4096u,
+				"master and continuation did not materialize as exact parts");
+			master = completed_master;
+			continuation = completed_continuation;
+			capture.stop();
+		}
+
+		const auto master_bytes = read_bytes(output / master.filename.data());
+		const auto continuation_bytes = read_bytes(
+			output / continuation.filename.data());
+		const msap1::MncwfV4Reader master_reader(master_bytes);
+		const msap1::MncwfV4Reader continuation_reader(continuation_bytes);
+		require(master_reader.sample_frame_count() == 2'048u &&
+				continuation_reader.sample_frame_count() == 1'025u &&
+				master_reader.capture_metadata().capture_uuid ==
+					master.capture_uuid &&
+				continuation_reader.capture_metadata().capture_uuid ==
+					continuation.capture_uuid,
+			"materialized continuation sample spans or UUIDs are wrong");
+		require(has_capture_lineage(master_reader,
+				msap1::MncwfLineageRelation::next_continuation,
+				continuation.capture_uuid) &&
+			has_capture_lineage(continuation_reader,
+				msap1::MncwfLineageRelation::previous_continuation,
+				master.capture_uuid) &&
+			master_reader.events().size() == 1u &&
+			continuation_reader.events().size() == 1u &&
+			master_reader.events().front().event_uuid ==
+				continuation_reader.events().front().event_uuid,
+			"materialized continuation lost bidirectional or event lineage");
+
+		{
+			std::ofstream empty(discovery_device, std::ios::binary);
+			require(static_cast<bool>(empty),
+				"create continuation discovery device");
+		}
+		{
+			msap1::WaveformCapture discovered(discovery_device.string(), output,
+				test_capture_context(), options);
+			discovered.start();
+			const auto restored = discovered.sessions();
+			const auto restored_master = find_session(restored, master.id,
+				"restart did not discover continuation master");
+			const auto restored_continuation = find_session(
+				restored, continuation.id,
+				"restart did not discover continuation");
+			require(restored_master.master_session_id == master.id &&
+					restored_continuation.continuation_of_session_id ==
+						master.id &&
+					restored_continuation.master_session_id == master.id,
+				"restart did not reconstruct numeric continuation lineage");
+			discovered.stop();
+		}
+
+		{
+			write_test_block(recovery_device, 50'000u, false,
+				test_sample_rate_hz);
+			msap1::WaveformCapture recovery(recovery_device.string(),
+				recovery_output, test_capture_context(), options);
+			recovery.start();
+			recovery.read_available();
+			const msap1::WaveformEventIdentity recovered_event{22u, 1u};
+			const auto recovered = recovery.track_power_quality_event(
+				recovered_event, msap1::WaveformEventLifecycle::update,
+				1u, 51'023u, 0u, 0u, 1u,
+				pq_descriptor(recovered_event,
+					msap1::WaveformEventLifecycle::update, 1u, 51'023u));
+			require(recovered.first_sequence == 50'000u &&
+					recovered.last_sequence == 51'023u,
+				"UPDATE-first recovery did not clamp to retained history");
+			(void)recovery.track_power_quality_event(
+				recovered_event, msap1::WaveformEventLifecycle::end,
+				1u, 51'023u, 0u, 0u, 1u,
+				pq_descriptor(recovered_event,
+					msap1::WaveformEventLifecycle::end, 1u, 51'023u));
+			recovery.read_available();
+			const auto completed = find_session(
+				wait_for_session(recovery, recovered.id), recovered.id,
+				"UPDATE-first recovery session disappeared");
+			require(completed.state ==
+					msap1::WaveformSessionState::complete,
+				"UPDATE-first recovery tail was not materialized");
+			const auto recovered_bytes = read_bytes(
+				recovery_output / completed.filename.data());
+			const msap1::MncwfV4Reader recovered_reader(recovered_bytes);
+			require(recovered_reader.sample_frame_count() == 1'024u &&
+					recovered_reader.events().size() == 1u &&
+					(recovered_reader.events().front().flags &
+						msap1::mncwf_event_discontinuous) != 0u &&
+					(recovered_reader.events().front().flags &
+						msap1::mncwf_event_trigger_valid) == 0u,
+				"UPDATE-first recovery did not persist a clipped diagnostic tail");
+			recovery.stop();
+		}
+
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(recovery_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(discovery_device);
+		std::filesystem::remove(recovery_device);
+	} catch (...) {
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(recovery_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(discovery_device);
+		std::filesystem::remove(recovery_device);
+		throw;
+	}
+}
+
 } // namespace
 
 int main()
@@ -255,6 +452,7 @@ int main()
 	const auto device = unique_path(".device");
 	const auto output = unique_path(".captures");
 	try {
+		test_materialized_continuation_and_restart_recovery();
 		write_test_block(device);
 		msap1::WaveformCapture capture(
 			device.string(), output, test_capture_context());

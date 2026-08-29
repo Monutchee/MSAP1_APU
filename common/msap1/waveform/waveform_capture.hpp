@@ -95,6 +95,13 @@ struct WaveformCaptureContext {
 	std::int32_t utc_offset_seconds = 0;
 };
 
+/** Construction limits. Production uses the 128 MiB default; a smaller ring
+ * lets deterministic verification exercise capacity rollover without changing
+ * the runtime policy or allocating a production-sized test fixture. */
+struct WaveformCaptureOptions {
+	std::size_t history_capacity_frames = waveform_history_frames;
+};
+
 /*
  * One correlation of the PL conversion-domain sample counter with
  * CLOCK_REALTIME, produced for the measurement timebase (UTC mapping).
@@ -246,7 +253,8 @@ class WaveformCapture {
 public:
 	explicit WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory,
-				 WaveformCaptureContext context = {});
+				 WaveformCaptureContext context = {},
+				 WaveformCaptureOptions options = {});
 	~WaveformCapture();
 
 	WaveformCapture(const WaveformCapture &) = delete;

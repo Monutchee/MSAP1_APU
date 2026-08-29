@@ -455,12 +455,16 @@ private:
 
 WaveformCapture::WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory,
-				 WaveformCaptureContext context)
+				 WaveformCaptureContext context,
+				 WaveformCaptureOptions options)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
-	  history_(waveform_history_frames),
+	  history_(options.history_capacity_frames),
 	  writer_(std::make_unique<AsyncWriter>())
 {
+	if (history_.empty())
+		throw std::invalid_argument(
+			"waveform history capacity must be non-zero");
 	set_context(std::move(context));
 }
 
@@ -660,6 +664,16 @@ void WaveformCapture::discover_persisted_sessions()
 				session.summary.decimation = first.decimation_divisor;
 				session.summary.master_session_id = *session_id;
 				session.summary.state = WaveformSessionState::complete;
+				for (const auto &lineage : reader.lineage()) {
+					if (lineage.relation ==
+						MncwfLineageRelation::previous_continuation)
+						session.previous_capture_uuid =
+							lineage.related_capture_uuid;
+					else if (lineage.relation ==
+						MncwfLineageRelation::next_continuation)
+						session.next_capture_uuid =
+							lineage.related_capture_uuid;
+				}
 				const auto filename = entry.path().filename().string();
 				std::copy_n(filename.c_str(),
 					std::min(filename.size(),
@@ -784,6 +798,45 @@ void WaveformCapture::discover_persisted_sessions()
 		[](const Session &left, const Session &right) {
 			return left.summary.id < right.summary.id;
 		});
+	/* MNCWF v4 persists UUID lineage rather than daemon-local session IDs.
+	 * Resolve those UUIDs only after every file has been validated and loaded,
+	 * then rebuild the numeric summaries used by IPC/API clients. */
+	for (auto &session : sessions_) {
+		if (uuid_is_zero(session.previous_capture_uuid))
+			continue;
+		const auto predecessor = std::ranges::find_if(sessions_,
+			[&session](const Session &candidate) {
+				return candidate.summary.capture_uuid ==
+						session.previous_capture_uuid;
+			});
+		if (predecessor == sessions_.end() ||
+		    predecessor->summary.id >= session.summary.id ||
+		    predecessor->summary.last_sequence ==
+				std::numeric_limits<std::uint64_t>::max() ||
+		    predecessor->summary.last_sequence + 1u !=
+				session.summary.first_sequence ||
+		    predecessor->next_capture_uuid != session.summary.capture_uuid)
+			continue;
+		session.summary.continuation_of_session_id =
+			predecessor->summary.id;
+	}
+	for (auto &session : sessions_) {
+		auto master = session.summary.id;
+		auto predecessor_id = session.summary.continuation_of_session_id;
+		for (std::size_t depth = 0u;
+		     predecessor_id != 0u && depth < sessions_.size(); ++depth) {
+			const auto predecessor = std::ranges::find_if(sessions_,
+				[predecessor_id](const Session &candidate) {
+					return candidate.summary.id == predecessor_id;
+				});
+			if (predecessor == sessions_.end())
+				break;
+			master = predecessor->summary.id;
+			predecessor_id =
+				predecessor->summary.continuation_of_session_id;
+		}
+		session.summary.master_session_id = master;
+	}
 }
 
 std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
@@ -1172,14 +1225,24 @@ WaveformSessionSummary WaveformCapture::track_power_quality_event(
 	if (active == sessions_.end()) {
 		/* Recovery can first observe an UPDATE after an APU restart. Keep the
 		 * materializable tail if the already-active event predates the ring. */
-		const auto recoverable_first = requested_last - requested_first + 1u >
-			budget ? requested_last - budget + 1u : requested_first;
+		const auto budget_limited_first =
+			requested_last - requested_first + 1u > budget
+				? requested_last - budget + 1u : requested_first;
+		const auto recoverable_first = requested_last < oldest_sequence_
+			? requested_last
+			: std::max(budget_limited_first, oldest_sequence_);
 		active = new_session(recoverable_first, requested_last, 0u, 0u,
 			context_);
 	}
 	else {
-		active->summary.first_sequence = std::min(
-			active->summary.first_sequence, requested_first);
+		/* Later records for an already-linked event still carry its original
+		 * trigger and must not pull a restart-clipped tail or continuation back
+		 * across its materializable boundary. Only a new overlapping event may
+		 * extend an unsealed master's lower bound. */
+		if (!has_event(*active) &&
+		    active->summary.continuation_of_session_id == 0u)
+			active->summary.first_sequence = std::min(
+				active->summary.first_sequence, requested_first);
 		if (requested_last - active->summary.first_sequence + 1u > budget) {
 			const auto predecessor = active->summary.id;
 			const auto master = active->summary.master_session_id;
@@ -1594,6 +1657,7 @@ WaveformStatus WaveformCapture::status()
 	result.max_capture_frames = max_capture_frames();
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
+	result.history_capacity_frames = history_.size();
 	result.correlation = correlation_;
 	for (const auto &session : sessions_) {
 		if (session.summary.state == WaveformSessionState::complete)
