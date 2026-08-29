@@ -16,6 +16,7 @@ flowchart LR
     DMA["PL meter DMA"] --> ACQ["Acquisition validation"]
     ACQ --> STREAM["msap1-meter-stream"]
     STREAM --> SPOOL["DurableMeterSpool"]
+    STREAM --> ENERGY["Atomic ENERGY assembler + lifetime ledger"]
     SPOOL --> HIST["msap1-meter-historian"]
     HIST --> BASIC["Basic 10/12-cycle store"]
     HIST --> AGG["150/180-cycle and long-period stores"]
@@ -59,6 +60,7 @@ Persistent databases live below `/data/mnc/database`:
 ```text
 /data/mnc/database/
 ├── meter-stream/spool.sqlite3
+├── meter-stream/energy.sqlite3
 └── meter-historian/historian.sqlite3
 ```
 
@@ -83,13 +85,27 @@ queued in the spool and cannot overtake backfill. If the oldest retained spool
 cursor is greater than one, status explicitly reports that older history is
 unavailable for reconstruction.
 
+ENERGY-v1 arrives as two records. The stream service tolerates unrelated
+interleaving but accepts only a unique summary/quadrants pair with matching
+sequence, generation, session, sample anchors, and part count. It commits the
+pair to `energy.sqlite3` with WAL and `synchronous=FULL` before acknowledging
+or replacing the authoritative latest view. The ledger stores all 28 lifetime
+counters, the last volatile R5C1 session checkpoint, reset epochs, demand
+peaks/watermark, and reset audit rows. Duplicate families are no-ops,
+same-session rollback is rejected, and a new R5C1 session accumulates from its
+zero baseline without losing lifetime totals.
+
 ## Historian schema
 
 `measurement_blocks` stores record/period identity, source sequence,
 configuration generation, measurement time, source sample window, and quality.
-`measurement_values` stores one signed engineering-unit value and quality per
-attribute. Attribute units come from the meter attribute catalog; a valid zero
-is never represented as unavailable data.
+`measurement_values` stores one signed engineering-unit value, quality, and an
+optional reset epoch per attribute. Attribute units come from the meter
+attribute catalog; a valid zero is never represented as unavailable data.
+Energy and demand use authoritative snapshots at completed UTC ten-minute
+boundaries and persistent/forever retention. Their reset epochs let history
+clients break a series instead of joining values across an administrative
+reset.
 
 New PL record kinds are added through the typed decoder registry. New meter
 attributes extend the catalog and value insertion mapping without changing

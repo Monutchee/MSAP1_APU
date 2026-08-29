@@ -1,5 +1,6 @@
 #include "msap1/meter/MeterDataProvider/snapshot/in_process_meter_snapshot_provider.hpp"
 
+#include <array>
 #include <chrono>
 #include <stdexcept>
 
@@ -13,6 +14,52 @@ using mnc::meter::MeterAttributeSet;
 using mnc::meter::MeterAttributeValue;
 using mnc::meter::MeterUnit;
 using mnc::meter::ReadingQuality;
+
+constexpr std::array energy_attribute_groups{
+	std::array{MeterAttributeId::ActiveImportEnergyA,
+		MeterAttributeId::ActiveImportEnergyB,
+		MeterAttributeId::ActiveImportEnergyC,
+		MeterAttributeId::ActiveImportEnergyTotal},
+	std::array{MeterAttributeId::ActiveExportEnergyA,
+		MeterAttributeId::ActiveExportEnergyB,
+		MeterAttributeId::ActiveExportEnergyC,
+		MeterAttributeId::ActiveExportEnergyTotal},
+	std::array{MeterAttributeId::ApparentEnergyA,
+		MeterAttributeId::ApparentEnergyB,
+		MeterAttributeId::ApparentEnergyC,
+		MeterAttributeId::ApparentEnergyTotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIC,
+		MeterAttributeId::ReactiveEnergyQuadrantITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIIC,
+		MeterAttributeId::ReactiveEnergyQuadrantIITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIIIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIIIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIIIC,
+		MeterAttributeId::ReactiveEnergyQuadrantIIITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIVA,
+		MeterAttributeId::ReactiveEnergyQuadrantIVB,
+		MeterAttributeId::ReactiveEnergyQuadrantIVC,
+		MeterAttributeId::ReactiveEnergyQuadrantIVTotal},
+};
+
+constexpr std::array demand_attribute_groups{
+	std::array{MeterAttributeId::CurrentActiveDemandA,
+		MeterAttributeId::CurrentActiveDemandB,
+		MeterAttributeId::CurrentActiveDemandC,
+		MeterAttributeId::CurrentActiveDemandTotal},
+	std::array{MeterAttributeId::ImportDemandPeakA,
+		MeterAttributeId::ImportDemandPeakB,
+		MeterAttributeId::ImportDemandPeakC,
+		MeterAttributeId::ImportDemandPeakTotal},
+	std::array{MeterAttributeId::ExportDemandPeakA,
+		MeterAttributeId::ExportDemandPeakB,
+		MeterAttributeId::ExportDemandPeakC,
+		MeterAttributeId::ExportDemandPeakTotal},
+};
 
 mnc::meter::TimeQuality time_quality(msap1::TimeQuality value)
 {
@@ -109,9 +156,49 @@ MeterAttributeValue unavailable(MeterAttributeKey attribute)
 	return {attribute, descriptor.unit, ReadingQuality::Unavailable};
 }
 
+template<typename Unit>
+bool append_group(std::vector<MeterAttributeValue> &output,
+	MeterAttributeKey attribute, const std::array<MeterAttributeId, 4> &ids,
+	MeterUnit unit, const PhaseABCTotal<Reading<Unit>> &group)
+{
+	const std::array<const Reading<Unit> *, 4> readings{
+		&group.phase_a, &group.phase_b, &group.phase_c, &group.total};
+	for (std::size_t index = 0; index < ids.size(); ++index) {
+		if (attribute.id == ids[index]) {
+			output.push_back(value(attribute, unit, *readings[index]));
+			return true;
+		}
+	}
+	return false;
+}
+
+template<typename Unit>
+void replace_group(std::vector<MeterAttributeValue> &output,
+	const std::array<MeterAttributeId, 4> &ids, MeterUnit unit,
+	const PhaseABCTotal<Reading<Unit>> &group)
+{
+	const std::array<const Reading<Unit> *, 4> readings{
+		&group.phase_a, &group.phase_b, &group.phase_c, &group.total};
+	for (auto &attribute : output) {
+		for (std::size_t index = 0; index < ids.size(); ++index) {
+			if (attribute.attribute.id == ids[index]) {
+				attribute = value(attribute.attribute, unit, *readings[index]);
+				break;
+			}
+		}
+	}
+}
+
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
 	using Id = MeterAttributeId;
+	if (period == msap1::MeasurementPeriod::Demand) {
+		std::vector<MeterAttributeKey> result;
+		for (const auto &group : demand_attribute_groups)
+			for (const auto id : group)
+				result.push_back({id, std::nullopt});
+		return result;
+	}
 	std::vector<MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -161,10 +248,70 @@ std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 				      Id::NegativeSequenceCurrent})
 			result.push_back({id, std::nullopt});
 	}
+	if (period == msap1::MeasurementPeriod::Basic)
+		for (const auto &group : energy_attribute_groups)
+			for (const auto id : group)
+				result.push_back({id, std::nullopt});
 	return result;
 }
 
 } // namespace
+
+void overlay_authoritative_energy(mnc::meter::MeterSnapshot &snapshot,
+	const msap1::EnergyValues &energy)
+{
+	snapshot.energy = mnc::meter::EnergySnapshotMetadata{
+		energy.session_id, energy.reset_epoch, energy.last_sample_index,
+		energy.accepted_samples, energy.skipped_samples,
+		energy.accepted_blocks, energy.skipped_blocks,
+		energy.saturated, energy.incomplete_input, energy.discontinuity};
+	replace_group(snapshot.values, energy_attribute_groups[0],
+		MeterUnit::MicroWattHours, energy.active_import);
+	replace_group(snapshot.values, energy_attribute_groups[1],
+		MeterUnit::MicroWattHours, energy.active_export);
+	replace_group(snapshot.values, energy_attribute_groups[2],
+		MeterUnit::MicroVoltAmpereHours, energy.apparent);
+	for (std::size_t quadrant = 0; quadrant < energy.reactive_quadrants.size();
+	     ++quadrant)
+		replace_group(snapshot.values, energy_attribute_groups[3 + quadrant],
+			MeterUnit::MicroVarHours, energy.reactive_quadrants[quadrant]);
+}
+
+void overlay_authoritative_demand(mnc::meter::MeterSnapshot &snapshot,
+	const msap1::DemandValues &demand)
+{
+	snapshot.demand = mnc::meter::DemandSnapshotMetadata{
+		.session_id = demand.session_id,
+		.peak_reset_epoch = demand.peak_reset_epoch,
+		.last_sample_index = demand.last_sample_index,
+		.interval_anchor_sample = demand.interval_anchor_sample,
+		.source_interval_count = demand.source_interval_count,
+		.source_status = demand.source_status,
+		.window_seconds = demand.window_seconds,
+		.update_seconds = demand.update_seconds,
+		.profile_generation = demand.profile_generation,
+		.method = static_cast<std::uint8_t>(demand.method),
+		.import_peak_samples = {demand.import_peak_sample.phase_a,
+			demand.import_peak_sample.phase_b,
+			demand.import_peak_sample.phase_c,
+			demand.import_peak_sample.total},
+		.export_peak_samples = {demand.export_peak_sample.phase_a,
+			demand.export_peak_sample.phase_b,
+			demand.export_peak_sample.phase_c,
+			demand.export_peak_sample.total},
+		.time_aligned = demand.time_aligned,
+		.contaminated = demand.contaminated,
+		.boundary_valid = demand.boundary_valid,
+		.saturated = demand.saturated,
+		.incomplete_input = demand.incomplete_input,
+	};
+	replace_group(snapshot.values, demand_attribute_groups[0],
+		MeterUnit::MicroWatts, demand.current_active);
+	replace_group(snapshot.values, demand_attribute_groups[1],
+		MeterUnit::MicroWatts, demand.import_peak);
+	replace_group(snapshot.values, demand_attribute_groups[2],
+		MeterUnit::MicroWatts, demand.export_peak);
+}
 
 std::vector<mnc::meter::MeterCapabilities>
 InProcessMeterSnapshotProvider::capabilities() const
@@ -179,6 +326,7 @@ InProcessMeterSnapshotProvider::capabilities() const
 		 supported(MeasurementPeriod::Min10Live)},
 		{MeasurementPeriod::Hour2Live,
 		 supported(MeasurementPeriod::Hour2Live)},
+		{MeasurementPeriod::Demand, supported(MeasurementPeriod::Demand)},
 	};
 }
 
@@ -204,6 +352,44 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 		result.timing = snapshot_timing(*view.timing);
 	else if (view.aggregate_timing)
 		result.timing = snapshot_timing(*view.aggregate_timing);
+	if (view.period == MeasurementPeriod::Basic &&
+	    view.values.energy.session_id != 0) {
+		const auto &energy = view.values.energy;
+		result.energy = mnc::meter::EnergySnapshotMetadata{
+			energy.session_id, energy.reset_epoch, energy.last_sample_index,
+			energy.accepted_samples, energy.skipped_samples,
+			energy.accepted_blocks, energy.skipped_blocks,
+			energy.saturated, energy.incomplete_input, energy.discontinuity};
+	}
+	if (view.period == MeasurementPeriod::Demand &&
+	    view.values.demand.session_id != 0) {
+		const auto &demand = view.values.demand;
+		result.demand = mnc::meter::DemandSnapshotMetadata{
+			.session_id = demand.session_id,
+			.peak_reset_epoch = demand.peak_reset_epoch,
+			.last_sample_index = demand.last_sample_index,
+			.interval_anchor_sample = demand.interval_anchor_sample,
+			.source_interval_count = demand.source_interval_count,
+			.source_status = demand.source_status,
+			.window_seconds = demand.window_seconds,
+			.update_seconds = demand.update_seconds,
+			.profile_generation = demand.profile_generation,
+			.method = static_cast<std::uint8_t>(demand.method),
+			.import_peak_samples = {demand.import_peak_sample.phase_a,
+				demand.import_peak_sample.phase_b,
+				demand.import_peak_sample.phase_c,
+				demand.import_peak_sample.total},
+			.export_peak_samples = {demand.export_peak_sample.phase_a,
+				demand.export_peak_sample.phase_b,
+				demand.export_peak_sample.phase_c,
+				demand.export_peak_sample.total},
+			.time_aligned = demand.time_aligned,
+			.contaminated = demand.contaminated,
+			.boundary_valid = demand.boundary_valid,
+			.saturated = demand.saturated,
+			.incomplete_input = demand.incomplete_input,
+		};
+	}
 
 	for (const auto attribute : selection.values()) {
 		/* Validate the canonical identity before interpreting provider
@@ -218,6 +404,30 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			result.values.push_back(unavailable(attribute));
 			continue;
 		}
+		const auto &energy = view.values.energy;
+		if (append_group(result.values, attribute, energy_attribute_groups[0],
+				MeterUnit::MicroWattHours, energy.active_import) ||
+		    append_group(result.values, attribute, energy_attribute_groups[1],
+				MeterUnit::MicroWattHours, energy.active_export) ||
+		    append_group(result.values, attribute, energy_attribute_groups[2],
+				MeterUnit::MicroVoltAmpereHours, energy.apparent) ||
+		    append_group(result.values, attribute, energy_attribute_groups[3],
+				MeterUnit::MicroVarHours, energy.reactive_quadrants[0]) ||
+		    append_group(result.values, attribute, energy_attribute_groups[4],
+				MeterUnit::MicroVarHours, energy.reactive_quadrants[1]) ||
+		    append_group(result.values, attribute, energy_attribute_groups[5],
+				MeterUnit::MicroVarHours, energy.reactive_quadrants[2]) ||
+		    append_group(result.values, attribute, energy_attribute_groups[6],
+				MeterUnit::MicroVarHours, energy.reactive_quadrants[3]))
+			continue;
+		const auto &demand = view.values.demand;
+		if (append_group(result.values, attribute, demand_attribute_groups[0],
+				MeterUnit::MicroWatts, demand.current_active) ||
+		    append_group(result.values, attribute, demand_attribute_groups[1],
+				MeterUnit::MicroWatts, demand.import_peak) ||
+		    append_group(result.values, attribute, demand_attribute_groups[2],
+				MeterUnit::MicroWatts, demand.export_peak))
+			continue;
 		switch (attribute.id) {
 		case MeterAttributeId::Frequency:
 			result.values.push_back(value(attribute, MeterUnit::MilliHertz,
@@ -434,6 +644,9 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			result.values.push_back(value(attribute,
 				MeterUnit::MicroAmperes,
 				view.values.unbalance.current_negative_sequence));
+			break;
+		default:
+			/* Known M17 groups were projected above. */
 			break;
 		}
 	}

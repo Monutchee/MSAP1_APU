@@ -84,8 +84,13 @@ std::vector<HistoryPoint> HistorianClient::query(const HistoryQuery &query) cons
 		HistoryPoint point; point.measured_at_nanoseconds=reader.i64();
 		point.source_sequence=reader.u64();
 		point.attribute=static_cast<mnc::meter::MeterAttributeId>(reader.u16());
-		point.quality=static_cast<MeasurementQuality>(reader.u8()); (void)reader.u8();
-		point.value=reader.i64(); points.push_back(point);
+		point.quality=static_cast<MeasurementQuality>(reader.u8());
+		const bool has_reset_epoch = reader.u8() != 0;
+		point.value=reader.i64();
+		const auto reset_epoch = reader.u64();
+		if (has_reset_epoch)
+			point.reset_epoch = reset_epoch;
+		points.push_back(point);
 	}
 	reader.require_finished();
 	return points;

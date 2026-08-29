@@ -1,7 +1,9 @@
 #include "pipeline/record_ingestor.hpp"
 
+#include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "support/logs.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -142,6 +144,9 @@ void MeterRecordIngestor::begin_epoch()
 		pending.reset();
 	for (auto &latest : latest_harmonic_spectra_)
 		latest.reset();
+	energy_assembler_.reset();
+	pending_energy_family_.reset();
+	incomplete_energy_families_ = 0;
 	incomplete_harmonic_families_ = 0;
 	incomplete_harmonic_families_by_period_.fill(0);
 }
@@ -166,6 +171,8 @@ void MeterRecordIngestor::clear_latest()
 		pending.reset();
 	for (auto &latest : latest_harmonic_spectra_)
 		latest.reset();
+	energy_assembler_.reset();
+	pending_energy_family_.reset();
 }
 
 const std::optional<msap1::HarmonicSpectrumSnapshot> &
@@ -694,6 +701,141 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		return;
 	}
 
+	/* ENERGY-v1 is cumulative but is not publishable record-by-record. Buffer
+	 * both parts, validate their complete identity, commit the pair in one
+	 * meter-stream transaction, and only then replace the Basic latest view. */
+	if (record.record_format() == msap1::meter_energy_format) {
+		msap1::EnergyFamilyIdentity identity{};
+		msap1::EnergyAssemblyUpdate assembly{};
+		try {
+			identity = msap1::decode_energy_identity(record);
+			if (pending_energy_family_ &&
+			    pending_energy_family_->identity != identity)
+				pending_energy_family_.reset();
+			if (!pending_energy_family_) {
+				pending_energy_family_.emplace();
+				pending_energy_family_->identity = identity;
+			}
+			const auto part = static_cast<std::size_t>(record.energy_part());
+			auto &pending = pending_energy_family_->records[part];
+			const auto *bytes =
+				reinterpret_cast<const std::byte *>(&record);
+			if (pending) {
+				if (pending->payload.size() != sizeof(record) ||
+				    !std::equal(bytes, bytes + sizeof(record),
+					pending->payload.begin()))
+					throw std::invalid_argument(
+						"ENERGY duplicate part has different payload");
+			} else {
+				mnc::meter_stream::MeterStreamRecord stream_record{};
+				stream_record.record_format = record.record_format();
+				stream_record.record_kind = static_cast<std::uint16_t>(
+					msap1::RecordKind::energy);
+				stream_record.measurement_period = static_cast<std::uint8_t>(
+					msap1::MeasurementPeriod::Basic);
+				stream_record.source_sequence = identity.sequence;
+				stream_record.source_fragment =
+					static_cast<std::uint16_t>(part);
+				stream_record.configuration_generation =
+					identity.configuration_generation;
+				stream_record.ingested_at_nanoseconds =
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::system_clock::now().time_since_epoch()).count();
+				stream_record.timing.first_sample_index =
+					identity.first_sample_index;
+				stream_record.timing.sample_count = identity.sample_count;
+				stream_record.payload.assign(bytes, bytes + sizeof(record));
+				pending = std::move(stream_record);
+				++pending_energy_family_->count;
+			}
+			assembly = energy_assembler_.accept(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("energy record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+
+		++energy_records_;
+		incomplete_energy_families_ += assembly.incomplete_families;
+		if (assembly.completed) {
+			if (!pending_energy_family_ ||
+			    pending_energy_family_->count != 2u ||
+			    !pending_energy_family_->records[0] ||
+			    !pending_energy_family_->records[1])
+				throw std::logic_error(
+					"complete ENERGY family has a partial publication buffer");
+
+			msap1::meter::BlockTiming timing{};
+			timing.sequence = identity.sequence;
+			timing.configuration_generation =
+				identity.configuration_generation;
+			timing.first_sample_index = identity.first_sample_index;
+			timing.sample_count = identity.sample_count;
+			timing.sample_rate_hz = identity.sample_rate_hz;
+			stamp_time_state(timing, timebase_);
+			for (auto &pending : pending_energy_family_->records) {
+				pending->timing.time_quality =
+					static_cast<std::uint8_t>(timing.time_quality);
+				if (timing.utc_start)
+					pending->timing.utc_start_nanoseconds =
+						std::chrono::duration_cast<std::chrono::nanoseconds>(
+							timing.utc_start->time_since_epoch()).count();
+				pending->timing.utc_uncertainty_nanoseconds =
+					timing.utc_uncertainty_ns;
+			}
+			std::array<mnc::meter_stream::MeterStreamRecord, 2> family{
+				std::move(*pending_energy_family_->records[0]),
+				std::move(*pending_energy_family_->records[1])};
+			std::vector<std::uint64_t> cursors;
+			try {
+				cursors = publisher_.publish_records(family);
+			} catch (const msap1::energy_ledger::Conflict &error) {
+				/* A repeated R5 boot nonce can make a fresh volatile
+				 * counter stream look stale to the lifetime ledger. Preserve
+				 * the authoritative checkpoint and quarantine this family,
+				 * but never let one M17 product take down voltage/current/
+				 * power acquisition. A later family with a fresh session ID
+				 * is accepted without operator intervention. */
+				note_invalid_record();
+				++incomplete_energy_families_;
+				log_rejected_record(
+					std::string("ENERGY ledger conflict: ") +
+						error.what(),
+					"meter_energy_ledger_conflict", record);
+				pending_energy_family_.reset();
+				return;
+			}
+			if (cursors.size() != family.size())
+				throw std::runtime_error(
+					"ENERGY family publish returned the wrong cursor count");
+
+			msap1::MeterUpdate update{};
+			update.period = msap1::MeasurementPeriod::Basic;
+			update.kind = msap1::RecordKind::energy;
+			update.sequence = identity.sequence;
+			update.configuration_generation =
+				identity.configuration_generation;
+			update.energy = std::move(*assembly.completed);
+			if (auto *authority = dynamic_cast<
+				msap1::meter_stream::EnergyAuthority *>(&publisher_)) {
+				auto authoritative = authority->energy();
+				if (!authoritative)
+					throw std::runtime_error(
+						"meter-stream acknowledged ENERGY without a durable snapshot");
+				update.energy = std::move(*authoritative);
+			}
+			update.timing = timing;
+			meter_data_.apply(update);
+			++energy_families_;
+			pending_energy_family_.reset();
+		}
+		++meter_records_;
+		last_record_time_ = Clock::now();
+		return;
+	}
+
 	/*
 	 * The stream interleaves record formats with INDEPENDENT sequence
 	 * counters, so continuity is tracked per format. POWER and PHASOR
@@ -703,6 +845,7 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	 * shared transport's health.
 	 */
 	const bool sibling =
+		record.record_format() == msap1::meter_demand_format ||
 		record.record_format() == msap1::meter_power_format ||
 		record.record_format() == msap1::meter_phasor_format ||
 		record.record_format() == msap1::meter_unbalance_format ||
@@ -828,7 +971,31 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	}
 	const auto *bytes = reinterpret_cast<const std::byte *>(&record);
 	stream_record.payload.assign(bytes, bytes + sizeof(record));
-	(void)publisher_.publish(stream_record);
+	try {
+		(void)publisher_.publish(stream_record);
+	} catch (const msap1::energy_ledger::Conflict &error) {
+		if (!update.demand)
+			throw;
+		/* DEMAND shares the R5 session identity with ENERGY. Reject a
+		 * colliding/stale interval without advancing peaks, while leaving
+		 * every other record stream operational until a fresh R5 session
+		 * arrives. */
+		note_invalid_record();
+		log_rejected_record(
+			std::string("DEMAND ledger conflict: ") + error.what(),
+			"meter_demand_ledger_conflict", record);
+		return;
+	}
+	if (update.demand) {
+		if (auto *authority = dynamic_cast<
+			msap1::meter_stream::EnergyAuthority *>(&publisher_)) {
+			auto authoritative = authority->demand();
+			if (!authoritative)
+				throw std::runtime_error(
+					"meter-stream acknowledged DEMAND without a durable snapshot");
+			update.demand = std::move(*authoritative);
+		}
+	}
 	meter_data_.apply(update);
 	if (aggregate) {
 		last_aggregate_sequence_ = record.aggregate_sequence();

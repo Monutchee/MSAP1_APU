@@ -39,6 +39,31 @@ struct MeterConversionSettings {
 	std::vector<VoltageChannelConfig> voltage_channels;
 };
 
+struct DemandSettings {
+	/* One active profile at a time. Sliding is operationally responsive while
+	 * fixed_block retains the aligned UTC ten-minute billing-style product. */
+	std::string method = "sliding";
+	std::uint32_t window_seconds = 60;
+
+	void validate() const
+	{
+		if (method == "fixed_block") {
+			if (window_seconds != 600)
+				throw std::runtime_error(
+					"fixed-block demand window must be 600 seconds");
+			return;
+		}
+		if (method != "sliding")
+			throw std::runtime_error(
+				"demand method must be fixed_block or sliding");
+		if (window_seconds != 60 && window_seconds != 300 &&
+		    window_seconds != 600 && window_seconds != 900 &&
+		    window_seconds != 1800)
+			throw std::runtime_error(
+				"sliding demand window must be 60, 300, 600, 900, or 1800 seconds");
+	}
+};
+
 struct MeteringSettings {
 	static constexpr double min_system_nominal_voltage_v = 1.0;
 	static constexpr double max_system_nominal_voltage_v = 1'000'000.0;
@@ -63,6 +88,7 @@ struct MeteringSettings {
 	 * the documented DISARMED state; the band ordering is enforced by
 	 * prepare_meter_configuration(), which owns the threshold math. */
 	PowerQualityConfig power_quality;
+	DemandSettings demand;
 	MeterConversionSettings conversion;
 
 	void validate() const
@@ -82,6 +108,7 @@ struct MeteringSettings {
 			throw std::runtime_error(
 				"system nominal voltage must be 1..1000000 V");
 		rms.validate();
+		demand.validate();
 	}
 };
 

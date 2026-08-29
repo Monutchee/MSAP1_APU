@@ -12,7 +12,9 @@ The runtime data paths are:
 ```text
 AD7771 capture -> PL conversion -> PL RMS + VLA frequency -> AXI DMA
     -> /dev/msap1-meter -> msap1-fpga-acquisition
-    -> typed decoder -> latest-period MeterDataProvider
+    -> typed decoder -> R5C1 ENERGY family assembler
+    -> msap1-meter-stream SQLite lifetime ledger
+    -> latest-period MeterDataProvider after durable acknowledgement
     -> CLI, authenticated JSON API, and future publishers
 
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
@@ -152,6 +154,14 @@ The authenticated external API is:
   ten-minute intervals have completed)
 - `GET /api/v1/meter/minutes-10/live` and
   `GET /api/v1/meter/hours-2/live` (non-normative open-interval previews)
+- `GET /api/v1/meter/energy` (durable lifetime active import/export, apparent,
+  and fundamental reactive quadrant I--IV counters)
+- `GET /api/v1/meter/demand` (newest durable configured fixed/sliding signed
+  active demand, profile metadata, and authoritative import/export peaks)
+- `POST /api/v1/meter/energy/reset` (administrator only; resets all 28 energy
+  counters with expected-epoch/idempotency protection)
+- `POST /api/v1/meter/demand/peaks/reset` (administrator only; resets all
+  active-demand peaks with expected-epoch/idempotency protection)
 - `GET /api/v1/meter/history/capabilities`
 - `POST /api/v1/meter/history/query`
 - `GET /api/v1/meter/history/health`
@@ -223,6 +233,15 @@ difference as distortion power. The API does not currently publish THD,
 fundamental P₁/S₁ or power algorithm profile/version;
 those fields must remain unavailable rather than inferred.
 
+Energy quadrant selection uses simultaneous active power P and fundamental
+reactive power Q1 signs: quadrant I is `P>=0,Q1>0`, II is `P<0,Q1>0`, III is
+`P<0,Q1<0`, and IV is `P>=0,Q1<0`. `P==0` stays on the import side and
+`Q1==0` adds no reactive energy. Phase counters use phase signs; the total
+counter uses algebraic total signs and is never reconstructed from phase
+quadrants. All browser-facing 64-bit counters, session IDs, sample anchors,
+and reset epochs are decimal strings so values beyond JavaScript's safe
+integer range remain exact.
+
 External responses use JSON. The development login is `admin` / `admin`.
 The backend owns nginx and serves HTTP 80 and HTTPS 443. Read-only routes
 require the viewer role; changing ADC capture requires the admin role.
@@ -239,6 +258,14 @@ mnc meter snapshot
 mnc meter view
 mnc meter view --results 20
 mnc meter view --duration 10
+mnc meter energy
+mnc --output json meter energy
+mnc meter energy reset --expected-epoch 0 \
+    --idempotency-key commissioning-energy-1 --yes
+mnc meter demand
+mnc --output json meter demand
+mnc meter demand peaks-reset --expected-epoch 0 \
+    --idempotency-key commissioning-demand-1 --yes
 mnc adc stop
 mnc adc start
 mnc adc rate

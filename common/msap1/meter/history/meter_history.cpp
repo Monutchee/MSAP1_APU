@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -25,6 +26,52 @@ using mnc::meter::MeterAttributeId;
 using mnc::storage::sqlite::Database;
 using mnc::storage::sqlite::Transaction;
 
+constexpr std::array energy_history_groups{
+	std::array{MeterAttributeId::ActiveImportEnergyA,
+		MeterAttributeId::ActiveImportEnergyB,
+		MeterAttributeId::ActiveImportEnergyC,
+		MeterAttributeId::ActiveImportEnergyTotal},
+	std::array{MeterAttributeId::ActiveExportEnergyA,
+		MeterAttributeId::ActiveExportEnergyB,
+		MeterAttributeId::ActiveExportEnergyC,
+		MeterAttributeId::ActiveExportEnergyTotal},
+	std::array{MeterAttributeId::ApparentEnergyA,
+		MeterAttributeId::ApparentEnergyB,
+		MeterAttributeId::ApparentEnergyC,
+		MeterAttributeId::ApparentEnergyTotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIC,
+		MeterAttributeId::ReactiveEnergyQuadrantITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIIC,
+		MeterAttributeId::ReactiveEnergyQuadrantIITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIIIA,
+		MeterAttributeId::ReactiveEnergyQuadrantIIIB,
+		MeterAttributeId::ReactiveEnergyQuadrantIIIC,
+		MeterAttributeId::ReactiveEnergyQuadrantIIITotal},
+	std::array{MeterAttributeId::ReactiveEnergyQuadrantIVA,
+		MeterAttributeId::ReactiveEnergyQuadrantIVB,
+		MeterAttributeId::ReactiveEnergyQuadrantIVC,
+		MeterAttributeId::ReactiveEnergyQuadrantIVTotal},
+};
+
+constexpr std::array demand_history_groups{
+	std::array{MeterAttributeId::CurrentActiveDemandA,
+		MeterAttributeId::CurrentActiveDemandB,
+		MeterAttributeId::CurrentActiveDemandC,
+		MeterAttributeId::CurrentActiveDemandTotal},
+	std::array{MeterAttributeId::ImportDemandPeakA,
+		MeterAttributeId::ImportDemandPeakB,
+		MeterAttributeId::ImportDemandPeakC,
+		MeterAttributeId::ImportDemandPeakTotal},
+	std::array{MeterAttributeId::ExportDemandPeakA,
+		MeterAttributeId::ExportDemandPeakB,
+		MeterAttributeId::ExportDemandPeakC,
+		MeterAttributeId::ExportDemandPeakTotal},
+};
+
 std::int64_t period_value(MeasurementPeriod period)
 {
 	return static_cast<std::int64_t>(period);
@@ -41,6 +88,8 @@ MeasurementPeriod period_for(mnc::meter_stream::DatabaseDataset dataset)
 		return MeasurementPeriod::Min10;
 	case mnc::meter_stream::DatabaseDataset::hours_2:
 		return MeasurementPeriod::Hour2;
+	case mnc::meter_stream::DatabaseDataset::demand:
+		return MeasurementPeriod::Demand;
 	case mnc::meter_stream::DatabaseDataset::raw_record_spool:
 	case mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180:
 	case mnc::meter_stream::DatabaseDataset::harmonic_minutes_10:
@@ -72,6 +121,7 @@ mnc::meter_stream::DatabaseDataset harmonic_dataset_for(
 	case MeasurementPeriod::Basic:
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
+	case MeasurementPeriod::Demand:
 		break;
 	}
 	throw std::invalid_argument("unsupported harmonic historian period");
@@ -102,6 +152,8 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 		return mnc::meter_stream::DatabaseDataset::minutes_10;
 	case MeasurementPeriod::Hour2:
 		return mnc::meter_stream::DatabaseDataset::hours_2;
+	case MeasurementPeriod::Demand:
+		return mnc::meter_stream::DatabaseDataset::demand;
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
 		throw std::invalid_argument(
@@ -113,9 +165,9 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 void validate_historian_policies(
 	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
 {
-	if (policies.size() != 7)
+	if (policies.size() != 8)
 		throw std::invalid_argument(
-			"historian requires exactly seven dataset policies");
+			"historian requires exactly eight dataset policies");
 	std::set<mnc::meter_stream::DatabaseDataset> datasets;
 	for (const auto &policy : policies) {
 		mnc::meter_stream::validate_database_policy(policy);
@@ -130,6 +182,9 @@ void validate_historian_policies(
 
 bool supported_attribute(MeterAttributeId attribute)
 {
+	if (attribute >= MeterAttributeId::ActiveImportEnergyA &&
+	    attribute <= MeterAttributeId::ExportDemandPeakTotal)
+		return true;
 	switch (attribute) {
 	case MeterAttributeId::Frequency:
 	case MeterAttributeId::VanRms:
@@ -143,9 +198,21 @@ bool supported_attribute(MeterAttributeId attribute)
 	case MeterAttributeId::VabRms:
 	case MeterAttributeId::VbcRms:
 	case MeterAttributeId::VcaRms:
+	default:
 		return false;
 	}
-	return false;
+}
+
+std::optional<std::uint64_t> parse_reset_epoch(std::string_view text)
+{
+	if (text.empty())
+		return std::nullopt;
+	std::uint64_t value = 0;
+	const auto [end, error] = std::from_chars(text.data(),
+		text.data() + text.size(), value);
+	if (error != std::errc{} || end != text.data() + text.size())
+		throw std::runtime_error("historian reset epoch is not uint64 decimal");
+	return value;
 }
 
 std::uint64_t logical_period_bytes(Database &database, MeasurementPeriod period)
@@ -346,6 +413,7 @@ CREATE TABLE IF NOT EXISTS measurement_values(
  signed_value INTEGER NOT NULL,
  quality INTEGER NOT NULL,
  source_sequence INTEGER NOT NULL,
+ reset_epoch TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(block_id, attribute_id)
 );
 CREATE TABLE IF NOT EXISTS historian_metadata(
@@ -383,6 +451,17 @@ CREATE TABLE IF NOT EXISTS harmonic_families(
 CREATE INDEX IF NOT EXISTS harmonic_families_time
  ON harmonic_families(period, measured_at_ns);
 )SQL");
+	/* Existing historian databases predate M17 reset epochs. SQLite has no
+	 * portable ADD COLUMN IF NOT EXISTS, so inspect the live schema first. */
+	bool has_reset_epoch = false;
+	auto columns = database.prepare("PRAGMA table_info(measurement_values)");
+	while (columns.step())
+		has_reset_epoch = has_reset_epoch || columns.text(1) == "reset_epoch";
+	columns.reset();
+	if (!has_reset_epoch)
+		database.execute(
+			"ALTER TABLE measurement_values ADD COLUMN "
+			"reset_epoch TEXT NOT NULL DEFAULT ''");
 }
 
 void remove_database_family(const std::filesystem::path &path)
@@ -607,6 +686,57 @@ VALUES(?,?,?,?,?)
 		put(MeterAttributeId::IcRms, f.current.phase_c);
 		put(MeterAttributeId::InRms, f.current.neutral);
 	}
+	/* At each completed UTC ten-minute boundary the service attaches one
+	 * authoritative ledger snapshot. Store all 28 energy counters in the
+	 * Min10 dataset and all 12 demand values in the dedicated Demand dataset;
+	 * each projection is one atomic history block with its reset epoch. */
+	if (inserted && (update.energy || update.demand)) {
+		auto statement = database.prepare(R"SQL(
+INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence,reset_epoch)
+VALUES(?,?,?,?,?,?)
+)SQL");
+		auto put = [&](MeterAttributeId id, const auto &reading,
+			std::uint64_t reset_epoch) {
+			statement.bind(1, block_id);
+			statement.bind(2, static_cast<std::int32_t>(id));
+			statement.bind(3, reading.value);
+			statement.bind(4, static_cast<std::int32_t>(reading.quality));
+			statement.bind(5, reading.source_sequence);
+			statement.bind(6, std::to_string(reset_epoch));
+			statement.execute();
+			statement.reset();
+			++appended_values;
+		};
+		auto put_group = [&](const auto &ids, const auto &group,
+			std::uint64_t reset_epoch) {
+			const std::array readings{&group.phase_a, &group.phase_b,
+				&group.phase_c, &group.total};
+			for (std::size_t index = 0; index < ids.size(); ++index)
+				put(ids[index], *readings[index], reset_epoch);
+		};
+		if (update.energy) {
+			const auto &energy = *update.energy;
+			put_group(energy_history_groups[0], energy.active_import,
+				energy.reset_epoch);
+			put_group(energy_history_groups[1], energy.active_export,
+				energy.reset_epoch);
+			put_group(energy_history_groups[2], energy.apparent,
+				energy.reset_epoch);
+			for (std::size_t quadrant = 0;
+			     quadrant < energy.reactive_quadrants.size(); ++quadrant)
+				put_group(energy_history_groups[3 + quadrant],
+					energy.reactive_quadrants[quadrant], energy.reset_epoch);
+		}
+		if (update.demand) {
+			const auto &demand = *update.demand;
+			put_group(demand_history_groups[0], demand.current_active,
+				demand.peak_reset_epoch);
+			put_group(demand_history_groups[1], demand.import_peak,
+				demand.peak_reset_epoch);
+			put_group(demand_history_groups[2], demand.export_peak,
+				demand.peak_reset_epoch);
+		}
+	}
 	transaction.commit();
 	impl_->acknowledged_cursor = std::max(impl_->acknowledged_cursor, stream_cursor);
 
@@ -830,7 +960,8 @@ std::vector<HistoryPoint> MeterHistoryStore::query(const HistoryQuery &query) co
 	std::scoped_lock lock(impl_->mutex);
 	auto &database = impl_->database(query.period);
 	std::string sql = R"SQL(
-SELECT b.measured_at_ns,v.source_sequence,v.attribute_id,v.signed_value,v.quality
+	SELECT b.measured_at_ns,v.source_sequence,v.attribute_id,v.signed_value,
+	 v.quality,v.reset_epoch
 FROM measurement_blocks b JOIN measurement_values v ON v.block_id=b.id
 WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
 )SQL";
@@ -852,8 +983,14 @@ WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
 	std::vector<HistoryPoint> result;
 	while (statement.step()) {
 		const auto id = static_cast<MeterAttributeId>(statement.integer(2));
-		result.push_back({statement.integer(0), static_cast<std::uint64_t>(statement.integer(1)),
-			id, statement.integer(3), static_cast<MeasurementQuality>(statement.integer(4))});
+		result.push_back({
+			.measured_at_nanoseconds = statement.integer(0),
+			.source_sequence = static_cast<std::uint64_t>(statement.integer(1)),
+			.attribute = id,
+			.value = statement.integer(3),
+			.quality = static_cast<MeasurementQuality>(statement.integer(4)),
+			.reset_epoch = parse_reset_epoch(statement.text(5)),
+		});
 	}
 	return result;
 }
@@ -1030,6 +1167,7 @@ void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
 		mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180,
 		mnc::meter_stream::DatabaseDataset::harmonic_minutes_10,
 		mnc::meter_stream::DatabaseDataset::harmonic_hours_2,
+		mnc::meter_stream::DatabaseDataset::demand,
 	};
 	std::scoped_lock lock(impl_->mutex);
 

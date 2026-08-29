@@ -116,12 +116,13 @@ requests retain immediate length-based dispatch for compatibility and latency.
 
 ## Coherent data access
 
-For an input-register request, `Msap1RegisterBank` first asks
-`MeterSnapshotProvider` for all required Basic-period attributes. It performs
-that request once, then projects every requested register from the returned
-immutable snapshot. It never fetches one measurement per register. Therefore
-a read spanning frequency, voltage, and current cannot mix acquisition
-sequences.
+For an input-register request, `Msap1RegisterBank` first identifies the one
+measurement period and all attributes required by that range. It asks
+`MeterSnapshotProvider` once, then projects every requested register from the
+returned immutable snapshot. It never fetches one measurement per register.
+Therefore a read spanning multiple values within Basic or 10-minute data
+cannot mix acquisition sequences. A request spanning incompatible periods is
+rejected with Illegal Data Address.
 
 The cross-process `AcquisitionMeterSnapshotProvider` is a typed adapter over the
 existing acquisition client. Modbus code does not construct IPC frames or
@@ -177,9 +178,10 @@ stable reserved regions so additions do not shift published fields:
 |---:|---:|---|
 | FC03 | `0x0000–0x00FF` | Map metadata and future holding metadata |
 | FC04 | `0x0000–0x001F` | Published Basic measurements and status |
-| FC04 | `0x0020–0x0FFF` | Reserved Basic-period growth |
+| FC04 | `0x0020–0x00FF` | Reserved legacy Basic-period growth |
+| FC04 | `0x0100–0x0FFF` | Basic extensions, including lifetime energy |
 | FC04 | `0x1000–0x1FFF` | 150/180-cycle measurements |
-| FC04 | `0x2000–0x2FFF` | 10-minute measurements |
+| FC04 | `0x2000–0x2FFF` | Demand and 10-minute measurements |
 | FC04 | `0x3000–0x3FFF` | 2-hour measurements |
 | FC04 | `0x4000–0x4FFF` | Voltage harmonics |
 | FC04 | `0x5000–0x5FFF` | Current harmonics |
@@ -189,7 +191,7 @@ The current `Basic` period represents the grid-synchronized 10/12-cycle
 product. Reserved regions are an ABI allocation policy, not an indication that
 their future measurements are implemented today.
 
-## MSAP1 register contract, version 1
+## MSAP1 register contract, version 2
 
 All addresses below are zero-based protocol addresses. Some Modbus tools show
 Input Register address 0 as `30001` and Holding Register address 0 as `40001`.
@@ -212,6 +214,35 @@ Always check the tool's addressing convention.
 | 18 | 2 | uint32 | Low 32 bits of source sequence | count |
 | 20 | 2 | uint32 | Configuration generation | count |
 
+M17 appends the following stable ranges. Every phase group is ordered A, B,
+C, total. Each 64-bit value occupies four consecutive registers in high-word-
+first order; the range endpoints below include all four values.
+
+| Address range | Type | Meaning | Unit |
+|---:|---|---|---|
+| `0x0100–0x010F` | uint64 | Active import energy A/B/C/total | uWh |
+| `0x0110–0x011F` | uint64 | Active export energy A/B/C/total | uWh |
+| `0x0120–0x012F` | uint64 | Apparent energy A/B/C/total | uVAh |
+| `0x0130–0x013F` | uint64 | Reactive quadrant I A/B/C/total | uvarh |
+| `0x0140–0x014F` | uint64 | Reactive quadrant II A/B/C/total | uvarh |
+| `0x0150–0x015F` | uint64 | Reactive quadrant III A/B/C/total | uvarh |
+| `0x0160–0x016F` | uint64 | Reactive quadrant IV A/B/C/total | uvarh |
+| `0x0170–0x018D` | mixed | Energy session, epoch, provenance, flags, and quality mask | metadata |
+| `0x2000–0x200F` | int64 | Signed current active demand A/B/C/total | uW |
+| `0x2010–0x201F` | uint64 | Active import peaks A/B/C/total | uW |
+| `0x2020–0x202F` | uint64 | Active export peaks A/B/C/total | uW |
+| `0x2030–0x206F` | mixed | Demand session, epoch, profile, quality, flags, and peak anchors | metadata |
+
+Energy metadata starts at `0x0170`: session ID, reset epoch, last sample,
+accepted/skipped samples and blocks, flags, then the 64-bit quality mask.
+Energy flag bits 0--2 are saturation, incomplete input, and discontinuity.
+Demand metadata starts at `0x2030`: session ID, peak reset epoch, last sample,
+window anchor, interval count/status, method, window seconds, update seconds,
+profile generation, flags, quality mask, and import/export peak sample anchors.
+Demand flag bits 0--4 are time aligned, contaminated, boundary valid,
+saturated, and incomplete input. Use the generated map export for every exact
+field address rather than copying this range summary into client code.
+
 Unavailable or invalid electrical values are encoded as IEEE-754 quiet NaN.
 The corresponding quality bit is clear. A valid zero is encoded as `0.0` and
 has its quality bit set, preserving the product-wide distinction between zero
@@ -221,9 +252,9 @@ and unavailable.
 
 | Address | Words | Type | Meaning | Value |
 |---:|---:|---|---|---:|
-| 0 | 1 | uint16 | Register-map version | 1 |
+| 0 | 1 | uint16 | Register-map version | 2 |
 | 1 | 1 | uint16 | Word-order marker | `0x1234` |
-| 2 | 1 | uint16 | Published measurement-attribute count | 8 |
+| 2 | 1 | uint16 | Published measurement-attribute count | 48 |
 
 The table above is produced from the compiled schema; runtime JSON/YAML and
 per-register `std::function` objects are intentionally not used.
@@ -266,12 +297,16 @@ for register in document["registers"]:
 
 ## Encoding
 
-Modbus bytes are network/big-endian. Multiword 32-bit integers and IEEE-754
-float32 values use **high word first**. For example:
+Modbus bytes are network/big-endian. Multiword 32-bit and 64-bit integers and
+IEEE-754 float32 values use **high word first**. Signed integers use their
+two's-complement bit pattern. For example:
 
 ```text
 uint32 0x12345678 -> register 0 = 0x1234, register 1 = 0x5678
 float32 1.0       -> register 0 = 0x3f80, register 1 = 0x0000
+uint64 0x0123456789abcdef
+                  -> registers = 0x0123, 0x4567, 0x89ab, 0xcdef
+int64 -2          -> registers = 0xffff, 0xffff, 0xffff, 0xfffe
 ```
 
 Encoding helpers use shifts and `std::bit_cast`; they do not depend on CPU

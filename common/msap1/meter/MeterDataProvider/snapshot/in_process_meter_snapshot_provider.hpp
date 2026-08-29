@@ -5,6 +5,14 @@
 
 namespace msap1::meter {
 
+/** Replace M17 fields in an already selected snapshot with the durable ledger
+ * authority. This is also used on reads so an administrative reset is visible
+ * immediately, without waiting for another RPU family. */
+void overlay_authoritative_energy(mnc::meter::MeterSnapshot &snapshot,
+	const msap1::EnergyValues &energy);
+void overlay_authoritative_demand(mnc::meter::MeterSnapshot &snapshot,
+	const msap1::DemandValues &demand);
+
 /** Product adapter that projects decoded MSAP1 values onto the reusable API. */
 class InProcessMeterSnapshotProvider final
 	: public mnc::meter::MeterSnapshotProvider {

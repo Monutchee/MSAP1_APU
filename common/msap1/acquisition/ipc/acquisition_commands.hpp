@@ -64,7 +64,7 @@ inline constexpr const char *acquisition_socket_path =
  * 33: The simulator tone ratio becomes fractional for interharmonic injection.
  * 34: InfoResponse distinguishes current-capture-epoch record rejections
  * from the process-lifetime forensic total. */
-inline constexpr std::uint16_t acquisition_ipc_version = 34;
+inline constexpr std::uint16_t acquisition_ipc_version = 35;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();

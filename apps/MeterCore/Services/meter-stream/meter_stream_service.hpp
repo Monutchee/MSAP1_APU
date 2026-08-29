@@ -4,6 +4,7 @@
 #include "mnc/ipc/ipc.hpp"
 #include "mnc/service/service.hpp"
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/energy_ledger.hpp"
 
 #include <boost/asio/io_context.hpp>
 
@@ -35,6 +36,7 @@ private:
 	void report_dropped_records();
 	boost::asio::io_context context_;
 	std::unique_ptr<mnc::meter_stream::DurableMeterSpool> spool_;
+	std::unique_ptr<msap1::energy_ledger::EnergyLedger> energy_ledger_;
 	mnc::ipc::UnixStreamServer server_;
 	std::thread worker_;
 	std::vector<std::weak_ptr<mnc::ipc::FramedConnection>> subscribers_;

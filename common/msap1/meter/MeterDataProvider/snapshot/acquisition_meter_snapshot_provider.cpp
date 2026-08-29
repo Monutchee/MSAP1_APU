@@ -1,5 +1,7 @@
 #include "msap1/meter/MeterDataProvider/snapshot/acquisition_meter_snapshot_provider.hpp"
 
+#include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
+
 #include <stdexcept>
 
 namespace msap1::meter {
@@ -9,6 +11,13 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 	mnc::meter::MeasurementPeriod period)
 {
 	using Id = mnc::meter::MeterAttributeId;
+	if (period == mnc::meter::MeasurementPeriod::Demand) {
+		std::vector<mnc::meter::MeterAttributeKey> result;
+		for (const auto attribute :
+		     mnc::meter::attributes_in(mnc::meter::MeterAttributeGroup::Demand))
+			result.push_back(attribute);
+		return result;
+	}
 	std::vector<mnc::meter::MeterAttributeKey> result{
 		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
 		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
@@ -43,6 +52,10 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 			      Id::PositiveSequenceCurrent,
 			      Id::NegativeSequenceCurrent})
 		result.push_back({id, std::nullopt});
+	if (period == mnc::meter::MeasurementPeriod::Basic)
+		for (const auto attribute : mnc::meter::attributes_in(
+			mnc::meter::MeterAttributeGroup::Energy))
+			result.push_back(attribute);
 	return result;
 }
 
@@ -59,6 +72,7 @@ AcquisitionMeterSnapshotProvider::capabilities() const
 		{Period::Hour2, supported(Period::Hour2)},
 		{Period::Min10Live, supported(Period::Min10Live)},
 		{Period::Hour2Live, supported(Period::Hour2Live)},
+		{Period::Demand, supported(Period::Demand)},
 	};
 }
 

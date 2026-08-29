@@ -19,6 +19,12 @@ public:
 	void clear_history(
 		std::span<const mnc::meter_stream::DatabaseDataset> datasets) const;
 	void recreate_history_database() const;
+	[[nodiscard]] std::optional<EnergyValues> energy() const;
+	[[nodiscard]] std::optional<DemandValues> demand() const;
+	[[nodiscard]] energy_ledger::ResetResult reset_energy(
+		const energy_ledger::ResetRequest &request) const;
+	[[nodiscard]] energy_ledger::ResetResult reset_demand_peaks(
+		const energy_ledger::ResetRequest &request) const;
 
 private:
 	mutable meter_stream::MeterRecordStreamClient stream_;

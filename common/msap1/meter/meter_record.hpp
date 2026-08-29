@@ -65,6 +65,42 @@ inline constexpr std::uint32_t meter_phasor_format = 0x00080002u;
  * 0 V ratios valid, bit 1 I ratios valid, bit 8 angle-reference valid.
  * Status bit 1 mirrors the PHASOR record (frequency-reference loss). */
 inline constexpr std::uint32_t meter_unbalance_format = 0x00090002u;
+/* ENERGY-v1 (M17): an atomic two-record cumulative session family. Part 0
+ * carries active import/export and apparent energy; part 1 carries reactive
+ * energy selected into quadrants I..IV by the simultaneous P/Q1 signs. */
+inline constexpr std::uint32_t meter_energy_format = 0x00030001u;
+inline constexpr std::uint8_t meter_energy_part_summary = 0u;
+inline constexpr std::uint8_t meter_energy_part_quadrants = 1u;
+inline constexpr std::uint8_t meter_energy_part_count = 2u;
+inline constexpr std::size_t meter_energy_last_sample_word = 14u;
+inline constexpr std::size_t meter_energy_summary_import_word = 16u;
+inline constexpr std::size_t meter_energy_summary_export_word = 24u;
+inline constexpr std::size_t meter_energy_summary_apparent_word = 32u;
+inline constexpr std::array<std::size_t, 4> meter_energy_quadrant_words{
+	16u, 24u, 32u, 40u};
+inline constexpr std::size_t meter_energy_session_word = 48u;
+inline constexpr std::size_t meter_energy_accepted_samples_word = 50u;
+inline constexpr std::size_t meter_energy_skipped_samples_word = 52u;
+inline constexpr std::size_t meter_energy_accepted_blocks_word = 54u;
+inline constexpr std::size_t meter_energy_skipped_blocks_word = 55u;
+
+/* DEMAND-v1 (M17): signed current active demand and directional profile
+ * peaks for the configured fixed-block or sliding window. */
+inline constexpr std::uint32_t meter_demand_format = 0x00040001u;
+inline constexpr std::uint16_t meter_demand_fixed_interval_seconds = 600u;
+inline constexpr std::uint16_t meter_demand_default_window_seconds = 60u;
+inline constexpr std::uint16_t meter_demand_sliding_update_seconds = 3u;
+inline constexpr std::size_t meter_demand_last_sample_word = 14u;
+inline constexpr std::size_t meter_demand_current_word = 16u;
+inline constexpr std::size_t meter_demand_import_peak_word = 24u;
+inline constexpr std::size_t meter_demand_export_peak_word = 32u;
+inline constexpr std::size_t meter_demand_import_peak_anchor_word = 40u;
+inline constexpr std::size_t meter_demand_export_peak_anchor_word = 48u;
+inline constexpr std::size_t meter_demand_session_word = 56u;
+inline constexpr std::size_t meter_demand_interval_anchor_sample_word = 58u;
+inline constexpr std::size_t meter_demand_source_interval_count_word = 60u;
+inline constexpr std::size_t meter_demand_source_status_word = 61u;
+inline constexpr std::size_t meter_demand_profile_generation_word = 62u;
 /* AGG v3 (metrology M11/M15): the R5C1 150/180-cycle tier record
  * (Mtr2Engine retired). MTR2-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
@@ -257,6 +293,8 @@ struct MeterRecord {
 		        record_format() == meter_power_format ||
 			record_format() == meter_phasor_format ||
 			record_format() == meter_unbalance_format ||
+			record_format() == meter_energy_format ||
+			record_format() == meter_demand_format ||
 			record_format() == meter_aggregate_format ||
 				record_format() == meter_aggregate_power_format ||
 				record_format() == meter_aggregate_phasor_format ||
@@ -309,6 +347,85 @@ struct MeterRecord {
 	 * finalized — so any nonzero value is a fault. */
 	std::uint32_t emit_drops() const { return word(11); }
 	std::uint32_t result_drops() const { return word(12); }
+
+	/* ---- ENERGY-v1 / DEMAND-v1 (M17) fields ------------------------- */
+
+	std::uint8_t energy_part() const
+	{
+		return static_cast<std::uint8_t>(word(13) & 0x3u);
+	}
+	std::uint8_t energy_part_count() const
+	{
+		return static_cast<std::uint8_t>((word(13) >> 2u) & 0x3u);
+	}
+	bool energy_family_complete() const { return (word(13) & (1u << 4u)) != 0u; }
+	std::uint8_t energy_category_valid_mask() const
+	{
+		return static_cast<std::uint8_t>((word(13) >> 8u) & 0x0fu);
+	}
+	std::uint64_t energy_last_sample_index() const
+	{
+		return unsigned64(meter_energy_last_sample_word);
+	}
+	std::uint64_t energy_session_id() const
+	{
+		return unsigned64(meter_energy_session_word);
+	}
+	std::uint64_t energy_accepted_samples() const
+	{
+		return unsigned64(meter_energy_accepted_samples_word);
+	}
+	std::uint64_t energy_skipped_samples() const
+	{
+		return unsigned64(meter_energy_skipped_samples_word);
+	}
+	std::uint32_t energy_accepted_blocks() const
+	{
+		return word(meter_energy_accepted_blocks_word);
+	}
+	std::uint32_t energy_skipped_blocks() const
+	{
+		return word(meter_energy_skipped_blocks_word);
+	}
+	bool energy_complete() const { return (status() & (1u << 1u)) != 0u; }
+	bool energy_incomplete_input() const { return (status() & (1u << 2u)) != 0u; }
+	bool energy_saturated() const { return (status() & (1u << 3u)) != 0u; }
+	bool energy_discontinuity() const { return (status() & (1u << 4u)) != 0u; }
+
+	std::uint16_t demand_interval_seconds() const
+	{
+		return static_cast<std::uint16_t>(word(13) & 0xffffu);
+	}
+	std::uint8_t demand_valid_mask() const
+	{
+		return static_cast<std::uint8_t>((word(13) >> 16u) & 0x0fu);
+	}
+	std::uint8_t demand_method() const
+	{
+		return static_cast<std::uint8_t>((word(13) >> 20u) & 0x03u);
+	}
+	std::uint16_t demand_update_seconds() const
+	{
+		return static_cast<std::uint16_t>((word(13) >> 22u) & 0x03ffu);
+	}
+	std::uint32_t demand_profile_generation() const
+	{
+		return word(meter_demand_profile_generation_word);
+	}
+	std::uint64_t demand_last_sample_index() const
+	{
+		return unsigned64(meter_demand_last_sample_word);
+	}
+	std::uint64_t demand_session_id() const
+	{
+		return unsigned64(meter_demand_session_word);
+	}
+	bool demand_complete() const { return (status() & (1u << 1u)) != 0u; }
+	bool demand_time_aligned() const { return (status() & (1u << 2u)) != 0u; }
+	bool demand_contaminated() const { return (status() & (1u << 3u)) != 0u; }
+	bool demand_boundary_valid() const { return (status() & (1u << 4u)) != 0u; }
+	bool demand_saturated() const { return (status() & (1u << 5u)) != 0u; }
+	bool demand_incomplete_input() const { return (status() & (1u << 6u)) != 0u; }
 
 	/* ---- periodic (BASIC-v4, 0x00010004) fields ----------------------- */
 

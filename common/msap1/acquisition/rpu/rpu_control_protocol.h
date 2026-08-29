@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 7u
+#define MSAP1_RPU_VERSION 8u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -41,6 +41,13 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_SIMULATOR_EVENT_SET = 16,
 	MSAP1_RPU_MSG_AGGREGATION_HEALTH_GET = 17,
 	MSAP1_RPU_MSG_AGGREGATION_HEALTH = 18,
+	MSAP1_RPU_MSG_DEMAND_CONFIG_SET = 19,
+	MSAP1_RPU_MSG_DEMAND_CONFIG = 20,
+};
+
+enum msap1_demand_method {
+	MSAP1_DEMAND_METHOD_FIXED_BLOCK = 0,
+	MSAP1_DEMAND_METHOD_SLIDING = 1,
 };
 
 enum msap1_aggregation_health_flag {
@@ -533,6 +540,21 @@ struct msap1_aggregation_health_payload {
 	uint32_t validator_records_processed;
 	uint32_t validator_max_runtime_us;
 	uint32_t validator_max_schedule_gap_us;
+} __attribute__((packed));
+
+/* R5C1 active-demand profile. Fixed block is the aligned UTC ten-minute
+ * product. Sliding windows refresh on each nominal three-second aggregate. */
+struct msap1_demand_config_payload {
+	uint32_t method;
+	uint32_t window_seconds;
+	uint32_t update_seconds;
+} __attribute__((packed));
+
+struct msap1_demand_config_ack_payload {
+	uint32_t method;
+	uint32_t window_seconds;
+	uint32_t update_seconds;
+	uint32_t profile_generation;
 } __attribute__((packed));
 
 #ifdef __cplusplus

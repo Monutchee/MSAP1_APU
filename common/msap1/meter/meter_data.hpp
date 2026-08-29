@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace msap1 {
@@ -68,6 +69,8 @@ struct RatioMillionths {};
 struct MicroAmperes {};
 struct MicroWatts {};
 struct MicroWattHours {};
+struct MicroVarHours {};
+struct MicroVoltAmpereHours {};
 
 using SystemTime = std::chrono::system_clock::time_point;
 
@@ -107,6 +110,14 @@ struct PhaseABCN {
 	T phase_b{};
 	T phase_c{};
 	T neutral{};
+};
+
+template<typename T>
+struct PhaseABCTotal {
+	T phase_a{};
+	T phase_b{};
+	T phase_c{};
+	T total{};
 };
 
 struct FundamentalValues {
@@ -197,8 +208,87 @@ struct UnbalanceValues {
 	bool angle_reference_valid = false;
 	bool phasor_invalid = false;
 };
-struct EnergyValues {};
-struct DemandValues {};
+/**
+ * Four-quadrant fundamental reactive-energy classification.
+ *
+ * Deliberately avoid Q1/Q2 names: Q1 already denotes fundamental reactive
+ * power in the metrology contract. Axis behavior is normative: P == 0 uses
+ * the import side, while Q1 == 0 contributes to no quadrant.
+ */
+enum class EnergyQuadrant : std::uint8_t {
+	quadrant_i = 0,
+	quadrant_ii = 1,
+	quadrant_iii = 2,
+	quadrant_iv = 3,
+	none = 0xff,
+};
+
+[[nodiscard]] constexpr EnergyQuadrant classify_energy_quadrant(
+	std::int64_t active_power, std::int64_t fundamental_reactive_power) noexcept
+{
+	if (fundamental_reactive_power == 0)
+		return EnergyQuadrant::none;
+	if (fundamental_reactive_power > 0)
+		return active_power < 0 ? EnergyQuadrant::quadrant_ii
+					: EnergyQuadrant::quadrant_i;
+	return active_power < 0 ? EnergyQuadrant::quadrant_iii
+				: EnergyQuadrant::quadrant_iv;
+}
+
+struct EnergyValues {
+	PhaseABCTotal<Reading<MicroWattHours>> active_import{};
+	PhaseABCTotal<Reading<MicroWattHours>> active_export{};
+	PhaseABCTotal<Reading<MicroVoltAmpereHours>> apparent{};
+	std::array<PhaseABCTotal<Reading<MicroVarHours>>, 4>
+		reactive_quadrants{};
+	std::uint64_t session_id = 0;
+	std::uint64_t last_sample_index = 0;
+	std::uint64_t accepted_samples = 0;
+	std::uint64_t skipped_samples = 0;
+	std::uint32_t accepted_blocks = 0;
+	std::uint32_t skipped_blocks = 0;
+	std::uint64_t reset_epoch = 0;
+	bool saturated = false;
+	bool incomplete_input = false;
+	bool discontinuity = false;
+
+	[[nodiscard]] const PhaseABCTotal<Reading<MicroVarHours>> &reactive(
+		EnergyQuadrant quadrant) const
+	{
+		const auto index = static_cast<std::size_t>(quadrant);
+		if (index >= reactive_quadrants.size())
+			throw std::out_of_range("energy quadrant");
+		return reactive_quadrants[index];
+	}
+};
+
+enum class DemandMethod : std::uint8_t {
+	fixed_block = 0,
+	sliding = 1,
+};
+
+struct DemandValues {
+	PhaseABCTotal<Reading<MicroWatts>> current_active{};
+	PhaseABCTotal<Reading<MicroWatts>> import_peak{};
+	PhaseABCTotal<Reading<MicroWatts>> export_peak{};
+	PhaseABCTotal<std::uint64_t> import_peak_sample{};
+	PhaseABCTotal<std::uint64_t> export_peak_sample{};
+	std::uint64_t session_id = 0;
+	std::uint64_t last_sample_index = 0;
+	std::uint64_t interval_anchor_sample = 0;
+	std::uint32_t source_interval_count = 0;
+	std::uint32_t source_status = 0;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint64_t peak_reset_epoch = 0;
+	DemandMethod method = DemandMethod::sliding;
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+	bool saturated = false;
+	bool incomplete_input = false;
+};
 /* Power-quality event kinds and types, mirroring the PL's
  * metering_types.hpp (MET_PQ_KIND_* / MET_PQ_EVENT_*). */
 enum class PowerQualityRecordKind : std::uint8_t {
@@ -300,7 +390,7 @@ public:
 	latest(MeasurementPeriod period) const;
 
 private:
-	static constexpr std::size_t period_count = 6;
+	static constexpr std::size_t period_count = 7;
 	mutable std::mutex mutex_;
 	std::array<std::optional<MeterPeriodView>, period_count> views_{};
 };

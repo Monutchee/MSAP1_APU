@@ -24,6 +24,7 @@ enum class RecordIntervalCategory : std::uint8_t {
 	hours_2,
 	minutes_10_live,
 	hours_2_live,
+	demand,
 	count,
 };
 
@@ -58,6 +59,7 @@ struct RecordIntervalIdentity {
 	case msap1::meter_power_format:
 	case msap1::meter_phasor_format:
 	case msap1::meter_unbalance_format:
+	case msap1::meter_energy_format:
 	case msap1::meter_harmonic_format:
 		return {RecordIntervalCategory::basic, "basic",
 			"10/12-cycle"};
@@ -73,6 +75,9 @@ struct RecordIntervalIdentity {
 	case msap1::meter_ten_minute_unbalance_format:
 		return {RecordIntervalCategory::minutes_10, "minutes_10",
 			"10-minute"};
+	case msap1::meter_demand_format:
+		return {RecordIntervalCategory::demand, "demand",
+			"configured demand"};
 	case msap1::meter_two_hour_format:
 	case msap1::meter_two_hour_power_format:
 	case msap1::meter_two_hour_phasor_format:

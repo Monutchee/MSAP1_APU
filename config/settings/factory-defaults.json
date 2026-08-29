@@ -26,6 +26,10 @@
       "interruption_percent": 10.0,
       "hysteresis_percent": 2.0
     },
+    "demand": {
+      "method": "sliding",
+      "window_seconds": 60
+    },
     "conversion": {
       "profile_id": "msap1-sensor-board-5a",
       "adc_reference_volts": 1.0,
@@ -71,7 +75,8 @@
 	"hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
 	"harmonic_cycles_150_180": {"backend": "memory", "maximum_age_seconds": 86400, "maximum_bytes": 536870912, "volatile_spool_acknowledged": false},
 	"harmonic_minutes_10": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
-	"harmonic_hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false}
+	"harmonic_hours_2": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false},
+	"demand": {"backend": "persistent", "maximum_age_seconds": 0, "maximum_bytes": 0, "volatile_spool_acknowledged": false}
 	},
 	"modbus": {
 		"enabled": true,

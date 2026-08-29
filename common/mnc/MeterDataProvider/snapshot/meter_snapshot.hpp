@@ -2,6 +2,7 @@
 
 #include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -64,12 +65,47 @@ struct MeterAttributeValue {
 	std::int64_t calculation_window_nanoseconds = 0;
 };
 
+struct EnergySnapshotMetadata {
+	std::uint64_t session_id = 0;
+	std::uint64_t reset_epoch = 0;
+	std::uint64_t last_sample_index = 0;
+	std::uint64_t accepted_samples = 0;
+	std::uint64_t skipped_samples = 0;
+	std::uint32_t accepted_blocks = 0;
+	std::uint32_t skipped_blocks = 0;
+	bool saturated = false;
+	bool incomplete_input = false;
+	bool discontinuity = false;
+};
+
+struct DemandSnapshotMetadata {
+	std::uint64_t session_id = 0;
+	std::uint64_t peak_reset_epoch = 0;
+	std::uint64_t last_sample_index = 0;
+	std::uint64_t interval_anchor_sample = 0;
+	std::uint32_t source_interval_count = 0;
+	std::uint32_t source_status = 0;
+	std::uint32_t window_seconds = 0;
+	std::uint32_t update_seconds = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint8_t method = 0;
+	std::array<std::uint64_t, 4> import_peak_samples{};
+	std::array<std::uint64_t, 4> export_peak_samples{};
+	bool time_aligned = false;
+	bool contaminated = false;
+	bool boundary_valid = false;
+	bool saturated = false;
+	bool incomplete_input = false;
+};
+
 struct MeterSnapshot {
 	MeasurementPeriod period = MeasurementPeriod::Basic;
 	std::uint64_t sequence = 0;
 	std::uint32_t configuration_generation = 0;
 	std::int64_t updated_at_nanoseconds = 0;
 	std::optional<MeterSnapshotTiming> timing;
+	std::optional<EnergySnapshotMetadata> energy;
+	std::optional<DemandSnapshotMetadata> demand;
 	std::vector<MeterAttributeValue> values;
 };
 

@@ -47,6 +47,7 @@ static_assert(register_width(DataType::uint32) == 2);
 static_assert(register_width(DataType::int32) == 2);
 static_assert(register_width(DataType::float32) == 2);
 static_assert(register_width(DataType::uint64) == 4);
+static_assert(register_width(DataType::int64) == 4);
 
 constexpr std::array overlapping_blocks{
 	RegisterBlock{input, 0x1000, 0x1000, "test.first"},
@@ -130,6 +131,35 @@ public:
 		snapshot.period = request.period;
 		snapshot.sequence = 0x12345678;
 		snapshot.configuration_generation = 0xaabbccdd;
+		snapshot.energy = mnc::meter::EnergySnapshotMetadata{
+			.session_id = 0xfedcba9876543210ULL,
+			.reset_epoch = 7,
+			.last_sample_index = 0x0102030405060708ULL,
+			.accepted_samples = 1234,
+			.skipped_samples = 56,
+			.accepted_blocks = 78,
+			.skipped_blocks = 9,
+			.saturated = true,
+			.incomplete_input = true,
+			.discontinuity = true,
+		};
+		snapshot.demand = mnc::meter::DemandSnapshotMetadata{
+			.session_id = 0xfedcba9876543210ULL,
+			.peak_reset_epoch = 8,
+			.last_sample_index = 9000,
+			.interval_anchor_sample = 10000,
+			.source_interval_count = 3000,
+			.source_status = 0x55aa,
+			.window_seconds = 60,
+			.update_seconds = 3,
+			.profile_generation = 4,
+			.method = 1,
+			.import_peak_samples = {11, 12, 13, 14},
+			.export_peak_samples = {21, 22, 23, 24},
+			.time_aligned = true,
+			.contaminated = true,
+			.boundary_valid = true,
+		};
 		for (const auto &attribute : request.attributes) {
 			mnc::meter::MeterAttributeValue value;
 			value.attribute = attribute;
@@ -147,6 +177,25 @@ public:
 				break;
 			case mnc::meter::MeterUnit::MicroAmperes:
 				value.value = 5'000'000;
+				break;
+			case mnc::meter::MeterUnit::MicroWattHours:
+			case mnc::meter::MeterUnit::MicroVarHours:
+			case mnc::meter::MeterUnit::MicroVoltAmpereHours:
+				value.value = 0x0123456789abcdefLL;
+				break;
+			case mnc::meter::MeterUnit::MicroWatts:
+				value.value = attribute.id >=
+					mnc::meter::MeterAttributeId::CurrentActiveDemandA &&
+					attribute.id <= mnc::meter::MeterAttributeId::CurrentActiveDemandTotal
+					? -2 : 0x0123456789abcdefLL;
+				break;
+			case mnc::meter::MeterUnit::Picowatts:
+			case mnc::meter::MeterUnit::PicoVoltAmperes:
+			case mnc::meter::MeterUnit::PowerFactorMillionths:
+			case mnc::meter::MeterUnit::Picovars:
+			case mnc::meter::MeterUnit::Millidegrees:
+			case mnc::meter::MeterUnit::RatioMillionths:
+				value.value = 1;
 				break;
 			}
 			snapshot.values.push_back(value);
@@ -201,7 +250,7 @@ void metadata_and_boundaries()
 	const auto metadata = registers.read(
 		mnc::modbus::FunctionCode::read_holding_registers, 0, 3);
 	require(metadata.exception == mnc::modbus::ExceptionCode::none &&
-		metadata.values == (std::vector<std::uint16_t>{1, 0x1234, 8}),
+		metadata.values == (std::vector<std::uint16_t>{2, 0x1234, 48}),
 		"register-map metadata changed");
 	require(provider.reads == 0,
 		"metadata read unnecessarily queried meter data");
@@ -228,6 +277,56 @@ void metadata_and_boundaries()
 	require(registers.write_single(0, 1) ==
 		mnc::modbus::ExceptionCode::illegal_data_address,
 		"read-only initial map accepted a write");
+}
+
+void m17_energy_demand_map()
+{
+	SnapshotProvider provider;
+	msap1::modbus::Msap1RegisterBank registers(provider);
+	const auto energy = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x0100, 4);
+	require(energy.exception == mnc::modbus::ExceptionCode::none &&
+		energy.values == (std::vector<std::uint16_t>{
+			0x0123, 0x4567, 0x89ab, 0xcdef}),
+		"energy uint64 is not high-word-first at 0x0100");
+	const auto quadrant_iv = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x016c, 4);
+	require(quadrant_iv.exception == mnc::modbus::ExceptionCode::none,
+		"quadrant-IV total is missing from 0x016c..0x016f");
+	const auto energy_session = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x0170, 4);
+	require(energy_session.values == (std::vector<std::uint16_t>{
+		0xfedc, 0xba98, 0x7654, 0x3210}),
+		"energy session metadata word order changed");
+	const auto energy_quality = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x018a, 4);
+	require(energy_quality.values == (std::vector<std::uint16_t>{
+		0x0000, 0x0000, 0x0fff, 0xffff}),
+		"28-bit energy quality mask changed");
+
+	const auto demand = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x2000, 4);
+	require(demand.exception == mnc::modbus::ExceptionCode::none &&
+		demand.values == (std::vector<std::uint16_t>{
+			0xffff, 0xffff, 0xffff, 0xfffe}),
+		"signed demand int64 is not two's-complement high-word-first");
+	const auto export_peak = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x202c, 4);
+	require(export_peak.exception == mnc::modbus::ExceptionCode::none,
+		"export-demand total is missing from 0x202c..0x202f");
+	const auto demand_session = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x2030, 4);
+	require(demand_session.values == energy_session.values,
+		"demand session metadata word order changed");
+	const auto import_anchor = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x2050, 4);
+	require(import_anchor.values == (std::vector<std::uint16_t>{0, 0, 0, 11}),
+		"demand peak sample anchors are missing");
+	const auto profile = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x2044, 7);
+	require(profile.values ==
+		(std::vector<std::uint16_t>{1, 0, 60, 0, 3, 0, 4}),
+		"demand method/window/update/profile metadata changed address or order");
 }
 
 void projected_snapshot_requests()
@@ -370,5 +469,6 @@ int main()
 	metadata_and_boundaries();
 	partial_register_reads();
 	projected_snapshot_requests();
+	m17_energy_demand_map();
 	generated_map_lookup_and_export();
 }

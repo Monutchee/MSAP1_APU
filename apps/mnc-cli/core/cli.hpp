@@ -69,6 +69,9 @@ struct Options {
 	bool health_refresh = false;
 	bool health_full = false;
 	bool settings_confirm = false;
+	bool meter_reset_confirm = false;
+	std::optional<std::uint64_t> meter_reset_expected_epoch;
+	std::optional<std::string> meter_reset_idempotency_key;
 	bool socket_overridden = false;
 	bool timeout_overridden = false;
 	int timeout_ms = 3000;

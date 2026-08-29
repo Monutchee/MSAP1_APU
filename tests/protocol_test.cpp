@@ -196,6 +196,33 @@ void aggregation_health_round_trip()
 		"aggregation health payload changed during wire round trip");
 }
 
+void demand_configuration_round_trip()
+{
+	static_assert(sizeof(msap1_demand_config_payload) == 12,
+		"demand profile request must be three packed words");
+	static_assert(sizeof(msap1_demand_config_ack_payload) == 16,
+		"demand profile acknowledgement must be four packed words");
+	msap1_demand_config_ack_payload acknowledgement{
+		MSAP1_DEMAND_METHOD_SLIDING, 60u, 3u, 42u};
+	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_DEMAND_CONFIG,
+		91u, &acknowledgement, sizeof(acknowledgement));
+	const auto message = msap1::decode_message(wire.data(), wire.size());
+	const auto decoded = msap1::decode_demand_config_ack(message);
+	require(decoded.method == MSAP1_DEMAND_METHOD_SLIDING &&
+		decoded.window_seconds == 60u && decoded.update_seconds == 3u &&
+		decoded.profile_generation == 42u,
+		"demand profile acknowledgement changed during wire round trip");
+
+	acknowledgement.profile_generation = 0u;
+	const auto invalid_wire = msap1::encode_request(
+		MSAP1_RPU_MSG_DEMAND_CONFIG, 92u, &acknowledgement,
+		sizeof(acknowledgement));
+	const auto invalid = msap1::decode_message(
+		invalid_wire.data(), invalid_wire.size());
+	require_throws([&] { (void)msap1::decode_demand_config_ack(invalid); },
+		"zero demand profile generation was accepted");
+}
+
 void adc_diagnostic_round_trip()
 {
 	msap1_adc_diagnostic_payload diagnostic{};
@@ -340,8 +367,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 7u,
-		"the simulator event message belongs to wire version 7");
+			MSAP1_RPU_VERSION == 8u,
+		"the simulator event message belongs to wire version 8");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -854,6 +881,7 @@ int main()
 		meter_ack_round_trip();
 		adc_health_round_trip();
 		aggregation_health_round_trip();
+		demand_configuration_round_trip();
 		adc_diagnostic_round_trip();
 		meter_config_wire_layout();
 		simulator_event_wire_layout();

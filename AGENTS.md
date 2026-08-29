@@ -100,6 +100,21 @@
   persists only complete 42-record aggregate families in their three typed
   datasets and acknowledges a cursor only after the selected projection is
   durable.
+- M17 ENERGY-v1 is also family-atomic. Assemble exactly one summary and one
+  quadrant part with matching identity; never publish, acknowledge, or expose
+  a partial pair. `msap1-meter-stream` owns the SQLite WAL/FULL authoritative
+  lifetime ledger for all 28 counters and commits a complete family before
+  advancing latest state. R5C1 session counters are volatile inputs, not the
+  lifetime authority. Same-session rollback is rejected, duplicates are
+  idempotent, and a new session starts its delta baseline at zero. A stale or
+  rollback ledger conflict quarantines only that ENERGY family or DEMAND
+  record; it must never terminate acquisition or suppress unrelated meter
+  products, and a later fresh R5C1 session resumes automatically.
+- Energy and demand resets are Admin-only serialized ledger transactions with
+  an expected epoch and idempotency key. They require a durable source
+  checkpoint, preserve an audit record, and must not be offered through
+  Modbus. UTC ten-minute history stores exact signed values plus the relevant
+  reset epoch; clients must break graph lines when that epoch changes.
 - Product-neutral Modbus framing, request handling, CRC, and asynchronous
   TCP/RTU transports live under `common/mnc/modbus`. The source-controlled
   MSAP1 register contract and its `MeterSnapshotProvider` adapter live under
@@ -216,6 +231,20 @@
   10 s interval, which is not implemented, so the decoder keeps that
   reading's quality `unavailable` and the API publishes `informative` rather
   than a validity flag.
+- Record format `0x00030001` (ENERGY-v1) is two fixed 256-byte records with a
+  common family identity. Summary carries active import/export and apparent
+  energy; quadrants carries fundamental reactive energy for quadrants I--IV,
+  each for A/B/C/total. Record format `0x00040001` (DEMAND-v1) carries signed
+  current active demand, import/export session peaks, and the configured
+  method/window/update/profile generation. Default demand is a 60-second
+  sliding average refreshed by each nominal three-second aggregate; supported
+  windows are 1, 5, 10, 15, and 30 minutes. Fixed mode retains the aligned UTC
+  ten-minute block. R5C1 applies configuration through its direct RPMsg
+  endpoint and the APU retries the desired profile after endpoint recovery.
+  A profile change starts a new peak epoch because peaks from different window
+  semantics are not comparable. Preserve 64-bit values as exact integers
+  internally and decimal strings in REST, CLI JSON, MQTT, and browser-facing
+  models.
 
 ## Build and verification
 

@@ -125,6 +125,22 @@ reading_quality_name(mnc::meter::ReadingQuality quality)
 		value = static_cast<double>(reading.value) / 10000.0;
 		unit = "%";
 		break;
+	case mnc::meter::MeterUnit::MicroWattHours:
+		value = static_cast<double>(reading.value);
+		unit = "uWh";
+		break;
+	case mnc::meter::MeterUnit::MicroVarHours:
+		value = static_cast<double>(reading.value);
+		unit = "uvarh";
+		break;
+	case mnc::meter::MeterUnit::MicroVoltAmpereHours:
+		value = static_cast<double>(reading.value);
+		unit = "uVAh";
+		break;
+	case mnc::meter::MeterUnit::MicroWatts:
+		value = static_cast<double>(reading.value);
+		unit = "uW";
+		break;
 	}
 	return {std::string(descriptor.key), unit,
 		reading.quality == mnc::meter::ReadingQuality::Valid, value,

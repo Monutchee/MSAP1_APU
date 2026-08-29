@@ -2,6 +2,7 @@
 
 #include "mnc/MeterDataProvider/stream/meter_stream.hpp"
 #include "mnc/ipc/ipc.hpp"
+#include "msap1/meter/energy_ledger.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -17,10 +18,13 @@ inline constexpr std::string_view socket_path =
 /* Version 2 appended session_start_cursor and dropped_unacknowledged_records
  * to the get_stream_status reply. Version 3 assigns the record envelope's
  * reserved u16 to source_fragment for multi-record producer families.
- * Version 4 adds an atomic bounded publish_records request. The version is
+ * Version 4 adds an atomic bounded publish_records request. Version 5 adds
+ * authoritative energy/demand snapshots and audited reset transactions.
+ * Version 6 revises the pre-production DEMAND-v1 snapshot with method,
+ * window, update-cadence, and profile-generation metadata. The version is
  * not carried on the wire — all peers ship in one image and the decoder's
  * require_finished() turns any accidental mix into a loud error frame. */
-inline constexpr std::uint32_t protocol_version = 4;
+inline constexpr std::uint32_t protocol_version = 6;
 inline constexpr std::size_t maximum_publish_records = 256;
 
 /* A maximum ReadRecords reply can contain 4096 complete 256-byte PL records
@@ -43,6 +47,10 @@ enum class Command : std::uint32_t {
 	apply_storage_policy,
 	subscribe_stream_events,
 	publish_records,
+	get_energy_snapshot,
+	get_demand_snapshot,
+	reset_energy,
+	reset_demand_peaks,
 };
 
 enum class Status : std::uint32_t {
@@ -51,6 +59,8 @@ enum class Status : std::uint32_t {
 	storage_error,
 	permission_denied,
 	internal_error,
+	unavailable,
+	conflict,
 };
 
 /** Notifications delivered after SubscribeStreamEvents succeeds. */
@@ -69,10 +79,26 @@ enum class Event : std::uint32_t {
 [[nodiscard]] std::vector<mnc::meter_stream::MeterStreamRecord> decode_records(
 	mnc::ipc::ByteReader &reader);
 
+[[nodiscard]] std::vector<std::byte> encode_energy_values(
+	const EnergyValues &values);
+[[nodiscard]] EnergyValues decode_energy_values(mnc::ipc::ByteReader &reader);
+[[nodiscard]] std::vector<std::byte> encode_demand_values(
+	const DemandValues &values);
+[[nodiscard]] DemandValues decode_demand_values(mnc::ipc::ByteReader &reader);
+
+/** Optional product authority used by acquisition after its durability barrier. */
+class EnergyAuthority {
+public:
+	virtual ~EnergyAuthority() = default;
+	[[nodiscard]] virtual std::optional<EnergyValues> energy() const = 0;
+	[[nodiscard]] virtual std::optional<DemandValues> demand() const = 0;
+};
+
 /** Typed synchronous adapter used by acquisition and historian. */
 class MeterRecordStreamClient final
 	: public mnc::meter_stream::MeterRecordPublisher,
-	  public mnc::meter_stream::MeterStreamConsumer {
+	  public mnc::meter_stream::MeterStreamConsumer,
+	  public EnergyAuthority {
 public:
 	explicit MeterRecordStreamClient(
 		std::string path = std::string(socket_path));
@@ -88,6 +114,12 @@ public:
 	[[nodiscard]] mnc::meter_stream::StreamStatus status() const;
 	[[nodiscard]] mnc::meter_stream::DatabaseStoragePolicy policy() const;
 	void apply_policy(mnc::meter_stream::DatabaseStoragePolicy policy);
+	[[nodiscard]] std::optional<EnergyValues> energy() const override;
+	[[nodiscard]] std::optional<DemandValues> demand() const override;
+	[[nodiscard]] energy_ledger::ResetResult reset_energy(
+		const energy_ledger::ResetRequest &reset);
+	[[nodiscard]] energy_ledger::ResetResult reset_demand_peaks(
+		const energy_ledger::ResetRequest &reset);
 
 private:
 	[[nodiscard]] mnc::ipc::Frame request(Command command,

@@ -3,6 +3,7 @@
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "pipeline/record_interval_category.hpp"
 #include "pipeline/record_ingestor.hpp"
+#include "msap1/meter/energy_ledger.hpp"
 
 #include <algorithm>
 #include <array>
@@ -146,6 +147,44 @@ public:
 	}
 	std::size_t attempts_ = 0;
 	std::size_t fail_on_ = 0;
+};
+
+class ConflictingM17Publisher final
+	: public mnc::meter_stream::MeterRecordPublisher {
+public:
+	std::uint64_t publish(
+		const mnc::meter_stream::MeterStreamRecord &record) override
+	{
+		if (record.record_format == msap1::meter_demand_format &&
+		    demand_conflict_pending) {
+			demand_conflict_pending = false;
+			throw msap1::energy_ledger::Conflict(
+				"stale DEMAND family sequence");
+		}
+		records.push_back(record);
+		return records.size();
+	}
+
+	std::vector<std::uint64_t> publish_records(
+		std::span<const mnc::meter_stream::MeterStreamRecord> family) override
+	{
+		if (!family.empty() &&
+		    family.front().record_format == msap1::meter_energy_format &&
+		    energy_conflict_pending) {
+			energy_conflict_pending = false;
+			throw msap1::energy_ledger::Conflict(
+				"stale ENERGY family sequence");
+		}
+		std::vector<std::uint64_t> cursors;
+		cursors.reserve(family.size());
+		for (const auto &record : family)
+			cursors.push_back(publish(record));
+		return cursors;
+	}
+
+	std::vector<mnc::meter_stream::MeterStreamRecord> records;
+	bool energy_conflict_pending = true;
+	bool demand_conflict_pending = true;
 };
 
 void device_interfaces_are_substitutable()
@@ -363,6 +402,147 @@ msap1::MeterRecord basic_record(std::uint32_t sequence,
 	record.words[13] = 60u | (12u << 8) | (1u << 16) |
 		(utc_resynchronized ? (1u << 19) : 0u);
 	return record;
+}
+
+void write_record_u64(msap1::MeterRecord &record, std::size_t word,
+	std::uint64_t value)
+{
+	record.words[word] = static_cast<std::uint32_t>(value);
+	record.words[word + 1U] = static_cast<std::uint32_t>(value >> 32U);
+}
+
+msap1::MeterRecord energy_record(std::uint32_t sequence, std::uint8_t part,
+	std::uint32_t generation, std::uint64_t session_id)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_energy_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000U;
+	record.words[6] = 6400U;
+	record.words[7] = 0x7fU;
+	record.words[8] = 1U << 1U;
+	write_record_u64(record, 9U, 640000U);
+	record.words[13] = part | (2U << 2U) | (1U << 4U) | (0xfU << 8U);
+	write_record_u64(record, 14U, 646399U);
+	if (part == msap1::meter_energy_part_summary) {
+		for (const auto base : {msap1::meter_energy_summary_import_word,
+			msap1::meter_energy_summary_export_word,
+			msap1::meter_energy_summary_apparent_word})
+			for (std::size_t index = 0; index < 4U; ++index)
+				write_record_u64(record, base + index * 2U,
+					100U + base + index);
+	} else {
+		for (const auto base : msap1::meter_energy_quadrant_words)
+			for (std::size_t index = 0; index < 4U; ++index)
+				write_record_u64(record, base + index * 2U,
+					100U + base + index);
+	}
+	write_record_u64(record, msap1::meter_energy_session_word, session_id);
+	write_record_u64(record, msap1::meter_energy_accepted_samples_word,
+		6400U);
+	record.words[msap1::meter_energy_accepted_blocks_word] = 1U;
+	return record;
+}
+
+msap1::MeterRecord demand_record(std::uint32_t sequence,
+	std::uint32_t generation, std::uint64_t session_id)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_demand_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000U;
+	record.words[6] = 19'200'000U;
+	record.words[7] = 0x7fU;
+	record.words[8] = (1U << 1U) | (1U << 2U) | (1U << 4U);
+	write_record_u64(record, 9U, 1'000'000U);
+	record.words[13] = msap1::meter_demand_fixed_interval_seconds |
+		(0xfU << 16U) |
+		(static_cast<std::uint32_t>(
+			msap1::meter_demand_fixed_interval_seconds) << 22U);
+	write_record_u64(record, msap1::meter_demand_last_sample_word,
+		20'199'999U);
+	for (std::size_t index = 0; index < 4U; ++index) {
+		write_record_u64(record,
+			msap1::meter_demand_current_word + index * 2U,
+			1000U + index);
+		write_record_u64(record,
+			msap1::meter_demand_import_peak_word + index * 2U,
+			2000U + index);
+		write_record_u64(record,
+			msap1::meter_demand_export_peak_word + index * 2U,
+			3000U + index);
+		write_record_u64(record,
+			msap1::meter_demand_import_peak_anchor_word + index * 2U,
+			100U + index);
+		write_record_u64(record,
+			msap1::meter_demand_export_peak_anchor_word + index * 2U,
+			200U + index);
+	}
+	write_record_u64(record, msap1::meter_demand_session_word, session_id);
+	write_record_u64(record, msap1::meter_demand_interval_anchor_sample_word,
+		20'200'000U);
+	record.words[msap1::meter_demand_source_interval_count_word] = 1U;
+	record.words[msap1::meter_demand_source_status_word] = record.words[8];
+	record.words[msap1::meter_demand_profile_generation_word] = 1U;
+	return record;
+}
+
+void ingestor_quarantines_m17_ledger_conflicts()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	configuration.wire.rms_window_samples = 6400U;
+	const msap1::meter::MeasurementTimebase timebase;
+	ConflictingM17Publisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+	constexpr std::uint64_t repeated_boot_session =
+		0xd78c5e6a33d83a55ULL;
+	constexpr std::uint64_t fresh_boot_session = 0x123456789abcdef0ULL;
+	feed(energy_record(1U, msap1::meter_energy_part_summary,
+		configuration.wire.generation, repeated_boot_session));
+	feed(energy_record(1U, msap1::meter_energy_part_quadrants,
+		configuration.wire.generation, repeated_boot_session));
+	feed(energy_record(1U, msap1::meter_energy_part_summary,
+		configuration.wire.generation, fresh_boot_session));
+	feed(energy_record(1U, msap1::meter_energy_part_quadrants,
+		configuration.wire.generation, fresh_boot_session));
+	feed(basic_record(1U, 640000U, 6400U,
+		configuration.wire.generation));
+	feed(demand_record(1U, configuration.wire.generation,
+		repeated_boot_session));
+	feed(demand_record(1U, configuration.wire.generation,
+		fresh_boot_session));
+	feed(basic_record(2U, 646400U, 6400U,
+		configuration.wire.generation));
+
+	require(ingest.energy_families() == 1U &&
+		ingest.incomplete_energy_families() == 1U,
+		"ENERGY did not quarantine the collision then accept a fresh session");
+	require(ingest.invalid_records() == 2U &&
+		ingest.lifetime_invalid_records() == 2U,
+		"M17 ledger conflicts were not retained as diagnostics");
+	require(ingest.latest_record().has_value() &&
+		ingest.latest_record()->sequence() == 2U &&
+		publisher.records.size() == 5U,
+		"an M17 ledger conflict stopped ordinary meter acquisition");
 }
 
 msap1::MeterRecord harmonic_record(std::uint32_t sequence,
@@ -1075,6 +1255,7 @@ int main()
 	rejection_interval_categories_cover_meter_tiers();
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
+	ingestor_quarantines_m17_ledger_conflicts();
 	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();

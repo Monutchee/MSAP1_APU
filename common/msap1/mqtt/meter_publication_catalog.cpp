@@ -19,6 +19,10 @@ std::string unit_id(mnc::meter::MeterUnit unit)
 	case mnc::meter::MeterUnit::Picovars: return "var";
 	case mnc::meter::MeterUnit::Millidegrees: return "deg";
 	case mnc::meter::MeterUnit::RatioMillionths: return "%";
+	case mnc::meter::MeterUnit::MicroWattHours: return "uWh";
+	case mnc::meter::MeterUnit::MicroVarHours: return "uvarh";
+	case mnc::meter::MeterUnit::MicroVoltAmpereHours: return "uVAh";
+	case mnc::meter::MeterUnit::MicroWatts: return "uW";
 	}
 	return "unknown";
 }
@@ -51,6 +55,7 @@ mnc::meter::MeasurementPeriod MeterPublicationCatalog::period(std::string_view i
 	if (id == "hour2") return Period::Hour2;
 	if (id == "min10_live") return Period::Min10Live;
 	if (id == "hour2_live") return Period::Hour2Live;
+	if (id == "demand") return Period::Demand;
 	throw std::invalid_argument("unknown meter publication period");
 }
 
@@ -65,6 +70,7 @@ std::string MeterPublicationCatalog::period_id(
 	case mnc::meter::MeasurementPeriod::Hour2: return "hour2";
 	case mnc::meter::MeasurementPeriod::Min10Live: return "min10_live";
 	case mnc::meter::MeasurementPeriod::Hour2Live: return "hour2_live";
+	case mnc::meter::MeasurementPeriod::Demand: return "demand";
 	}
 	return "unknown";
 }

@@ -181,6 +181,9 @@ void encoding_test()
 	require(encode_i32(-2) ==
 		(std::vector<std::uint16_t>{0xffff, 0xfffe}),
 		"int32 high-word-first encoding changed");
+	require(encode_i64(-2) ==
+		(std::vector<std::uint16_t>{0xffff, 0xffff, 0xffff, 0xfffe}),
+		"int64 high-word-first encoding changed");
 	require(encode_float(1.0f) ==
 		(std::vector<std::uint16_t>{0x3f80, 0x0000}),
 		"float32 high-word-first encoding changed");

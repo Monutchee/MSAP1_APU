@@ -8,6 +8,7 @@
 #include "msap1/acquisition/dma/meter_record_source.hpp"
 #include "pipeline/record_interval_category.hpp"
 #include "msap1/meter/measurement_timebase.hpp"
+#include "msap1/meter/energy_demand.hpp"
 #include "msap1/meter/harmonic_spectrum.hpp"
 #include "msap1/meter/meter_config.hpp"
 #include "msap1/meter/meter_data.hpp"
@@ -210,6 +211,14 @@ public:
 	{
 		return incomplete_harmonic_families_;
 	}
+	[[nodiscard]] std::uint64_t energy_families() const
+	{
+		return energy_families_;
+	}
+	[[nodiscard]] std::uint64_t incomplete_energy_families() const
+	{
+		return incomplete_energy_families_;
+	}
 	[[nodiscard]] const std::optional<msap1::HarmonicSpectrumSnapshot> &
 	latest_harmonic_spectrum() const
 	{
@@ -329,6 +338,20 @@ private:
 		incomplete_harmonic_families_by_period_{};
 	std::array<std::optional<msap1::HarmonicSpectrumSnapshot>,
 		harmonic_period_count> latest_harmonic_spectra_{};
+	/* M17 ENERGY is an atomic two-record family. The typed assembler and raw
+	 * publication slots advance together; only a validated pair reaches the
+	 * durable stream or Basic latest view. */
+	struct PendingEnergyFamily {
+		msap1::EnergyFamilyIdentity identity{};
+		std::array<std::optional<mnc::meter_stream::MeterStreamRecord>, 2>
+			records{};
+		std::size_t count = 0;
+	};
+	msap1::EnergyFamilyAssembler energy_assembler_{};
+	std::optional<PendingEnergyFamily> pending_energy_family_{};
+	std::uint64_t energy_records_ = 0;
+	std::uint64_t energy_families_ = 0;
+	std::uint64_t incomplete_energy_families_ = 0;
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
 	std::uint64_t two_hour_sequence_gaps_ = 0;

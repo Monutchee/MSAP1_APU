@@ -1,4 +1,5 @@
 #include "msap1/meter/meter_data.hpp"
+#include "msap1/meter/energy_demand.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -14,7 +15,7 @@ namespace {
 std::size_t period_index(MeasurementPeriod period)
 {
 	const auto index = static_cast<std::size_t>(period);
-	if (index >= 6)
+	if (index >= 7)
 		throw std::invalid_argument("invalid measurement period");
 	return index;
 }
@@ -1476,6 +1477,10 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
+	result.register_decoder(meter_demand_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_demand_meter_record(record, received_at);
+		});
 	result.register_decoder(meter_power_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_power_meter_record(record, received_at);
