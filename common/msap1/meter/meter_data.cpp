@@ -1985,4 +1985,133 @@ FlickerSnapshot decode_flicker_record(const MeterRecord &record)
 	return result;
 }
 
+MainsSignalSnapshot decode_mains_signal_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_mains_signal_format)
+		throw std::invalid_argument("invalid MAINS-SIGNAL-v1 record header");
+	const auto rate = record.sample_rate_hz();
+	const bool supported_rate = rate == 2000u || rate == 4000u ||
+		rate == 8000u || rate == 16000u || rate == 32000u ||
+		rate == 64000u || rate == 128000u;
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    !supported_rate || record.emit_drops() != 0u ||
+	    record.result_drops() != 0u)
+		throw std::invalid_argument(
+			"invalid MAINS-SIGNAL-v1 common provenance");
+	if ((record.status() & ~0x5u) != 0u)
+		throw std::invalid_argument("invalid MAINS-SIGNAL-v1 status");
+
+	const auto identity = record.word(13u);
+	const auto valid_mask = static_cast<std::uint8_t>(identity & 0x7u);
+	const auto detected_mask =
+		static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	if ((identity & ~0x00000707u) != 0u ||
+	    (detected_mask & ~valid_mask) != 0u ||
+	    record.word(7u) != static_cast<std::uint32_t>(valid_mask) << 4u)
+		throw std::invalid_argument(
+			"invalid MAINS-SIGNAL-v1 phase identity");
+
+	MainsSignalSnapshot result{};
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation =
+		record.word(meter_mains_profile_generation_word);
+	result.sample_rate_hz = rate;
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_mains_last_sample_word);
+	result.sample_count = record.block_sample_count();
+	result.phase_valid_mask = valid_mask;
+	result.detected_phase_mask = detected_mask;
+	result.configured_millihz =
+		record.word(meter_mains_configured_millihz_word);
+	result.measured_millihz =
+		record.word(meter_mains_measured_millihz_word);
+	result.bandwidth_millihz =
+		record.word(meter_mains_bandwidth_millihz_word);
+	result.observation_ms = record.word(meter_mains_observation_ms_word);
+	result.source_status = record.word(meter_mains_source_status_word);
+	result.threshold_e4 = record.word(meter_mains_threshold_e4_word);
+	result.reference_microvolts =
+		record.word(meter_mains_reference_microvolts_word);
+	result.status = record.status();
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		result.magnitude_microvolts[phase] =
+			record.word(meter_mains_magnitude_word + phase);
+		result.background_microvolts[phase] =
+			record.word(meter_mains_background_word + phase);
+	}
+
+	const auto upper_frequency =
+		static_cast<std::uint64_t>(result.configured_millihz) +
+		result.bandwidth_millihz;
+	const auto nyquist_millihz = static_cast<std::uint64_t>(rate) * 500u;
+	const auto expected_samples = rate / 5u;
+	if (result.profile_generation != result.configuration_generation ||
+	    result.configured_millihz == 0u ||
+	    result.bandwidth_millihz < 4u ||
+	    result.bandwidth_millihz >= result.configured_millihz ||
+	    upper_frequency >= nyquist_millihz ||
+	    upper_frequency >= 12500000u || result.observation_ms != 200u ||
+	    result.threshold_e4 > 0xffffu || result.reference_microvolts == 0u ||
+	    result.sample_count != expected_samples ||
+	    result.last_sample < result.first_sample ||
+	    result.last_sample - result.first_sample + 1u != expected_samples ||
+	    (result.source_status & ~0x3fu) != 0u ||
+	    (result.source_status & 1u) == 0u)
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 provenance is inconsistent");
+
+	const bool source_arithmetic =
+		(result.source_status & (1u << 4u)) != 0u;
+	const bool public_arithmetic = (result.status & 1u) != 0u;
+	if (source_arithmetic != public_arithmetic ||
+	    ((result.source_status & (1u << 3u)) != 0u &&
+	     (result.status & (1u << 2u)) == 0u))
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 status provenance is inconsistent");
+
+	const auto threshold_microvolts =
+		(static_cast<std::uint64_t>(result.reference_microvolts) *
+			 result.threshold_e4 + 9999u) /
+		10000u;
+	std::uint8_t expected_detected = 0u;
+	bool background_dominant = false;
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		if ((valid_mask & (1u << phase)) == 0u)
+			continue;
+		if (result.magnitude_microvolts[phase] >= threshold_microvolts)
+			expected_detected |= static_cast<std::uint8_t>(1u << phase);
+		if (result.background_microvolts[phase] >
+		    result.magnitude_microvolts[phase])
+			background_dominant = true;
+	}
+	if (detected_mask != expected_detected ||
+	    background_dominant !=
+		((result.source_status & (1u << 5u)) != 0u))
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 detection result is inconsistent");
+
+	if (detected_mask == 0u) {
+		if (result.measured_millihz != result.configured_millihz)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 idle frequency is inconsistent");
+	} else {
+		const auto half_bandwidth = result.bandwidth_millihz / 2u;
+		const auto lower = result.configured_millihz - half_bandwidth;
+		const auto upper = static_cast<std::uint64_t>(
+			result.configured_millihz) + half_bandwidth;
+		if (result.measured_millihz < lower ||
+		    result.measured_millihz > upper)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 measured frequency is out of band");
+	}
+
+	for (std::size_t word = 30u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 reserved word is nonzero");
+	return result;
+}
+
 } // namespace msap1

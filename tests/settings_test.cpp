@@ -109,9 +109,9 @@ void test_demand_profile_validation()
 	}
 }
 
-void test_m18_settings_and_wire_snapshot()
+void test_power_quality_settings_and_wire_snapshot()
 {
-	TestTree tree("m18-contract");
+	TestTree tree("power-quality-contract");
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
 	auto settings = handler.active().settings;
@@ -151,6 +151,29 @@ void test_m18_settings_and_wire_snapshot()
 		transient_rejected = true;
 	}
 	assert(transient_rejected);
+
+	settings = saved.settings;
+	settings.metering.mains_signalling.carrier_frequency_hz = 12490.0;
+	settings.metering.mains_signalling.bandwidth_hz = 20.0;
+	bool frontend_band_rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		frontend_band_rejected = true;
+	}
+	assert(frontend_band_rejected);
+
+	settings = saved.settings;
+	settings.metering.sample_rate_hz = 2000u;
+	settings.metering.mains_signalling.carrier_frequency_hz = 990.0;
+	settings.metering.mains_signalling.bandwidth_hz = 20.0;
+	bool nyquist_band_rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		nyquist_band_rejected = true;
+	}
+	assert(nyquist_band_rejected);
 }
 
 void test_nominal_frequency_validation()
@@ -430,7 +453,7 @@ int main()
 {
 	test_first_boot_and_direct_save();
 	test_demand_profile_validation();
-	test_m18_settings_and_wire_snapshot();
+	test_power_quality_settings_and_wire_snapshot();
 	test_nominal_frequency_validation();
 	test_system_nominal_voltage_validation();
 	test_measurement_topology_validation();

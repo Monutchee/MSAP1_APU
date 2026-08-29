@@ -1,7 +1,7 @@
 #pragma once
 
 #include "msap1/meter/meter_config.hpp"
-#include "msap1/settings/definition/m18_settings.hpp"
+#include "msap1/settings/definition/power_quality_settings.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -115,6 +115,12 @@ struct MeteringSettings {
 		events.validate();
 		flicker.validate();
 		mains_signalling.validate(sample_rate_hz);
+		/* A missing Udin leaves flicker configured but disarmed, matching the
+		 * HLS missing-reference behavior and the factory migration. A requested
+		 * mains carrier must instead have a threshold reference up front. */
+		if (mains_signalling.enabled && power_quality.reference_volts <= 0.0)
+			throw std::runtime_error(
+				"mains-signalling requires a positive voltage reference");
 		demand.validate();
 	}
 };

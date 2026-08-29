@@ -443,6 +443,14 @@ if(BUILD_TESTING)
 		-Wall -Wextra -Wpedantic)
 	add_test(NAME flicker_decode_test COMMAND flicker_decode_test)
 
+	# Final MAINS-SIGNAL-v1 public record decode and provenance guards.
+	add_executable(mains_signal_decode_test
+		${PROJECT_SOURCE_DIR}/tests/mains_signal_decode_test.cpp)
+	target_link_libraries(mains_signal_decode_test PRIVATE msap1::meter)
+	target_compile_options(mains_signal_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME mains_signal_decode_test COMMAND mains_signal_decode_test)
+
 	# M18 durable lifecycle catalogue, replay idempotence, and waveform links.
 	add_executable(pq_event_history_test
 		${PROJECT_SOURCE_DIR}/tests/pq_event_history_test.cpp)

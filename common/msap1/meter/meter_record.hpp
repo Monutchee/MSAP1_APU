@@ -222,6 +222,8 @@ inline constexpr std::size_t meter_mains_bandwidth_millihz_word = 24u;
 inline constexpr std::size_t meter_mains_observation_ms_word = 25u;
 inline constexpr std::size_t meter_mains_profile_generation_word = 26u;
 inline constexpr std::size_t meter_mains_source_status_word = 27u;
+inline constexpr std::size_t meter_mains_threshold_e4_word = 28u;
+inline constexpr std::size_t meter_mains_reference_microvolts_word = 29u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 

@@ -36,6 +36,8 @@ void rejection_interval_categories_cover_meter_tiers()
 		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
 		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
 		Case{msap1::meter_flicker_format, 0, "flicker", "flicker interval"},
+		Case{msap1::meter_mains_signal_format, 0, "mains_signal",
+			"mains-signalling observation"},
 		Case{msap1::meter_aggregate_format, 0, "cycles_150_180",
 			"150/180-cycle"},
 		Case{msap1::meter_ten_minute_open_format, 0, "minutes_10_live",
@@ -568,6 +570,83 @@ msap1::MeterRecord flicker_record(std::uint32_t sequence,
 	record.words[31] = 0x3u;
 	write_record_u64(record, 32u, first);
 	return record;
+}
+
+msap1::MeterRecord mains_signal_record(std::uint32_t sequence,
+	std::uint32_t generation, std::uint64_t first)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_mains_signal_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000u;
+	record.words[6] = 6400u;
+	record.words[7] = 0x70u;
+	record.words[8] = 0x4u;
+	write_record_u64(record, 9u, first);
+	record.words[13] = 0x507u;
+	write_record_u64(record, 14u, first + 6399u);
+	record.words[16] = 500000u;
+	record.words[17] = 505000u;
+	record.words[18] = 1200000u;
+	record.words[19] = 100000u;
+	record.words[20] = 700000u;
+	record.words[21] = 50000u;
+	record.words[22] = 50000u;
+	record.words[23] = 50000u;
+	record.words[24] = 20000u;
+	record.words[25] = 200u;
+	record.words[26] = generation;
+	record.words[27] = 0x3u;
+	record.words[28] = 50u;
+	record.words[29] = 120000000u;
+	return record;
+}
+
+void ingestor_isolates_and_publishes_mains_signal_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(mains_signal_record(1u, configuration.wire.generation, 1000u));
+	auto malformed = mains_signal_record(
+		2u, configuration.wire.generation, 7400u);
+	malformed.words[63] = 1u;
+	feed(malformed);
+	feed(mains_signal_record(3u, configuration.wire.generation, 13800u));
+	feed(basic_record(1u, 20'000'000u, 100u,
+		configuration.wire.generation));
+	feed(basic_record(2u, 20'000'100u, 100u,
+		configuration.wire.generation));
+
+	require(ingest.mains_signal_records() == 2u &&
+		ingest.mains_signal_sequence_gaps() == 1u &&
+		ingest.invalid_records() == 1u,
+		"mains-signalling continuity did not quarantine one malformed record");
+	require(ingest.sequence_gaps() == 0u &&
+		ingest.latest_record()->sequence() == 2u,
+		"a malformed mains-signalling record poisoned BASIC continuity");
+	require(ingest.latest_mains_signal()->sequence == 3u &&
+		publisher.records.size() == 4u &&
+		publisher.records.front().record_kind ==
+			static_cast<std::uint16_t>(msap1::RecordKind::mains_signal),
+		"validated mains-signalling records did not cross the durability barrier");
 }
 
 void ingestor_isolates_and_publishes_flicker_records()
@@ -1425,6 +1504,7 @@ int main()
 	ingestor_quarantines_m17_ledger_conflicts();
 	ingestor_isolates_and_publishes_pq_lifecycle_records();
 	ingestor_isolates_and_publishes_flicker_records();
+	ingestor_isolates_and_publishes_mains_signal_records();
 	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();

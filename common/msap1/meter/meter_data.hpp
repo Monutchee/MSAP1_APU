@@ -629,6 +629,45 @@ struct FlickerSnapshot {
 [[nodiscard]] FlickerSnapshot decode_flicker_record(
 	const MeterRecord &record);
 
+/** Exact decoded view of one final R5C1 MAINS-SIGNAL-v1 record. */
+struct MainsSignalSnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint8_t phase_valid_mask = 0;
+	std::uint8_t detected_phase_mask = 0;
+	std::uint32_t configured_millihz = 0;
+	std::uint32_t measured_millihz = 0;
+	std::array<std::uint32_t, 3> magnitude_microvolts{};
+	std::array<std::uint32_t, 3> background_microvolts{};
+	std::uint32_t bandwidth_millihz = 0;
+	std::uint32_t observation_ms = 0;
+	std::uint32_t threshold_e4 = 0;
+	std::uint32_t reference_microvolts = 0;
+	std::uint32_t status = 0;
+	std::uint32_t source_status = 0;
+
+	[[nodiscard]] bool any_detected() const noexcept
+	{
+		return detected_phase_mask != 0;
+	}
+	[[nodiscard]] bool first_after_gap() const noexcept
+	{
+		return (status & (1u << 2u)) != 0u;
+	}
+	[[nodiscard]] bool arithmetic_error() const noexcept
+	{
+		return (status & 1u) != 0u;
+	}
+};
+
+[[nodiscard]] MainsSignalSnapshot decode_mains_signal_record(
+	const MeterRecord &record);
+
 class MeterDecoderRegistry {
 public:
 	using Decoder = std::function<MeterUpdate(const MeterRecord &, SystemTime)>;

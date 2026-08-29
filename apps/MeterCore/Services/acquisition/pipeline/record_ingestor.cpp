@@ -137,6 +137,8 @@ void MeterRecordIngestor::begin_epoch()
 	last_flicker_sequence_.reset();
 	for (auto &latest : latest_flicker_)
 		latest.reset();
+	last_mains_signal_sequence_.reset();
+	latest_mains_signal_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -148,6 +150,7 @@ void MeterRecordIngestor::begin_epoch()
 	two_hour_sequence_gaps_ = 0;
 	pq_lifecycle_sequence_gaps_ = 0;
 	flicker_sequence_gaps_ = 0;
+	mains_signal_sequence_gaps_ = 0;
 	for (auto &assembler : harmonic_assemblers_)
 		assembler.reset();
 	for (auto &pending : pending_harmonic_families_)
@@ -175,6 +178,8 @@ void MeterRecordIngestor::clear_latest()
 	last_flicker_sequence_.reset();
 	for (auto &latest : latest_flicker_)
 		latest.reset();
+	last_mains_signal_sequence_.reset();
+	latest_mains_signal_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -749,6 +754,73 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		last_flicker_sequence_ = flicker.sequence;
 		latest_flicker_[static_cast<std::size_t>(flicker.kind)] = flicker;
 		++flicker_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
+		return;
+	}
+
+	/* MAINS-SIGNAL-v1 is one strict 200 ms observation per record. Its
+	 * producer sequence is independent of every other family; malformed or
+	 * stale observations are quarantined before the durable/latest boundary. */
+	if (record.record_format() == msap1::meter_mains_signal_format) {
+		msap1::MainsSignalSnapshot mains{};
+		try {
+			mains = msap1::decode_mains_signal_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("MAINS-SIGNAL-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_mains_signal_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				mains.sequence - (*last_mains_signal_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				mains_signal_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = mains.sequence;
+		timing.configuration_generation = mains.configuration_generation;
+		timing.first_sample_index = mains.first_sample;
+		timing.sample_count = mains.sample_count;
+		timing.sample_rate_hz = mains.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::mains_signal);
+		stream_record.measurement_period = static_cast<std::uint8_t>(
+			msap1::MeasurementPeriod::Basic);
+		stream_record.source_sequence = mains.sequence;
+		stream_record.configuration_generation =
+			mains.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = mains.first_sample;
+		stream_record.timing.sample_count = mains.sample_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+
+		last_mains_signal_sequence_ = mains.sequence;
+		latest_mains_signal_ = std::move(mains);
+		++mains_signal_records_;
 		++meter_records_;
 		last_record_time_ = Clock::now();
 		return;

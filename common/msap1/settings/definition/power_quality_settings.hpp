@@ -53,7 +53,8 @@ struct EventProfileSettings {
 };
 
 /**
- * M18 event policy. The first four profiles are IEC voltage phenomena; the
+ * Power-quality event policy. The first four profiles are IEC voltage
+ * phenomena; the
  * current and unbalance profiles are explicitly product alarms. Transient
  * classification stays unavailable until the analogue path is characterized.
  */
@@ -128,16 +129,17 @@ struct MainsSignallingSettings {
 		if (!std::isfinite(carrier_frequency_hz) ||
 		    !std::isfinite(bandwidth_hz) ||
 		    !std::isfinite(threshold_percent) || carrier_frequency_hz <= 0.0 ||
-		    carrier_frequency_hz >= 12500.0 || bandwidth_hz <= 0.0 ||
+		    carrier_frequency_hz >= 12500.0 || bandwidth_hz < 0.004 ||
 		    bandwidth_hz >= carrier_frequency_hz || observation_ms != 200u ||
 		    phase_mask == 0u || (phase_mask & ~0x7u) != 0u ||
-		    threshold_percent < 0.0 || threshold_percent > 655.35)
+		    threshold_percent < 0.0 || threshold_percent > 655.35 ||
+		    carrier_frequency_hz + bandwidth_hz >= 12500.0)
 			throw std::runtime_error(
 				"mains-signalling configuration is out of range");
-		if (enabled && carrier_frequency_hz >=
+		if (enabled && carrier_frequency_hz + bandwidth_hz >=
 			static_cast<double>(sample_rate_hz) / 2.0)
 			throw std::runtime_error(
-				"mains-signalling carrier exceeds the selected sample-rate Nyquist limit");
+				"mains-signalling band exceeds the selected sample-rate Nyquist limit");
 	}
 };
 
