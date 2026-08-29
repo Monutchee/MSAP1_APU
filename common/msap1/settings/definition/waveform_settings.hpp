@@ -27,6 +27,11 @@ struct WaveformSettings {
 	std::string site_name;
 	std::string circuit_id;
 	std::string circuit_name;
+	/* Provisioned identity and calibration authority. Blank/unknown values are
+	 * preserved as missing conversion-readiness fields; they are never guessed. */
+	std::string device_serial;
+	std::string calibration_id;
+	std::string calibration_status = "unknown";
 
 	static bool valid_decimation(std::uint32_t decimation)
 	{
@@ -45,10 +50,20 @@ struct WaveformSettings {
 			throw std::runtime_error(
 				"waveform decimation must be 1, 2, 4, 8, 16, or 32");
 		for (const auto *value : {&station_id, &station_name, &site_id,
-			&site_name, &circuit_id, &circuit_name})
+			&site_name, &circuit_id, &circuit_name, &device_serial,
+			&calibration_id})
 			if (value->size() > 128u)
 				throw std::runtime_error(
 					"waveform identity fields must not exceed 128 bytes");
+		if (calibration_status != "unknown" &&
+		    calibration_status != "valid" &&
+		    calibration_status != "expired" &&
+		    calibration_status != "invalid")
+			throw std::runtime_error(
+				"waveform calibration status must be unknown, valid, expired, or invalid");
+		if (calibration_status != "unknown" && calibration_id.empty())
+			throw std::runtime_error(
+				"a known waveform calibration status requires a calibration ID");
 	}
 };
 

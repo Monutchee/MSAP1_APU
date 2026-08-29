@@ -12,8 +12,8 @@ waveform capture files. It is intended for:
 - AI-assisted diagnostic tools.
 
 The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
-The production writer still emits version 3. Its authoritative implementation
-and public data definitions are:
+The production writer emits version 4. Its authoritative implementation and
+public data definitions are:
 
 ```text
 common/msap1/waveform/waveform_capture.cpp
@@ -23,13 +23,12 @@ common/msap1/waveform/waveform_capture.hpp
 Consumers in other repositories should link to this document instead of
 maintaining a second copy of the binary definition.
 
-The version 4 section-directory contract and implemented defensive read-only
-reader are specified separately in
-[`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Version 4 is not yet the
-production recorder output; that switch waits for the M18 capture-time settings
-and event lifecycle authorities. Future COMTRADE and PQDIF programs are
-converters from MNCWF v4, not alternate on-device recorders. Their source-field
-matrix is in
+The version 4 section-directory contract, encoder, defensive reader, and
+capture-time metadata rules are specified in
+[`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Versions 1 through 3
+remain accepted for existing persisted history. Future COMTRADE and PQDIF
+programs are converters from MNCWF v4, not alternate on-device recorders.
+Their source-field matrix is in
 [`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
 
 Completed captures are stored under:
@@ -38,7 +37,7 @@ Completed captures are stored under:
 /data/mnc/waveform/
 ```
 
-The current version 3 writer uses this UTC filename convention:
+The production writer uses this UTC filename convention:
 
 ```text
 waveform-<session-id>-YYYY-MM-DD_HH-MM-SS-mmm.mncwf
@@ -63,7 +62,7 @@ Two related formats exist, but they serve different purposes:
 | Format | Scope | Header | Channels | Purpose |
 |---|---|---:|---:|---|
 | `WFM1` | PL-to-Linux DMA transport | 64 bytes | 8 | Fixed 32,832-byte blocks used by the kernel driver and acquisition daemon |
-| `.mncwf` | Persistent capture file | 256 bytes in v2/v3 | 7 | Variable-length, self-describing product waveform archive |
+| `.mncwf` | Persistent capture file | 64-byte header plus section directory in v4 | 7 | Variable-length, self-describing product waveform archive |
 
 Each `WFM1` block contains 1024 frames of eight signed 32-bit channel words.
 The daemon uses these blocks to maintain its rolling history. When a completed

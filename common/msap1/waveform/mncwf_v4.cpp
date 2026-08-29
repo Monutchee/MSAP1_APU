@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -9,6 +11,9 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+
+#include <openssl/sha.h>
+#include <sys/random.h>
 
 namespace msap1 {
 namespace {
@@ -354,6 +359,463 @@ std::uint32_t mncwf_crc32c(std::span<const std::byte> bytes) noexcept
 			crc = (crc >> 1u) ^ ((crc & 1u) != 0u ? polynomial : 0u);
 	}
 	return crc ^ 0xffffffffu;
+}
+
+MncwfSha256 mncwf_sha256(std::span<const std::byte> bytes)
+{
+	MncwfSha256 digest{};
+	if (SHA256(reinterpret_cast<const unsigned char *>(bytes.data()),
+		bytes.size(), reinterpret_cast<unsigned char *>(digest.data())) ==
+	    nullptr)
+		throw std::runtime_error("MNCWF v4: SHA-256 failed");
+	return digest;
+}
+
+MncwfUuid mncwf_random_uuid()
+{
+	MncwfUuid uuid{};
+	std::size_t completed = 0;
+	while (completed < uuid.size()) {
+		const auto count = ::getrandom(uuid.data() + completed,
+			uuid.size() - completed, 0);
+		if (count < 0) {
+			if (errno == EINTR)
+				continue;
+			throw std::runtime_error(std::string("MNCWF v4: kernel UUID RNG: ") +
+				std::strerror(errno));
+		}
+		if (count == 0)
+			throw std::runtime_error("MNCWF v4: kernel UUID RNG returned EOF");
+		completed += static_cast<std::size_t>(count);
+	}
+	/* RFC 4122 variant, random/version-4 layout. */
+	uuid[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(uuid[6]) & 0x0fu) | 0x40u);
+	uuid[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(uuid[8]) & 0x3fu) | 0x80u);
+	return uuid;
+}
+
+namespace {
+
+using EncodedBytes = std::vector<std::byte>;
+
+void ensure_write(const EncodedBytes &bytes, std::size_t offset,
+	std::size_t width)
+{
+	if (offset > bytes.size() || width > bytes.size() - offset)
+		reject("encoder field exceeds its record");
+}
+
+void put_u16(EncodedBytes &bytes, std::size_t offset, std::uint16_t value)
+{
+	ensure_write(bytes, offset, 2u);
+	for (unsigned index = 0; index < 2u; ++index)
+		bytes[offset + index] = static_cast<std::byte>(
+			(value >> (index * 8u)) & 0xffu);
+}
+
+void put_s16(EncodedBytes &bytes, std::size_t offset, std::int16_t value)
+{
+	put_u16(bytes, offset, std::bit_cast<std::uint16_t>(value));
+}
+
+void put_u32(EncodedBytes &bytes, std::size_t offset, std::uint32_t value)
+{
+	ensure_write(bytes, offset, 4u);
+	for (unsigned index = 0; index < 4u; ++index)
+		bytes[offset + index] = static_cast<std::byte>(
+			(value >> (index * 8u)) & 0xffu);
+}
+
+void put_s32(EncodedBytes &bytes, std::size_t offset, std::int32_t value)
+{
+	put_u32(bytes, offset, std::bit_cast<std::uint32_t>(value));
+}
+
+void put_u64(EncodedBytes &bytes, std::size_t offset, std::uint64_t value)
+{
+	ensure_write(bytes, offset, 8u);
+	for (unsigned index = 0; index < 8u; ++index)
+		bytes[offset + index] = static_cast<std::byte>(
+			(value >> (index * 8u)) & 0xffu);
+}
+
+void put_s64(EncodedBytes &bytes, std::size_t offset, std::int64_t value)
+{
+	put_u64(bytes, offset, std::bit_cast<std::uint64_t>(value));
+}
+
+template<std::size_t Size>
+void put_array(EncodedBytes &bytes, std::size_t offset,
+	const std::array<std::byte, Size> &value)
+{
+	ensure_write(bytes, offset, Size);
+	std::copy(value.begin(), value.end(), bytes.begin() +
+		static_cast<std::ptrdiff_t>(offset));
+}
+
+std::pair<std::uint32_t, std::uint32_t> append_string(
+	EncodedBytes &blob, std::string_view value)
+{
+	if (value.empty())
+		return {0u, 0u};
+	if (value.size() > mncwf_v4_max_string_bytes ||
+	    blob.size() > std::numeric_limits<std::uint32_t>::max() - value.size())
+		reject("encoder string blob exceeds its bound");
+	const auto offset = static_cast<std::uint32_t>(blob.size());
+	const auto raw = std::as_bytes(std::span{value.data(), value.size()});
+	blob.insert(blob.end(), raw.begin(), raw.end());
+	return {offset, static_cast<std::uint32_t>(value.size())};
+}
+
+void put_string_ref(EncodedBytes &record, std::size_t offset,
+	std::pair<std::uint32_t, std::uint32_t> reference)
+{
+	put_u32(record, offset, reference.first);
+	put_u32(record, offset + 4u, reference.second);
+}
+
+struct EncodedSection {
+	MncwfV4SectionType type{};
+	std::uint64_t item_count = 0;
+	std::uint32_t item_bytes = 0;
+	EncodedBytes payload;
+};
+
+EncodedSection enveloped_section(MncwfV4SectionType type,
+	std::uint64_t item_count, std::uint32_t item_bytes,
+	EncodedBytes records, EncodedBytes blob = {})
+{
+	const auto expected_records = checked_multiply(item_count, item_bytes,
+		"encoded section records");
+	if (records.size() != expected_records)
+		reject("encoder section record geometry is inconsistent");
+	const auto records_end = checked_add(mncwf_v4_section_header_bytes,
+		records.size(), "encoded section records");
+	const auto blob_offset = blob.empty() ? 0u : align_eight(records_end);
+	const auto total = blob.empty() ? records_end :
+		checked_add(blob_offset, blob.size(), "encoded section blob");
+	if (total > mncwf_v4_max_file_bytes)
+		reject("encoded section exceeds the file bound");
+
+	EncodedSection section{type, item_count, item_bytes,
+		EncodedBytes(narrow_size(total, "encoded section"))};
+	put_u32(section.payload, 0, static_cast<std::uint32_t>(type));
+	put_u16(section.payload, 4, 1u);
+	put_u16(section.payload, 6, mncwf_v4_section_header_bytes);
+	put_u32(section.payload, 8, 0u);
+	put_u32(section.payload, 12, item_bytes);
+	put_u64(section.payload, 16, item_count);
+	put_u64(section.payload, 24, blob_offset);
+	put_u64(section.payload, 32, blob.size());
+	put_u64(section.payload, 40, 0u);
+	std::copy(records.begin(), records.end(), section.payload.begin() +
+		static_cast<std::ptrdiff_t>(mncwf_v4_section_header_bytes));
+	if (!blob.empty())
+		std::copy(blob.begin(), blob.end(), section.payload.begin() +
+			static_cast<std::ptrdiff_t>(blob_offset));
+	return section;
+}
+
+EncodedSection encode_capture(const MncwfV4CaptureMetadata &capture)
+{
+	EncodedBytes record(mncwf_v4_capture_metadata_bytes);
+	EncodedBytes blob;
+	put_array(record, 0, capture.capture_uuid);
+	put_array(record, 16, capture.device_uuid);
+	put_array(record, 32, capture.configuration_sha256);
+	put_array(record, 64, capture.sensor_profile_sha256);
+	put_u64(record, 96, capture.created_tai_nanoseconds);
+	put_u64(record, 104, capture.created_utc_nanoseconds);
+	put_s64(record, 112, capture.nominal_voltage_numerator);
+	put_u64(record, 120, capture.nominal_voltage_denominator);
+	put_u64(record, 128, capture.nominal_frequency_numerator);
+	put_u64(record, 136, capture.nominal_frequency_denominator);
+	put_u32(record, 144, static_cast<std::uint32_t>(capture.topology));
+	put_u32(record, 148,
+		static_cast<std::uint32_t>(capture.calibration_status));
+	put_u32(record, 152, capture.flags);
+	const std::array<std::string_view, 12> strings{
+		capture.station_name, capture.site_name, capture.circuit_name,
+		capture.product_name, capture.device_model, capture.firmware_version,
+		capture.software_build_id, capture.sensor_profile_id,
+		capture.configuration_id, capture.calibration_id,
+		capture.device_serial, capture.comments,
+	};
+	for (std::size_t index = 0; index < strings.size(); ++index)
+		put_string_ref(record, 160u + index * 8u,
+			append_string(blob, strings[index]));
+	return enveloped_section(MncwfV4SectionType::capture_metadata, 1u,
+		mncwf_v4_capture_metadata_bytes, std::move(record), std::move(blob));
+}
+
+EncodedSection encode_timebase(
+	const std::vector<MncwfV4TimebaseSegment> &segments)
+{
+	EncodedBytes records(segments.size() * mncwf_v4_timebase_segment_bytes);
+	for (std::size_t index = 0; index < segments.size(); ++index) {
+		const auto base = index * mncwf_v4_timebase_segment_bytes;
+		const auto &segment = segments[index];
+		put_u64(records, base + 0, segment.first_frame);
+		put_u64(records, base + 8, segment.frame_count);
+		put_u64(records, base + 16, segment.first_sequence);
+		put_u64(records, base + 24, segment.sequence_step);
+		put_u64(records, base + 32, segment.acquisition_rate_numerator);
+		put_u64(records, base + 40, segment.acquisition_rate_denominator);
+		put_u64(records, base + 48, segment.persisted_rate_numerator);
+		put_u64(records, base + 56, segment.persisted_rate_denominator);
+		put_u64(records, base + 64, segment.correlation_sequence);
+		put_u64(records, base + 72, segment.correlation_pl_tick);
+		put_u64(records, base + 80, segment.correlation_tai_nanoseconds);
+		put_u64(records, base + 88, segment.correlation_utc_nanoseconds);
+		put_u64(records, base + 96, segment.uncertainty_nanoseconds);
+		put_u32(records, base + 104, segment.decimation_divisor);
+		put_u16(records, base + 108,
+			static_cast<std::uint16_t>(segment.decimation_method));
+		put_u16(records, base + 110,
+			static_cast<std::uint16_t>(segment.clock_source));
+		put_u16(records, base + 112,
+			static_cast<std::uint16_t>(segment.time_quality));
+		put_u16(records, base + 114, segment.flags);
+		put_s32(records, base + 116, segment.utc_offset_seconds);
+		put_u64(records, base + 120, segment.source_frame_count);
+	}
+	return enveloped_section(MncwfV4SectionType::timebase_segments,
+		segments.size(), mncwf_v4_timebase_segment_bytes, std::move(records));
+}
+
+EncodedSection encode_channels(
+	const std::vector<MncwfV4ChannelDefinition> &channels)
+{
+	EncodedBytes records(channels.size() * mncwf_v4_channel_definition_bytes);
+	EncodedBytes blob;
+	for (std::size_t index = 0; index < channels.size(); ++index) {
+		const auto base = index * mncwf_v4_channel_definition_bytes;
+		const auto &channel = channels[index];
+		ensure_write(records, base, mncwf_v4_channel_definition_bytes);
+		std::copy(channel.stable_id.begin(), channel.stable_id.end(),
+			records.begin() + static_cast<std::ptrdiff_t>(base));
+		put_u32(records, base + 16, channel.source_channel);
+		put_u32(records, base + 20, channel.flags);
+		put_u16(records, base + 24, static_cast<std::uint16_t>(channel.phase));
+		put_u16(records, base + 26,
+			static_cast<std::uint16_t>(channel.quantity));
+		put_u16(records, base + 28, static_cast<std::uint16_t>(channel.si_unit));
+		put_u16(records, base + 30,
+			static_cast<std::uint16_t>(channel.sample_encoding));
+		put_u16(records, base + 32, channel.storage_bits);
+		put_u16(records, base + 34, channel.valid_bits);
+		put_s16(records, base + 36, channel.display_exponent10);
+		put_s64(records, base + 40, channel.gain_numerator);
+		put_u64(records, base + 48, channel.gain_denominator);
+		put_s64(records, base + 56, channel.offset_numerator);
+		put_u64(records, base + 64, channel.offset_denominator);
+		put_u64(records, base + 72,
+			channel.primary_secondary_ratio_numerator);
+		put_u64(records, base + 80,
+			channel.primary_secondary_ratio_denominator);
+		put_s64(records, base + 88, channel.nominal_numerator);
+		put_u64(records, base + 96, channel.nominal_denominator);
+		put_s64(records, base + 104, channel.range_minimum_numerator);
+		put_u64(records, base + 112, channel.range_minimum_denominator);
+		put_s64(records, base + 120, channel.range_maximum_numerator);
+		put_u64(records, base + 128, channel.range_maximum_denominator);
+		put_u64(records, base + 136, channel.resolution_numerator);
+		put_u64(records, base + 144, channel.resolution_denominator);
+		put_s64(records, base + 152, channel.clipping_low);
+		put_s64(records, base + 160, channel.clipping_high);
+		put_string_ref(records, base + 168,
+			append_string(blob, channel.name));
+		put_string_ref(records, base + 176,
+			append_string(blob, channel.unit_symbol));
+		put_string_ref(records, base + 184,
+			append_string(blob, channel.description));
+	}
+	return enveloped_section(MncwfV4SectionType::channel_definitions,
+		channels.size(), mncwf_v4_channel_definition_bytes,
+		std::move(records), std::move(blob));
+}
+
+EncodedSection encode_events(const std::vector<MncwfV4EventDescriptor> &events)
+{
+	EncodedBytes records(events.size() * mncwf_v4_event_descriptor_bytes);
+	EncodedBytes blob;
+	for (std::size_t index = 0; index < events.size(); ++index) {
+		const auto base = index * mncwf_v4_event_descriptor_bytes;
+		const auto &event = events[index];
+		ensure_write(records, base, mncwf_v4_event_descriptor_bytes);
+		std::copy(event.event_uuid.begin(), event.event_uuid.end(),
+			records.begin() + static_cast<std::ptrdiff_t>(base));
+		put_u16(records, base + 16,
+			static_cast<std::uint16_t>(event.taxonomy));
+		put_u16(records, base + 18, event.event_type);
+		put_u16(records, base + 20,
+			static_cast<std::uint16_t>(event.lifecycle));
+		put_u16(records, base + 22,
+			static_cast<std::uint16_t>(event.time_quality));
+		put_u32(records, base + 24, event.flags);
+		put_u32(records, base + 28, event.phase_mask);
+		put_u16(records, base + 32,
+			static_cast<std::uint16_t>(event.quantity));
+		put_u16(records, base + 34,
+			static_cast<std::uint16_t>(event.si_unit));
+		put_u16(records, base + 36, event.trigger_source);
+		put_u32(records, base + 40, event.configuration_generation);
+		put_u32(records, base + 44, event.severity);
+		put_u64(records, base + 48, event.start_sequence);
+		put_u64(records, base + 56, event.current_sequence);
+		put_u64(records, base + 64, event.end_sequence);
+		put_u64(records, base + 72, event.trigger_sequence);
+		put_u64(records, base + 80, event.start_tai_nanoseconds);
+		put_u64(records, base + 88, event.current_tai_nanoseconds);
+		put_u64(records, base + 96, event.end_tai_nanoseconds);
+		put_u64(records, base + 104, event.trigger_tai_nanoseconds);
+		put_u64(records, base + 112, event.start_utc_nanoseconds);
+		put_u64(records, base + 120, event.current_utc_nanoseconds);
+		put_u64(records, base + 128, event.end_utc_nanoseconds);
+		put_u64(records, base + 136, event.trigger_utc_nanoseconds);
+		put_u64(records, base + 144, event.uncertainty_nanoseconds);
+		put_s64(records, base + 152, event.reference_micro_units);
+		put_s64(records, base + 160, event.threshold_micro_units);
+		put_s64(records, base + 168, event.hysteresis_micro_units);
+		for (std::size_t phase = 0; phase < 3u; ++phase)
+			put_s64(records, base + 176u + phase * 8u,
+				event.extrema_micro_units[phase]);
+		put_u64(records, base + 200, event.duration_samples);
+		put_u64(records, base + 208, event.update_count);
+		put_u32(records, base + 216, event.status);
+		put_string_ref(records, base + 224,
+			append_string(blob, event.taxonomy_name));
+		put_string_ref(records, base + 232,
+			append_string(blob, event.label));
+		put_string_ref(records, base + 240,
+			append_string(blob, event.settings_snapshot_json));
+	}
+	return enveloped_section(MncwfV4SectionType::event_descriptors,
+		events.size(), mncwf_v4_event_descriptor_bytes,
+		std::move(records), std::move(blob));
+}
+
+EncodedSection encode_quality(
+	const std::vector<MncwfV4QualityInterval> &intervals)
+{
+	EncodedBytes records(intervals.size() * mncwf_v4_quality_interval_bytes);
+	for (std::size_t index = 0; index < intervals.size(); ++index) {
+		const auto base = index * mncwf_v4_quality_interval_bytes;
+		const auto &quality = intervals[index];
+		put_u64(records, base + 0, quality.first_frame);
+		put_u64(records, base + 8, quality.frame_count);
+		put_u64(records, base + 16, quality.first_sequence);
+		put_u64(records, base + 24, quality.last_sequence);
+		put_u64(records, base + 32, quality.channel_mask);
+		put_u32(records, base + 40, quality.flags);
+		put_u16(records, base + 44, quality.severity);
+		put_u16(records, base + 46, quality.source);
+		put_u32(records, base + 48, quality.detail_code);
+	}
+	return enveloped_section(MncwfV4SectionType::quality_intervals,
+		intervals.size(), mncwf_v4_quality_interval_bytes,
+		std::move(records));
+}
+
+EncodedSection encode_lineage(
+	const std::vector<MncwfV4LineageEntry> &entries)
+{
+	EncodedBytes records(entries.size() * mncwf_v4_lineage_entry_bytes);
+	for (std::size_t index = 0; index < entries.size(); ++index) {
+		const auto base = index * mncwf_v4_lineage_entry_bytes;
+		const auto &entry = entries[index];
+		put_u16(records, base + 0,
+			static_cast<std::uint16_t>(entry.relation));
+		put_u16(records, base + 2, entry.flags);
+		ensure_write(records, base + 8, entry.related_capture_uuid.size());
+		std::copy(entry.related_capture_uuid.begin(),
+			entry.related_capture_uuid.end(), records.begin() +
+			static_cast<std::ptrdiff_t>(base + 8));
+		std::copy(entry.related_event_uuid.begin(), entry.related_event_uuid.end(),
+			records.begin() + static_cast<std::ptrdiff_t>(base + 24));
+		put_u64(records, base + 40, entry.first_sequence);
+		put_u64(records, base + 48, entry.last_sequence);
+		put_u32(records, base + 56, entry.part_index);
+		put_u32(records, base + 60, entry.part_count);
+	}
+	return enveloped_section(MncwfV4SectionType::lineage, entries.size(),
+		mncwf_v4_lineage_entry_bytes, std::move(records));
+}
+
+} // namespace
+
+std::vector<std::byte> encode_mncwf_v4(const MncwfV4Document &document)
+{
+	const auto sample_bytes = checked_multiply(document.sample_frame_count,
+		document.sample_frame_bytes, "encoded sample data");
+	if (document.sample_data.size() != sample_bytes)
+		reject("encoder sample geometry is inconsistent");
+	std::array<EncodedSection, mncwf_v4_mandatory_section_count> sections{
+		encode_capture(document.capture_metadata),
+		encode_timebase(document.timebase_segments),
+		encode_channels(document.channels),
+		encode_events(document.events),
+		encode_quality(document.quality_intervals),
+		encode_lineage(document.lineage),
+		enveloped_section(MncwfV4SectionType::sample_data,
+			document.sample_frame_count, document.sample_frame_bytes,
+			document.sample_data),
+	};
+
+	const auto directory_bytes = checked_multiply(sections.size(),
+		mncwf_v4_directory_entry_bytes, "encoded directory");
+	auto next_offset = align_eight(checked_add(mncwf_v4_header_bytes,
+		directory_bytes, "encoded directory"));
+	std::vector<std::uint64_t> offsets;
+	offsets.reserve(sections.size());
+	for (const auto &section : sections) {
+		offsets.push_back(next_offset);
+		next_offset = align_eight(checked_add(next_offset,
+			section.payload.size(), "encoded file"));
+	}
+	/* Section extents, including the final one, have zero eight-byte padding. */
+	const auto file_bytes = next_offset;
+	if (file_bytes > mncwf_v4_max_file_bytes)
+		reject("encoded file exceeds the 512 MiB bound");
+	EncodedBytes file(narrow_size(file_bytes, "encoded file"));
+	std::copy(mncwf_magic.begin(), mncwf_magic.end(), file.begin());
+	put_u32(file, 8, mncwf_v4_version);
+	put_u32(file, 12, mncwf_v4_header_bytes);
+	put_u32(file, 16, mncwf_v4_directory_entry_bytes);
+	put_u32(file, 20, static_cast<std::uint32_t>(sections.size()));
+	put_u64(file, 24, mncwf_v4_header_bytes);
+	put_u64(file, 32, directory_bytes);
+	put_u64(file, 40, file_bytes);
+
+	for (std::size_t index = 0; index < sections.size(); ++index) {
+		const auto directory = mncwf_v4_header_bytes +
+			index * mncwf_v4_directory_entry_bytes;
+		const auto &section = sections[index];
+		put_u32(file, directory + 0,
+			static_cast<std::uint32_t>(section.type));
+		put_u16(file, directory + 4, 1u);
+		put_u16(file, directory + 6, mncwf_v4_section_required);
+		put_u64(file, directory + 8, offsets[index]);
+		put_u64(file, directory + 16, section.payload.size());
+		put_u64(file, directory + 24, section.payload.size());
+		put_u64(file, directory + 32, section.item_count);
+		put_u32(file, directory + 40, section.item_bytes);
+		put_u32(file, directory + 44, mncwf_crc32c(section.payload));
+		std::copy(section.payload.begin(), section.payload.end(), file.begin() +
+			static_cast<std::ptrdiff_t>(offsets[index]));
+	}
+	const auto directory = std::span<const std::byte>{file}.subspan(
+		mncwf_v4_header_bytes, narrow_size(directory_bytes, "directory"));
+	put_u32(file, 52, mncwf_crc32c(directory));
+	put_u32(file, 56, 0u);
+	put_u32(file, 56, mncwf_crc32c(
+		std::span<const std::byte>{file}.first(mncwf_v4_header_bytes)));
+
+	/* One implementation is the writer; the other is the acceptance oracle. */
+	(void)MncwfV4Reader{file};
+	return file;
 }
 
 MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)

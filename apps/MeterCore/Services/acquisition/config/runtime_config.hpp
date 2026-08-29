@@ -29,13 +29,15 @@ namespace msap1::acquisition::daemon {
 msap1::settings::ProductSettings load_runtime_settings();
 
 /**
- * @brief Build the per-channel .mncwf metadata for the persisted channels.
+ * @brief Freeze all capture and per-channel MNCWF-v4 authorities.
  *
- * Persisted captures carry CH0 through CH6 (Ia..In, Vc, Vb, Va) with the
- * active scaling coefficients so a capture file is self-describing.
+ * The result includes configured identity, firmware/build provenance,
+ * configuration and sensor digests, calibration state, exact transforms,
+ * sensor ratios, ranges, resolution, clipping, and stable channel UUIDs.
  */
-std::array<msap1::WaveformChannelMetadata, msap1::waveform_persisted_channels>
-waveform_metadata(const msap1::PreparedMeterConfiguration &configuration);
+msap1::WaveformCaptureContext waveform_capture_context(
+	const msap1::settings::ProductSettings &settings,
+	const msap1::PreparedMeterConfiguration &configuration);
 
 /**
  * @brief Render the persistent frequency settings as the IPC configuration

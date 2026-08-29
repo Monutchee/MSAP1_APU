@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace msap1 {
@@ -369,6 +370,41 @@ struct MncwfV4LineageEntry {
 /** Reflected CRC-32C (Castagnoli), initial/final XOR 0xFFFFFFFF. */
 [[nodiscard]] std::uint32_t mncwf_crc32c(
 	std::span<const std::byte> bytes) noexcept;
+
+/** SHA-256 helper used to freeze capture-time configuration authorities. */
+[[nodiscard]] MncwfSha256 mncwf_sha256(
+	std::span<const std::byte> bytes);
+[[nodiscard]] inline MncwfSha256 mncwf_sha256(std::string_view text)
+{
+	return mncwf_sha256(std::as_bytes(std::span{text.data(), text.size()}));
+}
+
+/** Generate an RFC-4122 variant/version-4 UUID from the kernel RNG. */
+[[nodiscard]] MncwfUuid mncwf_random_uuid();
+
+/**
+ * Complete typed input to the deterministic version-4 encoder.
+ *
+ * sample_data contains exactly sample_frame_count interleaved frames of
+ * sample_frame_bytes bytes. The encoder validates its own result with
+ * MncwfV4Reader before returning it, so a writer bug cannot publish a file
+ * that the product reader rejects.
+ */
+struct MncwfV4Document {
+	MncwfV4CaptureMetadata capture_metadata{};
+	std::vector<MncwfV4TimebaseSegment> timebase_segments;
+	std::vector<MncwfV4ChannelDefinition> channels;
+	std::vector<MncwfV4EventDescriptor> events;
+	std::vector<MncwfV4QualityInterval> quality_intervals;
+	std::vector<MncwfV4LineageEntry> lineage;
+	std::uint64_t sample_frame_count = 0;
+	std::uint32_t sample_frame_bytes = 0;
+	std::vector<std::byte> sample_data;
+};
+
+/** Encode all seven mandatory sections with deterministic ordering and CRCs. */
+[[nodiscard]] std::vector<std::byte>
+encode_mncwf_v4(const MncwfV4Document &document);
 
 /**
  * Defensive, read-only MNCWF v4 view.

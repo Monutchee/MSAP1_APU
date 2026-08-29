@@ -315,13 +315,14 @@ capture. Completed files survive service and system restarts under:
 /data/mnc/waveform/
 ```
 
-New `.mncwf` version 2 files store CH0 through CH6 as raw signed 32-bit counts
-and deliberately omit diagnostic CH7. Channel descriptors carry names and the
-active Q16.16 conversion coefficients, allowing raw-count and converted-unit
-views without duplicating the sample payload. Legacy eight-channel version 1
-files remain readable. See [the MNCWF reader guide](docs/MNCWF_FILE_FORMAT.md)
-for the exact binary layout, conversion equation, and a Python example. R5
-firmware and RPMsg are not in this payload path.
+New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
+or explicitly identified boxcar-decimated averages and deliberately omit
+diagnostic CH7. Versioned sections freeze exact channel transforms, timebase,
+quality, events, capture/device identity, and UUID lineage so later COMTRADE or
+PQDIF export needs only the master file. Legacy versions 1 through 3 remain
+discoverable. See the
+[MNCWF v4 contract](docs/File_Standard/MNCWF_V4_FILE_FORMAT.md) for the exact
+binary layout. R5 firmware and RPMsg are not in this payload path.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

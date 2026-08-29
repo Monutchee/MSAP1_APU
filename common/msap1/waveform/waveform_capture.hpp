@@ -1,5 +1,7 @@
 #pragma once
 
+#include "msap1/waveform/mncwf_v4.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -83,6 +85,16 @@ struct WaveformCorrelation {
 	std::uint64_t uncertainty_nanoseconds = 0;
 };
 
+/** Immutable authorities copied into each session when its first trigger lands. */
+struct WaveformCaptureContext {
+	MncwfV4CaptureMetadata capture_metadata{};
+	std::vector<MncwfV4ChannelDefinition> channels;
+	MncwfClockSource clock_source = MncwfClockSource::system;
+	MncwfTimeQuality time_quality = MncwfTimeQuality::unknown;
+	std::uint16_t time_flags = 0;
+	std::int32_t utc_offset_seconds = 0;
+};
+
 /*
  * One correlation of the PL conversion-domain sample counter with
  * CLOCK_REALTIME, produced for the measurement timebase (UTC mapping).
@@ -120,6 +132,7 @@ struct WaveformSessionSummary {
 	 */
 	std::uint32_t decimation = 1;
 	std::array<char, waveform_session_name_size> filename{};
+	MncwfUuid capture_uuid{};
 };
 
 struct WaveformStatus {
@@ -233,9 +246,7 @@ class WaveformCapture {
 public:
 	explicit WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory,
-				 std::array<WaveformChannelMetadata,
-					    waveform_persisted_channels>
-					 channel_metadata = {});
+				 WaveformCaptureContext context = {});
 	~WaveformCapture();
 
 	WaveformCapture(const WaveformCapture &) = delete;
@@ -258,7 +269,12 @@ public:
 		WaveformEventIdentity event_id, WaveformEventLifecycle lifecycle,
 		std::uint64_t trigger_sequence, std::uint64_t current_sequence,
 		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
-		std::uint32_t decimation);
+		std::uint32_t decimation, MncwfV4EventDescriptor descriptor);
+	/** Replace the authority used by sessions created after this call. Existing
+	 * sessions retain their original capture-time snapshot. */
+	void set_context(WaveformCaptureContext context);
+	void set_time_context(MncwfClockSource source, MncwfTimeQuality quality,
+		std::uint16_t leap_flags = 0u) noexcept;
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
 	std::vector<WaveformSessionSummary> sessions();
@@ -303,8 +319,7 @@ private:
 
 	std::string device_path_;
 	std::filesystem::path output_directory_;
-	std::array<WaveformChannelMetadata, waveform_persisted_channels>
-		channel_metadata_{};
+	WaveformCaptureContext context_{};
 	bool persisted_sessions_discovered_ = false;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
@@ -328,6 +343,7 @@ private:
 	std::vector<GapRange> gaps_;
 	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};
+	std::uint64_t correlation_utc_nanoseconds_ = 0;
 };
 
 } // namespace msap1

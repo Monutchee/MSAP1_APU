@@ -3,16 +3,17 @@
 ## Status
 
 This is the normative byte contract for a file whose magic is `MNCWF1\0\0`
-and whose version is `4`. The defensive read-only implementation is
+and whose version is `4`. The production encoder and defensive reader are
 [`mncwf_v4.hpp`](../../common/msap1/waveform/mncwf_v4.hpp) and
 [`mncwf_v4.cpp`](../../common/msap1/waveform/mncwf_v4.cpp). Its synthetic and
 adversarial vectors are in
 [`mncwf_v4_reader_test.cpp`](../../tests/mncwf_v4_reader_test.cpp).
 
-The acquisition daemon still writes MNCWF v3. Enabling the v4 writer waits for
-the M18 settings-v4 and durable-event authorities so the first production v4
-file cannot omit capture-time identity or evaluated event settings. A file
-that claims version 4 must nevertheless satisfy this entire contract.
+The acquisition daemon writes MNCWF v4 for new captures. It freezes settings,
+device/channel identity, time quality, event descriptors, and UUID lineage at
+capture time, validates the encoded bytes through the independent reader, and
+publishes the file only after an atomic temporary-file rename. Existing v1-v3
+files remain discoverable as legacy history.
 
 MNCWF v4 is the only planned on-device waveform master. COMTRADE and PQDIF are
 future export conversions; they do not replace or supplement this recording

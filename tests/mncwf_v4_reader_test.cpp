@@ -520,9 +520,46 @@ int main()
 			bounds_checked = true;
 		}
 		require(bounds_checked, "sample-frame access is bounds checked");
+
+		msap1::MncwfV4Document document{};
+		document.capture_metadata = reader.capture_metadata();
+		document.timebase_segments = reader.timebase_segments();
+		document.channels = reader.channels();
+		document.events = reader.events();
+		document.quality_intervals = reader.quality_intervals();
+		document.lineage = reader.lineage();
+		document.sample_frame_count = reader.sample_frame_count();
+		document.sample_frame_bytes = reader.sample_frame_bytes();
+		document.sample_data.assign(reader.sample_data().begin(),
+			reader.sample_data().end());
+		const auto encoded = msap1::encode_mncwf_v4(document);
+		const msap1::MncwfV4Reader round_trip{encoded};
+		require(round_trip.header().section_count == 7u &&
+			round_trip.capture_metadata().configuration_sha256 ==
+				reader.capture_metadata().configuration_sha256 &&
+			round_trip.timebase_segments().size() ==
+				reader.timebase_segments().size() &&
+			round_trip.timebase_segments().front().source_frame_count ==
+				reader.timebase_segments().front().source_frame_count &&
+			round_trip.sample_data().size() == reader.sample_data().size(),
+			"typed writer round-trips every mandatory section");
+		require(msap1::encode_mncwf_v4(document) == encoded,
+			"typed writer output is deterministic");
 	} catch (const std::exception &error) {
 		std::fprintf(stderr, "FAIL: valid fixture rejected: %s\n", error.what());
 		++failures;
+	}
+	{
+		const auto uuid = msap1::mncwf_random_uuid();
+		require(std::ranges::any_of(uuid,
+			[](std::byte byte) { return byte != std::byte{0}; }) &&
+			(std::to_integer<std::uint8_t>(uuid[6]) & 0xf0u) == 0x40u &&
+			(std::to_integer<std::uint8_t>(uuid[8]) & 0xc0u) == 0x80u,
+			"capture UUID uses the RFC-4122 random layout");
+		const auto digest = msap1::mncwf_sha256("abc");
+		require(std::to_integer<std::uint8_t>(digest[0]) == 0xbau &&
+			std::to_integer<std::uint8_t>(digest[31]) == 0xadu,
+			"capture digest helper computes SHA-256");
 	}
 	{
 		bool all_rejected = true;

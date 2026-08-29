@@ -115,7 +115,10 @@
     "site_id": "",
     "site_name": "",
     "circuit_id": "",
-    "circuit_name": ""
+    "circuit_name": "",
+    "device_serial": "",
+    "calibration_id": "",
+    "calibration_status": "unknown"
   },
   "database": {
     "spool": {"backend": "memory", "maximum_age_seconds": 3600, "maximum_bytes": 33554432, "volatile_spool_acknowledged": true},

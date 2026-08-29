@@ -6,11 +6,15 @@
 #include "support/logs.hpp"
 #include "support/utc_clock.hpp"
 
+#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -45,13 +49,149 @@ msap1_demand_config_payload demand_configuration(
 	};
 }
 
+MncwfUuid event_uuid(const PowerQualityEventId &id)
+{
+	std::array<std::byte, 16> source{};
+	for (unsigned byte = 0; byte < 8u; ++byte) {
+		source[byte] = static_cast<std::byte>(
+			(id.session >> (byte * 8u)) & 0xffu);
+		source[8u + byte] = static_cast<std::byte>(
+			(id.counter >> (byte * 8u)) & 0xffu);
+	}
+	const auto digest = mncwf_sha256(source);
+	MncwfUuid result{};
+	std::copy_n(digest.begin(), result.size(), result.begin());
+	result[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
+	result[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
+	return result;
+}
+
+std::string event_label(PowerQualityLifecycleType type)
+{
+	switch (type) {
+	case PowerQualityLifecycleType::voltage_sag: return "voltage sag";
+	case PowerQualityLifecycleType::voltage_swell: return "voltage swell";
+	case PowerQualityLifecycleType::voltage_interruption:
+		return "voltage interruption";
+	case PowerQualityLifecycleType::rapid_voltage_change:
+		return "rapid voltage change";
+	case PowerQualityLifecycleType::voltage_unbalance:
+		return "voltage unbalance";
+	case PowerQualityLifecycleType::current_sag: return "current sag";
+	case PowerQualityLifecycleType::current_swell: return "current swell";
+	case PowerQualityLifecycleType::current_unbalance:
+		return "current unbalance";
+	case PowerQualityLifecycleType::transient_voltage:
+		return "transient voltage";
+	}
+	return "power-quality event";
+}
+
+MncwfTimeQuality waveform_time_quality(meter::TimeQuality quality)
+{
+	switch (quality) {
+	case meter::TimeQuality::Synchronized: return MncwfTimeQuality::locked;
+	case meter::TimeQuality::Holdover: return MncwfTimeQuality::holdover;
+	case meter::TimeQuality::Unsynchronized:
+		return MncwfTimeQuality::unlocked;
+	}
+	return MncwfTimeQuality::unknown;
+}
+
+MncwfV4EventDescriptor waveform_event_descriptor(
+	const PowerQualityEventLifecycleSnapshot &snapshot)
+{
+	MncwfV4EventDescriptor result{};
+	result.event_uuid = event_uuid(snapshot.id);
+	result.taxonomy = snapshot.iec_classification
+		? MncwfEventTaxonomy::iec_61000_4_30
+		: MncwfEventTaxonomy::product_alarm;
+	result.event_type = static_cast<std::uint16_t>(snapshot.type) + 1u;
+	result.lifecycle = static_cast<MncwfEventLifecycle>(
+		static_cast<std::uint16_t>(snapshot.lifecycle) + 1u);
+	result.time_quality = waveform_time_quality(snapshot.time_quality);
+	result.flags = mncwf_event_start_valid | mncwf_event_current_valid |
+		mncwf_event_trigger_valid | mncwf_event_settings_snapshot_valid;
+	if (snapshot.terminal())
+		result.flags |= mncwf_event_end_valid;
+	if (snapshot.start_utc_nanoseconds != 0u &&
+	    snapshot.last_utc_nanoseconds != 0u)
+		result.flags |= mncwf_event_utc_valid;
+	if (snapshot.discontinuities != 0u)
+		result.flags |= mncwf_event_contaminated |
+			mncwf_event_discontinuous;
+	result.phase_mask = snapshot.phase_mask;
+	result.quantity = static_cast<std::uint8_t>(snapshot.type) >=
+		static_cast<std::uint8_t>(PowerQualityLifecycleType::current_sag) &&
+		static_cast<std::uint8_t>(snapshot.type) <=
+		static_cast<std::uint8_t>(PowerQualityLifecycleType::current_unbalance)
+		? MncwfQuantity::current : MncwfQuantity::voltage;
+	result.si_unit = result.quantity == MncwfQuantity::current
+		? MncwfSiUnit::ampere : MncwfSiUnit::volt;
+	result.trigger_source = snapshot.trigger_source;
+	result.configuration_generation = snapshot.configuration_generation;
+	result.start_sequence = snapshot.first_sample;
+	result.current_sequence = snapshot.last_sample;
+	result.end_sequence = snapshot.terminal() ? snapshot.last_sample : 0u;
+	result.trigger_sequence = snapshot.trigger_sample;
+	result.start_utc_nanoseconds = snapshot.start_utc_nanoseconds;
+	result.current_utc_nanoseconds = snapshot.last_utc_nanoseconds;
+	result.end_utc_nanoseconds = snapshot.terminal()
+		? snapshot.last_utc_nanoseconds : 0u;
+	result.trigger_utc_nanoseconds = snapshot.start_utc_nanoseconds;
+	result.reference_micro_units = snapshot.reference_micro_units;
+	result.threshold_micro_units = static_cast<std::int64_t>(
+		(static_cast<std::uint64_t>(snapshot.reference_micro_units) *
+			snapshot.threshold_e4 + 5000u) / 10000u);
+	result.hysteresis_micro_units = static_cast<std::int64_t>(
+		(static_cast<std::uint64_t>(snapshot.reference_micro_units) *
+			snapshot.hysteresis_e4 + 5000u) / 10000u);
+	const bool minimum_event =
+		snapshot.type == PowerQualityLifecycleType::voltage_sag ||
+		snapshot.type == PowerQualityLifecycleType::voltage_interruption ||
+		snapshot.type == PowerQualityLifecycleType::current_sag;
+	for (std::size_t phase = 0; phase < result.extrema_micro_units.size();
+	     ++phase)
+		result.extrema_micro_units[phase] = minimum_event
+			? snapshot.minimum_micro_units[phase]
+			: snapshot.maximum_micro_units[phase];
+	result.duration_samples = snapshot.duration_samples;
+	result.update_count = snapshot.update_count;
+	result.status = snapshot.status;
+	result.taxonomy_name = snapshot.iec_classification
+		? "IEC 61000-4-30 voltage event" : "MSAP1 product alarm";
+	result.label = event_label(snapshot.type);
+	std::ostringstream settings;
+	settings << "{\"configuration_generation\":"
+		 << snapshot.configuration_generation
+		 << ",\"profile_generation\":" << snapshot.profile_generation
+		 << ",\"reference_micro_units\":"
+		 << snapshot.reference_micro_units
+		 << ",\"threshold_e4\":" << snapshot.threshold_e4
+		 << ",\"hysteresis_e4\":" << snapshot.hysteresis_e4
+		 << ",\"phase_mask\":" << static_cast<unsigned>(snapshot.phase_mask)
+		 << ",\"per_phase\":" << (snapshot.per_phase ? "true" : "false")
+		 << ",\"waveform\":{\"pretrigger_ms\":"
+		 << snapshot.waveform_pretrigger_ms
+		 << ",\"posttrigger_ms\":" << snapshot.waveform_posttrigger_ms
+		 << ",\"decimation\":" << snapshot.waveform_decimation
+		 << "},\"settings_digest\":\"" << std::hex << std::setfill('0');
+	for (const auto word : snapshot.settings_digest)
+		settings << std::setw(8) << word;
+	settings << "\"}";
+	result.settings_snapshot_json = settings.str();
+	return result;
+}
+
 CaptureCoordinator::CaptureCoordinator(const Options &options)
 	: options_(options),
 	  product_settings_(load_runtime_settings()),
 	  configuration_(prepare_product_configuration(product_settings_)),
 	  meter_(options.meter_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
-		    waveform_metadata(configuration_)),
+		    waveform_capture_context(product_settings_, configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
 	  ingest_(meter_, configuration_, timebase_, meter_stream_,
@@ -65,7 +205,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 				  event.trigger_sample, event.last_sample,
 				  event.waveform_pretrigger_ms,
 				  event.waveform_posttrigger_ms,
-				  event.waveform_decimation);
+				  event.waveform_decimation,
+				  waveform_event_descriptor(event));
 		  }),
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
@@ -192,6 +333,15 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		? 0u
 		: 16ull * 1'000'000'000ull / sample_rate;
 	const auto clock_status = read_utc_clock_status();
+	std::uint16_t leap_flags = 0u;
+	if (clock_status.positive_leap_pending)
+		leap_flags |= mncwf_time_positive_leap_pending;
+	if (clock_status.negative_leap_pending)
+		leap_flags |= mncwf_time_negative_leap_pending;
+	waveform_.set_time_context(MncwfClockSource::system,
+		clock_status.synchronized ? MncwfTimeQuality::locked
+			: MncwfTimeQuality::unlocked,
+		leap_flags);
 	timebase_.record_sync(
 		{.sample_counter = sync->sample_counter,
 		 .utc_ns = static_cast<std::int64_t>(sync->realtime_nanoseconds),
@@ -492,7 +642,9 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 		}
 		throw;
 	}
+	auto capture_context = waveform_capture_context(candidate, configuration_);
 	product_settings_ = std::move(candidate);
+	waveform_.set_context(std::move(capture_context));
 }
 
 void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
@@ -555,6 +707,8 @@ void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
 		{{"MNC_SAMPLE_RATE_HZ", std::to_string(sample_rate_hz)},
 		 {"MNC_CONFIGURATION_GENERATION",
 		  std::to_string(configuration_.wire.generation)}});
+	waveform_.set_context(
+		waveform_capture_context(staged_settings, configuration_));
 }
 
 void CaptureCoordinator::run_adc_diagnostic(std::uint32_t flow)

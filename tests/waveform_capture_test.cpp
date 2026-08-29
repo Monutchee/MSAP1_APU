@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <unistd.h>
 
@@ -79,6 +81,173 @@ std::vector<msap1::WaveformSessionSummary> wait_for_session(
 	throw std::runtime_error("waveform materialization timed out");
 }
 
+msap1::WaveformCaptureContext test_capture_context()
+{
+	msap1::WaveformCaptureContext context{};
+	for (std::size_t index = 0; index < 16u; ++index)
+		context.capture_metadata.device_uuid[index] =
+			static_cast<std::byte>(0x20u + index);
+	for (std::size_t index = 0; index < 32u; ++index) {
+		context.capture_metadata.configuration_sha256[index] =
+			static_cast<std::byte>(0x40u + index);
+		context.capture_metadata.sensor_profile_sha256[index] =
+			static_cast<std::byte>(0x80u + index);
+	}
+	context.capture_metadata.nominal_voltage_numerator = 120;
+	context.capture_metadata.nominal_voltage_denominator = 1;
+	context.capture_metadata.nominal_frequency_numerator = 60;
+	context.capture_metadata.nominal_frequency_denominator = 1;
+	context.capture_metadata.topology = msap1::MncwfTopology::wye;
+	context.capture_metadata.calibration_status =
+		msap1::MncwfCalibrationStatus::valid;
+	context.capture_metadata.station_name = "test station";
+	context.capture_metadata.site_name = "test site";
+	context.capture_metadata.circuit_name = "test circuit";
+	context.capture_metadata.product_name = "MSAP1";
+	context.capture_metadata.device_model = "MSAP1-test";
+	context.capture_metadata.firmware_version = "test-firmware";
+	context.capture_metadata.software_build_id = "test-build";
+	context.capture_metadata.sensor_profile_id = "test-profile";
+	context.capture_metadata.configuration_id = "test-configuration";
+	context.capture_metadata.calibration_id = "test-calibration";
+	context.capture_metadata.device_serial = "test-device";
+	static constexpr std::array<const char *, msap1::waveform_persisted_channels>
+		names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
+	static constexpr std::array phases{
+		msap1::MncwfPhase::a, msap1::MncwfPhase::b,
+		msap1::MncwfPhase::c, msap1::MncwfPhase::neutral,
+		msap1::MncwfPhase::c, msap1::MncwfPhase::b,
+		msap1::MncwfPhase::a,
+	};
+	for (std::size_t index = 0; index < names.size(); ++index) {
+		msap1::MncwfV4ChannelDefinition channel{};
+		for (std::size_t byte = 0; byte < channel.stable_id.size(); ++byte)
+			channel.stable_id[byte] = static_cast<std::byte>(
+				0xa0u + index * 16u + byte);
+		channel.source_channel = index;
+		channel.flags = msap1::mncwf_channel_enabled |
+			msap1::mncwf_channel_transform_valid |
+			msap1::mncwf_channel_ratio_valid |
+			msap1::mncwf_channel_nominal_valid |
+			msap1::mncwf_channel_range_valid |
+			msap1::mncwf_channel_resolution_valid |
+			msap1::mncwf_channel_clipping_valid |
+			msap1::mncwf_channel_calibration_valid;
+		channel.phase = phases[index];
+		channel.quantity = index < 4u ? msap1::MncwfQuantity::current
+			: msap1::MncwfQuantity::voltage;
+		channel.si_unit = index < 4u ? msap1::MncwfSiUnit::ampere
+			: msap1::MncwfSiUnit::volt;
+		channel.storage_bits = 32;
+		channel.valid_bits = 24;
+		channel.display_exponent10 = -6;
+		channel.gain_numerator = static_cast<std::int64_t>(1000u + index);
+		channel.gain_denominator = 65'536'000'000ull;
+		channel.offset_denominator = 1;
+		channel.primary_secondary_ratio_numerator = 1;
+		channel.primary_secondary_ratio_denominator = 1;
+		channel.nominal_numerator = index < 4u ? 5 : 120;
+		channel.nominal_denominator = 1;
+		channel.range_minimum_numerator = -1000;
+		channel.range_minimum_denominator = 1;
+		channel.range_maximum_numerator = 1000;
+		channel.range_maximum_denominator = 1;
+		channel.resolution_numerator = 1;
+		channel.resolution_denominator = 1'000'000;
+		channel.clipping_low = -(1ll << 23u);
+		channel.clipping_high = (1ll << 23u) - 1;
+		channel.name = names[index];
+		channel.unit_symbol = index < 4u ? "A" : "V";
+		channel.description = "test channel";
+		context.channels.push_back(std::move(channel));
+	}
+	context.clock_source = msap1::MncwfClockSource::system;
+	context.time_quality = msap1::MncwfTimeQuality::locked;
+	context.time_flags = msap1::mncwf_time_utc_offset_known;
+	context.utc_offset_seconds = -4 * 60 * 60;
+	return context;
+}
+
+std::vector<std::byte> read_bytes(const std::filesystem::path &path)
+{
+	std::ifstream input(path, std::ios::binary);
+	require(static_cast<bool>(input), "open MNCWF test file");
+	input.seekg(0, std::ios::end);
+	const auto end = input.tellg();
+	require(end >= 0, "measure MNCWF test file");
+	input.seekg(0, std::ios::beg);
+	std::vector<std::byte> result(static_cast<std::size_t>(end));
+	input.read(reinterpret_cast<char *>(result.data()),
+		static_cast<std::streamsize>(result.size()));
+	require(input.gcount() == static_cast<std::streamsize>(result.size()),
+		"read complete MNCWF test file");
+	return result;
+}
+
+std::int32_t read_s32(std::span<const std::byte> bytes, std::size_t offset)
+{
+	require(offset <= bytes.size() && bytes.size() - offset >= 4u,
+		"read signed MNCWF sample");
+	std::uint32_t raw = 0u;
+	for (unsigned byte = 0; byte < 4u; ++byte)
+		raw |= static_cast<std::uint32_t>(
+			std::to_integer<std::uint8_t>(bytes[offset + byte]))
+			<< (byte * 8u);
+	return std::bit_cast<std::int32_t>(raw);
+}
+
+msap1::MncwfV4EventDescriptor pq_descriptor(
+	msap1::WaveformEventIdentity identity,
+	msap1::WaveformEventLifecycle lifecycle,
+	std::uint64_t start_sequence, std::uint64_t current_sequence)
+{
+	msap1::MncwfV4EventDescriptor event{};
+	for (unsigned byte = 0; byte < 8u; ++byte) {
+		event.event_uuid[byte] = static_cast<std::byte>(
+			(identity.session >> (byte * 8u)) & 0xffu);
+		event.event_uuid[8u + byte] = static_cast<std::byte>(
+			(identity.counter >> (byte * 8u)) & 0xffu);
+	}
+	event.event_uuid[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(event.event_uuid[6]) & 0x0fu) |
+		0x50u);
+	event.event_uuid[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(event.event_uuid[8]) & 0x3fu) |
+		0x80u);
+	event.taxonomy = msap1::MncwfEventTaxonomy::iec_61000_4_30;
+	event.event_type = 1u;
+	event.lifecycle = static_cast<msap1::MncwfEventLifecycle>(
+		static_cast<std::uint16_t>(lifecycle) + 1u);
+	event.time_quality = msap1::MncwfTimeQuality::locked;
+	event.flags = msap1::mncwf_event_start_valid |
+		msap1::mncwf_event_current_valid |
+		msap1::mncwf_event_trigger_valid |
+		msap1::mncwf_event_settings_snapshot_valid;
+	if (lifecycle == msap1::WaveformEventLifecycle::end ||
+	    lifecycle == msap1::WaveformEventLifecycle::abort)
+		event.flags |= msap1::mncwf_event_end_valid;
+	event.phase_mask = msap1::mncwf_event_phase_a;
+	event.quantity = msap1::MncwfQuantity::voltage;
+	event.si_unit = msap1::MncwfSiUnit::volt;
+	event.trigger_source = 3u;
+	event.configuration_generation = 7u;
+	event.start_sequence = start_sequence;
+	event.current_sequence = current_sequence;
+	event.end_sequence = current_sequence;
+	event.trigger_sequence = start_sequence;
+	event.reference_micro_units = 120'000'000;
+	event.threshold_micro_units = 108'000'000;
+	event.hysteresis_micro_units = 2'400'000;
+	event.extrema_micro_units = {90'000'000, 120'000'000, 120'000'000};
+	event.duration_samples = current_sequence - start_sequence;
+	event.update_count = 1u;
+	event.taxonomy_name = "IEC 61000-4-30 voltage event";
+	event.label = "voltage sag";
+	event.settings_snapshot_json =
+		R"({"threshold_e4":9000,"hysteresis_e4":200})";
+	return event;
+}
+
 } // namespace
 
 int main()
@@ -87,30 +256,8 @@ int main()
 	const auto output = unique_path(".captures");
 	try {
 		write_test_block(device);
-		std::array<msap1::WaveformChannelMetadata,
-			   msap1::waveform_persisted_channels>
-			metadata{};
-		static constexpr std::array<const char *,
-					    msap1::waveform_persisted_channels>
-			names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
-		for (std::size_t channel = 0; channel < metadata.size();
-		     ++channel) {
-			metadata[channel].source_channel = channel;
-			metadata[channel].kind =
-				channel < 4
-					? msap1::WaveformChannelKind::current
-					: msap1::WaveformChannelKind::voltage;
-			metadata[channel].scale_micro_units_q16 =
-				static_cast<std::uint32_t>(1000 + channel);
-			metadata[channel].flags = 1;
-			std::copy_n(names[channel],
-				    std::strlen(names[channel]),
-				    metadata[channel].name.begin());
-			metadata[channel].unit.front() =
-				channel < 4 ? 'A' : 'V';
-		}
 		msap1::WaveformCapture capture(
-			device.string(), output, metadata);
+			device.string(), output, test_capture_context());
 		capture.start();
 		capture.read_available();
 
@@ -171,55 +318,39 @@ int main()
 		require(std::filesystem::exists(capture_file),
 			"capture file is missing");
 
-		const auto expected_size = 256u +
-			msap1::waveform_persisted_channels *
-				sizeof(msap1::WaveformChannelMetadata) +
-			24u + (1024u - 704u + 1u) *
-				msap1::waveform_persisted_channels *
-				sizeof(std::int32_t);
-		require(std::filesystem::file_size(capture_file) == expected_size,
-			"capture file layout mismatch");
-		std::ifstream persisted(capture_file, std::ios::binary);
-		persisted.seekg(8);
-		std::uint32_t file_version = 0;
-		persisted.read(reinterpret_cast<char *>(&file_version),
-			       sizeof(file_version));
-		require(file_version == 3u, "capture file version mismatch");
-		persisted.seekg(152);
-		std::uint32_t file_decimation = 0;
-		persisted.read(reinterpret_cast<char *>(&file_decimation),
-			       sizeof(file_decimation));
-		require(file_decimation == 1u,
-			"undecimated capture must record divisor 1");
-		persisted.seekg(96);
-		std::uint32_t channel_count = 0;
-		std::uint32_t frame_bytes = 0;
-		persisted.read(reinterpret_cast<char *>(&channel_count),
-			       sizeof(channel_count));
-		persisted.read(reinterpret_cast<char *>(&frame_bytes),
-			       sizeof(frame_bytes));
-		require(channel_count == 7u && frame_bytes == 28u,
+		const auto persisted_bytes = read_bytes(capture_file);
+		const msap1::MncwfV4Reader persisted(persisted_bytes);
+		require(persisted.header().section_count ==
+				msap1::mncwf_v4_mandatory_section_count,
+			"capture did not emit every mandatory MNCWF v4 section");
+		require(persisted.capture_metadata().capture_uuid ==
+				sessions.front().capture_uuid,
+			"persisted capture UUID mismatch");
+		require(persisted.channels().size() ==
+				msap1::waveform_persisted_channels &&
+				persisted.sample_frame_bytes() == 28u,
 			"persisted channel layout mismatch");
-		persisted.seekg(256);
-		msap1::WaveformChannelMetadata persisted_channel{};
-		persisted.read(
-			reinterpret_cast<char *>(&persisted_channel),
-			sizeof(persisted_channel));
-		require(std::string(persisted_channel.name.data()) == "Ia" &&
-				persisted_channel.scale_micro_units_q16 == 1000u,
+		require(persisted.channels().front().name == "Ia" &&
+				persisted.channels().front().gain_numerator == 1000,
 			"channel conversion metadata mismatch");
-		persisted.seekg(256 +
-			msap1::waveform_persisted_channels *
-				sizeof(msap1::WaveformChannelMetadata) +
-			24);
-		std::array<std::int32_t,
-			   msap1::waveform_persisted_channels>
-			persisted_frame{};
-		persisted.read(
-			reinterpret_cast<char *>(persisted_frame.data()),
-			sizeof(persisted_frame));
-		require(persisted_frame[0] == 7030 &&
-				persisted_frame[6] == 7036,
+		require(persisted.timebase_segments().size() == 1u &&
+				persisted.timebase_segments().front().decimation_divisor == 1u &&
+				persisted.timebase_segments().front().source_frame_count == 321u,
+			"undecimated timebase mismatch");
+		require(persisted.sample_frame_count() == 321u,
+			"undecimated sample count mismatch");
+		require(persisted.events().size() == 1u &&
+				persisted.events().front().lifecycle ==
+					msap1::MncwfEventLifecycle::complete &&
+				!persisted.events().front().settings_snapshot_json.empty(),
+			"manual event descriptor mismatch");
+		const auto readiness =
+			msap1::assess_mncwf_v4_conversion_readiness(persisted);
+		require(readiness.comtrade_ready() && readiness.pqdif_ready(),
+			"production MNCWF v4 capture is not conversion-ready");
+		const auto persisted_frame = persisted.sample_frame(0u);
+		require(read_s32(persisted_frame, 0u) == 7030 &&
+				read_s32(persisted_frame, 24u) == 7036,
 			"persisted sample channel selection mismatch");
 		const std::string capture_name =
 			sessions.front().filename.data();
@@ -264,42 +395,21 @@ int main()
 		const auto decimated_file =
 			output / decimated_session->filename.data();
 		const auto decimated_frames = (1024u - 960u) / 4u + 1u;
-		require(std::filesystem::file_size(decimated_file) ==
-				256u + msap1::waveform_persisted_channels *
-					sizeof(msap1::WaveformChannelMetadata) +
-					24u + decimated_frames *
-					msap1::waveform_persisted_channels *
-					sizeof(std::int32_t),
-			"decimated file layout mismatch");
-		std::ifstream reduced(decimated_file, std::ios::binary);
-		std::uint32_t reduced_version = 0;
-		std::uint32_t reduced_decimation = 0;
-		std::uint64_t reduced_count = 0;
-		reduced.seekg(8);
-		reduced.read(reinterpret_cast<char *>(&reduced_version),
-			     sizeof(reduced_version));
-		reduced.seekg(136);
-		reduced.read(reinterpret_cast<char *>(&reduced_count),
-			     sizeof(reduced_count));
-		reduced.seekg(152);
-		reduced.read(reinterpret_cast<char *>(&reduced_decimation),
-			     sizeof(reduced_decimation));
-		require(reduced_version == 3u && reduced_decimation == 4u &&
-				reduced_count == decimated_frames,
-			"decimated header mismatch");
-		reduced.seekg(256 +
-			msap1::waveform_persisted_channels *
-				sizeof(msap1::WaveformChannelMetadata) +
-			24);
-		std::array<std::int32_t, msap1::waveform_persisted_channels>
-			mean_frame{};
-		reduced.read(reinterpret_cast<char *>(mean_frame.data()),
-			     sizeof(mean_frame));
+		const auto reduced_bytes = read_bytes(decimated_file);
+		const msap1::MncwfV4Reader reduced(reduced_bytes);
+		require(reduced.sample_frame_count() == decimated_frames &&
+				reduced.timebase_segments().size() == 1u &&
+				reduced.timebase_segments().front().decimation_divisor == 4u &&
+				reduced.timebase_segments().front().sequence_step == 4u &&
+				reduced.timebase_segments().front().source_frame_count == 65u,
+			"decimated timebase mismatch");
 		/*
 		 * Sequences 960..963 are ramp values 9590..9620 step 10, so
 		 * the stored group mean is 9605 plus the channel offset.
 		 */
-		require(mean_frame[0] == 9605 && mean_frame[6] == 9611,
+		const auto mean_frame = reduced.sample_frame(0u);
+		require(read_s32(mean_frame, 0u) == 9605 &&
+				read_s32(mean_frame, 24u) == 9611,
 			"decimated samples are not the group means");
 		/* Erase it so the restore test below still sees one file. */
 		capture.erase(decimated.id);
@@ -313,7 +423,9 @@ int main()
 		const msap1::WaveformEventIdentity pq_two{11, 2};
 		const auto pq_started = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::start,
-			1000, 1024, 1, 0, 1);
+			1000, 1024, 1, 0, 1,
+			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::start,
+				1000, 1024));
 		capture.read_available();
 		auto pq_sessions = capture.sessions();
 		auto pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
@@ -323,17 +435,23 @@ int main()
 			"an active PQ event did not hold its capture union open");
 		const auto pq_overlap = capture.track_power_quality_event(
 			pq_two, msap1::WaveformEventLifecycle::start,
-			1005, 1024, 1, 0, 1);
+			1005, 1024, 1, 0, 1,
+			pq_descriptor(pq_two, msap1::WaveformEventLifecycle::start,
+				1005, 1024));
 		require(pq_overlap.id == pq_started.id && pq_overlap.event_count == 2,
 			"overlapping PQ events did not merge into one master");
 		const auto pq_update = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::update,
-			1000, 1024, 1, 0, 1);
+			1000, 1024, 1, 0, 1,
+			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::update,
+				1000, 1024));
 		require(pq_update.event_count == 2,
 			"PQ UPDATE added a duplicate event marker");
 		(void)capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::end,
-			1000, 1024, 1, 0, 1);
+			1000, 1024, 1, 0, 1,
+			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::end,
+				1000, 1024));
 		capture.read_available();
 		pq_sessions = capture.sessions();
 		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
@@ -342,7 +460,9 @@ int main()
 			"one terminal event closed a still-overlapping capture union");
 		(void)capture.track_power_quality_event(
 			pq_two, msap1::WaveformEventLifecycle::abort,
-			1005, 1024, 1, 0, 1);
+			1005, 1024, 1, 0, 1,
+			pq_descriptor(pq_two, msap1::WaveformEventLifecycle::abort,
+				1005, 1024));
 		capture.read_available();
 		pq_sessions = wait_for_session(capture, pq_started.id);
 		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
@@ -353,6 +473,15 @@ int main()
 				pq_session->master_session_id == pq_session->id &&
 				pq_session->continuation_of_session_id == 0,
 			"the completed PQ capture lost union or lineage identity");
+		const auto pq_file = output / pq_session->filename.data();
+		const auto pq_bytes = read_bytes(pq_file);
+		const msap1::MncwfV4Reader pq_reader(pq_bytes);
+		require(pq_reader.events().size() == 2u,
+			"the MNCWF master lost an overlapping event descriptor");
+		require(std::ranges::count_if(pq_reader.lineage(), [](const auto &entry) {
+			return entry.relation == msap1::MncwfLineageRelation::event;
+		}) == 2,
+			"the MNCWF master lost event UUID lineage");
 		capture.erase(pq_started.id);
 
 		/* A live event longer than the safe materialization budget seals one
@@ -360,11 +489,15 @@ int main()
 		const msap1::WaveformEventIdentity pq_long{11, 3};
 		const auto long_master = capture.track_power_quality_event(
 			pq_long, msap1::WaveformEventLifecycle::start,
-			1024, 1024, 0, 0, 1);
+			1024, 1024, 0, 0, 1,
+			pq_descriptor(pq_long, msap1::WaveformEventLifecycle::start,
+				1024, 1024));
 		const auto safe_frames = capture.status().max_capture_frames;
 		const auto long_continuation = capture.track_power_quality_event(
 			pq_long, msap1::WaveformEventLifecycle::update,
-			1024, 1024 + safe_frames + 10, 0, 0, 1);
+			1024, 1024 + safe_frames + 10, 0, 0, 1,
+			pq_descriptor(pq_long, msap1::WaveformEventLifecycle::update,
+				1024, 1024 + safe_frames + 10));
 		require(long_continuation.id != long_master.id &&
 				long_continuation.continuation_of_session_id ==
 					long_master.id &&
@@ -426,7 +559,8 @@ int main()
 
 		const auto empty_device = unique_path(".empty-device");
 		std::ofstream(empty_device, std::ios::binary);
-		msap1::WaveformCapture restarted(empty_device.string(), output);
+		msap1::WaveformCapture restarted(
+			empty_device.string(), output, test_capture_context());
 		restarted.start();
 		const auto restored = restarted.sessions();
 		require(!restored.empty() &&

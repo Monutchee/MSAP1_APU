@@ -21,6 +21,8 @@ namespace msap1::acquisition::daemon {
 struct UtcClockStatus {
 	/* True when the kernel clock is disciplined (!STA_UNSYNC). */
 	bool synchronized = false;
+	bool positive_leap_pending = false;
+	bool negative_leap_pending = false;
 	/* Kernel maximum-error estimate for the clock itself, nanoseconds. */
 	std::uint64_t estimated_uncertainty_ns = 0;
 };
@@ -39,6 +41,8 @@ inline UtcClockStatus read_utc_clock_status() noexcept
 		return {};
 	UtcClockStatus status{};
 	status.synchronized = (clock_state.status & STA_UNSYNC) == 0;
+	status.positive_leap_pending = (clock_state.status & STA_INS) != 0;
+	status.negative_leap_pending = (clock_state.status & STA_DEL) != 0;
 	/* maxerror is maintained by the kernel in microseconds. */
 	status.estimated_uncertainty_ns =
 		static_cast<std::uint64_t>(clock_state.maxerror) * 1000u;
