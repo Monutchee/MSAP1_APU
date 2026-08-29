@@ -454,6 +454,16 @@ Relations are `1=parent`, `2=previous continuation`, `3=next continuation`,
 section lets one event reference contiguous capacity-limited masters and lets
 an exported virtual slice retain its parent and continuation identity.
 
+An event-selected virtual file includes each stored frame whose represented
+source-frame group intersects the selected event's start-through-end/current
+range. It receives a deterministic derivative capture UUID, retains every
+intersecting event marker, clips open markers with the discontinuity flag,
+clips quality intervals, and records parent, selection, event, and applicable
+continuation lineage. Metadata sections, the directory, and all CRCs are
+regenerated. The implementation exposes the unchanged master sample extent
+through bounded offset reads, so an exporter can stream it without allocating
+or persisting a second waveform-sized payload.
+
 ## Sample-data section
 
 This section has no blob. `item_count` is the persisted frame count and

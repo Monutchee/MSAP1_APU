@@ -331,8 +331,29 @@ Section event_section()
 	put_string_ref(record, 232, append_string(blob, "phase-A voltage dip"));
 	put_string_ref(record, 240, append_string(blob,
 		R"({"generation":7,"threshold_e4":9000,"hysteresis_e4":100})"));
+	/* A contained event selects only the middle decimated sample group while
+	 * retaining the intersecting outer event as a clipped marker. */
+	record.resize(2u * msap1::mncwf_v4_event_descriptor_bytes);
+	std::copy_n(record.begin(), msap1::mncwf_v4_event_descriptor_bytes,
+		record.begin() + msap1::mncwf_v4_event_descriptor_bytes);
+	const auto second = msap1::mncwf_v4_event_descriptor_bytes;
+	fill_identity(record, second, 16, 0xf0);
+	put_u16(record, second + 18, 2);
+	put_u64(record, second + 48, 104);
+	put_u64(record, second + 56, 105);
+	put_u64(record, second + 64, 106);
+	put_u64(record, second + 72, 104);
+	put_u64(record, second + 80, 2'000'125'000ull);
+	put_u64(record, second + 88, 2'000'156'250ull);
+	put_u64(record, second + 96, 2'000'187'500ull);
+	put_u64(record, second + 104, 2'000'125'000ull);
+	put_u64(record, second + 112, 2'000'124'963ull);
+	put_u64(record, second + 120, 2'000'156'213ull);
+	put_u64(record, second + 128, 2'000'187'463ull);
+	put_u64(record, second + 136, 2'000'124'963ull);
+	put_u64(record, second + 200, 2);
 	return enveloped_section(msap1::MncwfV4SectionType::event_descriptors,
-		1, msap1::mncwf_v4_event_descriptor_bytes, std::move(record),
+		2, msap1::mncwf_v4_event_descriptor_bytes, std::move(record),
 		std::move(blob));
 }
 
@@ -470,6 +491,23 @@ void expect_rejected(const Bytes &file, std::string_view what)
 	}
 }
 
+Bytes materialize(const msap1::MncwfV4VirtualFile &file)
+{
+	Bytes result(static_cast<std::size_t>(file.size()));
+	std::uint64_t offset = 0u;
+	while (offset < file.size()) {
+		const auto request = static_cast<std::size_t>(
+			std::min<std::uint64_t>(13u, file.size() - offset));
+		const auto copied = file.read(offset,
+			std::span<std::byte>{result}.subspan(
+				static_cast<std::size_t>(offset), request));
+		if (copied == 0u)
+			throw std::logic_error("virtual file stopped before EOF");
+		offset += copied;
+	}
+	return result;
+}
+
 } // namespace
 
 int main()
@@ -501,7 +539,7 @@ int main()
 			reader.channels()[1].name == "Va" &&
 			reader.channels()[1].source_channel == 6,
 			"channel identity and source mapping");
-		require(reader.events().size() == 1 &&
+		require(reader.events().size() == 2 &&
 			reader.events().front().settings_snapshot_json.find(
 				"threshold_e4") != std::string::npos,
 			"historical event includes its evaluated settings");
@@ -543,9 +581,69 @@ int main()
 				reader.timebase_segments().front().source_frame_count &&
 			round_trip.sample_data().size() == reader.sample_data().size(),
 			"typed writer round-trips every mandatory section");
-		require(msap1::encode_mncwf_v4(document) == encoded,
-			"typed writer output is deterministic");
-	} catch (const std::exception &error) {
+			require(msap1::encode_mncwf_v4(document) == encoded,
+				"typed writer output is deterministic");
+
+			const auto selected_event = reader.events()[1].event_uuid;
+			const auto virtual_file =
+				msap1::make_mncwf_v4_event_slice(reader, selected_event);
+			const auto virtual_bytes = materialize(virtual_file);
+			const msap1::MncwfV4Reader sliced{virtual_bytes};
+			require(sliced.capture_metadata().capture_uuid ==
+					virtual_file.capture_uuid() &&
+					sliced.capture_metadata().capture_uuid !=
+						reader.capture_metadata().capture_uuid,
+				"virtual slice has a deterministic derivative UUID");
+			require(sliced.sample_frame_count() == 1u &&
+					sliced.timebase_segments().size() == 1u &&
+					sliced.timebase_segments().front().first_sequence == 104u &&
+					sliced.timebase_segments().front().source_frame_count == 4u &&
+					virtual_file.first_sequence() == 104u &&
+					virtual_file.last_sequence() == 107u,
+				"virtual slice recalculates decimated frame bounds");
+			require(std::bit_cast<std::int32_t>(
+					get_u32(sliced.sample_frame(0), 0)) == 11 &&
+					std::bit_cast<std::int32_t>(
+						get_u32(sliced.sample_frame(0), 4)) == 230'001,
+				"virtual slice streams the selected master sample span");
+			require(sliced.events().size() == 2u &&
+					std::ranges::count_if(sliced.events(),
+						[](const auto &event) {
+							return (event.flags &
+								msap1::mncwf_event_discontinuous) != 0u;
+						}) == 1,
+				"virtual slice retains and bounds intersecting event markers");
+			require(sliced.quality_intervals().empty(),
+				"virtual slice removes nonintersecting quality intervals");
+			require(std::ranges::count_if(sliced.lineage(),
+					[](const auto &entry) {
+						return entry.relation ==
+							msap1::MncwfLineageRelation::event;
+					}) == 2 &&
+					std::ranges::any_of(sliced.lineage(),
+						[](const auto &entry) {
+							return entry.relation ==
+								msap1::MncwfLineageRelation::parent;
+						}) &&
+					std::ranges::any_of(sliced.lineage(),
+						[](const auto &entry) {
+							return entry.relation ==
+								msap1::MncwfLineageRelation::virtual_slice;
+						}),
+				"virtual slice retains parent, selection, and event lineage");
+			const auto sliced_readiness =
+				msap1::assess_mncwf_v4_conversion_readiness(sliced);
+			require(sliced_readiness.comtrade_ready() &&
+					sliced_readiness.pqdif_ready(),
+				"virtual slice remains converter-source ready");
+			const auto repeated = materialize(
+				msap1::make_mncwf_v4_event_slice(reader, selected_event));
+			require(repeated == virtual_bytes,
+				"virtual slice output is deterministic across chunk boundaries");
+			std::array<std::byte, 1> beyond{};
+			require(virtual_file.read(virtual_file.size(), beyond) == 0u,
+				"virtual slice read stops exactly at EOF");
+		} catch (const std::exception &error) {
 		std::fprintf(stderr, "FAIL: valid fixture rejected: %s\n", error.what());
 		++failures;
 	}
@@ -560,6 +658,15 @@ int main()
 		require(std::to_integer<std::uint8_t>(digest[0]) == 0xbau &&
 			std::to_integer<std::uint8_t>(digest[31]) == 0xadu,
 			"capture digest helper computes SHA-256");
+		bool unknown_event_rejected = false;
+		try {
+			const msap1::MncwfV4Reader reader{valid};
+			(void)msap1::make_mncwf_v4_event_slice(reader, uuid);
+		} catch (const std::invalid_argument &) {
+			unknown_event_rejected = true;
+		}
+		require(unknown_event_rejected,
+			"virtual slice rejects an event outside the master");
 	}
 	{
 		bool all_rejected = true;

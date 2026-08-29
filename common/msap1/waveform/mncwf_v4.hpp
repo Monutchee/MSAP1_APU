@@ -483,6 +483,50 @@ private:
 };
 
 /**
+ * Read-only, non-owning event subcapture encoded as a complete MNCWF v4 file.
+ *
+ * Metadata, directory entries, CRC32C values, and zero padding are owned by
+ * this object. The sample region remains a span into the validated parent
+ * reader, so the parent's byte storage must outlive the virtual file. read()
+ * supports bounded sequential or random-access delivery without materializing
+ * or persisting another waveform-sized buffer.
+ */
+class MncwfV4VirtualFile {
+public:
+	[[nodiscard]] std::uint64_t size() const noexcept { return file_bytes_; }
+	[[nodiscard]] const MncwfUuid &capture_uuid() const noexcept
+	{
+		return capture_uuid_;
+	}
+	[[nodiscard]] std::uint64_t first_sequence() const noexcept
+	{
+		return first_sequence_;
+	}
+	[[nodiscard]] std::uint64_t last_sequence() const noexcept
+	{
+		return last_sequence_;
+	}
+	/** Copy at most destination.size() bytes beginning at file offset. */
+	[[nodiscard]] std::size_t read(std::uint64_t offset,
+		std::span<std::byte> destination) const noexcept;
+
+private:
+	friend MncwfV4VirtualFile make_mncwf_v4_event_slice(
+		const MncwfV4Reader &, const MncwfUuid &);
+	std::vector<std::byte> prefix_;
+	std::span<const std::byte> sample_data_{};
+	std::uint64_t file_bytes_ = 0;
+	std::uint8_t trailing_padding_bytes_ = 0;
+	MncwfUuid capture_uuid_{};
+	std::uint64_t first_sequence_ = 0;
+	std::uint64_t last_sequence_ = 0;
+};
+
+/** Build a deterministic virtual subcapture around one event UUID. */
+[[nodiscard]] MncwfV4VirtualFile make_mncwf_v4_event_slice(
+	const MncwfV4Reader &reader, const MncwfUuid &event_uuid);
+
+/**
  * Missing MNCWF source fields for later, full-fidelity event exports.
  *
  * This does not implement or advertise either converter. Empty vectors mean

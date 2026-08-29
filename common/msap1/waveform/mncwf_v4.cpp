@@ -23,6 +23,19 @@ namespace {
 	throw std::invalid_argument("MNCWF v4: " + std::string(reason));
 }
 
+std::uint32_t crc32c_update(std::uint32_t crc,
+	std::span<const std::byte> bytes) noexcept
+{
+	constexpr std::uint32_t polynomial = 0x82F63B78u;
+	for (const auto value : bytes) {
+		crc ^= std::to_integer<std::uint8_t>(value);
+		for (unsigned bit = 0; bit < 8u; ++bit)
+			crc = (crc >> 1u) ^
+				((crc & 1u) != 0u ? polynomial : 0u);
+	}
+	return crc;
+}
+
 std::uint64_t checked_add(std::uint64_t left, std::uint64_t right,
 	std::string_view label)
 {
@@ -351,14 +364,7 @@ bool rate_matches_decimation(const MncwfV4TimebaseSegment &segment)
 
 std::uint32_t mncwf_crc32c(std::span<const std::byte> bytes) noexcept
 {
-	constexpr std::uint32_t polynomial = 0x82F63B78u;
-	std::uint32_t crc = 0xffffffffu;
-	for (const auto value : bytes) {
-		crc ^= std::to_integer<std::uint8_t>(value);
-		for (unsigned bit = 0; bit < 8u; ++bit)
-			crc = (crc >> 1u) ^ ((crc & 1u) != 0u ? polynomial : 0u);
-	}
-	return crc ^ 0xffffffffu;
+	return crc32c_update(0xffffffffu, bytes) ^ 0xffffffffu;
 }
 
 MncwfSha256 mncwf_sha256(std::span<const std::byte> bytes)
@@ -816,6 +822,485 @@ std::vector<std::byte> encode_mncwf_v4(const MncwfV4Document &document)
 	/* One implementation is the writer; the other is the acceptance oracle. */
 	(void)MncwfV4Reader{file};
 	return file;
+}
+
+namespace {
+
+std::uint64_t event_last_sequence(const MncwfV4EventDescriptor &event)
+{
+	if ((event.flags & mncwf_event_end_valid) != 0u)
+		return event.end_sequence;
+	if ((event.flags & mncwf_event_current_valid) != 0u)
+		return event.current_sequence;
+	return event.start_sequence;
+}
+
+MncwfUuid virtual_capture_uuid(const MncwfUuid &parent,
+	const MncwfUuid &event, std::uint64_t first_frame,
+	std::uint64_t frame_count)
+{
+	constexpr std::string_view domain = "MNCWF-v4 virtual event slice";
+	EncodedBytes seed;
+	const auto domain_bytes = std::as_bytes(
+		std::span{domain.data(), domain.size()});
+	seed.insert(seed.end(), domain_bytes.begin(), domain_bytes.end());
+	seed.insert(seed.end(), parent.begin(), parent.end());
+	seed.insert(seed.end(), event.begin(), event.end());
+	const auto offset = seed.size();
+	seed.resize(offset + 16u);
+	put_u64(seed, offset, first_frame);
+	put_u64(seed, offset + 8u, frame_count);
+	const auto digest = mncwf_sha256(seed);
+	MncwfUuid result{};
+	std::copy_n(digest.begin(), result.size(), result.begin());
+	/* Deterministic name-derived UUID, RFC-4122 variant/version-5 layout. */
+	result[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
+	result[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
+	return result;
+}
+
+std::pair<std::uint64_t, std::uint64_t> frame_source_bounds(
+	const std::vector<MncwfV4TimebaseSegment> &segments,
+	std::uint64_t frame)
+{
+	const auto found = std::ranges::find_if(segments,
+		[frame](const auto &segment) {
+			return frame >= segment.first_frame &&
+			       frame - segment.first_frame < segment.frame_count;
+		});
+	if (found == segments.end())
+		reject("virtual slice frame has no timebase segment");
+	const auto local = frame - found->first_frame;
+	const auto first = checked_add(found->first_sequence,
+		checked_multiply(local, found->decimation_divisor,
+			"virtual frame sequence"),
+		"virtual frame sequence");
+	const auto segment_end = checked_add(found->first_sequence,
+		found->source_frame_count, "virtual segment source range");
+	const auto group_end = std::min(segment_end,
+		checked_add(first, found->decimation_divisor,
+			"virtual frame source range"));
+	return {first, group_end - 1u};
+}
+
+const MncwfV4TimebaseSegment &segment_for_sequence(
+	const std::vector<MncwfV4TimebaseSegment> &segments,
+	std::uint64_t sequence)
+{
+	const auto found = std::ranges::find_if(segments,
+		[sequence](const auto &segment) {
+			return sequence >= segment.first_sequence &&
+			       sequence - segment.first_sequence <
+				       segment.source_frame_count;
+		});
+	if (found == segments.end())
+		reject("virtual event anchor has no timebase segment");
+	return *found;
+}
+
+std::uint64_t timestamp_for_sequence(
+	const std::vector<MncwfV4TimebaseSegment> &segments,
+	std::uint64_t sequence, bool utc)
+{
+	const auto &segment = segment_for_sequence(segments, sequence);
+	const auto anchor = utc ? segment.correlation_utc_nanoseconds
+		: segment.correlation_tai_nanoseconds;
+	if (anchor == 0u)
+		reject(utc ? "virtual event lacks a UTC timebase" :
+			"virtual event lacks a TAI timebase");
+	const auto delta = sequence >= segment.correlation_sequence
+		? sequence - segment.correlation_sequence
+		: segment.correlation_sequence - sequence;
+	const auto scaled = checked_multiply(delta,
+		segment.acquisition_rate_denominator,
+		"virtual event timestamp delta");
+	const auto nanoseconds = checked_multiply(scaled, 1'000'000'000ull,
+		"virtual event timestamp delta") /
+		segment.acquisition_rate_numerator;
+	if (sequence >= segment.correlation_sequence) {
+		return checked_add(anchor, nanoseconds,
+			"virtual event timestamp");
+	}
+	if (nanoseconds > anchor)
+		reject("virtual event timestamp underflows");
+	return anchor - nanoseconds;
+}
+
+void restamp_event(MncwfV4EventDescriptor &event,
+	const MncwfV4EventDescriptor &original,
+	const std::vector<MncwfV4TimebaseSegment> &segments)
+{
+	const auto stamp = [&](std::uint64_t sequence,
+		std::uint64_t original_sequence, std::uint64_t &tai,
+		std::uint64_t &utc) {
+		if ((event.flags & mncwf_event_tai_valid) == 0u)
+			tai = 0u;
+		else if (sequence != original_sequence)
+			tai = timestamp_for_sequence(segments, sequence, false);
+		if ((event.flags & mncwf_event_utc_valid) == 0u)
+			utc = 0u;
+		else if (sequence != original_sequence)
+			utc = timestamp_for_sequence(segments, sequence, true);
+	};
+	stamp(event.start_sequence, original.start_sequence,
+		event.start_tai_nanoseconds, event.start_utc_nanoseconds);
+	if ((event.flags & mncwf_event_current_valid) != 0u)
+		stamp(event.current_sequence, original.current_sequence,
+			event.current_tai_nanoseconds,
+			event.current_utc_nanoseconds);
+	else {
+		event.current_tai_nanoseconds = 0u;
+		event.current_utc_nanoseconds = 0u;
+	}
+	if ((event.flags & mncwf_event_end_valid) != 0u)
+		stamp(event.end_sequence, original.end_sequence,
+			event.end_tai_nanoseconds, event.end_utc_nanoseconds);
+	else {
+		event.end_tai_nanoseconds = 0u;
+		event.end_utc_nanoseconds = 0u;
+	}
+	if ((event.flags & mncwf_event_trigger_valid) != 0u)
+		stamp(event.trigger_sequence, original.trigger_sequence,
+			event.trigger_tai_nanoseconds,
+			event.trigger_utc_nanoseconds);
+	else {
+		event.trigger_tai_nanoseconds = 0u;
+		event.trigger_utc_nanoseconds = 0u;
+	}
+}
+
+void write_directory_entry(EncodedBytes &file, std::size_t index,
+	MncwfV4SectionType type, std::uint64_t offset,
+	std::uint64_t stored_bytes, std::uint64_t item_count,
+	std::uint32_t item_bytes, std::uint32_t crc)
+{
+	const auto directory = mncwf_v4_header_bytes +
+		index * mncwf_v4_directory_entry_bytes;
+	put_u32(file, directory + 0u, static_cast<std::uint32_t>(type));
+	put_u16(file, directory + 4u, 1u);
+	put_u16(file, directory + 6u, mncwf_v4_section_required);
+	put_u64(file, directory + 8u, offset);
+	put_u64(file, directory + 16u, stored_bytes);
+	put_u64(file, directory + 24u, stored_bytes);
+	put_u64(file, directory + 32u, item_count);
+	put_u32(file, directory + 40u, item_bytes);
+	put_u32(file, directory + 44u, crc);
+}
+
+} // namespace
+
+MncwfV4VirtualFile make_mncwf_v4_event_slice(
+	const MncwfV4Reader &reader, const MncwfUuid &event_uuid)
+{
+	if (all_zero(event_uuid))
+		reject("virtual slice event UUID is zero");
+	const auto selected = std::ranges::find_if(reader.events(),
+		[&event_uuid](const auto &event) {
+			return event.event_uuid == event_uuid;
+		});
+	if (selected == reader.events().end())
+		reject("virtual slice event UUID is not in the capture");
+
+	const auto requested_first = selected->start_sequence;
+	const auto requested_last = event_last_sequence(*selected);
+	std::optional<std::uint64_t> first_frame;
+	std::uint64_t last_frame_exclusive = 0u;
+	for (const auto &segment : reader.timebase_segments()) {
+		const auto segment_last = checked_add(segment.first_sequence,
+			segment.source_frame_count - 1u,
+			"virtual segment sequence range");
+		if (requested_last < segment.first_sequence ||
+		    requested_first > segment_last)
+			continue;
+		const auto local_first = requested_first <= segment.first_sequence
+			? 0u : (requested_first - segment.first_sequence) /
+				segment.decimation_divisor;
+		const auto local_last = requested_last >= segment_last
+			? segment.frame_count - 1u
+			: (requested_last - segment.first_sequence) /
+				segment.decimation_divisor;
+		const auto absolute_first = checked_add(segment.first_frame,
+			local_first, "virtual first frame");
+		const auto absolute_last = checked_add(segment.first_frame,
+			local_last + 1u, "virtual last frame");
+		first_frame = first_frame ? std::min(*first_frame, absolute_first)
+			: absolute_first;
+		last_frame_exclusive = std::max(last_frame_exclusive, absolute_last);
+	}
+	if (!first_frame || last_frame_exclusive <= *first_frame)
+		reject("virtual slice event has no sample frames");
+	const auto frame_count = last_frame_exclusive - *first_frame;
+
+	std::vector<MncwfV4TimebaseSegment> timebase;
+	for (const auto &source : reader.timebase_segments()) {
+		const auto source_end = checked_add(source.first_frame,
+			source.frame_count, "virtual source frame range");
+		const auto begin = std::max(source.first_frame, *first_frame);
+		const auto end = std::min(source_end, last_frame_exclusive);
+		if (begin >= end)
+			continue;
+		auto segment = source;
+		const auto local_first = begin - source.first_frame;
+		const auto local_end = end - source.first_frame;
+		segment.first_frame = begin - *first_frame;
+		segment.frame_count = end - begin;
+		segment.first_sequence = checked_add(source.first_sequence,
+			checked_multiply(local_first, source.decimation_divisor,
+				"virtual segment first sequence"),
+			"virtual segment first sequence");
+		const auto original_end = checked_add(source.first_sequence,
+			source.source_frame_count, "virtual source sequence range");
+		const auto selected_end = std::min(original_end,
+			checked_add(source.first_sequence,
+				checked_multiply(local_end, source.decimation_divisor,
+					"virtual segment source count"),
+				"virtual segment source count"));
+		segment.source_frame_count = selected_end - segment.first_sequence;
+		if (timebase.empty())
+			segment.flags &= static_cast<std::uint16_t>(
+				~(mncwf_time_rate_change_before |
+					mncwf_time_sequence_gap_before));
+		timebase.push_back(segment);
+	}
+	if (timebase.empty())
+		reject("virtual slice has no timebase segments");
+	const auto slice_first_sequence = timebase.front().first_sequence;
+	const auto slice_last_sequence = checked_add(
+		timebase.back().first_sequence,
+		timebase.back().source_frame_count - 1u,
+		"virtual source sequence range");
+
+	std::vector<MncwfV4EventDescriptor> events;
+	for (const auto &source : reader.events()) {
+		if (event_last_sequence(source) < slice_first_sequence ||
+		    source.start_sequence > slice_last_sequence)
+			continue;
+		auto event = source;
+		const auto clamp = [slice_first_sequence, slice_last_sequence](
+			std::uint64_t value) {
+			return std::clamp(value, slice_first_sequence,
+				slice_last_sequence);
+		};
+		const bool clipped_start = event.start_sequence < slice_first_sequence;
+		const bool clipped_current =
+			(event.flags & mncwf_event_current_valid) != 0u &&
+			event.current_sequence > slice_last_sequence;
+		const bool clipped_end =
+			(event.flags & mncwf_event_end_valid) != 0u &&
+			event.end_sequence > slice_last_sequence;
+		event.start_sequence = clamp(event.start_sequence);
+		if ((event.flags & mncwf_event_current_valid) != 0u)
+			event.current_sequence = std::max(event.start_sequence,
+				clamp(event.current_sequence));
+		if (clipped_end) {
+			event.flags &= ~mncwf_event_end_valid;
+			event.end_sequence = 0u;
+		} else if ((event.flags & mncwf_event_end_valid) != 0u) {
+			event.end_sequence = std::max(event.current_sequence,
+				clamp(event.end_sequence));
+		}
+		if ((event.flags & mncwf_event_trigger_valid) != 0u &&
+		    (event.trigger_sequence < slice_first_sequence ||
+		     event.trigger_sequence > slice_last_sequence)) {
+			event.flags &= ~mncwf_event_trigger_valid;
+			event.trigger_sequence = 0u;
+		}
+		if (clipped_start || clipped_current || clipped_end) {
+			event.flags |= mncwf_event_discontinuous;
+			if ((event.flags & mncwf_event_end_valid) == 0u)
+				event.lifecycle = MncwfEventLifecycle::update;
+		}
+		if ((event.lifecycle == MncwfEventLifecycle::end ||
+		     event.lifecycle == MncwfEventLifecycle::abort ||
+		     event.lifecycle == MncwfEventLifecycle::complete) &&
+		    (event.flags & mncwf_event_end_valid) == 0u)
+			event.lifecycle = MncwfEventLifecycle::update;
+		event.duration_samples = event_last_sequence(event) -
+			event.start_sequence;
+		restamp_event(event, source, timebase);
+		events.push_back(std::move(event));
+	}
+	if (std::ranges::find_if(events, [&event_uuid](const auto &event) {
+		return event.event_uuid == event_uuid;
+	}) == events.end())
+		reject("virtual slice lost its selected event");
+
+	std::vector<MncwfV4QualityInterval> quality;
+	for (const auto &source : reader.quality_intervals()) {
+		const auto source_end = checked_add(source.first_frame,
+			source.frame_count, "virtual quality frame range");
+		const auto begin = std::max(source.first_frame, *first_frame);
+		const auto end = std::min(source_end, last_frame_exclusive);
+		if (begin >= end)
+			continue;
+		auto interval = source;
+		interval.first_frame = begin - *first_frame;
+		interval.frame_count = end - begin;
+		const auto first_bounds = frame_source_bounds(
+			reader.timebase_segments(), begin);
+		const auto last_bounds = frame_source_bounds(
+			reader.timebase_segments(), end - 1u);
+		interval.first_sequence = std::max(source.first_sequence,
+			first_bounds.first);
+		interval.last_sequence = std::min(source.last_sequence,
+			last_bounds.second);
+		if (interval.first_sequence <= interval.last_sequence)
+			quality.push_back(interval);
+	}
+
+	auto capture = reader.capture_metadata();
+	const auto parent_uuid = capture.capture_uuid;
+	capture.capture_uuid = virtual_capture_uuid(parent_uuid, event_uuid,
+		*first_frame, frame_count);
+	if (!capture.comments.empty())
+		capture.comments += ";";
+	capture.comments += "virtual_event_slice";
+
+	std::vector<MncwfV4LineageEntry> lineage;
+	for (const auto &source : reader.lineage()) {
+		if (source.relation == MncwfLineageRelation::event ||
+		    source.last_sequence < slice_first_sequence ||
+		    source.first_sequence > slice_last_sequence)
+			continue;
+		auto entry = source;
+		entry.first_sequence = std::max(entry.first_sequence,
+			slice_first_sequence);
+		entry.last_sequence = std::min(entry.last_sequence,
+			slice_last_sequence);
+		lineage.push_back(entry);
+	}
+	lineage.push_back({MncwfLineageRelation::parent, 0u, parent_uuid, {},
+		slice_first_sequence, slice_last_sequence, 0u, 1u});
+	lineage.push_back({MncwfLineageRelation::virtual_slice, 0u, parent_uuid,
+		event_uuid, slice_first_sequence, slice_last_sequence, 0u, 1u});
+	for (const auto &event : events)
+		lineage.push_back({MncwfLineageRelation::event, 0u,
+			capture.capture_uuid, event.event_uuid, event.start_sequence,
+			event_last_sequence(event), 0u, 1u});
+	if (lineage.size() > mncwf_v4_max_lineage_entries)
+		reject("virtual slice lineage exceeds its bound");
+
+	const auto sample_offset = checked_multiply(*first_frame,
+		reader.sample_frame_bytes(), "virtual sample offset");
+	const auto sample_bytes = checked_multiply(frame_count,
+		reader.sample_frame_bytes(), "virtual sample bytes");
+	const auto sample_data = reader.sample_data().subspan(
+		narrow_size(sample_offset, "virtual sample offset"),
+		narrow_size(sample_bytes, "virtual sample bytes"));
+
+	std::array<EncodedSection, 6> metadata{
+		encode_capture(capture), encode_timebase(timebase),
+		encode_channels(reader.channels()), encode_events(events),
+		encode_quality(quality), encode_lineage(lineage),
+	};
+	constexpr auto section_count = mncwf_v4_mandatory_section_count;
+	const auto directory_bytes = checked_multiply(section_count,
+		mncwf_v4_directory_entry_bytes, "virtual directory");
+	auto next_offset = align_eight(checked_add(mncwf_v4_header_bytes,
+		directory_bytes, "virtual directory"));
+	std::array<std::uint64_t, section_count> offsets{};
+	for (std::size_t index = 0; index < metadata.size(); ++index) {
+		offsets[index] = next_offset;
+		next_offset = align_eight(checked_add(next_offset,
+			metadata[index].payload.size(), "virtual metadata"));
+	}
+	offsets.back() = next_offset;
+	const auto sample_stored_bytes = checked_add(
+		mncwf_v4_section_header_bytes, sample_data.size(),
+		"virtual sample section");
+	const auto file_bytes = align_eight(checked_add(offsets.back(),
+		sample_stored_bytes, "virtual file"));
+	if (file_bytes > mncwf_v4_max_file_bytes)
+		reject("virtual file exceeds the 512 MiB bound");
+	const auto prefix_bytes = checked_add(offsets.back(),
+		mncwf_v4_section_header_bytes, "virtual prefix");
+	EncodedBytes prefix(narrow_size(prefix_bytes, "virtual prefix"));
+	std::copy(mncwf_magic.begin(), mncwf_magic.end(), prefix.begin());
+	put_u32(prefix, 8u, mncwf_v4_version);
+	put_u32(prefix, 12u, mncwf_v4_header_bytes);
+	put_u32(prefix, 16u, mncwf_v4_directory_entry_bytes);
+	put_u32(prefix, 20u, section_count);
+	put_u64(prefix, 24u, mncwf_v4_header_bytes);
+	put_u64(prefix, 32u, directory_bytes);
+	put_u64(prefix, 40u, file_bytes);
+	for (std::size_t index = 0; index < metadata.size(); ++index) {
+		const auto &section = metadata[index];
+		write_directory_entry(prefix, index, section.type, offsets[index],
+			section.payload.size(), section.item_count, section.item_bytes,
+			mncwf_crc32c(section.payload));
+		std::copy(section.payload.begin(), section.payload.end(),
+			prefix.begin() + static_cast<std::ptrdiff_t>(offsets[index]));
+	}
+	EncodedBytes sample_header(mncwf_v4_section_header_bytes);
+	put_u32(sample_header, 0u,
+		static_cast<std::uint32_t>(MncwfV4SectionType::sample_data));
+	put_u16(sample_header, 4u, 1u);
+	put_u16(sample_header, 6u, mncwf_v4_section_header_bytes);
+	put_u32(sample_header, 12u, reader.sample_frame_bytes());
+	put_u64(sample_header, 16u, frame_count);
+	std::copy(sample_header.begin(), sample_header.end(),
+		prefix.begin() + static_cast<std::ptrdiff_t>(offsets.back()));
+	auto sample_crc = crc32c_update(0xffffffffu, sample_header);
+	sample_crc = crc32c_update(sample_crc, sample_data) ^ 0xffffffffu;
+	write_directory_entry(prefix, metadata.size(),
+		MncwfV4SectionType::sample_data, offsets.back(), sample_stored_bytes,
+		frame_count, reader.sample_frame_bytes(), sample_crc);
+	const auto directory = std::span<const std::byte>{prefix}.subspan(
+		mncwf_v4_header_bytes, narrow_size(directory_bytes, "virtual directory"));
+	put_u32(prefix, 52u, mncwf_crc32c(directory));
+	put_u32(prefix, 56u, 0u);
+	put_u32(prefix, 56u, mncwf_crc32c(
+		std::span<const std::byte>{prefix}.first(mncwf_v4_header_bytes)));
+
+	MncwfV4VirtualFile result{};
+	result.prefix_ = std::move(prefix);
+	result.sample_data_ = sample_data;
+	result.file_bytes_ = file_bytes;
+	result.trailing_padding_bytes_ = static_cast<std::uint8_t>(
+		file_bytes - prefix_bytes - sample_data.size());
+	result.capture_uuid_ = capture.capture_uuid;
+	result.first_sequence_ = slice_first_sequence;
+	result.last_sequence_ = slice_last_sequence;
+	return result;
+}
+
+std::size_t MncwfV4VirtualFile::read(std::uint64_t offset,
+	std::span<std::byte> destination) const noexcept
+{
+	if (offset >= file_bytes_ || destination.empty())
+		return 0u;
+	const auto requested = static_cast<std::size_t>(std::min<std::uint64_t>(
+		destination.size(), file_bytes_ - offset));
+	std::size_t copied = 0u;
+	const auto copy_region = [&](std::uint64_t region_offset,
+		std::span<const std::byte> source) {
+		if (copied == requested || offset + copied < region_offset ||
+		    offset + copied >= region_offset + source.size())
+			return;
+		const auto source_offset = static_cast<std::size_t>(
+			offset + copied - region_offset);
+		const auto count = std::min(requested - copied,
+			source.size() - source_offset);
+		std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(source_offset),
+			count, destination.begin() + static_cast<std::ptrdiff_t>(copied));
+		copied += count;
+	};
+	copy_region(0u, prefix_);
+	copy_region(prefix_.size(), sample_data_);
+	if (copied < requested) {
+		const auto padding_offset = prefix_.size() + sample_data_.size();
+		if (offset + copied >= padding_offset) {
+			const auto count = std::min<std::size_t>(requested - copied,
+				trailing_padding_bytes_ - static_cast<std::size_t>(
+					offset + copied - padding_offset));
+			std::fill_n(destination.begin() +
+				static_cast<std::ptrdiff_t>(copied), count, std::byte{0});
+			copied += count;
+		}
+	}
+	return copied;
 }
 
 MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
