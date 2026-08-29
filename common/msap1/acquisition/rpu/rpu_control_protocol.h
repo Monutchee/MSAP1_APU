@@ -616,7 +616,7 @@ struct msap1_m18_config_payload {
 	uint32_t generation;
 	uint32_t event_profile_count;
 	uint32_t reference_current_microamperes;
-	uint32_t reserved0;
+	uint32_t reference_voltage_microvolts;
 	struct msap1_m18_event_profile event[MSAP1_M18_EVENT_TYPE_COUNT];
 	uint32_t flicker_flags;
 	uint32_t flicker_phase_mask;

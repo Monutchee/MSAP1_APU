@@ -54,7 +54,19 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 		    waveform_metadata(configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
-	  ingest_(meter_, configuration_, timebase_, meter_stream_),
+	  ingest_(meter_, configuration_, timebase_, meter_stream_,
+		  [this](const msap1::PowerQualityEventLifecycleSnapshot &event) {
+			  if (!event.waveform_enabled)
+				  return;
+			  (void)waveform_.track_power_quality_event(
+				  {event.id.session, event.id.counter},
+				  static_cast<msap1::WaveformEventLifecycle>(
+					  event.lifecycle),
+				  event.trigger_sample, event.last_sample,
+				  event.waveform_pretrigger_ms,
+				  event.waveform_posttrigger_ms,
+				  event.waveform_decimation);
+		  }),
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
 	  health_(rpu_),

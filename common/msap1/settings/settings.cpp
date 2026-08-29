@@ -182,6 +182,9 @@ msap1_m18_config_payload to_m18_configuration(
 	result.reference_current_microamperes =
 		static_cast<std::uint32_t>(std::llround(
 			settings.metering.events.reference_current_amperes * 1000000.0));
+	result.reference_voltage_microvolts =
+		static_cast<std::uint32_t>(std::llround(
+			settings.metering.power_quality.reference_volts * 1000000.0));
 
 	const std::array profiles{
 		&settings.metering.events.voltage_sag,

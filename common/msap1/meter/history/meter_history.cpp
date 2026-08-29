@@ -215,6 +215,42 @@ std::optional<std::uint64_t> parse_reset_epoch(std::string_view text)
 	return value;
 }
 
+std::array<std::byte, 16> event_key(const PowerQualityEventId &id)
+{
+	std::array<std::byte, 16> result{};
+	for (std::size_t byte = 0; byte < 8; ++byte) {
+		result[byte] = static_cast<std::byte>(id.session >> (byte * 8u));
+		result[8u + byte] =
+			static_cast<std::byte>(id.counter >> (byte * 8u));
+	}
+	return result;
+}
+
+std::optional<std::int64_t> event_last_utc(
+	const PowerQualityEventLifecycleSnapshot &event,
+	std::optional<std::int64_t> first_utc)
+{
+	if (event.time_quality != TimeQuality::Unsynchronized) {
+		if (event.last_utc_nanoseconds >
+		    static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+			throw std::invalid_argument("PQ event UTC exceeds int64 range");
+		return static_cast<std::int64_t>(event.last_utc_nanoseconds);
+	}
+	if (!first_utc)
+		return std::nullopt;
+	const auto seconds = event.duration_samples / event.sample_rate_hz;
+	const auto remainder = event.duration_samples % event.sample_rate_hz;
+	if (seconds > static_cast<std::uint64_t>(
+			std::numeric_limits<std::int64_t>::max()) / 1'000'000'000u)
+		throw std::invalid_argument("PQ event UTC duration overflows");
+	const auto delta = seconds * 1'000'000'000u +
+		remainder * 1'000'000'000u / event.sample_rate_hz;
+	if (*first_utc > std::numeric_limits<std::int64_t>::max() -
+			static_cast<std::int64_t>(delta))
+		throw std::invalid_argument("PQ event last UTC overflows");
+	return *first_utc + static_cast<std::int64_t>(delta);
+}
+
 std::uint64_t logical_period_bytes(Database &database, MeasurementPeriod period)
 {
 	auto usage = database.prepare(R"SQL(
@@ -450,6 +486,31 @@ CREATE TABLE IF NOT EXISTS harmonic_families(
 );
 CREATE INDEX IF NOT EXISTS harmonic_families_time
  ON harmonic_families(period, measured_at_ns);
+CREATE TABLE IF NOT EXISTS power_quality_events(
+ event_id BLOB PRIMARY KEY,
+ stream_cursor INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ lifecycle INTEGER NOT NULL,
+ event_type INTEGER NOT NULL,
+ phase_mask INTEGER NOT NULL,
+ configuration_generation INTEGER NOT NULL,
+ first_sample INTEGER NOT NULL,
+ last_sample INTEGER NOT NULL,
+ trigger_sample INTEGER NOT NULL,
+ start_utc_ns INTEGER NOT NULL,
+ last_utc_ns INTEGER NOT NULL,
+ time_quality INTEGER NOT NULL,
+ utc_uncertainty_ns INTEGER NOT NULL,
+ payload BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS power_quality_events_time
+ ON power_quality_events(start_utc_ns,last_utc_ns);
+CREATE TABLE IF NOT EXISTS power_quality_event_waveforms(
+ event_id BLOB NOT NULL REFERENCES power_quality_events(event_id)
+  ON DELETE CASCADE,
+ capture_uuid BLOB NOT NULL,
+ PRIMARY KEY(event_id,capture_uuid)
+);
 )SQL");
 	/* Existing historian databases predate M17 reset epochs. SQLite has no
 	 * portable ADD COLUMN IF NOT EXISTS, so inspect the live schema first. */
@@ -529,6 +590,7 @@ public:
 			" SELECT COALESCE(MAX(stream_cursor),0) AS value FROM measurement_blocks"
 			" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_families"
 			" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_pending"
+			" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM power_quality_events"
 			")");
 		(void)latest.step();
 		acknowledged_cursor =
@@ -609,6 +671,173 @@ MeterHistoryStore::MeterHistoryStore(std::filesystem::path path,
 		return std::make_unique<Impl>(std::move(path), std::move(policies));
 	}()) {}
 MeterHistoryStore::~MeterHistoryStore() = default;
+
+void MeterHistoryStore::upsert_power_quality_event(const MeterRecord &record,
+	std::uint64_t stream_cursor,
+	std::optional<std::int64_t> first_utc_nanoseconds,
+	TimeQuality time_quality,
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds)
+{
+	const auto event = decode_pq_event_lifecycle_record(record);
+	if (event.time_quality != TimeQuality::Unsynchronized) {
+		if (event.start_utc_nanoseconds >
+		    static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+			throw std::invalid_argument("PQ event start UTC exceeds int64 range");
+		first_utc_nanoseconds =
+			static_cast<std::int64_t>(event.start_utc_nanoseconds);
+		time_quality = event.time_quality;
+	}
+	const auto last_utc_nanoseconds = event_last_utc(event,
+		first_utc_nanoseconds);
+	const auto key = event_key(event.id);
+	const auto payload = std::as_bytes(std::span{&record, std::size_t{1}});
+
+	std::scoped_lock lock(impl_->mutex);
+	Transaction transaction(impl_->persistent);
+	auto upsert = impl_->persistent.prepare(R"SQL(
+INSERT INTO power_quality_events(event_id,stream_cursor,source_sequence,
+ lifecycle,event_type,phase_mask,configuration_generation,first_sample,
+ last_sample,trigger_sample,start_utc_ns,last_utc_ns,time_quality,
+ utc_uncertainty_ns,payload)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(event_id) DO UPDATE SET
+ stream_cursor=excluded.stream_cursor,
+ source_sequence=excluded.source_sequence,
+ lifecycle=excluded.lifecycle,
+ event_type=excluded.event_type,
+ phase_mask=excluded.phase_mask,
+ configuration_generation=excluded.configuration_generation,
+ first_sample=excluded.first_sample,
+ last_sample=excluded.last_sample,
+ trigger_sample=excluded.trigger_sample,
+ start_utc_ns=CASE WHEN power_quality_events.start_utc_ns=0
+                   THEN excluded.start_utc_ns
+                   ELSE power_quality_events.start_utc_ns END,
+ last_utc_ns=excluded.last_utc_ns,
+ time_quality=excluded.time_quality,
+ utc_uncertainty_ns=excluded.utc_uncertainty_ns,
+ payload=excluded.payload
+WHERE excluded.last_sample > power_quality_events.last_sample OR
+ (excluded.last_sample = power_quality_events.last_sample AND
+  excluded.lifecycle >= power_quality_events.lifecycle)
+)SQL");
+	upsert.bind(1, std::span<const std::byte>{key});
+	upsert.bind(2, stream_cursor);
+	upsert.bind(3, static_cast<std::uint64_t>(event.sequence));
+	upsert.bind(4, static_cast<std::int32_t>(event.lifecycle));
+	upsert.bind(5, static_cast<std::int32_t>(event.type));
+	upsert.bind(6, static_cast<std::int32_t>(event.phase_mask));
+	upsert.bind(7, static_cast<std::int64_t>(event.configuration_generation));
+	upsert.bind(8, event.first_sample);
+	upsert.bind(9, event.last_sample);
+	upsert.bind(10, event.trigger_sample);
+	upsert.bind(11, first_utc_nanoseconds.value_or(0));
+	upsert.bind(12, last_utc_nanoseconds.value_or(0));
+	upsert.bind(13, static_cast<std::int32_t>(time_quality));
+	upsert.bind(14, utc_uncertainty_nanoseconds.value_or(0));
+	upsert.bind(15, payload);
+	upsert.execute();
+	transaction.commit();
+	impl_->acknowledged_cursor = std::max(impl_->acknowledged_cursor,
+		stream_cursor);
+}
+
+void MeterHistoryStore::link_power_quality_event_waveform(
+	const PowerQualityEventId &event_id, const WaveformCaptureUuid &capture_uuid)
+{
+	const auto key = event_key(event_id);
+	bool nonzero = false;
+	for (const auto byte : capture_uuid)
+		nonzero = nonzero || byte != std::byte{};
+	if (!nonzero)
+		throw std::invalid_argument("waveform capture UUID is zero");
+	std::scoped_lock lock(impl_->mutex);
+	auto insert = impl_->persistent.prepare(R"SQL(
+INSERT OR IGNORE INTO power_quality_event_waveforms(event_id,capture_uuid)
+VALUES(?,?)
+)SQL");
+	insert.bind(1, std::span<const std::byte>{key});
+	insert.bind(2, std::span<const std::byte>{capture_uuid});
+	insert.execute();
+	if (impl_->persistent.changes() == 0) {
+		auto exists = impl_->persistent.prepare(
+			"SELECT 1 FROM power_quality_events WHERE event_id=?");
+		exists.bind(1, std::span<const std::byte>{key});
+		if (!exists.step())
+			throw std::invalid_argument("power-quality event does not exist");
+	}
+}
+
+std::vector<PowerQualityEventCatalogEntry>
+MeterHistoryStore::query_power_quality_events(
+	const PowerQualityEventQuery &query) const
+{
+	if (query.limit == 0u || query.limit > 10000u)
+		throw std::invalid_argument("PQ event query limit is out of range");
+	if (query.start_utc_nanoseconds && query.end_utc_nanoseconds &&
+	    *query.start_utc_nanoseconds > *query.end_utc_nanoseconds)
+		throw std::invalid_argument("PQ event query time range is reversed");
+	std::scoped_lock lock(impl_->mutex);
+	std::string sql = R"SQL(
+SELECT event_id,stream_cursor,start_utc_ns,last_utc_ns,time_quality,
+ utc_uncertainty_ns,payload
+FROM power_quality_events WHERE 1=1
+)SQL";
+	if (query.id)
+		sql += " AND event_id=?";
+	if (query.start_utc_nanoseconds)
+		sql += " AND (last_utc_ns=0 OR last_utc_ns>=?)";
+	if (query.end_utc_nanoseconds)
+		sql += " AND (start_utc_ns=0 OR start_utc_ns<=?)";
+	sql += " ORDER BY last_sample DESC LIMIT ?";
+	auto select = impl_->persistent.prepare(sql);
+	int parameter = 1;
+	std::optional<std::array<std::byte, 16>> key;
+	if (query.id) {
+		key = event_key(*query.id);
+		select.bind(parameter++, std::span<const std::byte>{*key});
+	}
+	if (query.start_utc_nanoseconds)
+		select.bind(parameter++, *query.start_utc_nanoseconds);
+	if (query.end_utc_nanoseconds)
+		select.bind(parameter++, *query.end_utc_nanoseconds);
+	select.bind(parameter, static_cast<std::int64_t>(query.limit));
+
+	std::vector<PowerQualityEventCatalogEntry> result;
+	while (select.step()) {
+		const auto event_id = select.blob(0);
+		const auto payload = select.blob(6);
+		if (event_id.size() != 16u || payload.size() != sizeof(MeterRecord))
+			throw std::runtime_error("PQ event catalogue row is malformed");
+		MeterRecord record{};
+		std::memcpy(&record, payload.data(), sizeof(record));
+		PowerQualityEventCatalogEntry entry{};
+		entry.event = decode_pq_event_lifecycle_record(record);
+		entry.stream_cursor = static_cast<std::uint64_t>(select.integer(1));
+		if (const auto value = select.integer(2); value != 0)
+			entry.start_utc_nanoseconds = value;
+		if (const auto value = select.integer(3); value != 0)
+			entry.last_utc_nanoseconds = value;
+		entry.event.time_quality = static_cast<TimeQuality>(select.integer(4));
+		if (const auto value = select.integer(5); value != 0)
+			entry.utc_uncertainty_nanoseconds =
+				static_cast<std::uint64_t>(value);
+		auto links = impl_->persistent.prepare(R"SQL(
+SELECT capture_uuid FROM power_quality_event_waveforms
+WHERE event_id=? ORDER BY capture_uuid
+)SQL");
+		links.bind(1, event_id);
+		while (links.step()) {
+			const auto uuid = links.blob(0);
+			if (uuid.size() != entry.waveform_capture_uuids.emplace_back().size())
+				throw std::runtime_error("event waveform UUID is malformed");
+			std::memcpy(entry.waveform_capture_uuids.back().data(),
+				uuid.data(), uuid.size());
+		}
+		result.push_back(std::move(entry));
+	}
+	return result;
+}
 
 void MeterHistoryStore::append(const MeterUpdate &update,
 	std::uint64_t stream_cursor, std::int64_t measured_at_ns)
@@ -1000,6 +1229,11 @@ HistorianStatus MeterHistoryStore::status() const
 	std::scoped_lock lock(impl_->mutex);
 	HistorianStatus result; result.acknowledged_cursor = impl_->acknowledged_cursor;
 	result.storage_bytes = sqlite_family_size(impl_->persistent_path);
+	auto events = impl_->persistent.prepare(
+		"SELECT COUNT(*) FROM power_quality_events");
+	(void)events.step();
+	result.power_quality_event_count = static_cast<std::uint64_t>(
+		events.integer(0));
 	for (const auto &policy : impl_->manager.policies()) {
 		if (policy.dataset == mnc::meter_stream::DatabaseDataset::raw_record_spool)
 			continue;
@@ -1039,6 +1273,7 @@ std::uint64_t MeterHistoryStore::persisted_stream_high_water() const
 		" SELECT COALESCE(MAX(stream_cursor),0) AS value FROM measurement_blocks"
 		" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_families"
 		" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM harmonic_pending"
+		" UNION ALL SELECT COALESCE(MAX(stream_cursor),0) FROM power_quality_events"
 		")");
 	(void)latest.step();
 	return static_cast<std::uint64_t>(latest.integer(0));

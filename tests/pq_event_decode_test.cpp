@@ -65,6 +65,50 @@ msap1::MeterRecord make_record()
 	return record;
 }
 
+msap1::MeterRecord make_lifecycle_record()
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_pq_event_lifecycle_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = 99;
+	record.words[4] = 7;
+	record.words[5] = 32000;
+	record.words[6] = 1001;
+	record.words[7] = 0x50; /* voltage phases A and C in the M18 map */
+	record.words[8] = 0x0e; /* complete, first after gap, finalized */
+	record.words[9] = 1000;
+	record.words[12] = 2;
+	record.words[13] = msap1::meter_event_lifecycle_update |
+		(0u << 4u) | (0x5u << 8u);
+	record.words[14] = 2000;
+	record.words[16] = 0x55667788;
+	record.words[17] = 0x11223344;
+	record.words[18] = 42;
+	record.words[20] = 7;
+	record.words[21] = 9000;
+	record.words[22] = 200;
+	record.words[23] = 0x7u | (8u << 8u);
+	record.words[24] = 100;
+	record.words[25] = 500;
+	record.words[26] = 230000000;
+	for (std::uint32_t phase = 0; phase < 3; ++phase) {
+		record.words[28 + phase] = 190000000 + phase;
+		record.words[31 + phase] = 230000000 + phase;
+		record.words[34 + phase] = 210000000 + phase;
+	}
+	record.words[37] = 1000;
+	record.words[39] = 1100;
+	record.words[45] = 0; /* R5 leaves UTC explicitly unresolved */
+	record.words[46] = 2;
+	record.words[47] = 4;
+	record.words[48] = 0x11111111;
+	record.words[49] = 0x22222222;
+	record.words[50] = 0x33333333;
+	record.words[51] = 0x44444444;
+	return record;
+}
+
 } // namespace
 
 int main()
@@ -203,6 +247,50 @@ int main()
 		bad.words[14] = 0;
 		bad.words[15] = 0;
 		rejects(bad, "a last sample before the first must be rejected");
+	}
+
+	/* The M18 lifecycle record has an independent ID and sequence space and
+	 * retains its exact settings snapshot through every lifecycle edge. */
+	const auto lifecycle_record = make_lifecycle_record();
+	require(lifecycle_record.header_valid(),
+		"PQ-EVENT-v1 must pass the shared header check");
+	const auto event =
+		msap1::decode_pq_event_lifecycle_record(lifecycle_record);
+	require(event.id.session == 0x1122334455667788ull &&
+			event.id.counter == 42,
+		"stable 128-bit event ID");
+	require(event.lifecycle == msap1::PowerQualityEventLifecycle::update &&
+			event.type == msap1::PowerQualityLifecycleType::voltage_sag,
+		"lifecycle and taxonomy");
+	require(event.phase_mask == 0x5 && event.valid_mask == 0x50,
+		"M18 phase/validity map");
+	require(event.first_sample == 1000 && event.last_sample == 2000 &&
+			event.trigger_sample == 1100 && event.duration_samples == 1000,
+		"exact event sample anchors");
+	require(event.waveform_enabled && event.per_phase &&
+			event.iec_classification && event.waveform_decimation == 8,
+		"waveform/taxonomy settings snapshot");
+	require(event.minimum_micro_units[0] == 190000000 &&
+			event.maximum_micro_units[2] == 230000002 &&
+			event.current_micro_units[1] == 210000001,
+		"event extrema/current values");
+	require(event.discontinuities == 2 && event.update_count == 4 &&
+			event.time_quality == msap1::TimeQuality::Unsynchronized,
+		"event discontinuity/update/time provenance");
+	{
+		auto bad = lifecycle_record;
+		bad.words[52] = 1;
+		rejects(bad, "PQ-EVENT-v1 reserved words must be zero");
+	}
+	{
+		auto bad = lifecycle_record;
+		bad.words[18] = 0;
+		rejects(bad, "PQ-EVENT-v1 event counter must be nonzero");
+	}
+	{
+		auto bad = lifecycle_record;
+		bad.words[34] = 180000000;
+		rejects(bad, "PQ-EVENT-v1 current value must lie within its extrema");
 	}
 
 	if (failures != 0) {

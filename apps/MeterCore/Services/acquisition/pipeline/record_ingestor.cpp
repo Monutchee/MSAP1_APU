@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace msap1::acquisition::daemon {
@@ -86,9 +87,11 @@ MeterRecordIngestor::MeterRecordIngestor(
 	msap1::acquisition::MeterRecordSource &meter,
 	const msap1::PreparedMeterConfiguration &configuration,
 	const msap1::meter::MeasurementTimebase &timebase,
-	mnc::meter_stream::MeterRecordPublisher &publisher)
+	mnc::meter_stream::MeterRecordPublisher &publisher,
+	PqLifecycleCallback pq_lifecycle_callback)
 	: meter_(meter), configuration_(configuration),
-	  timebase_(timebase), publisher_(publisher)
+	  timebase_(timebase), publisher_(publisher),
+	  pq_lifecycle_callback_(std::move(pq_lifecycle_callback))
 {
 }
 
@@ -129,6 +132,8 @@ void MeterRecordIngestor::begin_epoch()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_pq_lifecycle_sequence_.reset();
+	latest_pq_lifecycle_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -138,6 +143,7 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
+	pq_lifecycle_sequence_gaps_ = 0;
 	for (auto &assembler : harmonic_assemblers_)
 		assembler.reset();
 	for (auto &pending : pending_harmonic_families_)
@@ -160,6 +166,8 @@ void MeterRecordIngestor::clear_latest()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_pq_lifecycle_sequence_.reset();
+	latest_pq_lifecycle_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -585,6 +593,84 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 					error.what(),
 				"meter_record_decode_rejected", record);
 		}
+		return;
+	}
+
+	/* PQ-EVENT-v1 is the final R5C1 lifecycle product. Decode it before
+	 * touching this family's continuity baseline, stamp its first-sample UTC
+	 * mapping into the durable envelope, and publish the exact 256-byte record.
+	 * It never participates in the BASIC/aggregate sequence trackers. */
+	if (record.record_format() == msap1::meter_pq_event_lifecycle_format) {
+		msap1::PowerQualityEventLifecycleSnapshot event{};
+		try {
+			event = msap1::decode_pq_event_lifecycle_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("PQ-EVENT-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_pq_lifecycle_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				event.sequence - (*last_pq_lifecycle_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				pq_lifecycle_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = event.sequence;
+		timing.configuration_generation = event.configuration_generation;
+		timing.first_sample_index = event.first_sample;
+		timing.sample_count = record.block_sample_count();
+		timing.sample_rate_hz = event.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::power_quality_event);
+		stream_record.measurement_period = static_cast<std::uint8_t>(
+			msap1::MeasurementPeriod::Basic);
+		stream_record.source_sequence = event.sequence;
+		stream_record.configuration_generation =
+			event.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = event.first_sample;
+		stream_record.timing.sample_count = record.block_sample_count();
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+		if (pq_lifecycle_callback_) {
+			try {
+				pq_lifecycle_callback_(event);
+			} catch (const std::exception &error) {
+				log_rejected_record(
+					std::string("PQ event waveform trigger: ") +
+						error.what(),
+					"pq_event_waveform_trigger_failed", record);
+			}
+		}
+
+		last_pq_lifecycle_sequence_ = event.sequence;
+		latest_pq_lifecycle_ = std::move(event);
+		++pq_lifecycle_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
 		return;
 	}
 

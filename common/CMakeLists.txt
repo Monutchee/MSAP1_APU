@@ -435,6 +435,15 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME pq_event_decode_test COMMAND pq_event_decode_test)
 
+	# M18 durable lifecycle catalogue, replay idempotence, and waveform links.
+	add_executable(pq_event_history_test
+		${PROJECT_SOURCE_DIR}/tests/pq_event_history_test.cpp)
+	target_link_libraries(pq_event_history_test PRIVATE
+		msap1::meter-data-provider-stream)
+	target_compile_options(pq_event_history_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME pq_event_history_test COMMAND pq_event_history_test)
+
 	# M16 HARMONIC-v1 decode and atomic 42-record family assembly.
 	add_executable(harmonic_decode_test
 		${PROJECT_SOURCE_DIR}/tests/harmonic_decode_test.cpp)

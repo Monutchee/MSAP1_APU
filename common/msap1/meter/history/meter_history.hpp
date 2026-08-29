@@ -5,6 +5,8 @@
 #include "msap1/meter/meter_data.hpp"
 
 #include <cstdint>
+#include <cstddef>
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -47,6 +49,7 @@ struct HistorianStatus {
 	std::uint64_t oldest_available_stream_cursor = 0;
 	std::uint64_t block_count = 0;
 	std::uint64_t storage_bytes = 0;
+	std::uint64_t power_quality_event_count = 0;
 	struct DatasetStatus {
 		mnc::meter_stream::DatabaseDataset dataset =
 			mnc::meter_stream::DatabaseDataset::basic;
@@ -58,6 +61,24 @@ struct HistorianStatus {
 		std::optional<std::int64_t> newest_nanoseconds;
 	};
 	std::vector<DatasetStatus> datasets;
+};
+
+using WaveformCaptureUuid = std::array<std::byte, 16>;
+
+struct PowerQualityEventCatalogEntry {
+	PowerQualityEventLifecycleSnapshot event{};
+	std::uint64_t stream_cursor = 0;
+	std::optional<std::int64_t> start_utc_nanoseconds;
+	std::optional<std::int64_t> last_utc_nanoseconds;
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
+	std::vector<WaveformCaptureUuid> waveform_capture_uuids;
+};
+
+struct PowerQualityEventQuery {
+	std::optional<PowerQualityEventId> id;
+	std::optional<std::int64_t> start_utc_nanoseconds;
+	std::optional<std::int64_t> end_utc_nanoseconds;
+	std::uint32_t limit = 1000;
 };
 
 /**
@@ -125,6 +146,17 @@ public:
 	[[nodiscard]] bool append_harmonic_record(const MeterRecord &record,
 		std::uint64_t stream_cursor,
 		std::int64_t measured_at_nanoseconds);
+	/** Idempotently materialize the newest lifecycle edge for one stable ID. */
+	void upsert_power_quality_event(const MeterRecord &record,
+		std::uint64_t stream_cursor,
+		std::optional<std::int64_t> first_utc_nanoseconds,
+		TimeQuality time_quality,
+		std::optional<std::uint64_t> utc_uncertainty_nanoseconds);
+	[[nodiscard]] std::vector<PowerQualityEventCatalogEntry>
+	query_power_quality_events(const PowerQualityEventQuery &query = {}) const;
+	/** Attach one canonical MNCWF-v4 capture UUID; duplicate links are ignored. */
+	void link_power_quality_event_waveform(const PowerQualityEventId &event_id,
+		const WaveformCaptureUuid &capture_uuid);
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
 	[[nodiscard]] HistorianStatus status() const;
 	/** Highest stream cursor the persistent projections have committed, or 0

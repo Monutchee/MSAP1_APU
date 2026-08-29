@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -140,12 +141,16 @@ struct WaveformCapture::Event {
 	std::uint64_t sequence = 0;
 	std::uint64_t tai_nanoseconds = 0;
 	WaveformTriggerSource source = WaveformTriggerSource::manual_cli;
+	WaveformEventIdentity identity{};
+	bool stable_identity = false;
 };
 
 struct WaveformCapture::Session {
 	WaveformSessionSummary summary{};
 	std::vector<Event> events;
+	std::vector<WaveformEventIdentity> active_events;
 	bool materialization_queued = false;
+	bool capacity_sealed = false;
 };
 
 /*
@@ -803,7 +808,8 @@ WaveformSessionSummary WaveformCapture::trigger(
 		[](const Session &session) {
 			return session.summary.state ==
 				       WaveformSessionState::capturing &&
-				!session.materialization_queued;
+				!session.materialization_queued &&
+				!session.capacity_sealed;
 		});
 	if (active == sessions_.end() ||
 	    requested_first > active->summary.last_sequence + 1u) {
@@ -841,9 +847,134 @@ WaveformSessionSummary WaveformCapture::trigger(
 				"waveform_decimation_kept", fields);
 		}
 	}
-	active->events.push_back({anchor, now_tai, source});
+	active->events.push_back({anchor, now_tai, source, {}, false});
 	active->summary.event_count =
 		static_cast<std::uint32_t>(active->events.size());
+	return active->summary;
+}
+
+WaveformSessionSummary WaveformCapture::track_power_quality_event(
+	WaveformEventIdentity event_id, WaveformEventLifecycle lifecycle,
+	std::uint64_t trigger_sequence, std::uint64_t current_sequence,
+	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
+	std::uint32_t decimation)
+{
+	collect_materialization_results();
+	if (event_id.session == 0u || event_id.counter == 0u)
+		throw std::invalid_argument("power-quality event ID is zero");
+	if (!have_history_ || sample_rate_hz_ == 0)
+		throw std::runtime_error("waveform history is not ready");
+	if (trigger_sequence > current_sequence)
+		throw std::invalid_argument("event trigger is after its current sample");
+	if (pretrigger_ms > 120000u || posttrigger_ms > 120000u)
+		throw std::invalid_argument("waveform duration exceeds 120 seconds");
+	if (!valid_decimation(decimation))
+		throw std::invalid_argument(
+			"waveform decimation must be 1, 2, 4, 8, 16, or 32");
+	const auto frames_for = [this](std::uint32_t milliseconds) {
+		return (static_cast<std::uint64_t>(sample_rate_hz_) * milliseconds +
+			999u) / 1000u;
+	};
+	const auto requested_first = trigger_sequence > frames_for(pretrigger_ms)
+		? trigger_sequence - frames_for(pretrigger_ms) : 0u;
+	if (current_sequence > std::numeric_limits<std::uint64_t>::max() -
+			frames_for(posttrigger_ms))
+		throw std::invalid_argument("event post-trigger range overflows");
+	const auto requested_last = current_sequence + frames_for(posttrigger_ms);
+	const auto budget = max_capture_frames();
+	if (frames_for(pretrigger_ms) + frames_for(posttrigger_ms) + 1u >
+	    budget)
+		throw std::invalid_argument(
+			"one event waveform policy exceeds the history budget");
+
+	if (const auto current = correlate())
+		correlation_ = *current;
+	const auto now_tai = tai_now_nanoseconds();
+	const auto now_realtime = realtime_now_nanoseconds();
+	const auto has_event = [&event_id](const Session &session) {
+		return std::find(session.active_events.begin(),
+			session.active_events.end(), event_id) !=
+			session.active_events.end();
+	};
+	auto active = std::find_if(sessions_.begin(), sessions_.end(),
+		[&](const Session &session) {
+			return session.summary.state == WaveformSessionState::capturing &&
+				!session.materialization_queued && has_event(session);
+		});
+	if (active == sessions_.end()) {
+		active = std::find_if(sessions_.begin(), sessions_.end(),
+			[&](const Session &session) {
+				return session.summary.state ==
+						WaveformSessionState::capturing &&
+					!session.materialization_queued &&
+					!session.capacity_sealed &&
+					requested_first <= session.summary.last_sequence + 1u;
+			});
+	}
+
+	auto new_session = [&](std::uint64_t first, std::uint64_t last,
+		std::uint64_t continuation, std::uint64_t master) {
+		Session session{};
+		session.summary.id = next_session_id_++;
+		session.summary.trigger_sequence = trigger_sequence;
+		session.summary.first_sequence = first;
+		session.summary.last_sequence = last;
+		session.summary.trigger_tai_nanoseconds = now_tai;
+		session.summary.trigger_realtime_nanoseconds = now_realtime;
+		session.summary.sample_rate_hz = sample_rate_hz_;
+		session.summary.decimation = decimation;
+		session.summary.state = WaveformSessionState::capturing;
+		session.summary.continuation_of_session_id = continuation;
+		session.summary.master_session_id = master == 0u
+			? session.summary.id : master;
+		sessions_.push_back(std::move(session));
+		return std::prev(sessions_.end());
+	};
+	if (active == sessions_.end()) {
+		/* Recovery can first observe an UPDATE after an APU restart. Keep the
+		 * materializable tail if the already-active event predates the ring. */
+		const auto recoverable_first = requested_last - requested_first + 1u >
+			budget ? requested_last - budget + 1u : requested_first;
+		active = new_session(recoverable_first, requested_last, 0u, 0u);
+	}
+	else {
+		active->summary.first_sequence = std::min(
+			active->summary.first_sequence, requested_first);
+		if (requested_last - active->summary.first_sequence + 1u > budget) {
+			const auto predecessor = active->summary.id;
+			const auto master = active->summary.master_session_id;
+			const auto continuation_first = active->summary.first_sequence + budget;
+			active->summary.last_sequence = continuation_first - 1u;
+			active->capacity_sealed = true;
+			auto carrying = active->active_events;
+			active->active_events.clear();
+			active = new_session(continuation_first,
+				std::max(continuation_first, requested_last), predecessor,
+				master);
+			active->active_events = std::move(carrying);
+			for (const auto &carried : active->active_events)
+				active->events.push_back({continuation_first, now_tai,
+					WaveformTriggerSource::pq_event, carried, true});
+		} else {
+			active->summary.last_sequence = std::max(
+				active->summary.last_sequence, requested_last);
+		}
+	}
+
+	if (!has_event(*active))
+		active->active_events.push_back(event_id);
+	const auto marker = std::find_if(active->events.begin(),
+		active->events.end(), [&event_id](const Event &event) {
+			return event.stable_identity && event.identity == event_id;
+		});
+	if (marker == active->events.end())
+		active->events.push_back({trigger_sequence, now_tai,
+			WaveformTriggerSource::pq_event, event_id, true});
+	active->summary.event_count = static_cast<std::uint32_t>(
+		active->events.size());
+	if (lifecycle == WaveformEventLifecycle::end ||
+	    lifecycle == WaveformEventLifecycle::abort)
+		std::erase(active->active_events, event_id);
 	return active->summary;
 }
 
@@ -906,6 +1037,7 @@ void WaveformCapture::finish_sessions()
 	for (auto &session : sessions_) {
 		if (session.summary.state != WaveformSessionState::capturing ||
 		    session.materialization_queued ||
+		    !session.active_events.empty() ||
 		    latest_sequence_ < session.summary.last_sequence)
 			continue;
 		const bool evicted =

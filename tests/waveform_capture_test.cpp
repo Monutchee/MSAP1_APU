@@ -306,6 +306,82 @@ int main()
 		require(!std::filesystem::exists(decimated_file),
 			"deleted decimated capture was retained");
 
+		/* Stable PQ events share one capture union. Lifecycle updates extend
+		 * it without duplicate markers, and a terminal edge cannot close the
+		 * union while another overlapping event remains active. */
+		const msap1::WaveformEventIdentity pq_one{11, 1};
+		const msap1::WaveformEventIdentity pq_two{11, 2};
+		const auto pq_started = capture.track_power_quality_event(
+			pq_one, msap1::WaveformEventLifecycle::start,
+			1000, 1024, 1, 0, 1);
+		capture.read_available();
+		auto pq_sessions = capture.sessions();
+		auto pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
+			[&](const auto &session) { return session.id == pq_started.id; });
+		require(pq_session != pq_sessions.end() &&
+				pq_session->state == msap1::WaveformSessionState::capturing,
+			"an active PQ event did not hold its capture union open");
+		const auto pq_overlap = capture.track_power_quality_event(
+			pq_two, msap1::WaveformEventLifecycle::start,
+			1005, 1024, 1, 0, 1);
+		require(pq_overlap.id == pq_started.id && pq_overlap.event_count == 2,
+			"overlapping PQ events did not merge into one master");
+		const auto pq_update = capture.track_power_quality_event(
+			pq_one, msap1::WaveformEventLifecycle::update,
+			1000, 1024, 1, 0, 1);
+		require(pq_update.event_count == 2,
+			"PQ UPDATE added a duplicate event marker");
+		(void)capture.track_power_quality_event(
+			pq_one, msap1::WaveformEventLifecycle::end,
+			1000, 1024, 1, 0, 1);
+		capture.read_available();
+		pq_sessions = capture.sessions();
+		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
+			[&](const auto &session) { return session.id == pq_started.id; });
+		require(pq_session->state == msap1::WaveformSessionState::capturing,
+			"one terminal event closed a still-overlapping capture union");
+		(void)capture.track_power_quality_event(
+			pq_two, msap1::WaveformEventLifecycle::abort,
+			1005, 1024, 1, 0, 1);
+		capture.read_available();
+		pq_sessions = wait_for_session(capture, pq_started.id);
+		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
+			[&](const auto &session) { return session.id == pq_started.id; });
+		require(pq_session != pq_sessions.end() &&
+				pq_session->state == msap1::WaveformSessionState::complete &&
+				pq_session->event_count == 2 &&
+				pq_session->master_session_id == pq_session->id &&
+				pq_session->continuation_of_session_id == 0,
+			"the completed PQ capture lost union or lineage identity");
+		capture.erase(pq_started.id);
+
+		/* A live event longer than the safe materialization budget seals one
+		 * master and carries the stable ID into a contiguous continuation. */
+		const msap1::WaveformEventIdentity pq_long{11, 3};
+		const auto long_master = capture.track_power_quality_event(
+			pq_long, msap1::WaveformEventLifecycle::start,
+			1024, 1024, 0, 0, 1);
+		const auto safe_frames = capture.status().max_capture_frames;
+		const auto long_continuation = capture.track_power_quality_event(
+			pq_long, msap1::WaveformEventLifecycle::update,
+			1024, 1024 + safe_frames + 10, 0, 0, 1);
+		require(long_continuation.id != long_master.id &&
+				long_continuation.continuation_of_session_id ==
+					long_master.id &&
+				long_continuation.master_session_id == long_master.id,
+			"capacity continuation lost master/predecessor lineage");
+		const auto long_sessions = capture.sessions();
+		const auto sealed = std::find_if(long_sessions.begin(),
+			long_sessions.end(), [&](const auto &session) {
+				return session.id == long_master.id;
+			});
+		require(sealed != long_sessions.end() &&
+				sealed->last_sequence + 1 ==
+					long_continuation.first_sequence &&
+				sealed->last_sequence - sealed->first_sequence + 1 ==
+					safe_frames,
+			"capacity continuation is not contiguous at the safe limit");
+
 		/*
 		 * A coordinated source change closes and reopens waveform DMA. The
 		 * next source is a new continuity epoch even if its first sequence is

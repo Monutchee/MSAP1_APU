@@ -493,6 +493,88 @@ msap1::MeterRecord demand_record(std::uint32_t sequence,
 	return record;
 }
 
+msap1::MeterRecord pq_lifecycle_record(std::uint32_t sequence,
+	std::uint32_t generation, std::uint64_t first, std::uint64_t last)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_pq_event_lifecycle_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000;
+	record.words[6] = static_cast<std::uint32_t>(last - first + 1u);
+	record.words[7] = 0x10;
+	record.words[8] = 0x0a;
+	write_record_u64(record, 9, first);
+	record.words[13] = msap1::meter_event_lifecycle_update | (1u << 8u);
+	write_record_u64(record, 14, last);
+	write_record_u64(record, 16, 0x123456789abcdef0ull);
+	write_record_u64(record, 18, 8);
+	record.words[20] = generation;
+	record.words[21] = 9000;
+	record.words[22] = 200;
+	record.words[23] = 0x5u | (1u << 8u);
+	record.words[24] = 100;
+	record.words[25] = 500;
+	record.words[26] = 230000000;
+	for (std::size_t phase = 0; phase < 3; ++phase) {
+		record.words[28 + phase] = 180000000 + phase;
+		record.words[31 + phase] = 230000000 + phase;
+		record.words[34 + phase] = 200000000 + phase;
+	}
+	write_record_u64(record, 37, last - first);
+	write_record_u64(record, 39, first);
+	record.words[47] = sequence;
+	record.words[48] = 1;
+	record.words[49] = 2;
+	record.words[50] = 3;
+	record.words[51] = 4;
+	return record;
+}
+
+void ingestor_isolates_and_publishes_pq_lifecycle_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(pq_lifecycle_record(1, configuration.wire.generation, 1000, 1100));
+	auto malformed = pq_lifecycle_record(
+		2, configuration.wire.generation, 1101, 1200);
+	malformed.words[63] = 1;
+	feed(malformed);
+	feed(pq_lifecycle_record(3, configuration.wire.generation, 1201, 1300));
+	feed(basic_record(1, 2000, 100, configuration.wire.generation));
+	feed(basic_record(2, 2100, 100, configuration.wire.generation));
+
+	require(ingest.pq_lifecycle_records() == 2 &&
+			ingest.pq_lifecycle_sequence_gaps() == 1 &&
+			ingest.invalid_records() == 1,
+		"PQ lifecycle decoder/continuity did not quarantine one malformed edge");
+	require(ingest.sequence_gaps() == 0 &&
+			ingest.latest_record()->sequence() == 2,
+		"a malformed PQ lifecycle edge poisoned BASIC continuity");
+	require(ingest.latest_pq_lifecycle()->sequence == 3 &&
+			publisher.records.size() == 4 &&
+			publisher.records.front().record_kind == static_cast<std::uint16_t>(
+				msap1::RecordKind::power_quality_event),
+		"validated lifecycle edges did not cross the durability barrier");
+}
+
 void ingestor_quarantines_m17_ledger_conflicts()
 {
 	using msap1::acquisition::daemon::MeterRecordIngestor;
@@ -1256,6 +1338,7 @@ int main()
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
 	ingestor_quarantines_m17_ledger_conflicts();
+	ingestor_isolates_and_publishes_pq_lifecycle_records();
 	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();

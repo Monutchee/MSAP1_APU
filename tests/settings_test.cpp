@@ -115,6 +115,7 @@ void test_m18_settings_and_wire_snapshot()
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
 	auto settings = handler.active().settings;
+	settings.metering.power_quality.reference_volts = 120.0;
 	settings.metering.events.voltage_sag.threshold_percent = 88.5;
 	settings.metering.events.current_sag.enabled = true;
 	settings.metering.events.reference_current_amperes = 5.0;
@@ -137,9 +138,9 @@ void test_m18_settings_and_wire_snapshot()
 	assert((wire.event[MSAP1_M18_EVENT_CURRENT_SAG].flags &
 		MSAP1_M18_EVENT_ENABLED) != 0u);
 	assert(wire.reference_current_microamperes == 5000000u);
+	assert(wire.reference_voltage_microvolts == 120000000u);
 	assert(wire.flicker_lamp_voltage == 230u);
 	assert(wire.mains_carrier_millihz == 1000000u);
-	assert(wire.reserved0 == 0u);
 
 	settings = saved.settings;
 	settings.metering.events.transient_voltage.enabled = true;

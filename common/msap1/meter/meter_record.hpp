@@ -374,6 +374,9 @@ struct MeterRecord {
 				record_format() == meter_harmonic_format ||
 				record_format() == meter_harmonic_aggregate_format ||
 			record_format() == meter_pq_event_format ||
+			record_format() == meter_pq_event_lifecycle_format ||
+			record_format() == meter_flicker_format ||
+			record_format() == meter_mains_signal_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}

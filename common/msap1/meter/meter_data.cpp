@@ -1745,4 +1745,143 @@ PowerQualitySnapshot decode_pq_event_record(const MeterRecord &record)
 	return snapshot;
 }
 
+PowerQualityEventLifecycleSnapshot
+decode_pq_event_lifecycle_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_pq_event_lifecycle_format)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 record header");
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    record.sample_rate_hz() == 0u || record.emit_drops() != 0u)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 common provenance");
+	if ((record.status() & ~0x0fu) != 0u ||
+	    (record.status() & 0x0au) != 0x0au)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 status");
+
+	const auto identity = record.word(13);
+	if ((identity & ~0x000307f3u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 identity has reserved bits");
+	const auto lifecycle = static_cast<std::uint8_t>(identity & 0x3u);
+	const auto type = static_cast<std::uint8_t>((identity >> 4u) & 0x0fu);
+	const auto phase_mask = static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	const auto trigger_source = static_cast<std::uint8_t>(
+		(identity >> 16u) & 0x3u);
+	if (lifecycle > meter_event_lifecycle_abort || type > 8u ||
+	    phase_mask == 0u || trigger_source > 2u)
+		throw std::invalid_argument("PQ-EVENT-v1 identity is out of range");
+
+	PowerQualityEventLifecycleSnapshot result{};
+	result.lifecycle = static_cast<PowerQualityEventLifecycle>(lifecycle);
+	result.type = static_cast<PowerQualityLifecycleType>(type);
+	result.phase_mask = phase_mask;
+	result.trigger_source = trigger_source;
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation = record.word(meter_event_profile_generation_word);
+	result.sample_rate_hz = record.sample_rate_hz();
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_event_last_sample_word);
+	result.id = {record.unsigned64(meter_event_id_word),
+		record.unsigned64(meter_event_id_word + 2u)};
+	result.threshold_e4 = record.word(meter_event_threshold_word);
+	result.hysteresis_e4 = record.word(meter_event_hysteresis_word);
+	const auto waveform = record.word(meter_event_waveform_policy_word);
+	result.waveform_enabled = (waveform & 0x1u) != 0u;
+	result.per_phase = (waveform & 0x2u) != 0u;
+	result.iec_classification = (waveform & 0x4u) != 0u;
+	result.waveform_decimation = waveform >> 8u;
+	result.waveform_pretrigger_ms =
+		record.word(meter_event_waveform_pre_ms_word);
+	result.waveform_posttrigger_ms =
+		record.word(meter_event_waveform_post_ms_word);
+	result.reference_micro_units = record.word(meter_event_reference_word);
+	for (std::size_t phase = 0; phase < 3u; ++phase) {
+		result.minimum_micro_units[phase] =
+			record.word(meter_event_minimum_word + phase);
+		result.maximum_micro_units[phase] =
+			record.word(meter_event_maximum_word + phase);
+		result.current_micro_units[phase] =
+			record.word(meter_event_current_word + phase);
+	}
+	result.duration_samples = record.unsigned64(meter_event_duration_word);
+	result.trigger_sample = record.unsigned64(meter_event_trigger_sample_word);
+	result.start_utc_nanoseconds =
+		record.unsigned64(meter_event_start_utc_ns_word);
+	result.last_utc_nanoseconds =
+		record.unsigned64(meter_event_last_utc_ns_word);
+	result.time_quality = static_cast<TimeQuality>(
+		record.word(meter_event_time_quality_word));
+	result.discontinuities = record.word(meter_event_discontinuity_word);
+	result.update_count = record.word(47u);
+	for (std::size_t lane = 0; lane < result.settings_digest.size(); ++lane)
+		result.settings_digest[lane] =
+			record.word(meter_event_settings_digest_word + lane);
+	result.valid_mask = record.word(7u);
+	result.status = record.status();
+
+	const auto valid_decimation = [](std::uint32_t value) {
+		return value == 1u || value == 2u || value == 4u || value == 8u ||
+		       value == 16u || value == 32u;
+	};
+	if (result.id.session == 0u || result.id.counter == 0u ||
+	    result.profile_generation != result.configuration_generation ||
+	    result.last_sample < result.first_sample ||
+	    result.trigger_sample < result.first_sample ||
+	    result.trigger_sample > result.last_sample ||
+	    result.duration_samples != result.last_sample - result.first_sample ||
+	    result.update_count == 0u || result.reference_micro_units == 0u ||
+	    result.threshold_e4 == 0u || result.threshold_e4 > 0xffffu ||
+	    result.hysteresis_e4 >= result.threshold_e4 ||
+	    result.waveform_pretrigger_ms > 120000u ||
+	    result.waveform_posttrigger_ms > 120000u ||
+	    !valid_decimation(result.waveform_decimation))
+		throw std::invalid_argument("PQ-EVENT-v1 provenance is inconsistent");
+	if ((waveform & ~0x00003f07u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 waveform policy has reserved bits");
+	const bool expected_iec = type <= 3u || type == 8u;
+	if (result.iec_classification != expected_iec)
+		throw std::invalid_argument("PQ-EVENT-v1 taxonomy is inconsistent");
+	const auto expected_valid = result.voltage_event()
+		? static_cast<std::uint32_t>(phase_mask) << 4u
+		: static_cast<std::uint32_t>(phase_mask);
+	if (result.valid_mask != expected_valid)
+		throw std::invalid_argument("PQ-EVENT-v1 phase validity is inconsistent");
+	const auto covered = result.duration_samples ==
+		std::numeric_limits<std::uint64_t>::max()
+		? std::numeric_limits<std::uint64_t>::max()
+		: result.duration_samples + 1u;
+	const auto expected_count = static_cast<std::uint32_t>(std::min(
+		covered, static_cast<std::uint64_t>(
+			std::numeric_limits<std::uint32_t>::max())));
+	if (record.block_sample_count() != expected_count ||
+	    result.discontinuities != record.result_drops())
+		throw std::invalid_argument("PQ-EVENT-v1 span is inconsistent");
+	for (std::size_t phase = 0; phase < 3u; ++phase)
+		if (result.minimum_micro_units[phase] >
+				result.maximum_micro_units[phase] ||
+		    result.current_micro_units[phase] <
+				result.minimum_micro_units[phase] ||
+		    result.current_micro_units[phase] >
+				result.maximum_micro_units[phase])
+			throw std::invalid_argument(
+				"PQ-EVENT-v1 extrema are inconsistent");
+	const auto quality = static_cast<std::uint32_t>(result.time_quality);
+	if (quality > static_cast<std::uint32_t>(TimeQuality::Holdover) ||
+	    (quality == 0u && (result.start_utc_nanoseconds != 0u ||
+			       result.last_utc_nanoseconds != 0u)) ||
+	    (quality != 0u && (result.start_utc_nanoseconds == 0u ||
+			       result.last_utc_nanoseconds <
+				       result.start_utc_nanoseconds)))
+		throw std::invalid_argument("PQ-EVENT-v1 time provenance is inconsistent");
+	bool digest_present = false;
+	for (const auto word : result.settings_digest)
+		digest_present = digest_present || word != 0u;
+	if (!digest_present || record.word(27u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 reserved/snapshot fields are invalid");
+	for (std::size_t word = 52u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument("PQ-EVENT-v1 reserved word is nonzero");
+	return result;
+}
+
 } // namespace msap1

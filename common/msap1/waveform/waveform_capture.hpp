@@ -63,6 +63,19 @@ enum class WaveformSessionState : std::uint32_t {
 	incomplete = 3,
 };
 
+struct WaveformEventIdentity {
+	std::uint64_t session = 0;
+	std::uint64_t counter = 0;
+	bool operator==(const WaveformEventIdentity &) const = default;
+};
+
+enum class WaveformEventLifecycle : std::uint8_t {
+	start = 0,
+	update = 1,
+	end = 2,
+	abort = 3,
+};
+
 struct WaveformCorrelation {
 	std::uint64_t tai_nanoseconds = 0;
 	std::uint64_t pl_tick = 0;
@@ -94,6 +107,11 @@ struct WaveformSessionSummary {
 	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
+	/** Zero for a master; otherwise the immediately preceding contiguous
+	 * session sealed at the 128 MiB safe materialization limit. */
+	std::uint64_t continuation_of_session_id = 0;
+	/** First session in a continuation chain (equal to id for a master). */
+	std::uint64_t master_session_id = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
 	/**
 	 * Capture-file decimation divisor: each persisted sample is the mean
@@ -233,6 +251,14 @@ public:
 				       std::uint32_t posttrigger_ms,
 				       std::uint32_t decimation,
 				       WaveformTriggerSource source);
+	/** Merge one stable PQ lifecycle into the active capture union. START and
+	 * recovery UPDATE edges add one marker; UPDATE/END extend without duplicate
+	 * markers. A session stays open while any linked event remains active. */
+	WaveformSessionSummary track_power_quality_event(
+		WaveformEventIdentity event_id, WaveformEventLifecycle lifecycle,
+		std::uint64_t trigger_sequence, std::uint64_t current_sequence,
+		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
+		std::uint32_t decimation);
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
 	std::vector<WaveformSessionSummary> sessions();

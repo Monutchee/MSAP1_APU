@@ -259,6 +259,29 @@ bool MeterHistorianService::rebuilds_volatile_period(
 bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
+	if (envelope.record_format == msap1::meter_pq_event_lifecycle_format) {
+		try {
+			if (envelope.payload.size() != sizeof(msap1::MeterRecord))
+				throw std::invalid_argument(
+					"historian PQ event record size mismatch");
+			msap1::MeterRecord raw{};
+			std::memcpy(&raw, envelope.payload.data(), sizeof(raw));
+			store_->upsert_power_quality_event(raw, envelope.cursor,
+				envelope.timing.utc_start_nanoseconds,
+				static_cast<msap1::TimeQuality>(
+					envelope.timing.time_quality),
+				envelope.timing.utc_uncertainty_nanoseconds);
+			return true;
+		} catch (const std::invalid_argument &error) {
+			const auto skipped = ++undecodable_records_;
+			if (skipped == 1 || skipped % 100 == 0)
+				(void)logger().write(mnc::logging::Priority::warning,
+					"skipped an undecodable PQ event at cursor " +
+						std::to_string(envelope.cursor) + ": " +
+						error.what(), "historian_record_skipped");
+			return false;
+		}
+	}
 	/* ENERGY is an atomic two-record family already committed by meter-stream.
 	 * Its durable ledger view is sampled into history at the UTC boundary. */
 	if (envelope.record_format == msap1::meter_energy_format)
