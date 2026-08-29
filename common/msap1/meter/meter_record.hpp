@@ -28,8 +28,8 @@ inline constexpr std::size_t meter_record_word_count = 64;
 inline constexpr std::size_t meter_record_size = 256;
 inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 /* Record type rides in [31:16] of word 1, version in [15:0]. The
- * reservation table (energy/demand/harmonics/PQ) lives with the PL
- * contract header; allocate there, never ad hoc. */
+ * reservation table (energy/demand/harmonics/PQ/flicker/mains signalling)
+ * lives with the PL contract header; allocate there, never ad hoc. */
 /* BASIC-v4 (metrology M7): the 10/12-cycle merge tier that retired the
  * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
  * word, per-lane slots, and words 56..63; additions: block last-sample
@@ -136,15 +136,17 @@ inline constexpr std::uint32_t meter_two_hour_phasor_format = 0x00170002u;
 inline constexpr std::uint32_t meter_two_hour_unbalance_format = 0x00180002u;
 /* M15 live-partial views. These records expose an open accumulator for
  * operations only. They use independent sequence spaces and can never replace
- * the immutable completed M13/M14 results. */
-inline constexpr std::uint32_t meter_ten_minute_open_format = 0x000E0001u;
-inline constexpr std::uint32_t meter_ten_minute_open_power_format = 0x00190001u;
-inline constexpr std::uint32_t meter_ten_minute_open_phasor_format = 0x001A0002u;
-inline constexpr std::uint32_t meter_ten_minute_open_unbalance_format = 0x001B0002u;
-inline constexpr std::uint32_t meter_two_hour_open_format = 0x000F0001u;
-inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x001C0001u;
-inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x001D0002u;
-inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x001E0002u;
+ * the immutable completed M13/M14 results. M18 moved the pre-production IDs
+ * out of the 0x000E/0x000F reservations; volatile preview/latest state using
+ * the old IDs is intentionally incompatible and discarded on upgrade. */
+inline constexpr std::uint32_t meter_ten_minute_open_format = 0x00200001u;
+inline constexpr std::uint32_t meter_ten_minute_open_power_format = 0x00210001u;
+inline constexpr std::uint32_t meter_ten_minute_open_phasor_format = 0x00220002u;
+inline constexpr std::uint32_t meter_ten_minute_open_unbalance_format = 0x00230002u;
+inline constexpr std::uint32_t meter_two_hour_open_format = 0x00240001u;
+inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x00250001u;
+inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x00260002u;
+inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x00270002u;
 /* HARMONIC v1 (metrology M16): one 10/12-cycle spectrum is a 42-record
  * family: seven product channels, six consecutive order chunks per channel,
  * and one shared producer sequence. Each record carries up to 24 packed
@@ -166,6 +168,13 @@ inline constexpr std::uint32_t meter_harmonic_aggregate_format = 0x001F0001u;
  * count. Words 32..36 echo the reference and thresholds the record was
  * evaluated against, so a stored event stays interpretable. */
 inline constexpr std::uint32_t meter_pq_event_format = 0x000B0001u;
+/* M18 final S02 record allocations. Payload decoders are added with their
+ * producers; reserving the values here prevents another pre-production
+ * feature from reusing them. The lifecycle PQ event is distinct from the
+ * low-level PQEVT diagnostic above. */
+inline constexpr std::uint32_t meter_pq_event_lifecycle_format = 0x00060001u;
+inline constexpr std::uint32_t meter_flicker_format = 0x000E0001u;
+inline constexpr std::uint32_t meter_mains_signal_format = 0x000F0001u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 

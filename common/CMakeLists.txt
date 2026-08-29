@@ -386,6 +386,14 @@ if(BUILD_TESTING)
     target_compile_options(meter_data_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME meter_data_test COMMAND meter_data_test)
 
+    # Public meter-record IDs are a co-release contract with PL/R5C1.
+    add_executable(meter_record_contract_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_record_contract_test.cpp)
+    target_link_libraries(meter_record_contract_test PRIVATE msap1::meter)
+    target_compile_options(meter_record_contract_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_record_contract_test COMMAND meter_record_contract_test)
+
     # The reference aggregator under tests/support is deliberately test-only:
     # R5C1 is the authoritative aggregator and APU production code never
     # computes aggregates, so only this test target sees tests/ includes.
