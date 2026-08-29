@@ -180,7 +180,7 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 		  [this](const msap1::PowerQualityEventLifecycleSnapshot &event) {
 			  if (!event.waveform_enabled)
 				  return;
-			  (void)waveform_.track_power_quality_event(
+			  const auto session = waveform_.track_power_quality_event(
 				  {event.id.session, event.id.counter},
 				  static_cast<msap1::WaveformEventLifecycle>(
 					  event.lifecycle),
@@ -189,6 +189,8 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 				  event.waveform_posttrigger_ms,
 				  event.waveform_decimation,
 				  waveform_event_descriptor(event));
+			  event_waveform_linker_.enqueue(event.id,
+				  session.capture_uuid);
 		  }),
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
@@ -1000,6 +1002,38 @@ msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
 	response.has_event = event.has_value();
 	if (event)
 		response.event = power_quality_ipc(*event);
+	return response;
+}
+
+msap1::FlickerResponse CaptureCoordinator::flicker_response() const
+{
+	msap1::FlickerResponse response{};
+	response.running = running_;
+	response.records = ingest_.flicker_records();
+	response.sequence_gaps = ingest_.flicker_sequence_gaps();
+	const auto copy = [&response, this](msap1::FlickerRecordKind kind,
+		bool &present, msap1::FlickerSnapshot &target) {
+		const auto &source = ingest_.latest_flicker(kind);
+		present = source.has_value();
+		if (source)
+			target = *source;
+	};
+	copy(msap1::FlickerRecordKind::live, response.has_live, response.live);
+	copy(msap1::FlickerRecordKind::pst, response.has_pst, response.pst);
+	copy(msap1::FlickerRecordKind::plt, response.has_plt, response.plt);
+	return response;
+}
+
+msap1::MainsSignalResponse CaptureCoordinator::mains_signal_response() const
+{
+	msap1::MainsSignalResponse response{};
+	response.running = running_;
+	response.records = ingest_.mains_signal_records();
+	response.sequence_gaps = ingest_.mains_signal_sequence_gaps();
+	const auto &latest = ingest_.latest_mains_signal();
+	response.has_snapshot = latest.has_value();
+	if (latest)
+		response.snapshot = *latest;
 	return response;
 }
 

@@ -98,6 +98,18 @@ void option_parsing()
 				"/tmp/event.mncwf",
 		"waveform export selection was not parsed");
 
+	const auto pq_events = application.parse({
+		"meter", "power-quality", "events", "--event",
+		"01234567-89ab-5def-8123-456789abcdef", "--start-utc-ns",
+		"-100", "--end-utc-ns", "200", "--limit", "7"});
+	require(!pq_events.show_help && pq_events.command->name() == "events" &&
+			pq_events.options.meter_event_id ==
+				"01234567-89ab-5def-8123-456789abcdef" &&
+			pq_events.options.meter_event_start_utc_ns == -100 &&
+			pq_events.options.meter_event_end_utc_ns == 200 &&
+			pq_events.options.result_limit == 7,
+		"power-quality event query options were not parsed");
+
 	const auto log = application.parse({
 		"log", "--component", "fpga-acquisition", "--module=dma",
 		"--priority", "warning", "--since", "10 minutes ago",
@@ -163,6 +175,12 @@ void help_and_errors()
 	output.str({});
 	error.str({});
 	require(application.execute(
+		{"meter", "power-quality", "events", "--event", "not-a-uuid"},
+		output, error) == 2,
+		"invalid power-quality event UUID was accepted");
+	output.str({});
+	error.str({});
+	require(application.execute(
 		{"log", "--priority", "verbose"}, output, error) == 2,
 		"unknown log priority was accepted");
 	output.str({});
@@ -223,6 +241,15 @@ void machine_interface()
 				msap1::cli::SideEffect::control &&
 			waveform_export->metadata.supports_json,
 		"waveform export metadata does not prevent remote file writes");
+	const auto pq_events = find("mnc meter power-quality events");
+	const auto flicker = find("mnc meter flicker");
+	const auto mains = find("mnc meter mains-signalling");
+	require(pq_events != descriptors.end() && flicker != descriptors.end() &&
+			mains != descriptors.end() &&
+			pq_events->metadata.access ==
+				msap1::cli::AccessLevel::diagnostic &&
+			flicker->metadata.supports_json && mains->metadata.supports_json,
+		"M18 typed meter commands are not diagnostic JSON commands");
 
 	const msap1::cli::ExecutionPolicy restricted{
 		.maximum_access = msap1::cli::AccessLevel::diagnostic,
@@ -298,6 +325,16 @@ void completion()
 	require(contains(candidates, "--refresh") &&
 			contains(candidates, "--full"),
 		"meter health completion omitted diagnostic options");
+	candidates = application.complete({"meter", "power-quality", ""});
+	require(contains(candidates, "events"),
+		"power-quality completion omitted durable events");
+	candidates = application.complete(
+		{"meter", "power-quality", "events", "--"});
+	require(contains(candidates, "--event") &&
+			contains(candidates, "--start-utc-ns") &&
+			contains(candidates, "--end-utc-ns") &&
+			contains(candidates, "--limit"),
+		"power-quality event completion omitted query options");
 	candidates = application.complete({"meter", "view", "--"});
 	require(contains(candidates, "--duration") &&
 		contains(candidates, "--results") && contains(candidates, "--socket"),

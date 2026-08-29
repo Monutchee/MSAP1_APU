@@ -159,6 +159,14 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.power_quality_response();
 		});
+	registry.on<msap1::FlickerRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const auto &) {
+			return coordinator.flicker_response();
+		});
+	registry.on<msap1::MainsSignalRequest>(AcquisitionStatus::dma_error,
+		[&coordinator](const auto &) {
+			return coordinator.mains_signal_response();
+		});
 	registry.on<msap1::HarmonicRequest>(AcquisitionStatus::dma_error,
 		[&coordinator](const msap1::HarmonicRequest &request) {
 			return coordinator.harmonic_response(request.period);

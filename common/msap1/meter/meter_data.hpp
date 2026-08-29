@@ -5,6 +5,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -518,6 +519,13 @@ struct PowerQualityEventId {
 	std::uint64_t counter = 0;
 	bool operator==(const PowerQualityEventId &) const = default;
 };
+
+/** Canonical externally visible identity derived from the stable R5C1 ID. */
+using PowerQualityEventUuid = std::array<std::byte, 16>;
+
+/** Deterministic RFC-4122 variant/version-5 identity for API and file links. */
+[[nodiscard]] PowerQualityEventUuid stable_power_quality_event_uuid(
+	const PowerQualityEventId &id);
 
 enum class PowerQualityEventLifecycle : std::uint8_t {
 	start = meter_event_lifecycle_start,

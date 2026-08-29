@@ -367,6 +367,53 @@ void typed_commands_round_trip_through_the_registry()
 		order_127.magnitude_valid && order_127.angle_valid,
 		"typed harmonic family did not round trip");
 
+	registry.on<msap1::FlickerRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::FlickerRequest &) {
+			msap1::FlickerResponse response{};
+			response.running = true;
+			response.records = 14u;
+			response.sequence_gaps = 2u;
+			response.has_pst = true;
+			response.pst.kind = msap1::FlickerRecordKind::pst;
+			response.pst.sequence = 9u;
+			response.pst.pst_q16[1] = 65536u;
+			return response;
+		});
+	const auto flicker_response =
+		msap1::decode_acquisition_payload<msap1::FlickerResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				msap1::FlickerRequest{})));
+	require(flicker_response.running && flicker_response.records == 14u &&
+			flicker_response.sequence_gaps == 2u &&
+			flicker_response.has_pst &&
+			flicker_response.pst.sequence == 9u &&
+			flicker_response.pst.pst_q16[1] == 65536u,
+		"typed flicker latest views did not round trip");
+
+	registry.on<msap1::MainsSignalRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::MainsSignalRequest &) {
+			msap1::MainsSignalResponse response{};
+			response.running = true;
+			response.records = 4u;
+			response.has_snapshot = true;
+			response.snapshot.sequence = 7u;
+			response.snapshot.configured_millihz = 105000u;
+			response.snapshot.detected_phase_mask = 0x5u;
+			return response;
+		});
+	const auto mains_response =
+		msap1::decode_acquisition_payload<msap1::MainsSignalResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				msap1::MainsSignalRequest{})));
+	require(mains_response.running && mains_response.records == 4u &&
+			mains_response.has_snapshot &&
+			mains_response.snapshot.sequence == 7u &&
+			mains_response.snapshot.configured_millihz == 105000u &&
+			mains_response.snapshot.detected_phase_mask == 0x5u,
+		"typed mains-signalling observation did not round trip");
+
 	/* IPC v36 carries the private storage authority plus public v4 capture,
 	 * master, and continuation identities used by bounded event export. */
 	registry.on<msap1::WaveformListRequest>(

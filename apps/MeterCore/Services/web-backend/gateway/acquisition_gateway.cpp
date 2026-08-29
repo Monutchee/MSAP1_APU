@@ -67,6 +67,16 @@ PowerQualityResponse AcquisitionGateway::power_quality(int timeout_ms)
 	return client_.request(PowerQualityRequest{}, timeout_ms);
 }
 
+FlickerResponse AcquisitionGateway::flicker(int timeout_ms)
+{
+	return client_.request(FlickerRequest{}, timeout_ms);
+}
+
+MainsSignalResponse AcquisitionGateway::mains_signalling(int timeout_ms)
+{
+	return client_.request(MainsSignalRequest{}, timeout_ms);
+}
+
 HarmonicResponse AcquisitionGateway::harmonics(
 	mnc::meter::MeasurementPeriod period, int timeout_ms)
 {

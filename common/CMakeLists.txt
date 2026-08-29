@@ -206,6 +206,7 @@ target_link_libraries(msap1_meter PUBLIC
 )
 target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
+	OpenSSL::Crypto
 )
 
 msap1_library(msap1_meter_data_provider_stream
@@ -261,6 +262,7 @@ msap1_library(msap1_waveform msap1::waveform
 )
 target_link_libraries(msap1_waveform PRIVATE
     mnc::logging
+	msap1::meter
     OpenSSL::Crypto
 )
 

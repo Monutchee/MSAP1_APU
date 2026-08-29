@@ -64,8 +64,8 @@ inline constexpr const char *acquisition_socket_path =
  * 33: The simulator tone ratio becomes fractional for interharmonic injection.
  * 34: InfoResponse distinguishes current-capture-epoch record rejections
  * from the process-lifetime forensic total. */
-/* 36: M18 event catalogue, flicker, mains signalling, and MNCWF-only
- * virtual event export commands use typed payloads. */
+/* 36: M18 flicker/mains latest views and MNCWF capture authorities use typed
+ * payloads. The durable event catalogue has its own historian IPC. */
 inline constexpr std::uint16_t acquisition_ipc_version = 36;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
@@ -440,6 +440,30 @@ struct PowerQualityResponse {
 	PowerQualityIpcSnapshot event{};
 };
 
+/** Latest independently finalized live/Pst/Plt FLICKER-v1 records. */
+struct FlickerResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	bool has_live = false;
+	bool has_pst = false;
+	bool has_plt = false;
+	FlickerSnapshot live{};
+	FlickerSnapshot pst{};
+	FlickerSnapshot plt{};
+};
+
+/** Latest finalized MAINS-SIGNAL-v1 observation. */
+struct MainsSignalResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	bool has_snapshot = false;
+	MainsSignalSnapshot snapshot{};
+};
+
 /** Latest complete M16 family. Partial 42-record families are never exposed. */
 struct HarmonicResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
@@ -587,6 +611,20 @@ struct PowerQualityRequest {
 	std::uint16_t version = acquisition_ipc_version;
 };
 
+/** Latest M18 flicker live and interval values. */
+struct FlickerRequest {
+	static constexpr std::string_view command = "meter-flicker";
+	using Response = FlickerResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
+/** Latest M18 mains-signalling carrier observation. */
+struct MainsSignalRequest {
+	static constexpr std::string_view command = "meter-mains-signalling";
+	using Response = MainsSignalResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
 /** Latest complete IEC-style harmonic subgroup spectrum (roadmap M16). */
 struct HarmonicRequest {
 	static constexpr std::string_view command = "meter-harmonics";
@@ -635,7 +673,7 @@ using AcquisitionCommandList = std::tuple<
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
 	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
-	HarmonicRequest,
+	FlickerRequest, MainsSignalRequest, HarmonicRequest,
 	SimulatorEventRequest, ConfigurationApplyRequest>;
 
 namespace detail {

@@ -158,6 +158,11 @@ The authenticated external API is:
   and fundamental reactive quadrant I--IV counters)
 - `GET /api/v1/meter/demand` (newest durable configured fixed/sliding signed
   active demand, profile metadata, and authoritative import/export peaks)
+- `GET /api/v1/meter/power-quality` (M12 live Urms(1/2) diagnostics)
+- `GET /api/v1/meter/power-quality/events` (durable M18 event catalogue;
+  optional `event_id`, `start_utc_ns`, `end_utc_ns`, and `limit` filters)
+- `GET /api/v1/meter/flicker` (latest independent live Pinst, Pst, and Plt)
+- `GET /api/v1/meter/mains-signalling` (latest configured-carrier observation)
 - `POST /api/v1/meter/energy/reset` (administrator only; resets all 28 energy
   counters with expected-epoch/idempotency protection)
 - `POST /api/v1/meter/demand/peaks/reset` (administrator only; resets all
@@ -268,6 +273,12 @@ mnc meter demand
 mnc --output json meter demand
 mnc meter demand peaks-reset --expected-epoch 0 \
     --idempotency-key commissioning-demand-1 --yes
+mnc meter power-quality
+mnc meter power-quality events --limit 100
+mnc meter power-quality events \
+    --event 01234567-89ab-5def-8123-456789abcdef
+mnc meter flicker
+mnc meter mains-signalling
 mnc adc stop
 mnc adc start
 mnc adc rate
@@ -334,6 +345,10 @@ only the selected virtual slice's metadata/directory/CRCs, and streams the
 unchanged sample extent in bounded chunks. It does not persist a second master
 on the device. Both the API and CLI advertise only `mncwf`; `comtrade` and
 `pqdif` fail explicitly until the later protocol-gateway converters land.
+The acquisition daemon delivers each event/capture UUID association to the
+durable historian on an isolated retry worker, so historian startup or ingest
+lag can never block DMA. Catalogue results and the Web UI join those capture
+UUIDs to the daemon-reported session/master/continuation identities.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

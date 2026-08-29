@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include <openssl/sha.h>
+
 namespace msap1 {
 namespace {
 
@@ -81,6 +83,30 @@ Reading<Unit> payload_reading(std::int64_t value, bool available,
 }
 
 } // namespace
+
+PowerQualityEventUuid stable_power_quality_event_uuid(
+	const PowerQualityEventId &id)
+{
+	std::array<std::byte, 16> source{};
+	for (unsigned byte = 0; byte < 8u; ++byte) {
+		source[byte] = static_cast<std::byte>(
+			(id.session >> (byte * 8u)) & 0xffu);
+		source[8u + byte] = static_cast<std::byte>(
+			(id.counter >> (byte * 8u)) & 0xffu);
+	}
+	std::array<std::byte, SHA256_DIGEST_LENGTH> digest{};
+	if (SHA256(reinterpret_cast<const unsigned char *>(source.data()),
+			source.size(),
+			reinterpret_cast<unsigned char *>(digest.data())) == nullptr)
+		throw std::runtime_error("power-quality event UUID hash failed");
+	PowerQualityEventUuid result{};
+	std::copy_n(digest.begin(), result.size(), result.begin());
+	result[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
+	result[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
+	return result;
+}
 
 void MeterLatestStore::apply(const MeterUpdate &update)
 {

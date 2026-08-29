@@ -77,6 +77,15 @@ webengine::Response get_meter_readings(AppContext &,
 /** @brief GET /api/v1/meter/power-quality — Urms(1/2) record and event. */
 webengine::Response get_meter_power_quality(AppContext &,
 					    const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/power-quality/events — durable M18 catalogue. */
+webengine::Response get_power_quality_events(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/flicker — latest live/Pst/Plt records. */
+webengine::Response get_meter_flicker(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/mains-signalling — latest carrier observation. */
+webengine::Response get_meter_mains_signalling(AppContext &,
+	const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/harmonics — latest complete M16 spectrum. */
 webengine::Response get_meter_harmonics(AppContext &,
 					const webengine::RequestContext &);
@@ -285,6 +294,15 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/power-quality",
 	 webengine::Role::Viewer, &get_meter_power_quality,
 	 "Latest Urms(1/2) record and the newest sag/swell/interruption"},
+	{webengine::http::verb::get, "/api/v1/meter/power-quality/events",
+	 webengine::Role::Viewer, &get_power_quality_events,
+	 "Durable M18 power-quality event catalogue and detail"},
+	{webengine::http::verb::get, "/api/v1/meter/flicker",
+	 webengine::Role::Viewer, &get_meter_flicker,
+	 "Latest independent flicker live, Pst, and Plt values"},
+	{webengine::http::verb::get, "/api/v1/meter/mains-signalling",
+	 webengine::Role::Viewer, &get_meter_mains_signalling,
+	 "Latest mains-signalling carrier observation"},
 	{webengine::http::verb::get, "/api/v1/meter/harmonics",
 	 webengine::Role::Viewer, &get_meter_harmonics,
 	 "Latest complete seven-channel harmonic subgroup spectrum"},

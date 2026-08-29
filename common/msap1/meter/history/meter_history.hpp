@@ -67,6 +67,7 @@ using WaveformCaptureUuid = std::array<std::byte, 16>;
 
 struct PowerQualityEventCatalogEntry {
 	PowerQualityEventLifecycleSnapshot event{};
+	PowerQualityEventUuid event_uuid{};
 	std::uint64_t stream_cursor = 0;
 	std::optional<std::int64_t> start_utc_nanoseconds;
 	std::optional<std::int64_t> last_utc_nanoseconds;
@@ -76,6 +77,7 @@ struct PowerQualityEventCatalogEntry {
 
 struct PowerQualityEventQuery {
 	std::optional<PowerQualityEventId> id;
+	std::optional<PowerQualityEventUuid> event_uuid;
 	std::optional<std::int64_t> start_utc_nanoseconds;
 	std::optional<std::int64_t> end_utc_nanoseconds;
 	std::uint32_t limit = 1000;
@@ -156,6 +158,10 @@ public:
 	query_power_quality_events(const PowerQualityEventQuery &query = {}) const;
 	/** Attach one canonical MNCWF-v4 capture UUID; duplicate links are ignored. */
 	void link_power_quality_event_waveform(const PowerQualityEventId &event_id,
+		const WaveformCaptureUuid &capture_uuid);
+	/** Attach a capture using the canonical UUID exposed by MNCWF/API clients. */
+	void link_power_quality_event_waveform(
+		const PowerQualityEventUuid &event_uuid,
 		const WaveformCaptureUuid &capture_uuid);
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
 	[[nodiscard]] HistorianStatus status() const;

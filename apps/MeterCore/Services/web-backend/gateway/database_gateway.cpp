@@ -24,6 +24,13 @@ DatabaseGateway::query(const history::HistoryQuery &query) const
 	return historian_.query(query);
 }
 
+std::vector<history::PowerQualityEventCatalogEntry>
+DatabaseGateway::query_power_quality_events(
+	const history::PowerQualityEventQuery &query) const
+{
+	return historian_.query_power_quality_events(query);
+}
+
 void DatabaseGateway::clear_history(
 	std::span<const mnc::meter_stream::DatabaseDataset> datasets) const
 {

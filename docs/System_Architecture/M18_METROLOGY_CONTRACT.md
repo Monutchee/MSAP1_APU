@@ -82,6 +82,30 @@ R5C1 returns finalized `PQ-EVENT-v1` (`0x00060001`), `FLICKER-v1`
 existing S02 output. Low-level M12 `PQEVT-v1` diagnostics remain direct on S01.
 Sample data and measurement records never use RPMsg.
 
+## Product measurement surfaces
+
+Acquisition IPC v36 exposes the three independent latest FLICKER-v1 views and
+the latest MAINS-SIGNAL-v1 observation. The existing
+`meter-power-quality` command remains the M12 Urms(1/2) diagnostic; it is not
+silently redefined as the M18 lifecycle catalogue.
+
+The durable catalogue is queried through meter-historian IPC by stable
+canonical event UUID. Authenticated viewers use
+`GET /api/v1/meter/power-quality/events`, optionally filtered by canonical
+`event_id`, UTC bounds, and a bounded limit. `GET /api/v1/meter/flicker` and
+`GET /api/v1/meter/mains-signalling` return engineering-unit projections of
+the typed acquisition snapshots. Equivalent local commands are
+`mnc meter power-quality events`, `mnc meter flicker`, and
+`mnc meter mains-signalling`; all support the normal JSON envelope.
+
+When waveform policy is enabled, acquisition assigns the capture UUID before
+queuing the session and sends the event/capture association to the historian
+on a separate ordered retry worker. The catalogue may therefore lag the live
+edge briefly, but historian unavailability never blocks the DMA ingestion
+thread. Duplicate lifecycle updates and overlapping-event links are
+idempotent. One event can list several continuation capture UUIDs and one
+capture UUID can appear on several overlapping events.
+
 ## Simulator 1.5
 
 The simulator accepts absolute frequencies from settings. R5C0 converts each

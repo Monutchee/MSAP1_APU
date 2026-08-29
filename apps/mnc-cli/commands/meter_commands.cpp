@@ -3,7 +3,9 @@
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
+#include "msap1/meter/history/historian_ipc.hpp"
 #include "msap1/meter/meter_health.hpp"
+#include "msap1/waveform/mncwf_v4.hpp"
 
 #include <array>
 #include <chrono>
@@ -43,6 +45,23 @@ std::uint64_t parse_positive_integer(const std::string &value,
 	}
 	if (end != value.size() || result == 0)
 		throw std::invalid_argument(option + " requires a positive integer");
+	return result;
+}
+
+std::int64_t parse_signed_integer(const std::string &value,
+	const std::string &option)
+{
+	std::size_t end = 0;
+	std::int64_t result = 0;
+	try {
+		result = std::stoll(value, &end, 10);
+	} catch (const std::exception &) {
+		throw std::invalid_argument(option +
+			" requires signed decimal nanoseconds");
+	}
+	if (end != value.size())
+		throw std::invalid_argument(option +
+			" requires signed decimal nanoseconds");
 	return result;
 }
 
@@ -1589,6 +1608,377 @@ int run_meter_power_quality(const Options &options, std::ostream &output)
 			     PowerQualityJsonGenerator{});
 }
 
+const char *pq_lifecycle_name(msap1::PowerQualityEventLifecycle lifecycle)
+{
+	switch (lifecycle) {
+	case msap1::PowerQualityEventLifecycle::start: return "start";
+	case msap1::PowerQualityEventLifecycle::update: return "update";
+	case msap1::PowerQualityEventLifecycle::end: return "end";
+	case msap1::PowerQualityEventLifecycle::abort: return "abort";
+	}
+	return "unknown";
+}
+
+const char *pq_lifecycle_type_name(msap1::PowerQualityLifecycleType type)
+{
+	switch (type) {
+	case msap1::PowerQualityLifecycleType::voltage_sag:
+		return "voltage_sag";
+	case msap1::PowerQualityLifecycleType::voltage_swell:
+		return "voltage_swell";
+	case msap1::PowerQualityLifecycleType::voltage_interruption:
+		return "voltage_interruption";
+	case msap1::PowerQualityLifecycleType::rapid_voltage_change:
+		return "rapid_voltage_change";
+	case msap1::PowerQualityLifecycleType::voltage_unbalance:
+		return "voltage_unbalance";
+	case msap1::PowerQualityLifecycleType::current_sag:
+		return "current_sag";
+	case msap1::PowerQualityLifecycleType::current_swell:
+		return "current_swell";
+	case msap1::PowerQualityLifecycleType::current_unbalance:
+		return "current_unbalance";
+	case msap1::PowerQualityLifecycleType::transient_voltage:
+		return "transient_voltage";
+	}
+	return "unknown";
+}
+
+struct PowerQualityEventItem {
+	std::string event_id;
+	std::uint64_t source_session = 0;
+	std::uint64_t source_counter = 0;
+	std::string lifecycle;
+	std::string type;
+	bool iec_classification = false;
+	std::uint8_t phase_mask = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint64_t trigger_sample = 0;
+	std::uint64_t duration_samples = 0;
+	double duration_ms = 0.0;
+	std::optional<std::int64_t> start_utc_nanoseconds;
+	std::optional<std::int64_t> last_utc_nanoseconds;
+	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
+	std::uint32_t status = 0;
+	std::uint32_t discontinuities = 0;
+	bool waveform_enabled = false;
+	std::vector<std::string> waveform_capture_uuids;
+};
+
+struct PowerQualityEventsResult {
+	std::uint32_t count = 0;
+	std::uint32_t limit = 0;
+	std::vector<std::string> export_formats{"mncwf"};
+	std::vector<PowerQualityEventItem> events;
+};
+
+PowerQualityEventItem pq_event_item(
+	const msap1::history::PowerQualityEventCatalogEntry &entry)
+{
+	const auto &event = entry.event;
+	PowerQualityEventItem item{};
+	item.event_id = msap1::mncwf_uuid_string(entry.event_uuid);
+	item.source_session = event.id.session;
+	item.source_counter = event.id.counter;
+	item.lifecycle = pq_lifecycle_name(event.lifecycle);
+	item.type = pq_lifecycle_type_name(event.type);
+	item.iec_classification = event.iec_classification;
+	item.phase_mask = event.phase_mask;
+	item.configuration_generation = event.configuration_generation;
+	item.first_sample = event.first_sample;
+	item.last_sample = event.last_sample;
+	item.trigger_sample = event.trigger_sample;
+	item.duration_samples = event.duration_samples;
+	item.duration_ms = event.sample_rate_hz == 0u ? 0.0
+		: static_cast<double>(event.duration_samples) * 1000.0 /
+			static_cast<double>(event.sample_rate_hz);
+	item.start_utc_nanoseconds = entry.start_utc_nanoseconds;
+	item.last_utc_nanoseconds = entry.last_utc_nanoseconds;
+	item.utc_uncertainty_nanoseconds = entry.utc_uncertainty_nanoseconds;
+	item.status = event.status;
+	item.discontinuities = event.discontinuities;
+	item.waveform_enabled = event.waveform_enabled;
+	for (const auto &uuid : entry.waveform_capture_uuids)
+		item.waveform_capture_uuids.push_back(
+			msap1::mncwf_uuid_string(uuid));
+	return item;
+}
+
+class PowerQualityEventsTextGenerator final
+	: public ResultGenerator<PowerQualityEventsResult> {
+public:
+	int write(const PowerQualityEventsResult &result,
+		std::ostream &output) const override
+	{
+		output << "Power-quality events: " << result.count << '\n';
+		for (const auto &event : result.events) {
+			output << "  " << event.event_id << "  " << event.type
+			       << "  " << event.lifecycle << "  phases=0x"
+			       << std::hex << static_cast<unsigned>(event.phase_mask)
+			       << std::dec << "  duration=" << event.duration_ms
+			       << " ms\n"
+			       << "    samples " << event.first_sample << ".."
+			       << event.last_sample << ", generation "
+			       << event.configuration_generation << '\n';
+			if (event.start_utc_nanoseconds)
+				output << "    UTC " << *event.start_utc_nanoseconds
+				       << ".."
+				       << event.last_utc_nanoseconds.value_or(
+						  *event.start_utc_nanoseconds)
+				       << " ns\n";
+			if (event.waveform_capture_uuids.empty())
+				output << "    waveform: none\n";
+			else
+				for (const auto &capture : event.waveform_capture_uuids)
+					output << "    waveform capture: " << capture
+					       << '\n';
+		}
+		return 0;
+	}
+};
+
+class PowerQualityEventsJsonGenerator final
+	: public ResultGenerator<PowerQualityEventsResult> {
+public:
+	int write(const PowerQualityEventsResult &result,
+		std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_power_quality_events(const Options &options,
+	std::ostream &output)
+{
+	msap1::history::PowerQualityEventQuery query{};
+	query.limit = static_cast<std::uint32_t>(
+		options.result_limit.value_or(100u));
+	if (query.limit == 0u || query.limit > 1000u)
+		throw std::invalid_argument("--limit must be 1..1000");
+	if (options.meter_event_id) {
+		const auto uuid = msap1::mncwf_uuid_from_string(
+			*options.meter_event_id);
+		if (!uuid || msap1::mncwf_uuid_is_zero(*uuid))
+			throw std::invalid_argument(
+				"--event must be a nonzero canonical UUID");
+		query.event_uuid = *uuid;
+		query.limit = 1u;
+	}
+	query.start_utc_nanoseconds = options.meter_event_start_utc_ns;
+	query.end_utc_nanoseconds = options.meter_event_end_utc_ns;
+	if (query.start_utc_nanoseconds && query.end_utc_nanoseconds &&
+	    *query.start_utc_nanoseconds > *query.end_utc_nanoseconds)
+		throw std::invalid_argument("event UTC range is reversed");
+	msap1::history::ipc::HistorianClient historian;
+	const auto entries = historian.query_power_quality_events(query);
+	PowerQualityEventsResult result{};
+	result.limit = query.limit;
+	result.count = static_cast<std::uint32_t>(entries.size());
+	result.events.reserve(entries.size());
+	for (const auto &entry : entries)
+		result.events.push_back(pq_event_item(entry));
+	return render_result(options, result, output,
+		PowerQualityEventsTextGenerator{},
+		PowerQualityEventsJsonGenerator{});
+}
+
+struct FlickerRecordResult {
+	std::string kind;
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t interval_seconds = 0;
+	std::uint16_t lamp_voltage = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t phase_valid_mask = 0;
+	std::array<double, 3> pinst{};
+	std::array<double, 3> pst{};
+	std::array<double, 3> plt{};
+	std::uint32_t status = 0;
+};
+
+struct FlickerResult {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	std::optional<FlickerRecordResult> live;
+	std::optional<FlickerRecordResult> pst;
+	std::optional<FlickerRecordResult> plt;
+};
+
+FlickerRecordResult flicker_result(const msap1::FlickerSnapshot &snapshot)
+{
+	FlickerRecordResult result{};
+	result.kind = snapshot.kind == msap1::FlickerRecordKind::live ? "live"
+		: snapshot.kind == msap1::FlickerRecordKind::pst ? "pst" : "plt";
+	result.sequence = snapshot.sequence;
+	result.configuration_generation = snapshot.configuration_generation;
+	result.interval_seconds = snapshot.interval_seconds;
+	result.lamp_voltage = snapshot.lamp_voltage;
+	result.nominal_frequency_hz = snapshot.nominal_frequency_hz;
+	result.phase_valid_mask = snapshot.phase_valid_mask;
+	result.status = snapshot.status;
+	for (std::size_t phase = 0; phase < 3u; ++phase) {
+		result.pinst[phase] = snapshot.pinst_q16[phase] / 65536.0;
+		result.pst[phase] = snapshot.pst_q16[phase] / 65536.0;
+		result.plt[phase] = snapshot.plt_q16[phase] / 65536.0;
+	}
+	return result;
+}
+
+class FlickerTextGenerator final : public ResultGenerator<FlickerResult> {
+public:
+	int write(const FlickerResult &result,
+		std::ostream &output) const override
+	{
+		static constexpr std::array<const char *, 3> phases{"A", "B", "C"};
+		output << "Flicker records=" << result.records
+		       << " gaps=" << result.sequence_gaps << '\n';
+		const auto print = [&](const std::optional<FlickerRecordResult> &record) {
+			if (!record)
+				return;
+			output << "  " << record->kind << " sequence=" << record->sequence
+			       << " interval=" << record->interval_seconds << " s\n";
+			for (std::size_t phase = 0; phase < 3u; ++phase)
+				output << "    " << phases[phase]
+				       << (record->phase_valid_mask & (1u << phase)
+						? ": " : ": invalid ")
+				       << "Pinst=" << record->pinst[phase]
+				       << " Pst=" << record->pst[phase]
+				       << " Plt=" << record->plt[phase] << '\n';
+		};
+		print(result.live); print(result.pst); print(result.plt);
+		if (!result.live && !result.pst && !result.plt)
+			output << "  no FLICKER-v1 record available\n";
+		return 0;
+	}
+};
+
+class FlickerJsonGenerator final : public ResultGenerator<FlickerResult> {
+public:
+	int write(const FlickerResult &result,
+		std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_flicker(const Options &options, std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(msap1::FlickerRequest{},
+		options.timeout_ms);
+	require_daemon_ok(response.status);
+	FlickerResult result{response.running, response.records,
+		response.sequence_gaps, {}, {}, {}};
+	if (response.has_live) result.live = flicker_result(response.live);
+	if (response.has_pst) result.pst = flicker_result(response.pst);
+	if (response.has_plt) result.plt = flicker_result(response.plt);
+	return render_result(options, result, output,
+		FlickerTextGenerator{}, FlickerJsonGenerator{});
+}
+
+struct MainsSignalPhaseResult {
+	std::string phase;
+	bool valid = false;
+	bool detected = false;
+	double magnitude_volts = 0.0;
+	double background_volts = 0.0;
+};
+
+struct MainsSignalResult {
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	bool available = false;
+	std::uint32_t sequence = 0;
+	double configured_hz = 0.0;
+	double measured_hz = 0.0;
+	double bandwidth_hz = 0.0;
+	std::uint32_t observation_ms = 0;
+	double threshold_percent = 0.0;
+	std::vector<MainsSignalPhaseResult> phases;
+};
+
+MainsSignalResult mains_signal_result(
+	const msap1::MainsSignalResponse &response)
+{
+	static constexpr std::array<const char *, 3> phases{"A", "B", "C"};
+	MainsSignalResult result{};
+	result.running = response.running;
+	result.records = response.records;
+	result.sequence_gaps = response.sequence_gaps;
+	result.available = response.has_snapshot;
+	if (!response.has_snapshot)
+		return result;
+	const auto &snapshot = response.snapshot;
+	result.sequence = snapshot.sequence;
+	result.configured_hz = snapshot.configured_millihz / 1000.0;
+	result.measured_hz = snapshot.measured_millihz / 1000.0;
+	result.bandwidth_hz = snapshot.bandwidth_millihz / 1000.0;
+	result.observation_ms = snapshot.observation_ms;
+	result.threshold_percent = snapshot.threshold_e4 / 100.0;
+	for (std::size_t phase = 0; phase < 3u; ++phase)
+		result.phases.push_back({phases[phase],
+			(snapshot.phase_valid_mask & (1u << phase)) != 0u,
+			(snapshot.detected_phase_mask & (1u << phase)) != 0u,
+			snapshot.magnitude_microvolts[phase] / 1e6,
+			snapshot.background_microvolts[phase] / 1e6});
+	return result;
+}
+
+class MainsSignalTextGenerator final
+	: public ResultGenerator<MainsSignalResult> {
+public:
+	int write(const MainsSignalResult &result,
+		std::ostream &output) const override
+	{
+		output << "Mains signalling records=" << result.records
+		       << " gaps=" << result.sequence_gaps << '\n';
+		if (!result.available) {
+			output << "  no MAINS-SIGNAL-v1 observation available\n";
+			return 0;
+		}
+		output << "  configured=" << result.configured_hz
+		       << " Hz measured=" << result.measured_hz
+		       << " Hz bandwidth=" << result.bandwidth_hz
+		       << " Hz window=" << result.observation_ms << " ms\n";
+		for (const auto &phase : result.phases)
+			output << "    " << phase.phase << ": "
+			       << (phase.valid ? "valid" : "invalid") << ' '
+			       << (phase.detected ? "detected" : "not detected")
+			       << " magnitude=" << phase.magnitude_volts
+			       << " V background=" << phase.background_volts << " V\n";
+		return 0;
+	}
+};
+
+class MainsSignalJsonGenerator final
+	: public ResultGenerator<MainsSignalResult> {
+public:
+	int write(const MainsSignalResult &result,
+		std::ostream &output) const override
+	{
+		write_json_success(output, result);
+		return 0;
+	}
+};
+
+int run_meter_mains_signalling(const Options &options,
+	std::ostream &output)
+{
+	AcquisitionClient client(options.socket_path);
+	const auto response = client.request(msap1::MainsSignalRequest{},
+		options.timeout_ms);
+	require_daemon_ok(response.status);
+	const auto result = mains_signal_result(response);
+	return render_result(options, result, output,
+		MainsSignalTextGenerator{}, MainsSignalJsonGenerator{});
+}
+
 struct HarmonicResult {
 	bool running = false;
 	std::uint64_t records = 0;
@@ -2078,9 +2468,71 @@ void register_meter_commands(Application &application)
 			.supports_json = true,
 			.variants = {},
 		}));
-	meter.add_subcommand(Command(
-		"power-quality", "Show the latest Urms(1/2) record and event",
+	Command power_quality(
+		"power-quality", "Show power-quality diagnostics and durable events",
 		run_meter_power_quality,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	Command power_quality_events(
+		"events", "List or inspect durable M18 power-quality events",
+		run_meter_power_quality_events,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	power_quality_events.add_option({
+		"event", "UUID", "Select one canonical event UUID",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.meter_event_id = value;
+		},
+	});
+	power_quality_events.add_option({
+		"start-utc-ns", "NS", "Include events ending at/after UTC",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.meter_event_start_utc_ns =
+				parse_signed_integer(value, "--start-utc-ns");
+		},
+	});
+	power_quality_events.add_option({
+		"end-utc-ns", "NS", "Include events starting at/before UTC",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.meter_event_end_utc_ns =
+				parse_signed_integer(value, "--end-utc-ns");
+		},
+	});
+	power_quality_events.add_option({
+		"limit", "COUNT", "Maximum events (default 100, maximum 1000)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			options.result_limit = parse_positive_integer(value, "--limit");
+		},
+	});
+	power_quality.add_subcommand(std::move(power_quality_events));
+	meter.add_subcommand(std::move(power_quality));
+	meter.add_subcommand(Command(
+		"flicker", "Show the latest independent live, Pst, and Plt values",
+		run_meter_flicker,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	meter.add_subcommand(Command(
+		"mains-signalling", "Show the latest mains-carrier observation",
+		run_meter_mains_signalling,
 		{
 			.access = AccessLevel::diagnostic,
 			.side_effect = SideEffect::none,

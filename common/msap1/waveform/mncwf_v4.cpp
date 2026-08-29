@@ -1,4 +1,5 @@
 #include "msap1/waveform/mncwf_v4.hpp"
+#include "msap1/meter/meter_data.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -452,21 +453,7 @@ bool mncwf_uuid_is_zero(const MncwfUuid &uuid) noexcept
 MncwfUuid mncwf_stable_event_uuid(std::uint64_t session,
 	std::uint64_t counter)
 {
-	std::array<std::byte, 16> source{};
-	for (unsigned byte = 0; byte < 8u; ++byte) {
-		source[byte] = static_cast<std::byte>(
-			(session >> (byte * 8u)) & 0xffu);
-		source[8u + byte] = static_cast<std::byte>(
-			(counter >> (byte * 8u)) & 0xffu);
-	}
-	const auto digest = mncwf_sha256(source);
-	MncwfUuid result{};
-	std::copy_n(digest.begin(), result.size(), result.begin());
-	result[6] = static_cast<std::byte>(
-		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
-	result[8] = static_cast<std::byte>(
-		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
-	return result;
+	return stable_power_quality_event_uuid({session, counter});
 }
 
 namespace {

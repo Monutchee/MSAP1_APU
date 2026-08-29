@@ -626,6 +626,31 @@ void MeterHistorianService::handle(
 			}
 			break;
 		}
+		case ipc::Command::query_power_quality_events: {
+			const auto query = ipc::decode_power_quality_event_query(input);
+			input.require_finished();
+			const auto events = store_->query_power_quality_events(query);
+			output.u32(0);
+			output.u32(static_cast<std::uint32_t>(events.size()));
+			for (const auto &event : events)
+				ipc::encode_power_quality_event_entry(output, event);
+			break;
+		}
+		case ipc::Command::link_power_quality_event_waveform: {
+			PowerQualityEventUuid event_uuid{};
+			WaveformCaptureUuid capture_uuid{};
+			const auto event_bytes = input.bytes(event_uuid.size());
+			const auto capture_bytes = input.bytes(capture_uuid.size());
+			input.require_finished();
+			std::copy(event_bytes.begin(), event_bytes.end(),
+				event_uuid.begin());
+			std::copy(capture_bytes.begin(), capture_bytes.end(),
+				capture_uuid.begin());
+			store_->link_power_quality_event_waveform(
+				event_uuid, capture_uuid);
+			output.u32(0);
+			break;
+		}
 		case ipc::Command::get_historian_status: {
 			input.require_finished();
 			auto status = store_->status();
@@ -643,6 +668,7 @@ void MeterHistorianService::handle(
 			output.u64(status.oldest_available_stream_cursor);
 			output.u64(status.block_count);
 			output.u64(status.storage_bytes);
+			output.u64(status.power_quality_event_count);
 			output.u32(static_cast<std::uint32_t>(
 				status.datasets.size()));
 			for (const auto &item : status.datasets) {
