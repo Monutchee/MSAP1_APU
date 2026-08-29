@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 
 namespace msap1::settings {
 
@@ -19,6 +20,13 @@ struct WaveformSettings {
 	 * 60 Hz cycle at the 128 kSPS acquisition rate.
 	 */
 	std::uint32_t default_decimation = 1;
+	/* Neutral capture-time identity copied into every MNCWF v4 master. */
+	std::string station_id;
+	std::string station_name;
+	std::string site_id;
+	std::string site_name;
+	std::string circuit_id;
+	std::string circuit_name;
 
 	static bool valid_decimation(std::uint32_t decimation)
 	{
@@ -36,6 +44,11 @@ struct WaveformSettings {
 		if (!valid_decimation(default_decimation))
 			throw std::runtime_error(
 				"waveform decimation must be 1, 2, 4, 8, 16, or 32");
+		for (const auto *value : {&station_id, &station_name, &site_id,
+			&site_name, &circuit_id, &circuit_name})
+			if (value->size() > 128u)
+				throw std::runtime_error(
+					"waveform identity fields must not exceed 128 bytes");
 	}
 };
 

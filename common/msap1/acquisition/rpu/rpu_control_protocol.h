@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 8u
+#define MSAP1_RPU_VERSION 9u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -43,6 +43,8 @@ enum msap1_rpu_msg_type {
 	MSAP1_RPU_MSG_AGGREGATION_HEALTH = 18,
 	MSAP1_RPU_MSG_DEMAND_CONFIG_SET = 19,
 	MSAP1_RPU_MSG_DEMAND_CONFIG = 20,
+	MSAP1_RPU_MSG_M18_CONFIG_SET = 21,
+	MSAP1_RPU_MSG_M18_CONFIG = 22,
 };
 
 enum msap1_demand_method {
@@ -171,6 +173,33 @@ enum msap1_simulator_config_flag {
 	MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE = 1u << 0,
 };
 
+enum msap1_m18_event_type {
+	MSAP1_M18_EVENT_VOLTAGE_SAG = 0,
+	MSAP1_M18_EVENT_VOLTAGE_SWELL = 1,
+	MSAP1_M18_EVENT_VOLTAGE_INTERRUPTION = 2,
+	MSAP1_M18_EVENT_RAPID_VOLTAGE_CHANGE = 3,
+	MSAP1_M18_EVENT_VOLTAGE_UNBALANCE = 4,
+	MSAP1_M18_EVENT_CURRENT_SAG = 5,
+	MSAP1_M18_EVENT_CURRENT_SWELL = 6,
+	MSAP1_M18_EVENT_CURRENT_UNBALANCE = 7,
+	MSAP1_M18_EVENT_TRANSIENT_VOLTAGE = 8,
+	MSAP1_M18_EVENT_TYPE_COUNT = 9,
+};
+
+enum msap1_m18_event_profile_flag {
+	MSAP1_M18_EVENT_ENABLED = 1u << 0,
+	MSAP1_M18_EVENT_WAVEFORM_ENABLED = 1u << 1,
+	MSAP1_M18_EVENT_PER_PHASE = 1u << 2,
+	MSAP1_M18_EVENT_IEC_CLASSIFICATION = 1u << 3,
+};
+
+enum msap1_m18_engine_flag {
+	MSAP1_M18_ENGINE_ENABLED = 1u << 0,
+	/* Capability flag, not a user request. It remains clear until the
+	 * analogue path and supported sample profiles are characterized. */
+	MSAP1_M18_TRANSIENT_CAPABLE = 1u << 1,
+};
+
 /*
  * Simulator event sequencer actions (metrology M12). Deliberately a
  * message of its own rather than fields in the configuration payload: a
@@ -297,6 +326,19 @@ struct msap1_meter_config_payload {
 	uint32_t pq_swell_threshold_e4;
 	uint32_t pq_interruption_threshold_e4;
 	uint32_t pq_hysteresis_e4;
+	/* Simulator v1.5 additions. AM is a frequency/depth envelope on the
+	 * selected lanes. Carrier and adjacent tones use absolute frequency and
+	 * a Q16 fraction of the receiving voltage lane's fundamental peak. */
+	uint32_t simulator_am_frequency_millihz;
+	uint32_t simulator_am_depth_q16;
+	uint32_t simulator_am_channel_mask;
+	uint32_t simulator_carrier_frequency_millihz;
+	uint32_t simulator_carrier_fraction_q16;
+	uint32_t simulator_carrier_phase_mask;
+	uint32_t simulator_carrier_phase_q32;
+	uint32_t simulator_adjacent_frequency_millihz;
+	uint32_t simulator_adjacent_fraction_q16;
+	uint32_t simulator_adjacent_phase_q32;
 } __attribute__((packed));
 
 /*
@@ -555,6 +597,44 @@ struct msap1_demand_config_ack_payload {
 	uint32_t window_seconds;
 	uint32_t update_seconds;
 	uint32_t profile_generation;
+} __attribute__((packed));
+
+/* Compact fixed M18 policy. Event type is the array index from
+ * msap1_m18_event_type; this avoids strings and keeps the request below the
+ * platform's 384-byte RPMsg frame cap. Percentages are in 1e-4 units. */
+struct msap1_m18_event_profile {
+	uint32_t flags;
+	uint32_t threshold_e4;
+	uint32_t hysteresis_e4;
+	uint32_t phase_mask;
+	uint32_t waveform_pretrigger_ms;
+	uint32_t waveform_posttrigger_ms;
+	uint32_t waveform_decimation;
+} __attribute__((packed));
+
+struct msap1_m18_config_payload {
+	uint32_t generation;
+	uint32_t event_profile_count;
+	uint32_t reference_current_microamperes;
+	uint32_t reserved0;
+	struct msap1_m18_event_profile event[MSAP1_M18_EVENT_TYPE_COUNT];
+	uint32_t flicker_flags;
+	uint32_t flicker_phase_mask;
+	uint32_t flicker_lamp_voltage;
+	uint32_t flicker_live_cadence_ms;
+	uint32_t flicker_pst_interval_seconds;
+	uint32_t flicker_plt_pst_count;
+	uint32_t mains_flags;
+	uint32_t mains_carrier_millihz;
+	uint32_t mains_bandwidth_millihz;
+	uint32_t mains_observation_ms;
+	uint32_t mains_phase_mask;
+	uint32_t mains_threshold_e4;
+} __attribute__((packed));
+
+struct msap1_m18_config_ack_payload {
+	uint32_t generation;
+	uint32_t capability_flags;
 } __attribute__((packed));
 
 #ifdef __cplusplus

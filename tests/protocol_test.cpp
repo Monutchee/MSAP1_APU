@@ -223,6 +223,47 @@ void demand_configuration_round_trip()
 		"zero demand profile generation was accepted");
 }
 
+void m18_configuration_round_trip()
+{
+	static_assert(sizeof(msap1_m18_event_profile) == 28,
+		"M18 event profile must be seven packed words");
+	static_assert(sizeof(msap1_m18_config_payload) == 316,
+		"M18 configuration must fit one RPMsg frame");
+	static_assert(sizeof(msap1_rpu_msg_header) +
+		      sizeof(msap1_m18_config_payload) <=
+		      MSAP1_RPU_MAX_FRAME_SIZE);
+	static_assert(offsetof(msap1_m18_config_payload, event) == 16);
+	static_assert(offsetof(msap1_m18_config_payload, flicker_flags) == 268);
+	static_assert(offsetof(msap1_m18_config_payload, mains_flags) == 292);
+
+	msap1_m18_config_payload configuration{};
+	configuration.generation = 77u;
+	configuration.event_profile_count = MSAP1_M18_EVENT_TYPE_COUNT;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].flags =
+		MSAP1_M18_EVENT_ENABLED | MSAP1_M18_EVENT_WAVEFORM_ENABLED |
+		MSAP1_M18_EVENT_PER_PHASE | MSAP1_M18_EVENT_IEC_CLASSIFICATION;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].threshold_e4 = 9000u;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].hysteresis_e4 = 200u;
+	configuration.flicker_pst_interval_seconds = 600u;
+	configuration.mains_carrier_millihz = 1000000u;
+	const auto request = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG_SET,
+		93u, &configuration, sizeof(configuration));
+	const auto decoded_request =
+		msap1::decode_message(request.data(), request.size());
+	require(decoded_request.header.version == 9u &&
+		decoded_request.payload.size() == sizeof(configuration),
+		"M18 configuration did not preserve its v9 frame geometry");
+
+	msap1_m18_config_ack_payload acknowledgement{77u, 0u};
+	const auto response = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG,
+		94u, &acknowledgement, sizeof(acknowledgement));
+	const auto decoded = msap1::decode_m18_config_ack(
+		msap1::decode_message(response.data(), response.size()));
+	require(decoded.generation == 77u &&
+		(decoded.capability_flags & MSAP1_M18_TRANSIENT_CAPABLE) == 0u,
+		"M18 acknowledgement changed during wire round trip");
+}
+
 void adc_diagnostic_round_trip()
 {
 	msap1_adc_diagnostic_payload diagnostic{};
@@ -263,11 +304,10 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Wire v7 expands each of the four simulator tone slots from two words
-	 * to three: Q16.16 frequency ratio, lane-mask/Q16 amplitude, and Q0.32
-	 * phase. The complete frame remains below the 384-byte RPMsg cap. */
-	static_assert(sizeof(msap1_meter_config_payload) == 312,
-		      "meter config payload must be 312 packed bytes");
+	/* Wire v9 appends simulator-v1.5 AM and absolute carrier controls while
+	 * keeping the complete frame below the 384-byte RPMsg cap. */
+	static_assert(sizeof(msap1_meter_config_payload) == 352,
+		      "meter config payload must be 352 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_dc_offset_counts) == 172,
 		      "DC offsets must follow the simulator phase step");
@@ -288,7 +328,10 @@ void meter_config_wire_layout()
 		      "the PQ reference must follow the nominal frequency");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       pq_hysteresis_e4) == 308,
-		      "the PQ hysteresis must be the trailing field");
+		      "the PQ hysteresis must retain its v8 offset");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_am_frequency_millihz) == 312,
+		      "simulator v1.5 fields must be append-only");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
@@ -301,6 +344,8 @@ void meter_config_wire_layout()
 	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
 	payload.pq_reference_microvolts = 230000000u;
 	payload.pq_hysteresis_e4 = 200u;
+	payload.simulator_am_frequency_millihz = 8800u;
+	payload.simulator_carrier_frequency_millihz = 1000000u;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
 	const auto decoded = msap1::decode_message(wire.data(), wire.size());
@@ -340,6 +385,11 @@ void meter_config_wire_layout()
 		    sizeof(hysteresis));
 	require(hysteresis == 200u,
 		"the PQ hysteresis was not encoded at its normative offset");
+	std::uint32_t am_frequency = 0;
+	std::memcpy(&am_frequency, decoded.payload.data() + 312,
+		    sizeof(am_frequency));
+	require(am_frequency == 8800u,
+		"the AM frequency was not encoded at its normative offset");
 }
 
 void simulator_event_wire_layout()
@@ -367,8 +417,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 8u,
-		"the simulator event message belongs to wire version 8");
+			MSAP1_RPU_VERSION == 9u,
+		"the simulator event message belongs to wire version 9");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -882,6 +932,7 @@ int main()
 		adc_health_round_trip();
 		aggregation_health_round_trip();
 		demand_configuration_round_trip();
+		m18_configuration_round_trip();
 		adc_diagnostic_round_trip();
 		meter_config_wire_layout();
 		simulator_event_wire_layout();

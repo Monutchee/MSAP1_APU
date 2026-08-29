@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "metering": {
     "sample_rate_hz": 128000,
     "nominal_frequency_hz": 60,
@@ -25,6 +25,34 @@
       "swell_percent": 110.0,
       "interruption_percent": 10.0,
       "hysteresis_percent": 2.0
+    },
+    "events": {
+      "reference_current_amperes": 0.0,
+      "voltage_sag": {"enabled": true, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "voltage_swell": {"enabled": true, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "voltage_interruption": {"enabled": true, "threshold_percent": 10.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "rapid_voltage_change": {"enabled": true, "threshold_percent": 3.0, "hysteresis_percent": 0.5, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "voltage_unbalance": {"enabled": false, "threshold_percent": 2.0, "hysteresis_percent": 0.2, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "current_sag": {"enabled": false, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "current_swell": {"enabled": false, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "current_unbalance": {"enabled": false, "threshold_percent": 10.0, "hysteresis_percent": 1.0, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
+      "transient_voltage": {"enabled": false, "threshold_percent": 150.0, "hysteresis_percent": 5.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}}
+    },
+    "flicker": {
+      "enabled": true,
+      "phase_mask": 7,
+      "lamp_voltage": 120,
+      "live_cadence_ms": 1000,
+      "pst_interval_seconds": 600,
+      "plt_pst_count": 12
+    },
+    "mains_signalling": {
+      "enabled": false,
+      "carrier_frequency_hz": 1000.0,
+      "bandwidth_hz": 20.0,
+      "observation_ms": 200,
+      "phase_mask": 7,
+      "threshold_percent": 0.0
     },
     "demand": {
       "method": "sliding",
@@ -59,13 +87,35 @@
         {"channel": 4, "rms": 120.0, "phase_degrees": 120.0, "dc": 0.0, "noise_rms": 0.0},
         {"channel": 5, "rms": 120.0, "phase_degrees": -120.0, "dc": 0.0, "noise_rms": 0.0},
         {"channel": 6, "rms": 120.0, "phase_degrees": 0.0, "dc": 0.0, "noise_rms": 0.0}
-      ]
+      ],
+      "amplitude_modulation": {
+        "enabled": false,
+        "frequency_hz": 8.8,
+        "depth_percent": 0.0,
+        "channels": "voltage"
+      },
+      "carrier": {
+        "enabled": false,
+        "frequency_hz": 1000.0,
+        "percent": 0.0,
+        "phase_mask": 7,
+        "phase_degrees": 0.0,
+        "adjacent_frequency_hz": 1020.0,
+        "adjacent_percent": 0.0,
+        "adjacent_phase_degrees": 0.0
+      }
     }
   },
   "waveform": {
     "default_pretrigger_ms": 3000,
     "default_posttrigger_ms": 3000,
-    "default_decimation": 1
+    "default_decimation": 1,
+    "station_id": "",
+    "station_name": "",
+    "site_id": "",
+    "site_name": "",
+    "circuit_id": "",
+    "circuit_name": ""
   },
   "database": {
     "spool": {"backend": "memory", "maximum_age_seconds": 3600, "maximum_bytes": 33554432, "volatile_spool_acknowledged": true},

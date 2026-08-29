@@ -51,6 +51,18 @@ std::uint32_t configuration_fingerprint(
 	return hash == 0u ? 1u : hash;
 }
 
+template<class T>
+void fingerprint_append(std::uint32_t &hash, const T &configuration)
+{
+	const auto *bytes =
+		reinterpret_cast<const unsigned char *>(&configuration);
+	for (std::size_t index = sizeof(configuration.generation);
+	     index < sizeof(configuration); ++index) {
+		hash ^= bytes[index];
+		hash *= 16777619u;
+	}
+}
+
 std::uint32_t frequency_mode(const std::string &mode)
 {
 	if (mode == "single_cycle")
@@ -105,6 +117,19 @@ bool supported_adc_sample_rate(std::uint32_t sample_rate_hz)
 	}
 }
 
+void coordinate_configuration_generation(
+	msap1_meter_config_payload &meter,
+	msap1_m18_config_payload &m18) noexcept
+{
+	std::uint32_t hash = 2166136261u;
+	fingerprint_append(hash, meter);
+	fingerprint_append(hash, m18);
+	if (hash == 0u)
+		hash = 1u;
+	meter.generation = hash;
+	m18.generation = hash;
+}
+
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path, std::uint32_t sample_rate_hz)
 {
@@ -149,7 +174,8 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	PreparedMeterConfiguration result;
 	result.source = std::move(source);
 	if (result.source.schema_version != 2u &&
-	    result.source.schema_version != 3u)
+	    result.source.schema_version != 3u &&
+	    result.source.schema_version != 4u)
 		throw std::runtime_error("unsupported meter configuration schema");
 	/*
 	 * Schema-v2 profiles predate the simulator object. Give those physical
@@ -491,6 +517,71 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			harmonic_channel_mask(harmonic.channels) | (fraction << 16);
 		result.wire.simulator_harmonics[slot * 3 + 2] =
 			phase_q32(harmonic.phase_degrees);
+	}
+
+	const auto &am = simulator.amplitude_modulation;
+	if (!std::isfinite(am.frequency_hz) || !std::isfinite(am.depth_percent) ||
+	    am.frequency_hz <= 0.0 || am.frequency_hz >= 1000.0 ||
+	    am.depth_percent < 0.0 || am.depth_percent > 100.0)
+		throw std::runtime_error(
+			"simulator amplitude-modulation configuration is out of range");
+	if (am.enabled && am.depth_percent == 0.0)
+		throw std::runtime_error(
+			"enabled simulator amplitude modulation requires non-zero depth");
+	if (am.enabled &&
+	    am.frequency_hz >= static_cast<double>(sample_rate_hz) / 2.0)
+		throw std::runtime_error(
+			"simulator amplitude modulation exceeds the Nyquist limit");
+	if (am.enabled) {
+		result.wire.simulator_am_frequency_millihz =
+			static_cast<std::uint32_t>(std::llround(am.frequency_hz * 1000.0));
+		result.wire.simulator_am_depth_q16 = static_cast<std::uint32_t>(
+			std::llround(am.depth_percent / 100.0 * q16_scale));
+		result.wire.simulator_am_channel_mask =
+			harmonic_channel_mask(am.channels);
+	}
+
+	const auto &carrier = simulator.carrier;
+	const auto valid_tone = [sample_rate_hz](double frequency, double percent,
+		std::string_view description) {
+		if (!std::isfinite(frequency) || !std::isfinite(percent) ||
+		    frequency <= 0.0 ||
+		    frequency >= static_cast<double>(sample_rate_hz) / 2.0 ||
+		    percent < 0.0 || percent > 99.9)
+			throw std::runtime_error("simulator " + std::string(description) +
+				" tone is out of range");
+	};
+	if (carrier.phase_mask == 0u || (carrier.phase_mask & ~0x7u) != 0u)
+		throw std::runtime_error(
+			"simulator carrier phase mask must select voltage phases A/B/C");
+	if (carrier.enabled && carrier.percent == 0.0)
+		throw std::runtime_error(
+			"enabled simulator carrier requires non-zero amplitude");
+	if (carrier.enabled) {
+		valid_tone(carrier.frequency_hz, carrier.percent, "carrier");
+		if (carrier.adjacent_percent != 0.0)
+			valid_tone(carrier.adjacent_frequency_hz,
+				carrier.adjacent_percent, "adjacent");
+		result.wire.simulator_carrier_frequency_millihz =
+			static_cast<std::uint32_t>(
+				std::llround(carrier.frequency_hz * 1000.0));
+		result.wire.simulator_carrier_fraction_q16 =
+			static_cast<std::uint32_t>(
+				std::llround(carrier.percent / 100.0 * q16_scale));
+		result.wire.simulator_carrier_phase_mask =
+			(carrier.phase_mask & 0x7u) << 4;
+		result.wire.simulator_carrier_phase_q32 =
+			phase_q32(carrier.phase_degrees);
+		if (carrier.adjacent_percent != 0.0) {
+			result.wire.simulator_adjacent_frequency_millihz =
+				static_cast<std::uint32_t>(std::llround(
+					carrier.adjacent_frequency_hz * 1000.0));
+			result.wire.simulator_adjacent_fraction_q16 =
+				static_cast<std::uint32_t>(std::llround(
+					carrier.adjacent_percent / 100.0 * q16_scale));
+			result.wire.simulator_adjacent_phase_q32 =
+				phase_q32(carrier.adjacent_phase_degrees);
+		}
 	}
 
 	result.wire.generation = configuration_fingerprint(result.wire);

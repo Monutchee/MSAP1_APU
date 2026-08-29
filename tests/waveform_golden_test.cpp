@@ -306,6 +306,61 @@ void harmonic_wire_packing()
 	}
 }
 
+void m18_simulator_wire_packing()
+{
+	auto source = simulator_profile();
+	source.schema_version = 4;
+	source.simulator.amplitude_modulation =
+		{true, 8.8, 12.5, "voltage"};
+	source.simulator.carrier =
+		{true, 1050.0, 2.0, 0x5u, 90.0, 1055.0, 1.0, -90.0};
+	const auto prepared =
+		msap1::prepare_meter_configuration(source, 32000);
+	const auto &wire = prepared.wire;
+	require(wire.simulator_am_frequency_millihz == 8800u &&
+			wire.simulator_am_depth_q16 == 8192u &&
+			wire.simulator_am_channel_mask == 0x70u,
+		"M18 amplitude modulation packs frequency, depth, and lanes");
+	require(wire.simulator_carrier_frequency_millihz == 1050000u &&
+			wire.simulator_carrier_fraction_q16 == 1311u &&
+			wire.simulator_carrier_phase_mask == 0x50u &&
+			wire.simulator_carrier_phase_q32 == 0x40000000u,
+		"M18 carrier packs absolute frequency, magnitude, mask, and phase");
+	require(wire.simulator_adjacent_frequency_millihz == 1055000u &&
+			wire.simulator_adjacent_fraction_q16 == 655u &&
+			wire.simulator_adjacent_phase_q32 == 0xc0000000u,
+		"M18 adjacent tone packs independently");
+
+	auto disabled = simulator_profile();
+	disabled.schema_version = 4;
+	const auto quiet = msap1::prepare_meter_configuration(disabled, 32000);
+	require(quiet.wire.simulator_am_frequency_millihz == 0u &&
+			quiet.wire.simulator_carrier_frequency_millihz == 0u &&
+			quiet.wire.simulator_adjacent_frequency_millihz == 0u,
+		"disabled M18 simulator controls stay bit-inert");
+
+	for (int scenario = 0; scenario < 3; ++scenario) {
+		auto rejected = simulator_profile();
+		rejected.schema_version = 4;
+		if (scenario == 0)
+			rejected.simulator.amplitude_modulation =
+				{true, 600.0, 10.0, "voltage"};
+		else if (scenario == 1)
+			rejected.simulator.carrier =
+				{true, 600.0, 1.0, 0x7u, 0.0, 400.0, 0.0, 0.0};
+		else
+			rejected.simulator.carrier =
+				{true, 400.0, 1.0, 0x7u, 0.0, 600.0, 1.0, 0.0};
+		bool threw = false;
+		try {
+			(void)msap1::prepare_meter_configuration(rejected, 1000);
+		} catch (const std::exception &) {
+			threw = true;
+		}
+		require(threw, "M18 simulator tones beyond Nyquist must be rejected");
+	}
+}
+
 void wire_conversion_round_trip()
 {
 	auto source = simulator_profile();
@@ -398,6 +453,7 @@ int main()
 	sequence_components_swap_under_acb();
 	harmonic_expectation_composition();
 	harmonic_wire_packing();
+	m18_simulator_wire_packing();
 	wire_conversion_round_trip();
 	wire_conversion_rejects_out_of_range();
 	tolerance_scales_with_block_length();

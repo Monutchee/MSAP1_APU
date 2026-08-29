@@ -55,6 +55,32 @@ msap1_demand_config_ack_payload AggregationHealthMonitor::configure_demand(
 	}
 }
 
+msap1_m18_config_ack_payload AggregationHealthMonitor::configure_m18(
+	const msap1_m18_config_payload &configuration)
+{
+	desired_m18_ = configuration;
+	try {
+		if (!controller_)
+			controller_ =
+				std::make_unique<msap1::acquisition::RpuController>(
+					service_, configured_device_);
+		const auto acknowledgement = msap1::decode_m18_config_ack(
+			controller_->transact(MSAP1_RPU_MSG_M18_CONFIG_SET,
+				&configuration, sizeof(configuration), 1000ms));
+		if (acknowledgement.generation != configuration.generation ||
+		    (acknowledgement.capability_flags &
+		     MSAP1_M18_TRANSIENT_CAPABLE) != 0u)
+			throw std::runtime_error(
+				"R5C1 M18 configuration readback does not match");
+		resolved_device_ = controller_->device_path();
+		return acknowledgement;
+	} catch (...) {
+		controller_.reset();
+		resolved_device_.clear();
+		throw;
+	}
+}
+
 void AggregationHealthMonitor::refresh() noexcept
 {
 	try {
@@ -65,6 +91,8 @@ void AggregationHealthMonitor::refresh() noexcept
 		const auto health = controller_->query_aggregation_health();
 		if (desired_demand_)
 			(void)configure_demand(*desired_demand_);
+		if (desired_m18_)
+			(void)configure_m18(*desired_m18_);
 		resolved_device_ = controller_->device_path();
 		cached_health_ = health;
 		has_cached_health_ = true;

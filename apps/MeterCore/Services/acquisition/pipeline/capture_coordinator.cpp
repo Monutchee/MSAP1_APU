@@ -21,6 +21,19 @@ namespace msap1::acquisition::daemon {
 
 using namespace std::chrono_literals;
 
+msap1::PreparedMeterConfiguration prepare_product_configuration(
+	const msap1::settings::ProductSettings &settings)
+{
+	auto result = msap1::prepare_meter_configuration(
+		msap1::settings::to_meter_configuration(settings),
+		settings.metering.sample_rate_hz);
+	result.m18_wire = msap1::settings::to_m18_configuration(
+		settings, result.wire.generation);
+	msap1::coordinate_configuration_generation(
+		result.wire, result.m18_wire);
+	return result;
+}
+
 msap1_demand_config_payload demand_configuration(
 	const msap1::settings::DemandSettings &settings)
 {
@@ -35,9 +48,7 @@ msap1_demand_config_payload demand_configuration(
 CaptureCoordinator::CaptureCoordinator(const Options &options)
 	: options_(options),
 	  product_settings_(load_runtime_settings()),
-	  configuration_(msap1::prepare_meter_configuration(
-		  msap1::settings::to_meter_configuration(product_settings_),
-		  product_settings_.metering.sample_rate_hz)),
+	  configuration_(prepare_product_configuration(product_settings_)),
 	  meter_(options.meter_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
 		    waveform_metadata(configuration_)),
@@ -249,6 +260,18 @@ void CaptureCoordinator::configure_meter()
 		  std::to_string(configuration_.wire.generation)},
 		 {"MNC_SAMPLE_RATE_HZ",
 		  std::to_string(configuration_.wire.sample_rate_hz)}});
+	const auto r5c1_ack =
+		aggregation_health_.configure_m18(configuration_.m18_wire);
+	if (r5c1_ack.generation != configuration_.wire.generation)
+		throw std::runtime_error(
+			"R5C1 M18 configuration generation does not match");
+	const auto r5c0_m18 = msap1::decode_m18_config_ack(
+		rpu_.transact(MSAP1_RPU_MSG_M18_CONFIG_SET,
+			&configuration_.m18_wire,
+			sizeof(configuration_.m18_wire), 1000ms));
+	if (r5c0_m18.generation != configuration_.wire.generation)
+		throw std::runtime_error(
+			"R5C0 M18 configuration generation does not match");
 	const auto response = rpu_.transact(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		&configuration_.wire, sizeof(configuration_.wire), 1000ms);
 	const auto acknowledgement = msap1::decode_meter_config_ack(response);
@@ -422,14 +445,9 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 {
 	auto candidate = msap1::settings::SettingsCodec::decode(json);
 	msap1::settings::SettingsValidator::validate(candidate);
-	auto meter_settings =
-		msap1::settings::to_meter_configuration(candidate);
+	auto staged = prepare_product_configuration(candidate);
 	const bool pipeline_changed =
-		candidate.metering.sample_rate_hz !=
-			configuration_.wire.sample_rate_hz ||
-		msap1::encode_meter_configuration(meter_settings, false) !=
-		msap1::encode_meter_configuration(
-				configuration_.source, false);
+		staged.wire.generation != configuration_.wire.generation;
 	const bool demand_changed =
 		candidate.metering.demand.method !=
 			product_settings_.metering.demand.method ||
@@ -442,9 +460,6 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 			(void)aggregation_health_.configure_demand(
 				demand_configuration(candidate.metering.demand));
 		if (pipeline_changed) {
-			auto staged = msap1::prepare_meter_configuration(
-				std::move(meter_settings),
-				candidate.metering.sample_rate_hz);
 			apply_complete_configuration(std::move(staged),
 				"central_settings_applied");
 		} else {
@@ -475,6 +490,12 @@ void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
 
 	auto staged = msap1::prepare_meter_configuration(
 		configuration_.source, sample_rate_hz);
+	auto staged_settings = product_settings_;
+	staged_settings.metering.sample_rate_hz = sample_rate_hz;
+	staged.m18_wire = msap1::settings::to_m18_configuration(
+		staged_settings, staged.wire.generation);
+	msap1::coordinate_configuration_generation(
+		staged.wire, staged.m18_wire);
 	const auto previous = configuration_;
 	const bool restart = running_;
 	if (restart)
