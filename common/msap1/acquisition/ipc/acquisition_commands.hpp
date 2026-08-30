@@ -66,7 +66,9 @@ inline constexpr const char *acquisition_socket_path =
  * from the process-lifetime forensic total. */
 /* 36: M18 flicker/mains latest views and MNCWF capture authorities use typed
  * payloads. The durable event catalogue has its own historian IPC. */
-inline constexpr std::uint16_t acquisition_ipc_version = 36;
+/* 37: Waveform session summaries expose the contributing trigger origins so
+ * manual history can remain distinct from PQ-event evidence. */
+inline constexpr std::uint16_t acquisition_ipc_version = 37;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -215,6 +217,7 @@ struct WaveformSessionIpc {
 	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
+	std::uint32_t trigger_source_mask = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
 	std::uint32_t decimation = 1;
 	std::string filename;

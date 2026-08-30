@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -40,6 +41,8 @@ struct WaveformTriggerDto {
 /** Body of DELETE /api/v1/waveforms. */
 struct WaveformDeleteDto {
 	std::uint64_t session_id = 0;
+	bool all = false;
+	bool confirmed = false;
 };
 
 /** One capture session in the waveform status document. */
@@ -53,6 +56,7 @@ struct WaveformSessionDto {
 	std::uint64_t trigger_realtime_nanoseconds;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t event_count;
+	std::string origin;
 	std::uint32_t decimation;
 	std::string filename;
 	std::uint64_t continuation_of_session_id;
@@ -94,6 +98,19 @@ std::string waveform_state_name(msap1::WaveformSessionState state)
 	return "unknown";
 }
 
+std::string waveform_origin(std::uint32_t mask)
+{
+	const auto manual = (mask &
+		((1u << static_cast<unsigned>(WaveformTriggerSource::manual_cli)) |
+		 (1u << static_cast<unsigned>(WaveformTriggerSource::manual_web)))) != 0u;
+	const auto power_quality = (mask &
+		(1u << static_cast<unsigned>(WaveformTriggerSource::pq_event))) != 0u;
+	if (manual && power_quality) return "mixed";
+	if (manual) return "manual";
+	if (power_quality) return "power_quality";
+	return "legacy";
+}
+
 /** Project a daemon waveform response onto the JSON status document. */
 WaveformDto waveform_status(const msap1::WaveformResponse &response)
 {
@@ -132,6 +149,7 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 			session.trigger_realtime_nanoseconds,
 			session.sample_rate_hz,
 			session.event_count,
+			waveform_origin(session.trigger_source_mask),
 			session.decimation,
 			session.filename,
 			session.continuation_of_session_id,
@@ -269,8 +287,8 @@ webengine::Response post_waveform_trigger(AppContext &app,
 /**
  * @brief DELETE /api/v1/waveforms (Admin)
  *
- * Deletes one completed waveform capture session and its persisted file.
- * The session is identified by the body's non-zero "session_id".
+ * Deletes one completed waveform capture session and its persisted file, or
+ * every inactive session when the explicitly confirmed "all" selector is set.
  *
  * @return 200 with the updated waveform status, 400 for invalid JSON or a
  *         missing session ID, or 409 when the daemon rejects the deletion.
@@ -287,19 +305,48 @@ delete_waveform_session(AppContext &app,
 			return error_response(
 				webengine::http::status::bad_request,
 				"invalid waveform deletion JSON");
-		if (deletion.session_id == 0u)
+		if (deletion.all && deletion.session_id != 0u)
+			return error_response(
+				webengine::http::status::bad_request,
+				"select waveform session_id or all, but not both");
+		if (deletion.all && !deletion.confirmed)
+			return error_response(
+				webengine::http::status::bad_request,
+				"bulk waveform deletion requires explicit confirmation");
+		if (!deletion.all && deletion.session_id == 0u)
 			return error_response(
 				webengine::http::status::bad_request,
 				"waveform session ID is required");
-		const auto response =
-			app.acquisition.delete_waveform(deletion.session_id);
+
+		auto response = app.acquisition.waveform_status();
 		require_acquisition_ok(response.status);
+		std::vector<std::uint64_t> targets;
+		if (deletion.all) {
+			if (std::ranges::any_of(response.sessions,
+					[](const auto &session) {
+						return session.state ==
+							WaveformSessionState::capturing;
+					}))
+				return error_response(webengine::http::status::conflict,
+					"all waveform data cannot be cleared while a capture is active");
+			for (const auto &session : response.sessions)
+				targets.push_back(session.id);
+		} else {
+			targets.push_back(deletion.session_id);
+		}
+		for (const auto session_id : targets) {
+			response = app.acquisition.delete_waveform(session_id);
+			require_acquisition_ok(response.status);
+		}
 		log_api_event(mnc::logging::Priority::notice,
-			"waveform capture deleted",
-			"waveform_deleted",
+			deletion.all ? "all waveform captures deleted"
+				: "waveform capture deleted",
+			deletion.all ? "waveforms_cleared" : "waveform_deleted",
 			{{"MNC_REQUEST_ID", correlation},
-			 {"MNC_WAVEFORM_SESSION",
-			  std::to_string(deletion.session_id)}});
+			 {deletion.all ? "MNC_WAVEFORMS_DELETED"
+				: "MNC_WAVEFORM_SESSION",
+			  std::to_string(deletion.all ? targets.size()
+				: deletion.session_id)}});
 		return json_response(webengine::http::status::ok,
 			waveform_status(response));
 	} catch (const std::exception &error) {

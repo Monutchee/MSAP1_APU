@@ -651,6 +651,36 @@ void MeterHistorianService::handle(
 			output.u32(0);
 			break;
 		}
+		case ipc::Command::delete_power_quality_events: {
+			const bool all = input.u8() != 0u;
+			const auto count = input.u32();
+			if ((all && count != 0u) ||
+			    (!all && (count == 0u || count > 1000u)))
+				throw std::invalid_argument(
+					"invalid power-quality event deletion selection");
+			std::vector<PowerQualityEventUuid> event_uuids;
+			event_uuids.reserve(count);
+			for (std::uint32_t index = 0; index < count; ++index) {
+				PowerQualityEventUuid uuid{};
+				const auto bytes = input.bytes(uuid.size());
+				std::copy(bytes.begin(), bytes.end(), uuid.begin());
+				event_uuids.push_back(uuid);
+			}
+			input.require_finished();
+			std::scoped_lock maintenance(migration_mutex_);
+			const auto deleted = all
+				? store_->clear_power_quality_events()
+				: store_->delete_power_quality_events(event_uuids);
+			const std::array fields{
+				mnc::logging::Field{"MNC_PQ_EVENTS_DELETED",
+					std::to_string(deleted)}};
+			(void)logger().write(mnc::logging::Priority::notice,
+				"power-quality catalogue events deleted",
+				"power_quality_events_deleted", fields);
+			output.u32(0);
+			output.u64(deleted);
+			break;
+		}
 		case ipc::Command::get_historian_status: {
 			input.require_finished();
 			auto status = store_->status();

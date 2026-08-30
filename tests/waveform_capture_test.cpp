@@ -384,7 +384,13 @@ void test_materialized_continuation_and_restart_recovery()
 			require(restored_master.master_session_id == master.id &&
 					restored_continuation.continuation_of_session_id ==
 						master.id &&
-					restored_continuation.master_session_id == master.id,
+					restored_continuation.master_session_id == master.id &&
+					(restored_master.trigger_source_mask &
+						(1u << static_cast<unsigned>(
+							msap1::WaveformTriggerSource::pq_event))) != 0u &&
+					(restored_continuation.trigger_source_mask &
+						(1u << static_cast<unsigned>(
+							msap1::WaveformTriggerSource::pq_event))) != 0u,
 				"restart did not reconstruct numeric continuation lineage");
 			discovered.stop();
 		}
@@ -502,6 +508,10 @@ int main()
 			"pre-trigger frame calculation mismatch");
 		require(triggered.last_sequence == 1024,
 			"post-trigger frame calculation mismatch");
+		require((triggered.trigger_source_mask &
+				(1u << static_cast<unsigned>(
+					msap1::WaveformTriggerSource::manual_cli))) != 0u,
+			"manual capture origin was not retained");
 
 		/* EOF still queues session completion after the read loop. */
 		capture.read_available();
@@ -638,6 +648,10 @@ int main()
 				1005, 1024));
 		require(pq_overlap.id == pq_started.id && pq_overlap.event_count == 2,
 			"overlapping PQ events did not merge into one master");
+		require((pq_overlap.trigger_source_mask &
+				(1u << static_cast<unsigned>(
+					msap1::WaveformTriggerSource::pq_event))) != 0u,
+			"PQ capture origin was not retained");
 		const auto pq_update = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::update,
 			1000, 1024, 1, 0, 1,

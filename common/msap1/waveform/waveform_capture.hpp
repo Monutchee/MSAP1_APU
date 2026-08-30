@@ -126,6 +126,9 @@ struct WaveformSessionSummary {
 	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
+	/** Bit N is set when at least one trigger from WaveformTriggerSource N
+	 * contributed to this (possibly merged) capture session. */
+	std::uint32_t trigger_source_mask = 0;
 	/** Zero for a master; otherwise the immediately preceding contiguous
 	 * session sealed at the 128 MiB safe materialization limit. */
 	std::uint64_t continuation_of_session_id = 0;

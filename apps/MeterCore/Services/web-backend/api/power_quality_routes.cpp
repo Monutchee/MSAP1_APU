@@ -243,6 +243,16 @@ struct PowerQualityEventsDto {
 	std::vector<PowerQualityEventDto> events;
 };
 
+struct PowerQualityEventDeleteDto {
+	std::vector<std::string> event_ids;
+	bool all = false;
+	bool confirmed = false;
+};
+
+struct PowerQualityEventDeleteResultDto {
+	std::uint64_t deleted = 0;
+};
+
 struct FlickerPhaseDto {
 	std::string phase;
 	bool valid = false;
@@ -396,6 +406,55 @@ webengine::Response get_power_quality_events(AppContext &app,
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/meter/power-quality/events", error);
 		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response delete_power_quality_events(AppContext &app,
+	const webengine::RequestContext &request)
+{
+	const auto correlation = request_id();
+	try {
+		PowerQualityEventDeleteDto selection;
+		if (glz::read_json(selection, request.request.body()))
+			return error_response(webengine::http::status::bad_request,
+				"invalid power-quality event deletion JSON");
+		if (!selection.confirmed)
+			return error_response(webengine::http::status::bad_request,
+				"power-quality event deletion requires explicit confirmation");
+		if (selection.all == !selection.event_ids.empty())
+			return error_response(webengine::http::status::bad_request,
+				"select event_ids or all, but not both");
+		if (selection.event_ids.size() > 1000u)
+			return error_response(webengine::http::status::bad_request,
+				"at most 1000 power-quality events may be deleted at once");
+
+		std::vector<PowerQualityEventUuid> event_uuids;
+		event_uuids.reserve(selection.event_ids.size());
+		for (const auto &text : selection.event_ids) {
+			const auto uuid = mncwf_uuid_from_string(text);
+			if (!uuid || mncwf_uuid_is_zero(*uuid))
+				return error_response(
+					webengine::http::status::bad_request,
+					"event_ids must contain nonzero canonical UUIDs");
+			event_uuids.push_back(*uuid);
+		}
+		const auto deleted = selection.all
+			? app.database.clear_power_quality_events()
+			: app.database.delete_power_quality_events(event_uuids);
+		log_api_event(mnc::logging::Priority::notice,
+			"power-quality catalogue events deleted",
+			"power_quality_events_deleted",
+			{{"MNC_REQUEST_ID", correlation},
+			 {"MNC_PQ_EVENTS_DELETED", std::to_string(deleted)}});
+		return json_response(webengine::http::status::ok,
+			PowerQualityEventDeleteResultDto{deleted});
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/power-quality/events", error);
+		return error_response(webengine::http::status::conflict,
 			error.what());
 	}
 }

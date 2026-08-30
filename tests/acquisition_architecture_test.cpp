@@ -415,8 +415,8 @@ void typed_commands_round_trip_through_the_registry()
 			mains_response.snapshot.detected_phase_mask == 0x5u,
 		"typed mains-signalling observation did not round trip");
 
-	/* IPC v36 carries the private storage authority plus public v4 capture,
-	 * master, and continuation identities used by bounded event export. */
+	/* IPC v37 carries private storage authority plus public v4 capture,
+	 * lineage, and trigger-origin identities used by catalogue projection. */
 	registry.on<msap1::WaveformListRequest>(
 		msap1::AcquisitionStatus::dma_error,
 		[](const msap1::WaveformListRequest &request) {
@@ -431,6 +431,8 @@ void typed_commands_round_trip_through_the_registry()
 			session.filename = "waveform-17-test.mncwf";
 			session.continuation_of_session_id = 16u;
 			session.master_session_id = 15u;
+			session.trigger_source_mask = 1u << static_cast<unsigned>(
+				msap1::WaveformTriggerSource::pq_event);
 			session.capture_uuid =
 				"01234567-89ab-4def-8123-456789abcdef";
 			response.sessions.push_back(std::move(session));
@@ -446,6 +448,9 @@ void typed_commands_round_trip_through_the_registry()
 			waveform_response.sessions.size() == 1u &&
 			waveform_response.sessions[0].continuation_of_session_id == 16u &&
 			waveform_response.sessions[0].master_session_id == 15u &&
+			waveform_response.sessions[0].trigger_source_mask ==
+				(1u << static_cast<unsigned>(
+					msap1::WaveformTriggerSource::pq_event)) &&
 			waveform_response.sessions[0].capture_uuid ==
 				"01234567-89ab-4def-8123-456789abcdef",
 		"typed waveform export authority did not round trip");

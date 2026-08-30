@@ -33,6 +33,7 @@ enum class Command : std::uint32_t {
 	recreate_database,
 	query_power_quality_events,
 	link_power_quality_event_waveform,
+	delete_power_quality_events,
 };
 
 /** Server-pushed notifications emitted after a subscription is accepted. */
@@ -53,6 +54,9 @@ public:
 	[[nodiscard]] std::vector<PowerQualityEventCatalogEntry>
 	query_power_quality_events(
 		const PowerQualityEventQuery &query = {}) const;
+	[[nodiscard]] std::uint64_t delete_power_quality_events(
+		std::span<const PowerQualityEventUuid> event_uuids) const;
+	[[nodiscard]] std::uint64_t clear_power_quality_events() const;
 	void link_power_quality_event_waveform(
 		const PowerQualityEventUuid &event_uuid,
 		const WaveformCaptureUuid &capture_uuid) const;

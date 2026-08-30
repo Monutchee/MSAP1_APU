@@ -58,6 +58,19 @@ bool valid_decimation(std::uint32_t decimation)
 		decimation == 8u || decimation == 16u || decimation == 32u;
 }
 
+constexpr std::uint32_t trigger_source_bit(WaveformTriggerSource source)
+{
+	return 1u << static_cast<unsigned>(source);
+}
+
+std::uint32_t trigger_source_bit(std::uint16_t source)
+{
+	if (source < static_cast<std::uint16_t>(WaveformTriggerSource::manual_cli) ||
+	    source > static_cast<std::uint16_t>(WaveformTriggerSource::pq_event))
+		return 0u;
+	return 1u << source;
+}
+
 bool uuid_is_zero(const MncwfUuid &uuid)
 {
 	return std::ranges::all_of(uuid,
@@ -661,6 +674,9 @@ void WaveformCapture::discover_persisted_sessions()
 					static_cast<std::uint32_t>(sample_rate);
 				session.summary.event_count = static_cast<std::uint32_t>(
 					reader.events().size());
+				for (const auto &event : reader.events())
+					session.summary.trigger_source_mask |=
+						trigger_source_bit(event.trigger_source);
 				session.summary.decimation = first.decimation_divisor;
 				session.summary.master_session_id = *session_id;
 				session.summary.state = WaveformSessionState::complete;
@@ -1130,6 +1146,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 			active->context)});
 	active->summary.event_count =
 		static_cast<std::uint32_t>(active->events.size());
+	active->summary.trigger_source_mask |= trigger_source_bit(source);
 	return active->summary;
 }
 
@@ -1287,6 +1304,8 @@ WaveformSessionSummary WaveformCapture::track_power_quality_event(
 		marker->descriptor = std::move(descriptor);
 	active->summary.event_count = static_cast<std::uint32_t>(
 		active->events.size());
+	active->summary.trigger_source_mask |=
+		trigger_source_bit(WaveformTriggerSource::pq_event);
 	if (lifecycle == WaveformEventLifecycle::end ||
 	    lifecycle == WaveformEventLifecycle::abort)
 		std::erase(active->active_events, event_id);

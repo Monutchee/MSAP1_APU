@@ -922,6 +922,51 @@ WHERE event_id=? ORDER BY capture_uuid
 	return result;
 }
 
+std::uint64_t MeterHistoryStore::delete_power_quality_events(
+	std::span<const PowerQualityEventUuid> event_uuids)
+{
+	if (event_uuids.empty())
+		throw std::invalid_argument(
+			"power-quality event deletion is empty");
+	std::set<PowerQualityEventUuid> unique;
+	for (const auto &uuid : event_uuids) {
+		if (std::ranges::none_of(uuid,
+				[](std::byte value) { return value != std::byte{}; }))
+			throw std::invalid_argument(
+				"power-quality event UUID is zero");
+		if (!unique.insert(uuid).second)
+			throw std::invalid_argument(
+				"duplicate power-quality event deletion");
+	}
+
+	std::scoped_lock lock(impl_->mutex);
+	Transaction transaction(impl_->persistent);
+	auto remove = impl_->persistent.prepare(
+		"DELETE FROM power_quality_events WHERE event_uuid=?");
+	std::uint64_t deleted = 0u;
+	for (const auto &uuid : unique) {
+		remove.bind(1, std::span<const std::byte>{uuid});
+		remove.execute();
+		deleted += static_cast<std::uint64_t>(impl_->persistent.changes());
+		remove.reset();
+	}
+	transaction.commit();
+	return deleted;
+}
+
+std::uint64_t MeterHistoryStore::clear_power_quality_events()
+{
+	std::scoped_lock lock(impl_->mutex);
+	Transaction transaction(impl_->persistent);
+	auto remove = impl_->persistent.prepare(
+		"DELETE FROM power_quality_events");
+	remove.execute();
+	const auto deleted = static_cast<std::uint64_t>(
+		impl_->persistent.changes());
+	transaction.commit();
+	return deleted;
+}
+
 void MeterHistoryStore::append(const MeterUpdate &update,
 	std::uint64_t stream_cursor, std::int64_t measured_at_ns)
 {

@@ -162,6 +162,9 @@ The authenticated external API is:
 - `GET /api/v1/meter/power-quality` (M12 live Urms(1/2) diagnostics)
 - `GET /api/v1/meter/power-quality/events` (durable M18 event catalogue;
   optional `event_id`, `start_utc_ns`, `end_utc_ns`, and `limit` filters)
+- `DELETE /api/v1/meter/power-quality/events` (administrator only; explicitly
+  confirmed selected UUIDs or complete-catalogue deletion; MNCWF files are
+  retained)
 - `GET /api/v1/meter/flicker` (latest independent live Pinst, Pst, and Plt)
 - `GET /api/v1/meter/mains-signalling` (latest configured-carrier observation)
 - `POST /api/v1/meter/energy/reset` (administrator only; resets all 28 energy
@@ -173,10 +176,14 @@ The authenticated external API is:
 - `GET /api/v1/meter/history/health`
 - `GET /api/v1/developer/database` (administrator only)
 - `PUT /api/v1/developer/database` (administrator only)
+- `POST /api/v1/developer/database/maintenance` (administrator only; clears
+  selected historian projections while preserving the raw-record spool)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`
 - `POST /api/v1/waveforms/trigger` (administrator only)
+- `DELETE /api/v1/waveforms` (administrator only; deletes one session or, with
+  explicit confirmation, all inactive sessions and their MNCWF files)
 - `GET /api/v1/waveforms/export?session_id=<id>&event_id=<uuid>&format=mncwf`
   (authenticated viewer; streamed virtual event capture)
 - `GET /protected/waveforms/view/<filename>` (authenticated viewer)
@@ -196,6 +203,11 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+
+Waveform session summaries classify their contributing triggers as `manual`,
+`power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
+manual and PQ capture still share the same capture coordinator, MNCWF-v4
+storage, parser, and export path.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1

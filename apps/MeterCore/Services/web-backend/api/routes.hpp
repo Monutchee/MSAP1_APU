@@ -80,6 +80,9 @@ webengine::Response get_meter_power_quality(AppContext &,
 /** @brief GET /api/v1/meter/power-quality/events — durable M18 catalogue. */
 webengine::Response get_power_quality_events(AppContext &,
 	const webengine::RequestContext &);
+/** @brief DELETE /api/v1/meter/power-quality/events — remove catalogue rows. */
+webengine::Response delete_power_quality_events(AppContext &,
+	const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/flicker — latest live/Pst/Plt records. */
 webengine::Response get_meter_flicker(AppContext &,
 	const webengine::RequestContext &);
@@ -297,6 +300,10 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/power-quality/events",
 	 webengine::Role::Viewer, &get_power_quality_events,
 	 "Durable M18 power-quality event catalogue and detail"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/meter/power-quality/events",
+	 webengine::Role::Admin, &delete_power_quality_events,
+	 "Delete selected or all durable power-quality catalogue events"},
 	{webengine::http::verb::get, "/api/v1/meter/flicker",
 	 webengine::Role::Viewer, &get_meter_flicker,
 	 "Latest independent flicker live, Pst, and Plt values"},
@@ -363,7 +370,7 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	 "Trigger a manual waveform capture"},
 	{webengine::http::verb::delete_, "/api/v1/waveforms",
 	 webengine::Role::Admin, &delete_waveform_session,
-	 "Delete one completed waveform session"},
+	 "Delete one completed waveform session or all inactive sessions"},
 
 	/* Settings (settings_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/settings/active",

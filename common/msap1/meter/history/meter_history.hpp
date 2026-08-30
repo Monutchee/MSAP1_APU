@@ -156,6 +156,12 @@ public:
 		std::optional<std::uint64_t> utc_uncertainty_nanoseconds);
 	[[nodiscard]] std::vector<PowerQualityEventCatalogEntry>
 	query_power_quality_events(const PowerQualityEventQuery &query = {}) const;
+	/** Delete selected canonical events and their cascade-owned waveform links.
+	 * Missing UUIDs are ignored so repeated administrative requests are safe. */
+	[[nodiscard]] std::uint64_t delete_power_quality_events(
+		std::span<const PowerQualityEventUuid> event_uuids);
+	/** Delete the complete durable event catalogue, without deleting MNCWF files. */
+	[[nodiscard]] std::uint64_t clear_power_quality_events();
 	/** Attach one canonical MNCWF-v4 capture UUID; duplicate links are ignored. */
 	void link_power_quality_event_waveform(const PowerQualityEventId &event_id,
 		const WaveformCaptureUuid &capture_uuid);

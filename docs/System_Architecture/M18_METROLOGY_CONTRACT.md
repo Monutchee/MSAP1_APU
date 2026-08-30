@@ -32,7 +32,7 @@ The M18 co-release moves these authorities together:
 | --- | ---: | --- |
 | Product settings | schema 4 | Decode schema 1–3 and migrate in memory; preserve the existing voltage sag, swell, and interruption settings. |
 | APU/RPU control | RPMsg 9 | Headers are byte-identical; configuration and acknowledgement only. |
-| Acquisition IPC | 36 | Reject a peer with a different fixed protocol version. |
+| Acquisition IPC | 37 | Reject a peer with a different fixed protocol version. |
 | ADC simulator | 1.5 | Adds deterministic AM and absolute carrier/adjacent tones. |
 | Persistent waveform | MNCWF 4 | Sole master/export format in M18; COMTRADE and PQDIF remain future converters. |
 
@@ -84,7 +84,7 @@ Sample data and measurement records never use RPMsg.
 
 ## Product measurement surfaces
 
-Acquisition IPC v36 exposes the three independent latest FLICKER-v1 views and
+Acquisition IPC v37 exposes the three independent latest FLICKER-v1 views and
 the latest MAINS-SIGNAL-v1 observation. The existing
 `meter-power-quality` command remains the M12 Urms(1/2) diagnostic; it is not
 silently redefined as the M18 lifecycle catalogue.
@@ -98,6 +98,12 @@ the typed acquisition snapshots. Equivalent local commands are
 `mnc meter power-quality events`, `mnc meter flicker`, and
 `mnc meter mains-signalling`; all support the normal JSON envelope.
 
+An administrator may delete selected canonical event UUIDs, or explicitly
+confirm a complete catalogue clear, through
+`DELETE /api/v1/meter/power-quality/events`. Deleting an event removes its
+catalogue-owned evidence links but deliberately does not delete shared MNCWF
+files. Waveform deletion is a separate capture-storage operation.
+
 When waveform policy is enabled, acquisition assigns the capture UUID before
 queuing the session and sends the event/capture association to the historian
 on a separate ordered retry worker. The catalogue may therefore lag the live
@@ -105,6 +111,12 @@ edge briefly, but historian unavailability never blocks the DMA ingestion
 thread. Duplicate lifecycle updates and overlapping-event links are
 idempotent. One event can list several continuation capture UUIDs and one
 capture UUID can appear on several overlapping events.
+
+Acquisition IPC session summaries include a bit mask of all trigger sources
+that contributed to a possibly merged capture. The web projection reports
+`manual`, `power_quality`, `mixed`, or `legacy`; this lets the manual capture
+library omit PQ-only evidence without splitting the underlying capture or
+storage implementation.
 
 ## Simulator 1.5
 

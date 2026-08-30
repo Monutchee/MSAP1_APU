@@ -186,10 +186,23 @@ int main()
 	}
 	{
 		msap1::history::MeterHistoryStore reopened(path, policies());
-		const auto rows = reopened.query_power_quality_events(by_id);
+		auto rows = reopened.query_power_quality_events(by_id);
 		require(rows.size() == 1 &&
 				rows[0].waveform_capture_uuids.size() == 1,
 			"event catalogue and links survive restart");
+		const std::array<msap1::PowerQualityEventUuid, 1> selected{
+			event_uuid};
+		require(reopened.delete_power_quality_events(selected) == 1u &&
+				reopened.query_power_quality_events(by_id).empty() &&
+				reopened.status().power_quality_event_count == 0u,
+			"selected event deletion did not cascade its catalogue row");
+		auto replacement = event_record(
+			msap1::meter_event_lifecycle_end, 3, 2500);
+		reopened.upsert_power_quality_event(replacement, 13,
+			1'000'000'000ll, msap1::TimeQuality::Synchronized, 250);
+		require(reopened.clear_power_quality_events() == 1u &&
+				reopened.query_power_quality_events().empty(),
+			"complete event catalogue clear did not remove all rows");
 	}
 	remove_database(path);
 	if (failures != 0) {

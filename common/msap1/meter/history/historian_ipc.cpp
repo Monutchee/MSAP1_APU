@@ -325,6 +325,43 @@ void HistorianClient::link_power_quality_event_waveform(
 	reader.require_finished();
 }
 
+std::uint64_t HistorianClient::delete_power_quality_events(
+	std::span<const PowerQualityEventUuid> event_uuids) const
+{
+	if (event_uuids.empty())
+		throw std::invalid_argument(
+			"power-quality event deletion is empty");
+	if (event_uuids.size() > 1000u)
+		throw std::invalid_argument(
+			"at most 1000 power-quality events may be deleted at once");
+	ByteWriter writer;
+	writer.u8(0u);
+	writer.u32(static_cast<std::uint32_t>(event_uuids.size()));
+	for (const auto &uuid : event_uuids)
+		write_uuid(writer, uuid);
+	auto response = request(Command::delete_power_quality_events,
+		writer.take(), 120000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const auto deleted = reader.u64();
+	reader.require_finished();
+	return deleted;
+}
+
+std::uint64_t HistorianClient::clear_power_quality_events() const
+{
+	ByteWriter writer;
+	writer.u8(1u);
+	writer.u32(0u);
+	auto response = request(Command::delete_power_quality_events,
+		writer.take(), 120000);
+	ByteReader reader(response.payload);
+	require_ok(reader);
+	const auto deleted = reader.u64();
+	reader.require_finished();
+	return deleted;
+}
+
 HistorianStatus HistorianClient::status() const
 {
 	auto response = request(Command::get_historian_status);
