@@ -151,8 +151,8 @@ void adc_health_round_trip()
 
 void aggregation_health_round_trip()
 {
-	static_assert(sizeof(msap1_aggregation_health_payload) == 200,
-		      "aggregation health ABI must be 50 packed words");
+	static_assert(sizeof(msap1_aggregation_health_payload) == 216,
+		      "aggregation health ABI must be 54 packed words");
 	msap1_aggregation_health_payload health{};
 	health.health_flags = MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE |
 		MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED |
@@ -186,6 +186,10 @@ void aggregation_health_round_trip()
 	health.validator_records_processed = 17;
 	health.validator_max_runtime_us = 18;
 	health.validator_max_schedule_gap_us = 19;
+	health.control_stack_high_water_bytes = 4096;
+	health.input_stack_high_water_bytes = 4100;
+	health.output_stack_high_water_bytes = 4200;
+	health.validator_stack_high_water_bytes = 4300;
 
 	const auto wire = msap1::encode_request(
 		MSAP1_RPU_MSG_AGGREGATION_HEALTH, 37, &health,
@@ -250,9 +254,9 @@ void m18_configuration_round_trip()
 		93u, &configuration, sizeof(configuration));
 	const auto decoded_request =
 		msap1::decode_message(request.data(), request.size());
-	require(decoded_request.header.version == 9u &&
-		decoded_request.payload.size() == sizeof(configuration),
-		"M18 configuration did not preserve its v9 frame geometry");
+	require(decoded_request.header.version == 10u &&
+			decoded_request.payload.size() == sizeof(configuration),
+		"M18 configuration did not preserve its v10 frame geometry");
 
 	msap1_m18_config_ack_payload acknowledgement{77u, 0u};
 	const auto response = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG,
@@ -304,8 +308,9 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Wire v9 appends simulator-v1.5 AM and absolute carrier controls while
-	 * keeping the complete frame below the 384-byte RPMsg cap. */
+	/* Wire v9 introduced simulator-v1.5 AM and absolute carrier controls; v10
+	 * retains that meter payload, extends aggregation health, and keeps the
+	 * complete frame below the 384-byte RPMsg cap. */
 	static_assert(sizeof(msap1_meter_config_payload) == 352,
 		      "meter config payload must be 352 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
@@ -417,8 +422,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 9u,
-		"the simulator event message belongs to wire version 9");
+			MSAP1_RPU_VERSION == 10u,
+		"the simulator event message belongs to wire version 10");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -835,6 +840,10 @@ void meter_health_evaluation()
 		MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE |
 		MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE;
 	aggregation.software_ring_capacity = 64;
+	aggregation.control_stack_high_water_bytes = 4096;
+	aggregation.input_stack_high_water_bytes = 4096;
+	aggregation.output_stack_high_water_bytes = 4096;
+	aggregation.validator_stack_high_water_bytes = 4096;
 	response.has_aggregation_health = true;
 	response.rpu_aggregation_health = aggregation;
 	const auto aggregation_healthy = msap1::evaluate_meter_health(response);
@@ -864,6 +873,15 @@ void meter_health_evaluation()
 		"deterministic input loss was not diagnosed");
 	require(has_aggregation_reason("input_ring_pressure_critical"),
 		"critical ring pressure was not diagnosed");
+	aggregation.validator_stack_high_water_bytes = 2047;
+	const auto stack_reasons =
+		msap1::evaluate_rpu_aggregation_health_reasons(aggregation);
+	bool has_stack_reason = false;
+	for (const auto &reason : stack_reasons)
+		if (reason.code == "task_stack_headroom_low")
+			has_stack_reason = true;
+	require(has_stack_reason,
+		"sub-2-KiB runtime task-stack headroom was not diagnosed");
 	response.has_aggregation_health = false;
 	response.rpu_aggregation_health = msap1_aggregation_health_payload{};
 

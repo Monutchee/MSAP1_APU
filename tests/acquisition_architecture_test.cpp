@@ -415,7 +415,7 @@ void typed_commands_round_trip_through_the_registry()
 			mains_response.snapshot.detected_phase_mask == 0x5u,
 		"typed mains-signalling observation did not round trip");
 
-	/* IPC v37 carries private storage authority plus public v4 capture,
+	/* IPC v38 carries private storage authority plus public v4 capture,
 	 * lineage, and trigger-origin identities used by catalogue projection. */
 	registry.on<msap1::WaveformListRequest>(
 		msap1::AcquisitionStatus::dma_error,

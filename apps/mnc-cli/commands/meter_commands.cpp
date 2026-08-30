@@ -471,7 +471,12 @@ int write_meter_health_text(const MeterHealthResult &result,
 		       << " records, max runtime "
 		       << aggregation.validator_max_runtime_us
 		       << " us, max schedule gap "
-		       << aggregation.validator_max_schedule_gap_us << " us\n";
+		       << aggregation.validator_max_schedule_gap_us << " us\n"
+		       << "  R5C1 stack headroom:  control/input/output/validator "
+		       << aggregation.control_stack_high_water_bytes << '/'
+		       << aggregation.input_stack_high_water_bytes << '/'
+		       << aggregation.output_stack_high_water_bytes << '/'
+		       << aggregation.validator_stack_high_water_bytes << " bytes\n";
 	}
 	output << "  Health confirmation:  "
 	       << (!response.health_probe_pending
@@ -744,6 +749,10 @@ struct AggregationHealthDto {
 	std::uint32_t validator_records_processed = 0;
 	std::uint32_t validator_max_runtime_us = 0;
 	std::uint32_t validator_max_schedule_gap_us = 0;
+	std::uint32_t control_stack_high_water_bytes = 0;
+	std::uint32_t input_stack_high_water_bytes = 0;
+	std::uint32_t output_stack_high_water_bytes = 0;
+	std::uint32_t validator_stack_high_water_bytes = 0;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 
@@ -1020,6 +1029,14 @@ MeterHealthDto meter_health_dto(const MeterHealthResult &result)
 			aggregation.validator_max_runtime_us;
 		dto.aggregation.validator_max_schedule_gap_us =
 			aggregation.validator_max_schedule_gap_us;
+		dto.aggregation.control_stack_high_water_bytes =
+			aggregation.control_stack_high_water_bytes;
+		dto.aggregation.input_stack_high_water_bytes =
+			aggregation.input_stack_high_water_bytes;
+		dto.aggregation.output_stack_high_water_bytes =
+			aggregation.output_stack_high_water_bytes;
+		dto.aggregation.validator_stack_high_water_bytes =
+			aggregation.validator_stack_high_water_bytes;
 	}
 	if (result.full && status.spi_responsive)
 		dto.adc.registers = adc_register_dtos(health);

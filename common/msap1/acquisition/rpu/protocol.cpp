@@ -10,7 +10,7 @@ static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
 static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
-static_assert(sizeof(msap1_aggregation_health_payload) == 200,
+static_assert(sizeof(msap1_aggregation_health_payload) == 216,
 	      "unexpected aggregation health payload layout");
 static_assert(sizeof(msap1_demand_config_payload) == 12,
 	      "unexpected demand configuration payload layout");

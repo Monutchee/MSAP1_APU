@@ -8,6 +8,8 @@
 
 namespace msap1 {
 
+inline constexpr std::uint32_t r5_task_stack_minimum_headroom_bytes = 2048u;
+
 struct HealthReason {
 	std::string code;
 	std::string message;

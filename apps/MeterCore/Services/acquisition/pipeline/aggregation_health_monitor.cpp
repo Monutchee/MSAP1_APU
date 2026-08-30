@@ -182,7 +182,15 @@ void AggregationHealthMonitor::observe_transition(
 		 {"MNC_INPUT_MAX_RUNTIME_US",
 		  std::to_string(health.input_max_runtime_us)},
 		 {"MNC_VALIDATOR_MAX_SCHEDULE_GAP_US",
-		  std::to_string(health.validator_max_schedule_gap_us)}});
+		  std::to_string(health.validator_max_schedule_gap_us)},
+		 {"MNC_CONTROL_STACK_HIGH_WATER_BYTES",
+		  std::to_string(health.control_stack_high_water_bytes)},
+		 {"MNC_INPUT_STACK_HIGH_WATER_BYTES",
+		  std::to_string(health.input_stack_high_water_bytes)},
+		 {"MNC_OUTPUT_STACK_HIGH_WATER_BYTES",
+		  std::to_string(health.output_stack_high_water_bytes)},
+		 {"MNC_VALIDATOR_STACK_HIGH_WATER_BYTES",
+		  std::to_string(health.validator_stack_high_water_bytes)}});
 	last_flags_ = health.health_flags;
 	last_healthy_ = healthy;
 }

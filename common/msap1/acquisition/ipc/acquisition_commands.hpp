@@ -67,8 +67,10 @@ inline constexpr const char *acquisition_socket_path =
 /* 36: M18 flicker/mains latest views and MNCWF capture authorities use typed
  * payloads. The durable event catalogue has its own historian IPC. */
 /* 37: Waveform session summaries expose the contributing trigger origins so
- * manual history can remain distinct from PQ-event evidence. */
-inline constexpr std::uint16_t acquisition_ipc_version = 37;
+ * manual history can remain distinct from PQ-event evidence.
+ * 38: R5C1 aggregation health exposes control/input/output/validator runtime
+ * stack high-water headroom in bytes. */
+inline constexpr std::uint16_t acquisition_ipc_version = 38;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();

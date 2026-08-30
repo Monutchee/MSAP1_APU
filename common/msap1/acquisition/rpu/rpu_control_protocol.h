@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 9u
+#define MSAP1_RPU_VERSION 10u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -582,6 +582,11 @@ struct msap1_aggregation_health_payload {
 	uint32_t validator_records_processed;
 	uint32_t validator_max_runtime_us;
 	uint32_t validator_max_schedule_gap_us;
+	/* Minimum unused FreeRTOS task stack observed since task creation. */
+	uint32_t control_stack_high_water_bytes;
+	uint32_t input_stack_high_water_bytes;
+	uint32_t output_stack_high_water_bytes;
+	uint32_t validator_stack_high_water_bytes;
 } __attribute__((packed));
 
 /* R5C1 active-demand profile. Fixed block is the aligned UTC ten-minute

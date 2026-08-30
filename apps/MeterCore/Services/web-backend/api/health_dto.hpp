@@ -157,6 +157,10 @@ struct AggregationHealthDto {
 	std::uint32_t validator_records_processed;
 	std::uint32_t validator_max_runtime_us;
 	std::uint32_t validator_max_schedule_gap_us;
+	std::uint32_t control_stack_high_water_bytes;
+	std::uint32_t input_stack_high_water_bytes;
+	std::uint32_t output_stack_high_water_bytes;
+	std::uint32_t validator_stack_high_water_bytes;
 	std::vector<HealthReasonDto> degraded_reasons;
 };
 

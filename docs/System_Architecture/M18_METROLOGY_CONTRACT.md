@@ -84,8 +84,9 @@ Sample data and measurement records never use RPMsg.
 
 ## Product measurement surfaces
 
-Acquisition IPC v37 exposes the three independent latest FLICKER-v1 views and
-the latest MAINS-SIGNAL-v1 observation. The existing
+Acquisition IPC v38 exposes the three independent latest FLICKER-v1 views, the
+latest MAINS-SIGNAL-v1 observation, and R5C1 control/input/output/validator
+runtime stack high-water headroom. The existing
 `meter-power-quality` command remains the M12 Urms(1/2) diagnostic; it is not
 silently redefined as the M18 lifecycle catalogue.
 
