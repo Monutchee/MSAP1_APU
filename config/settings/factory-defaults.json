@@ -28,15 +28,15 @@
     },
     "events": {
       "reference_current_amperes": 0.0,
-      "voltage_sag": {"enabled": true, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "voltage_swell": {"enabled": true, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "voltage_interruption": {"enabled": true, "threshold_percent": 10.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "rapid_voltage_change": {"enabled": true, "threshold_percent": 3.0, "hysteresis_percent": 0.5, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "voltage_unbalance": {"enabled": false, "threshold_percent": 2.0, "hysteresis_percent": 0.2, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "current_sag": {"enabled": false, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "current_swell": {"enabled": false, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "current_unbalance": {"enabled": false, "threshold_percent": 10.0, "hysteresis_percent": 1.0, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}},
-      "transient_voltage": {"enabled": false, "threshold_percent": 150.0, "hysteresis_percent": 5.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 1}}
+      "voltage_sag": {"enabled": true, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "voltage_swell": {"enabled": true, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "voltage_interruption": {"enabled": true, "threshold_percent": 10.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "rapid_voltage_change": {"enabled": true, "threshold_percent": 3.0, "hysteresis_percent": 0.5, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": true, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "voltage_unbalance": {"enabled": false, "threshold_percent": 2.0, "hysteresis_percent": 0.2, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "current_sag": {"enabled": false, "threshold_percent": 90.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "current_swell": {"enabled": false, "threshold_percent": 110.0, "hysteresis_percent": 2.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "current_unbalance": {"enabled": false, "threshold_percent": 10.0, "hysteresis_percent": 1.0, "phase_mask": 7, "phase_policy": "polyphase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}},
+      "transient_voltage": {"enabled": false, "threshold_percent": 150.0, "hysteresis_percent": 5.0, "phase_mask": 7, "phase_policy": "per_phase", "waveform": {"enabled": false, "pretrigger_ms": 3000, "posttrigger_ms": 3000, "decimation": 8}}
     },
     "flicker": {
       "enabled": true,

@@ -13,7 +13,10 @@ struct EventWaveformPolicy {
 	bool enabled = true;
 	std::uint32_t pretrigger_ms = 3000;
 	std::uint32_t posttrigger_ms = 3000;
-	std::uint32_t decimation = 1;
+	/* At the 128 kSPS product default, /8 retains 16 kSPS evidence while
+	 * reducing event-file storage by 8x. Event classification happens before
+	 * this capture policy, on the Urms(1/2) measurement stream. */
+	std::uint32_t decimation = 8;
 
 	void validate() const
 	{
@@ -65,15 +68,15 @@ struct PowerQualityEventSettings {
 	EventProfileSettings voltage_interruption{true, 10.0, 2.0};
 	EventProfileSettings rapid_voltage_change{true, 3.0, 0.5};
 	EventProfileSettings voltage_unbalance{
-		false, 2.0, 0.2, 0x7u, "polyphase", {false, 3000, 3000, 1}};
+		false, 2.0, 0.2, 0x7u, "polyphase", {false, 3000, 3000, 8}};
 	EventProfileSettings current_sag{
-		false, 90.0, 2.0, 0x7u, "per_phase", {false, 3000, 3000, 1}};
+		false, 90.0, 2.0, 0x7u, "per_phase", {false, 3000, 3000, 8}};
 	EventProfileSettings current_swell{
-		false, 110.0, 2.0, 0x7u, "per_phase", {false, 3000, 3000, 1}};
+		false, 110.0, 2.0, 0x7u, "per_phase", {false, 3000, 3000, 8}};
 	EventProfileSettings current_unbalance{
-		false, 10.0, 1.0, 0x7u, "polyphase", {false, 3000, 3000, 1}};
+		false, 10.0, 1.0, 0x7u, "polyphase", {false, 3000, 3000, 8}};
 	EventProfileSettings transient_voltage{
-		false, 150.0, 5.0, 0x7u, "per_phase", {false, 3000, 3000, 1}};
+		false, 150.0, 5.0, 0x7u, "per_phase", {false, 3000, 3000, 8}};
 
 	void validate() const
 	{
