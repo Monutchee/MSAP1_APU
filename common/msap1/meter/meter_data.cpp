@@ -315,7 +315,7 @@ MeterData::Subscription MeterData::subscribe(MeasurementPeriod period,
 namespace {
 
 /**
- * Channel and frequency decoding for the periodic (MTR1) record format.
+ * Channel and frequency decoding for the 10/12-cycle basic record format.
  * Word 6 is the actual block sample count — the sample count the PL
  * accumulated into these values.
  */
@@ -379,8 +379,8 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
 }
 
 /**
- * Aggregate (MTR2) fundamental decoding. Channel order and micro-unit
- * encoding are identical to MTR1; only the word layout differs — two words
+ * 150/180-cycle aggregate fundamental decoding. Channel order and micro-unit
+ * encoding match the basic record; only the word layout differs — two words
  * per channel at words 16..31, one mean-frequency word gated by status
  * bit 2, and channel validity from the word-7 mask (the AND across the 15
  * contributing blocks).
@@ -415,7 +415,7 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 {
 	FundamentalValues fundamental{};
 	/*
-	 * The MTR2 frequency field is informational only: it is the mean of
+	 * The aggregate frequency field is informational only: it is the mean of
 	 * the 15 basic frequency estimates, not a standardized measurement.
 	 * IEC 61000-4-30 defines the frequency product over its own (10 s)
 	 * interval, which will be implemented with that interval in a later
@@ -1005,14 +1005,14 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	if (timing_word.nominal_frequency_hz != 50u &&
 	    timing_word.nominal_frequency_hz != 60u)
 		throw std::invalid_argument(
-			"invalid nominal frequency in MTR1 timing word");
+			"invalid nominal frequency in 10/12-cycle basic timing word");
 	const auto nominal = timing_word.nominal_frequency_hz == 50u
 		? NominalFrequency::Hz50
 		: NominalFrequency::Hz60;
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(
-			"MTR1 block has a zero sample count");
+			"10/12-cycle basic interval has a zero sample count");
 	const auto first_sample_index = record.first_sample_index();
 	/*
 	 * Zero is not a reachable index. The PL conversion stage issues index 1
@@ -1029,18 +1029,18 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	 */
 	if (first_sample_index == 0u)
 		throw std::invalid_argument(
-			"MTR1 block has a zero first-sample index");
+			"10/12-cycle basic interval has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
-			"MTR1 sample range overflows the 64-bit counter");
+			"10/12-cycle basic sample range overflows the 64-bit counter");
 	/* A locked block is cycle-defined by construction: exactly the
 	 * nominal's cycles-per-block. Fallback blocks are time-defined and
 	 * may close any cycle count, including 0 or a partial tail. */
 	if (timing_word.cycle_locked && !timing_word.free_run_fallback &&
 	    timing_word.cycle_count != cycles_per_basic_block(nominal))
 		throw std::invalid_argument(
-			"MTR1 cycle-locked block has an impossible cycle count");
+			"10/12-cycle basic interval has an impossible cycle count");
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	/* Word 6 is the ACTUAL sample count of this cycle-defined block. */
@@ -1077,11 +1077,12 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 {
 	if (!record.header_valid() ||
 	    record.record_format() != meter_aggregate_format)
-		throw std::invalid_argument("invalid MTR2 aggregate record");
+		throw std::invalid_argument(
+			"invalid 150/180-cycle aggregate record");
 	/*
 	 * Validate the aggregation identity before building anything,
-	 * mirroring the hardened MTR1 rules: the PL emits only complete
-	 * 15-block aggregates whose cycle count follows the nominal, so any
+	 * mirroring the hardened 10/12-cycle basic rules: the producer emits only
+	 * complete 15-block aggregates whose cycle count follows the nominal, so any
 	 * other shape is corruption or a future RTL regression and must
 	 * never silently decode into a valid aggregate.
 	 */
@@ -1094,21 +1095,21 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	const auto status = record.aggregate_status();
 	if (!status.complete)
 		throw std::invalid_argument(
-			"MTR2 aggregate is not marked complete");
+			"150/180-cycle aggregate is not marked complete");
 	const auto composition = record.aggregate_composition();
 	if (composition.nominal_frequency_hz != 50u &&
 	    composition.nominal_frequency_hz != 60u)
 		throw std::invalid_argument(
-			"invalid nominal frequency in MTR2 composition word");
+			"invalid nominal frequency in 150/180-cycle aggregate composition word");
 	const auto nominal = composition.nominal_frequency_hz == 50u
 		? NominalFrequency::Hz50
 		: NominalFrequency::Hz60;
 	if (composition.basic_block_count != meter::basic_blocks_per_aggregate)
 		throw std::invalid_argument(
-			"MTR2 aggregate is not built from exactly 15 basic blocks");
+			"150/180-cycle aggregate is not built from exactly 15 basic intervals");
 	if (composition.cycle_count != cycles_per_aggregate(nominal))
 		throw std::invalid_argument(
-			"MTR2 aggregate cycle count does not match its nominal");
+			"150/180-cycle aggregate cycle count does not match its nominal frequency");
 	/*
 	 * The first/last basic sequences must describe exactly 15 consecutive
 	 * basic blocks. Both accessors return uint32_t, so the subtraction is
@@ -1119,11 +1120,11 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 					   record.first_basic_sequence());
 	if (basic_span != meter::basic_blocks_per_aggregate - 1u)
 		throw std::invalid_argument(
-			"MTR2 basic sequence span is not 15 consecutive blocks");
+			"150/180-cycle aggregate does not span 15 consecutive basic intervals");
 	const auto sample_count = record.aggregate_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(
-			"MTR2 aggregate has a zero sample count");
+			"150/180-cycle aggregate has a zero sample count");
 	const auto first_sample_index = record.aggregate_first_sample_index();
 	/* Same unreachable-zero rule as the basic block: the aggregate's first
 	 * sample is the first sample of its first contributing block, on the
@@ -1131,24 +1132,31 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	 * aggregate seeded on a block whose index was zeroed inherits it. */
 	if (first_sample_index == 0u)
 		throw std::invalid_argument(
-			"MTR2 aggregate has a zero first-sample index");
+			"150/180-cycle aggregate has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
-			"MTR2 sample range overflows the 64-bit counter");
+			"150/180-cycle aggregate sample range overflows the 64-bit counter");
 	if (status.utc_overlap && status.utc_resynchronized)
 		throw std::invalid_argument(
-			"MTR2 aggregate has conflicting UTC provenance");
+			"150/180-cycle aggregate has conflicting UTC provenance");
 	const auto expected_last =
 		first_sample_index + static_cast<std::uint64_t>(sample_count) - 1u;
 	const auto actual_last = record.aggregate_last_sample_index();
 	if (status.utc_overlap) {
-		if (actual_last < first_sample_index || actual_last >= expected_last)
+		/* A continuing aggregate overlaps the new synchronized aggregate
+		 * because both include the synchronized Basic interval. When UTC
+		 * lands inside an open Basic interval, the continuing aggregate's
+		 * summed contributions overlap internally and actual_last is earlier
+		 * than expected_last. At an exact Basic boundary its contributors are
+		 * contiguous and actual_last equals expected_last. Both geometries are
+		 * valid; only a range beyond the contribution span is impossible. */
+		if (actual_last < first_sample_index || actual_last > expected_last)
 			throw std::invalid_argument(
-				"MTR2 UTC-overlap range is not shorter than its contribution count");
+				"150/180-cycle UTC-overlap range exceeds its contribution span");
 	} else if (actual_last != expected_last) {
 		throw std::invalid_argument(
-			"MTR2 aggregate sample range is discontinuous");
+			"150/180-cycle aggregate sample range is discontinuous");
 	}
 
 	const auto sequence =
@@ -1600,7 +1608,7 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 			return decode_periodic_meter_record(record,
 							    received_at);
 		});
-	/* MTR2 aggregates interleave with basic records on the same DMA
+	/* 150/180-cycle aggregates interleave with basic records on the same DMA
 	 * stream; the registry routes them by the format word. */
 	result.register_decoder(meter_aggregate_format,
 		[](const MeterRecord &record, SystemTime received_at) {

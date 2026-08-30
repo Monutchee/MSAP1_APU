@@ -366,7 +366,7 @@ struct MeterUpdate {
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
 	/* Cycle-timing identity of the source block. Present for every
-	 * periodic (MTR1) update; absent for aggregate updates.
+	 * 10/12-cycle basic update; absent for aggregate updates.
 	 * The Basic period has no fixed duration — the actual duration is
 	 * sample_count / sample_rate per block (see SampleWindow). */
 	std::optional<BlockTiming> timing;
@@ -436,7 +436,7 @@ private:
 /**
  * Extensible decoder table keyed by the PL record format/version word.
  * Future power, energy, demand, and PQ records can register new decoders
- * without modifying the existing MTR1 fundamental decoder.
+ * without modifying the existing basic fundamental decoder.
  */
 /*
  * Decoded view of one SCYC-v2 single-cycle diagnostic record (PL
@@ -758,7 +758,7 @@ MeterUpdate decode_two_hour_open_unbalance_meter_record(
 	const MeterRecord &record, SystemTime received_at);
 
 /**
- * Decode an MTR1 (0x00010003) record: fundamental values plus the
+ * Decode a BASIC-v4 (0x00010004) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
  * TimeQuality and utc_start are NOT in the record — the PL does not know
  * UTC state — so the decoder leaves them at Unsynchronized/absent and the
@@ -773,7 +773,7 @@ MeterUpdate decode_two_hour_open_unbalance_meter_record(
  * Decode an AGG-v3 aggregate (0x00020003) record: 150/180-cycle fundamental
  * values plus the AggregateTiming identity. The PL is the authoritative
  * aggregator — this only DECODES what the PL computed; the APU never
- * recomputes aggregate values. As for MTR1, TimeQuality and utc_start are
+ * recomputes aggregate values. As for the basic record, TimeQuality and utc_start are
  * not in the record: the caller (the ingestor) stamps them from the
  * MeasurementTimebase after decoding.
  */

@@ -30,8 +30,8 @@ inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 /* Record type rides in [31:16] of word 1, version in [15:0]. The
  * reservation table (energy/demand/harmonics/PQ/flicker/mains signalling)
  * lives with the PL contract header; allocate there, never ad hoc. */
-/* BASIC-v4 (metrology M7): the 10/12-cycle merge tier that retired the
- * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
+/* BASIC-v4 (metrology M7): the current 10/12-cycle merge tier. Its interior
+ * retains the BASIC-v3 envelope, timing
  * word, per-lane slots, and words 56..63; additions: block last-sample
  * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
  * 32-bit), status bit 2 = first block after a discontinuity, and timing
@@ -101,8 +101,8 @@ inline constexpr std::size_t meter_demand_interval_anchor_sample_word = 58u;
 inline constexpr std::size_t meter_demand_source_interval_count_word = 60u;
 inline constexpr std::size_t meter_demand_source_status_word = 61u;
 inline constexpr std::size_t meter_demand_profile_generation_word = 62u;
-/* AGG v3 (metrology M11/M15): the R5C1 150/180-cycle tier record
- * (Mtr2Engine retired). MTR2-v2 interior plus:
+/* AGG-v3 (metrology M11/M15): the R5C1 150/180-cycle aggregate record.
+ * It retains the AGG-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
  * aggregate RMS (u32 micro-units). SEMANTIC upgrade: per-lane RMS is the
  * whole-interval finalize of the summed raw accumulators (mean-corrected
@@ -113,7 +113,7 @@ inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
 /* AGG-POWER/PHASOR/UNBAL v1 (M11): the aggregate tier's siblings, same
  * sequence/anchors as their AGG-v3 record; payload word maps (16+)
  * IDENTICAL to the basic-period POWER/PHASOR/UNBAL v1 maps. Word 13
- * carries the MTR2 shape word and 14/15 the folded basic-sequence range. */
+ * carries the aggregate shape word and 14/15 the folded basic-sequence range. */
 inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
 inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
 inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
@@ -543,7 +543,7 @@ struct MeterRecord {
 	std::uint32_t fifo_overflows() const { return word(62); }
 	std::uint32_t adc_alerts() const { return word(63); }
 
-	/* ---- aggregate (AGG-v3/MTR2, 0x00020003) fields ------------------ */
+	/* ---- 150/180-cycle aggregate (AGG-v3, 0x00020003) fields -------- */
 
 	std::uint32_t aggregate_sequence() const { return sequence(); }
 	std::uint32_t aggregate_sample_count() const
@@ -582,7 +582,7 @@ struct MeterRecord {
 	std::uint32_t first_basic_sequence() const { return word(14); }
 	std::uint32_t last_basic_sequence() const { return word(15); }
 	/* Words 16..31: aggregate RMS in signed 64-bit micro-units, two
-	 * words (lo, hi) per channel. Channel order is identical to MTR1:
+	 * words (lo, hi) per channel. Channel order matches the basic record:
 	 * Ia, Ib, Ic, In, Vc, Vb, Va, ch7 = 0. Validity comes from the
 	 * word-7 mask (the AND across the 15 contributing blocks). */
 	std::int64_t aggregate_rms_micro_units(std::size_t index) const

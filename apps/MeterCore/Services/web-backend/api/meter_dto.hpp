@@ -35,7 +35,7 @@
 namespace msap1::web::api {
 
 /**
- * Hardware channel order of every MSAP1 meter record (MTR1 and MTR2 alike):
+ * Hardware channel order of every MSAP1 basic and aggregate meter record:
  * three line currents, neutral current, three line-neutral voltages in
  * reverse phase order, and the common-mode debug channel.
  */

@@ -36,7 +36,7 @@ namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
-/* 18: InfoResponse carries the newest 150/180-cycle aggregate (MTR2) record
+/* 18: InfoResponse carries the newest 150/180-cycle aggregate record
  * beside the basic latest record.
  * 19: InfoResponse carries the time quality stamped onto that aggregate at
  * ingest, so its provenance no longer follows the daemon's current clock
@@ -295,7 +295,7 @@ struct InfoResponse {
 	MeterRecord latest_aggregate_record{};
 };
 
-/** Per-channel diagnostics that are specific to today's MTR1 record. */
+/** Per-channel diagnostics that are specific to today's basic record. */
 struct MeterChannelDiagnostics {
 	std::int64_t mean_micro_units = 0;
 	std::uint32_t rms_count = 0;

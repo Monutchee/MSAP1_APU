@@ -4,8 +4,9 @@
 `msap1-fpga-acquisition` is the sole Linux owner of meter-result DMA and the
 R5 core 0 RPMsg control endpoint. Acquisition consumes an immutable typed
 settings snapshot, converts it to fixed-point PL coefficients, commits it
-through the RPU, starts capture, and caches fixed 256-byte `MTR1` records from
-`/dev/msap1-meter`.
+through the RPU, starts capture, and caches fixed 256-byte meter records from
+`/dev/msap1-meter`, including 10/12-cycle Basic and 150/180-cycle aggregate
+records.
 
 The runtime data paths are:
 
@@ -89,7 +90,7 @@ logs, and firmware. The service intentionally keeps no drafts or revision
 history.
 
 `mnc meter-view` displays the user-facing meter channels CH0 through CH6.
-CH7/VCM remains available in the MTR1 record and internal API model for future
+CH7/VCM remains available in the basic record and internal API model for future
 reference-monitoring support, but is intentionally hidden from the CLI.
 
 The basic measurement block is cycle-defined — 10 grid cycles at a 50 Hz

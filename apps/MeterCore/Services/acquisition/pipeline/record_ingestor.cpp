@@ -234,7 +234,7 @@ bool MeterRecordIngestor::matches_configuration(
 }
 
 /*
- * Basic (MTR1) continuity: wire-sequence tracking against the newest
+ * Basic 10/12-cycle continuity: wire-sequence tracking against the newest
  * accepted basic record, plus — for consecutive sequences — sample-range
  * continuity on the PL conversion-domain counter. Interleaved aggregate
  * records never participate: they neither advance nor break this baseline.
@@ -355,7 +355,7 @@ bool MeterRecordIngestor::track_basic_continuity(
 }
 
 /*
- * Aggregate (MTR2) continuity: wire-sequence tracking only, on the
+ * Aggregate 150/180-cycle continuity: wire-sequence tracking only, on the
  * aggregate stream's own counter. A gap is counted, logged, and resynced.
  * There is deliberately NO sample-range check against the previous
  * aggregate: the PL enforces continuity of the 15 blocks INSIDE one

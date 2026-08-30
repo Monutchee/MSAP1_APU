@@ -71,7 +71,7 @@ mnc meter view --results 50
 ```
 
 Expect 50 strictly advancing records in about ten seconds (5 Hz). Every DMA
-record is exactly 256 bytes and contains `MTR1`; CH0–CH3 are valid RMS amps
+record is exactly 256 bytes and contains a BASIC-v4 result; CH0–CH3 are valid RMS amps
 with the 5 A profile and CH4–CH6 are valid RMS volts. Packetizer/hub drop
 counters remain zero.
 
@@ -421,10 +421,10 @@ semantics must hold.
    unchanged. Any later change requires a new format version and a
    deliberate decision.
 
-## 14. 10/12-cycle merge tier — Mtr1 retirement (metrology M7)
+## 14. 10/12-cycle Basic merge tier (metrology M7)
 
 Prerequisite: BASIC-v4 records (0x00010004, the Agg10_12CycleEngine merge
-tier) and the matched image. The legacy Mtr1Engine is gone: basic records
+tier) and the matched image. The standalone legacy Basic engine is gone: records
 are now finalized from merged SingleCycleResults, so the single-cycle and
 basic tiers must agree by construction, and basic records REQUIRE grid
 cycle timing (there is no sample-count window mode anymore; on lock loss
@@ -440,7 +440,7 @@ nominal cadence and blocks are flagged fallback).
 2. **Cadence and provenance.** Basic records advance at ~5/s (10 cycles at
    50 Hz, 12 at 60 Hz); `mnc meter health` shows zero sequence gaps and
    zero invalid records over a 10-minute soak. The 3-second aggregate
-   (MTR2) cadence and values must be unchanged.
+   150/180-cycle aggregate cadence and values must be unchanged.
 3. **VLL in the basic tier.** The basic record now carries Vab/Vbc/Vca
    (words 51..53) merged from the single-cycle difference statistics:
    207.85 V balanced; with `--va-rms 100` the three values must match the
@@ -564,7 +564,7 @@ rotation).
 
 ## 18. 150/180-cycle tier rebuild (metrology M11)
 
-Prerequisite: the Agg150_180CycleEngine build (Mtr2Engine retired): AGG-v3
+Prerequisite: the R5C1 150/180-cycle aggregate build: AGG-v3
 records (0x00020003) plus the AGG-POWER/PHASOR/UNBAL siblings
 (0x00100001/0x00110001/0x00120001), four records per ~3 s on the
 aggregate stream. The aggregate is now the whole-interval finalize of

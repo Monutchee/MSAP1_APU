@@ -485,7 +485,7 @@ void meter_record_contract()
 	require(timing.nominal_frequency_hz == 60 && timing.cycle_count == 12 &&
 		timing.cycle_locked && !timing.free_run_fallback,
 		"wrong timing word decoding");
-	/* MTR1 capture diagnostics latched at block close, words 60..63. */
+	/* Basic-record capture diagnostics latched at block close, words 60..63. */
 	require(record.capture_frames() == 5 && record.header_errors() == 6 &&
 		record.fifo_overflows() == 7 && record.adc_alerts() == 8,
 		"wrong capture diagnostic words");

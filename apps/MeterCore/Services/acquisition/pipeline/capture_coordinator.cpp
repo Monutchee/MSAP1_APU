@@ -835,7 +835,7 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 		}
 	}
 
-	/* MTR1 transport diagnostics are meaningful only for the current basic
+	/* Basic-record transport diagnostics are meaningful only for the current
 	 * record. They deliberately remain outside the generic provider model. */
 	if (request.selection.period != mnc::meter::MeasurementPeriod::Basic ||
 	    !ingest_.latest_record())

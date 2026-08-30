@@ -17,7 +17,7 @@ The nominal duration is approximately 200 ms, but 200 ms is never the
 semantic definition. The actual duration varies with the real grid
 frequency — intentionally. A block at 49.9 Hz is longer than a block at
 50.1 Hz; both are valid basic blocks. Consequently the block sample count
-in an MTR1 record (word 6) is the ACTUAL count, and consumers must never
+in a BASIC-v4 record (word 6) is the ACTUAL count, and consumers must never
 assume a fixed count. When the PL loses its cycle reference it falls back
 to a fixed sample window (`rms_window_samples`, derived from the nominal
 frequency) and flags the block `free_run_fallback`; blocks stay gapless
@@ -60,7 +60,7 @@ with grid frequency.
   (`AggregateTiming::frequency_valid`) but never advertises the
   `Cycles150_180` frequency reading as a valid measurement: its quality is
   always `unavailable`.
-- The **APU only decodes**. MTR2 aggregate records arrive interleaved with
+- The **APU only decodes**. AGG-v3 aggregate records arrive interleaved with
   basic records on the same 256-byte meter DMA stream, on an independent
   sequence counter starting at 1, so the ingestor tracks continuity per
   format. RPMsg stays control-only and DMA data-only: aggregate data never
@@ -72,7 +72,10 @@ with grid frequency.
   contain exactly 15 consecutive Basic sequence numbers. The continuing
   record carries status bit 3 (`utc_overlap`); the new record carries bit 4
   (`utc_resynchronized`). Only the continuing record may have an actual
-  first-to-last sample span shorter than its summed contribution count.
+  first-to-last sample span shorter than its summed contribution count. If the
+  UTC target lands exactly on a Basic boundary, the continuing record remains
+  marked as the member that overlaps the synchronized aggregate, but its own
+  contribution span remains contiguous.
 - `AggregateTiming` carries the aggregate identity — first and actual last
   sample indices, total contribution count, contributing Basic sequence
   range, and UTC-overlap provenance — and the APU stamps TimeQuality/UTC at
@@ -106,7 +109,7 @@ The two record streams stay separate all the way to the API:
   during holdover must still report `synchronized`, and regaining sync
   must never retroactively bless an older measurement.
 - `GET /api/v1/meter/aggregate` (viewer role, like `/meter/readings`)
-  decodes the cached MTR2 record through the shared
+  decodes the cached AGG-v3 record through the shared
   `MeterDecoderRegistry` — so the endpoint inherits the decoder's identity
   validation and aggregate RMS quality rules — and renders it with the same
   channel order, naming, and units as `/meter/readings`. It answers 200 with
@@ -154,9 +157,9 @@ It must never mark the electrical measurement invalid — `TimeQuality` and
 
 | Concept | What it is | Where it lives |
 |---|---|---|
-| Nominal frequency | Configuration: 50 or 60 Hz, selects the cycles-per-block rule and the fallback window | settings `metering.nominal_frequency_hz`, RPMsg `nominal_frequency_hz`, MTR1 timing word bits [7:0] |
-| Measured frequency | The PL frequency estimator's measurement of the actual grid | MTR1 words 56–59 |
-| Cycle timing | The PL zero-cross-driven block boundary machinery | PL `grid_cycle_timing`, MTR1 words 6/9/10/13 |
+| Nominal frequency | Configuration: 50 or 60 Hz, selects the cycles-per-block rule and the fallback window | settings `metering.nominal_frequency_hz`, RPMsg `nominal_frequency_hz`, BASIC-v4 timing word bits [7:0] |
+| Measured frequency | The PL frequency estimator's measurement of the actual grid | BASIC-v4 words 56–59 |
+| Cycle timing | The PL zero-cross-driven block boundary machinery | PL `grid_cycle_timing`, BASIC-v4 words 6/9/10/13 |
 
 Nominal frequency is never inferred from the measured frequency, and the
 measured frequency never changes the block rule.
@@ -168,7 +171,7 @@ measured frequency never changes the block rule.
   64-bit sample counter. The PL exports the Linux-programmed sample-domain UTC
   target as context but does not perform wall-clock conversion.
 - **RPU** — R5C1 owns Basic and longer interval aggregation, including the
-  two-slot UTC transition state and complete MTR1/MTR2 serialization. R5C0
+  two-slot UTC transition state and complete Basic/aggregate serialization. R5C0
   remains the configuration conduit for grid timing and capture control.
 - **APU** — UTC sync authority (MeasurementTimebase) and decoded data:
   record validation and continuity, BlockTiming stamping at decode time,
@@ -190,17 +193,17 @@ first_block_after_apply flags, plus bit 19 `utc_resynchronized`), the actual
 last-sample index (words 14–15), per-channel readings (words 16–55), the
 frequency block (56–59), and capture diagnostics (60–63).
 
-Aggregate format v3 `0x00020003` (MTR2) carries the composition word
+Aggregate format v3 `0x00020003` (AGG-v3) carries the composition word
 (word 13: block count 15, nominal Hz, total cycle count), the first/last
 contributing basic sequence (words 14–15), per-channel aggregate RMS in
-signed 64-bit micro-units (words 16–31, MTR1 channel order), the mean
+signed 64-bit micro-units (words 16–31, basic-record channel order), the mean
 frequency in millihertz (word 32), and the aggregation-engine diagnostics
 as of the emit (words 33–35: reset / ineligible / continuity counts). Words
 36–37 carry the actual last sample. Status bits 3 and 4 distinguish the
 continuing overlap interval from the newly synchronized interval.
 Decoding produces `MeasurementPeriod::Cycles150_180` updates carrying
 `AggregateTiming`; basic decoding is unchanged. Earlier formats (v1
-`0x00010001`, v2 `0x00010002`, MTR2 `0x00020001`) are not decodable —
+`0x00010001`, v2 `0x00010002`, aggregate v1 `0x00020001`) are not decodable —
 PL and APU ship together, and pre-production stores were reset at the
 cutover.
 
@@ -210,9 +213,10 @@ exactly 15 basic blocks whose cycle count matches that nominal, a
 first/last basic sequence span of exactly 15 consecutive blocks (modular,
 so a span wrapping 0xFFFFFFFF is accepted), a non-zero sample count, and a
 sample range that stays inside the 64-bit counter. An unmarked or synchronized
-record must have `actual_last == first + count - 1`; an overlap record must
-have a strictly shorter, nonempty physical span, and conflicting provenance
-bits are rejected. Aggregate RMS quality
+record must have `actual_last == first + count - 1`; an overlap record may
+have either that contiguous span (exact-boundary alignment) or a shorter,
+nonempty physical span, and conflicting provenance bits are rejected.
+Aggregate RMS quality
 follows a strict priority — an aggregation arithmetic error outranks the
 channel valid mask, so a saturated value can never be published as
 `valid`.

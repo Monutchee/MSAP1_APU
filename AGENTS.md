@@ -167,11 +167,13 @@
   DMA/capture, AD7771 SRC/PGA, and PL window configuration remain coherent.
   Daemon restart restores the persisted profile rate (128 kSPS factory
   default).
-- Linux consumes fixed 256-byte `MTR1` records. The daemon caches the newest
-  coherent result, and concurrent CLI/web readers never backpressure PL.
+- Linux consumes fixed 256-byte meter records, including 10/12-cycle Basic and
+  150/180-cycle aggregate records. The daemon caches the newest coherent
+  results, and concurrent CLI/web readers never backpressure PL.
 - Linux consumes fixed 32,832-byte `WFM1` blocks from the independent waveform
   DMA. WFM1 carries 1024 raw eight-channel frames and 64-bit sequence/tick
-  metadata; it does not replace MTR1 and does not change the RPU wire ABI.
+  metadata; it does not replace the basic meter-record path or change the RPU
+  wire ABI.
 - Voltage and current readings are RMS values calculated in PL and encoded in
   Q16 microvolts and microamps. The selected complete profile chooses
   mean-corrected AC RMS or zero-referenced total RMS and supplies the
@@ -209,16 +211,17 @@
   contained duplicates, and forward gaps. See
   `docs/System_Architecture/TIMING_MODEL.md` for the timing model and the
   PL/RPU/APU ownership split.
-- Record format `0x00020003` (AGG-v3/MTR2) is the 150/180-cycle aggregate
+- Record format `0x00020003` (AGG-v3) is the 150/180-cycle aggregate
   fundamental record: exactly 15 consecutive eligible basic blocks folded
   by R5C1 (the authoritative aggregator) into one 256-byte record that
   interleaves with basic records on the meter DMA stream under an
-  independent sequence counter. The APU only decodes MTR2 — never compute
-  aggregates in APU production code — and aggregate data never travels over
-  RPMsg. Status bit 3 marks the continuing UTC-overlap interval, bit 4 marks
-  the synchronized interval, and words 36–37 carry the actual last sample.
-  Only a bit-3 record may have a physical span shorter than its summed
-  contribution count. The word layout is pinned in
+  independent sequence counter. The APU only decodes aggregate records — it
+  never computes aggregates in production code — and aggregate data never
+  travels over RPMsg. Status bit 3 marks the continuing UTC-overlap interval,
+  bit 4 marks the synchronized interval, and words 36–37 carry the actual last
+  sample. Only a bit-3 record may have a physical span shorter than its summed
+  contribution count; exact-boundary alignment may leave that span contiguous.
+  The word layout is pinned in
   `docs/System_Architecture/TIMING_MODEL.md`.
 - The newest raw aggregate remains cached beside — never inside — the basic
   latest record and travels in `InfoResponse` for compatibility diagnostics.

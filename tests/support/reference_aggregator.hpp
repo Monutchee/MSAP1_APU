@@ -5,7 +5,8 @@
  * NON-AUTHORITATIVE software reference for 150/180-cycle aggregation.
  *
  * R5C1 is the authoritative aggregator: it folds 15 consecutive eligible
- * basic blocks into one MTR2 record, and the APU only DECODES that record.
+ * basic blocks into one 150/180-cycle aggregate record, and the APU only
+ * DECODES that record.
  * Production code must not include this header — it exists solely so tests
  * can verify the decoded wire quantities against an independent implementation of
  * the pinned arithmetic. Everything here is integer math (unsigned 128-bit
@@ -50,12 +51,12 @@ struct ReferenceBasicInput {
 	bool frequency_valid = false;
 };
 
-/** Expected MTR2 payload computed from the 15 basic inputs. */
+/** Expected aggregate payload computed from the 15 basic inputs. */
 struct ReferenceAggregate {
 	/* Aggregate RMS in the Q16.16 internal domain... */
 	std::array<std::uint64_t, meter_channel_count> rms_q16{};
 	/* ...and converted to the wire's integer micro-units. The wire
-	 * field is signed 64-bit only for layout symmetry with MTR1; the
+	 * field is signed 64-bit only for layout symmetry with the Basic record; the
 	 * arithmetic is unsigned throughout and never goes negative. */
 	std::array<std::int64_t, meter_channel_count> rms_micro_units{};
 	/* Mean frequency in millihertz; 0 unless frequency_valid. */

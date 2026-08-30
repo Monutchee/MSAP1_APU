@@ -27,7 +27,7 @@ namespace msap1::acquisition::daemon {
 /**
  * @brief Consumes meter records from the meter DMA and publishes them.
  *
- * The DMA stream interleaves basic MTR1, 150/180-cycle aggregate MTR2,
+ * The DMA stream interleaves 10/12-cycle basic, 150/180-cycle aggregate,
  * clock-aligned ten-minute M13 records, and two-hour M14 records, each on an
  * INDEPENDENT sequence counter.
  * Responsibilities, in the order a record flows through:
@@ -102,7 +102,7 @@ public:
 		return latest_record_;
 	}
 	/**
-	 * @brief Newest accepted AGGREGATE (MTR2) record (raw wire form).
+	 * @brief Newest accepted 150/180-cycle aggregate record (raw wire form).
 	 *
 	 * The 150/180-cycle counterpart of latest_record(): a separate cache
 	 * on its own record stream, so exposing aggregates never changes what

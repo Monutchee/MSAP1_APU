@@ -467,7 +467,7 @@ public:
 	msap1::acquisition::MeterRecordBatch next;
 };
 
-/* Minimal valid basic (MTR1) record for the continuity checks: first-sample
+/* Minimal valid 10/12-cycle Basic record for the continuity checks: first-sample
  * index in envelope words 9/10, timing word 13; channel words stay zero
  * because validation never inspects the electrical payload. */
 msap1::MeterRecord basic_record(std::uint32_t sequence,
@@ -1061,7 +1061,7 @@ void ingestor_validates_sample_range_continuity()
 	}
 }
 
-/* Minimal valid MTR2 aggregate for the interleaving checks: 15 blocks of
+/* Minimal valid 150/180-cycle aggregate for the interleaving checks: 15 blocks of
  * 6400 samples at 32 kSPS, 60 Hz nominal -> 180 cycles. Channel words stay
  * zero because continuity validation never inspects the electrical
  * payload. */
@@ -1245,7 +1245,7 @@ void ingestor_tracks_two_hour_stream_independently()
 }
 
 /*
- * The DMA stream interleaves basic MTR1 and aggregate MTR2 records with
+ * The DMA stream interleaves Basic and 150/180-cycle aggregate records with
  * INDEPENDENT sequence counters. Continuity must be tracked per format,
  * latest_record() must remain the newest BASIC record, and aggregate
  * timing must be UTC-stamped from the timebase exactly like basic timing.
