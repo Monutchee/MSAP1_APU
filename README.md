@@ -4,8 +4,9 @@
 `msap1-fpga-acquisition` is the sole Linux owner of meter-result DMA and the
 R5 core 0 RPMsg control endpoint. Acquisition consumes an immutable typed
 settings snapshot, converts it to fixed-point PL coefficients, commits it
-through the RPU, starts capture, and caches fixed 256-byte `MTR1` records from
-`/dev/msap1-meter`.
+through the RPU, starts capture, and caches fixed 256-byte meter records from
+`/dev/msap1-meter`, including 10/12-cycle Basic and 150/180-cycle aggregate
+records.
 
 The runtime data paths are:
 
@@ -89,7 +90,7 @@ logs, and firmware. The service intentionally keeps no drafts or revision
 history.
 
 `mnc meter-view` displays the user-facing meter channels CH0 through CH6.
-CH7/VCM remains available in the MTR1 record and internal API model for future
+CH7/VCM remains available in the basic record and internal API model for future
 reference-monitoring support, but is intentionally hidden from the CLI.
 
 The basic measurement block is cycle-defined — 10 grid cycles at a 50 Hz
@@ -158,6 +159,14 @@ The authenticated external API is:
   and fundamental reactive quadrant I--IV counters)
 - `GET /api/v1/meter/demand` (newest durable configured fixed/sliding signed
   active demand, profile metadata, and authoritative import/export peaks)
+- `GET /api/v1/meter/power-quality` (M12 live Urms(1/2) diagnostics)
+- `GET /api/v1/meter/power-quality/events` (durable M18 event catalogue;
+  optional `event_id`, `start_utc_ns`, `end_utc_ns`, and `limit` filters)
+- `DELETE /api/v1/meter/power-quality/events` (administrator only; explicitly
+  confirmed selected UUIDs or complete-catalogue deletion; MNCWF files are
+  retained)
+- `GET /api/v1/meter/flicker` (latest independent live Pinst, Pst, and Plt)
+- `GET /api/v1/meter/mains-signalling` (latest configured-carrier observation)
 - `POST /api/v1/meter/energy/reset` (administrator only; resets all 28 energy
   counters with expected-epoch/idempotency protection)
 - `POST /api/v1/meter/demand/peaks/reset` (administrator only; resets all
@@ -167,10 +176,16 @@ The authenticated external API is:
 - `GET /api/v1/meter/history/health`
 - `GET /api/v1/developer/database` (administrator only)
 - `PUT /api/v1/developer/database` (administrator only)
+- `POST /api/v1/developer/database/maintenance` (administrator only; clears
+  selected historian projections while preserving the raw-record spool)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
 - `GET /api/v1/waveforms`
 - `POST /api/v1/waveforms/trigger` (administrator only)
+- `DELETE /api/v1/waveforms` (administrator only; deletes one session or, with
+  explicit confirmation, all inactive sessions and their MNCWF files)
+- `GET /api/v1/waveforms/export?session_id=<id>&event_id=<uuid>&format=mncwf`
+  (authenticated viewer; streamed virtual event capture)
 - `GET /protected/waveforms/view/<filename>` (authenticated viewer)
 - `GET /protected/waveforms/download/<filename>` (authenticated viewer,
   attachment)
@@ -188,6 +203,11 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+
+Waveform session summaries classify their contributing triggers as `manual`,
+`power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
+manual and PQ capture still share the same capture coordinator, MNCWF-v4
+storage, parser, and export path.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
@@ -266,6 +286,12 @@ mnc meter demand
 mnc --output json meter demand
 mnc meter demand peaks-reset --expected-epoch 0 \
     --idempotency-key commissioning-demand-1 --yes
+mnc meter power-quality
+mnc meter power-quality events --limit 100
+mnc meter power-quality events \
+    --event 01234567-89ab-5def-8123-456789abcdef
+mnc meter flicker
+mnc meter mains-signalling
 mnc adc stop
 mnc adc start
 mnc adc rate
@@ -280,6 +306,9 @@ mnc adc simulator configure --frequency-hz 60 \
 mnc waveform status
 mnc waveform trigger --pre-ms 10000 --post-ms 10000
 mnc waveform list
+mnc waveform export --session 17 \
+    --event 01234567-89ab-5def-8123-456789abcdef --format mncwf \
+    --file event-17.mncwf
 mnc log
 mnc log --component fpga-acquisition
 mnc log --module dma --priority warning
@@ -315,13 +344,24 @@ capture. Completed files survive service and system restarts under:
 /data/mnc/waveform/
 ```
 
-New `.mncwf` version 2 files store CH0 through CH6 as raw signed 32-bit counts
-and deliberately omit diagnostic CH7. Channel descriptors carry names and the
-active Q16.16 conversion coefficients, allowing raw-count and converted-unit
-views without duplicating the sample payload. Legacy eight-channel version 1
-files remain readable. See [the MNCWF reader guide](docs/MNCWF_FILE_FORMAT.md)
-for the exact binary layout, conversion equation, and a Python example. R5
-firmware and RPMsg are not in this payload path.
+New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
+or explicitly identified boxcar-decimated averages and deliberately omit
+diagnostic CH7. Versioned sections freeze exact channel transforms, timebase,
+quality, events, capture/device identity, and UUID lineage so later COMTRADE or
+PQDIF export needs only the master file. Legacy versions 1 through 3 remain
+discoverable. See the
+[MNCWF v4 contract](docs/File_Standard/MNCWF_V4_FILE_FORMAT.md) for the exact
+binary layout. R5 firmware and RPMsg are not in this payload path.
+
+Event export validates and read-only maps the completed v4 master, rebuilds
+only the selected virtual slice's metadata/directory/CRCs, and streams the
+unchanged sample extent in bounded chunks. It does not persist a second master
+on the device. Both the API and CLI advertise only `mncwf`; `comtrade` and
+`pqdif` fail explicitly until the later protocol-gateway converters land.
+The acquisition daemon delivers each event/capture UUID association to the
+durable historian on an isolated retry worker, so historian startup or ingest
+lag can never block DMA. Catalogue results and the Web UI join those capture
+UUIDs to the daemon-reported session/master/continuation identities.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

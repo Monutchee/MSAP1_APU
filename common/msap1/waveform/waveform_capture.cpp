@@ -3,7 +3,9 @@
 #include "mnc/logging/logging.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <ctime>
@@ -12,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -55,6 +58,119 @@ bool valid_decimation(std::uint32_t decimation)
 		decimation == 8u || decimation == 16u || decimation == 32u;
 }
 
+constexpr std::uint32_t trigger_source_bit(WaveformTriggerSource source)
+{
+	return 1u << static_cast<unsigned>(source);
+}
+
+std::uint32_t trigger_source_bit(std::uint16_t source)
+{
+	if (source < static_cast<std::uint16_t>(WaveformTriggerSource::manual_cli) ||
+	    source > static_cast<std::uint16_t>(WaveformTriggerSource::pq_event))
+		return 0u;
+	return 1u << source;
+}
+
+bool uuid_is_zero(const MncwfUuid &uuid)
+{
+	return std::ranges::all_of(uuid,
+		[](std::byte value) { return value == std::byte{0}; });
+}
+
+std::optional<std::uint64_t> session_id_from_filename(
+	const std::filesystem::path &path)
+{
+	const auto filename = path.filename().string();
+	constexpr std::string_view prefix = "waveform-";
+	if (!filename.starts_with(prefix))
+		return std::nullopt;
+	const auto separator = filename.find('-', prefix.size());
+	if (separator == std::string::npos || separator == prefix.size())
+		return std::nullopt;
+	std::uint64_t result = 0u;
+	const auto first = filename.data() + prefix.size();
+	const auto last = filename.data() + separator;
+	const auto parsed = std::from_chars(first, last, result);
+	if (parsed.ec != std::errc{} || parsed.ptr != last || result == 0u ||
+	    result == std::numeric_limits<std::uint64_t>::max())
+		return std::nullopt;
+	return result;
+}
+
+std::uint32_t read_little_u32(std::span<const std::byte> bytes,
+	std::size_t offset)
+{
+	if (offset > bytes.size() || bytes.size() - offset < 4u)
+		throw std::out_of_range("read MNCWF version");
+	std::uint32_t result = 0u;
+	for (unsigned byte = 0; byte < 4u; ++byte)
+		result |= static_cast<std::uint32_t>(
+			std::to_integer<std::uint8_t>(bytes[offset + byte]))
+			<< (byte * 8u);
+	return result;
+}
+
+std::uint64_t translate_clock(std::uint64_t value,
+	std::uint64_t source_anchor, std::uint64_t destination_anchor)
+{
+	if (value >= source_anchor) {
+		const auto delta = value - source_anchor;
+		if (delta > std::numeric_limits<std::uint64_t>::max() -
+				destination_anchor)
+			throw std::overflow_error("waveform clock translation overflow");
+		return destination_anchor + delta;
+	}
+	const auto delta = source_anchor - value;
+	if (delta > destination_anchor)
+		throw std::overflow_error("waveform clock translation underflow");
+	return destination_anchor - delta;
+}
+
+MncwfV4EventDescriptor manual_event_descriptor(std::uint64_t sequence,
+	std::uint64_t tai_nanoseconds, std::uint64_t utc_nanoseconds,
+	WaveformTriggerSource source, const WaveformCaptureContext &context)
+{
+	MncwfV4EventDescriptor event{};
+	event.event_uuid = mncwf_random_uuid();
+	event.taxonomy = MncwfEventTaxonomy::product_alarm;
+	event.event_type = source == WaveformTriggerSource::manual_cli ? 0x100u
+		: source == WaveformTriggerSource::manual_web ? 0x101u : 0x102u;
+	event.lifecycle = MncwfEventLifecycle::complete;
+	event.time_quality = context.time_quality;
+	event.flags = mncwf_event_start_valid | mncwf_event_current_valid |
+		mncwf_event_end_valid | mncwf_event_trigger_valid |
+		mncwf_event_tai_valid | mncwf_event_utc_valid |
+		mncwf_event_settings_snapshot_valid;
+	event.phase_mask = mncwf_event_phase_system;
+	event.quantity = MncwfQuantity::status;
+	event.si_unit = MncwfSiUnit::dimensionless;
+	event.trigger_source = static_cast<std::uint16_t>(source);
+	event.start_sequence = sequence;
+	event.current_sequence = sequence;
+	event.end_sequence = sequence;
+	event.trigger_sequence = sequence;
+	event.start_tai_nanoseconds = tai_nanoseconds;
+	event.current_tai_nanoseconds = tai_nanoseconds;
+	event.end_tai_nanoseconds = tai_nanoseconds;
+	event.trigger_tai_nanoseconds = tai_nanoseconds;
+	event.start_utc_nanoseconds = utc_nanoseconds;
+	event.current_utc_nanoseconds = utc_nanoseconds;
+	event.end_utc_nanoseconds = utc_nanoseconds;
+	event.trigger_utc_nanoseconds = utc_nanoseconds;
+	event.update_count = 1u;
+	event.taxonomy_name = "MSAP1 capture trigger";
+	event.label = source == WaveformTriggerSource::manual_cli
+		? "manual CLI capture"
+		: source == WaveformTriggerSource::manual_web
+			? "manual Web capture" : "power-quality capture";
+	event.settings_snapshot_json = source == WaveformTriggerSource::manual_cli
+		? R"({"trigger":"manual_cli"})"
+		: source == WaveformTriggerSource::manual_web
+			? R"({"trigger":"manual_web"})"
+			: R"({"trigger":"power_quality"})";
+	return event;
+}
+
 std::uint64_t tai_now_nanoseconds()
 {
 	timespec timestamp{};
@@ -85,12 +201,6 @@ std::string filename_timestamp(std::uint64_t realtime_nanoseconds)
 		  << std::setw(3) << std::setfill('0')
 		  << (realtime_nanoseconds / 1000000ull) % 1000ull;
 	return formatted.str();
-}
-
-template <typename T>
-void write_binary(std::ofstream &stream, const T &value)
-{
-	stream.write(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
 /*
@@ -137,15 +247,20 @@ static_assert(sizeof(WaveformFileHeaderV2) == 256);
 } // namespace
 
 struct WaveformCapture::Event {
-	std::uint64_t sequence = 0;
-	std::uint64_t tai_nanoseconds = 0;
-	WaveformTriggerSource source = WaveformTriggerSource::manual_cli;
+	WaveformEventIdentity identity{};
+	bool stable_identity = false;
+	MncwfV4EventDescriptor descriptor{};
 };
 
 struct WaveformCapture::Session {
 	WaveformSessionSummary summary{};
+	WaveformCaptureContext context{};
 	std::vector<Event> events;
+	std::vector<WaveformEventIdentity> active_events;
+	MncwfUuid previous_capture_uuid{};
+	MncwfUuid next_capture_uuid{};
 	bool materialization_queued = false;
+	bool capacity_sealed = false;
 };
 
 /*
@@ -159,12 +274,13 @@ struct WaveformCapture::AsyncWriter {
 
 	struct Job {
 		WaveformSessionSummary summary{};
-		std::vector<Event> events;
+		WaveformCaptureContext context{};
+		std::vector<MncwfV4EventDescriptor> events;
+		std::vector<MncwfV4LineageEntry> lineage;
 		WaveformCorrelation correlation{};
+		std::uint64_t correlation_utc_nanoseconds = 0;
 		std::filesystem::path output_directory;
-		std::array<WaveformChannelMetadata,
-			   waveform_persisted_channels>
-			channel_metadata{};
+		std::uint64_t source_frame_count = 0;
 		std::vector<Frame> frames;
 	};
 
@@ -231,59 +347,72 @@ private:
 				throw std::runtime_error(
 					"create waveform file " + temporary);
 
-			WaveformFileHeaderV2 header{};
-			header.magic =
-				{'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'};
-			header.session_id = job.summary.id;
-			header.first_sequence = job.summary.first_sequence;
-			header.last_sequence = job.summary.last_sequence;
-			header.trigger_sequence = job.summary.trigger_sequence;
-			header.trigger_tai_nanoseconds =
-				job.summary.trigger_tai_nanoseconds;
-			header.sample_rate_hz = job.summary.sample_rate_hz;
-			header.event_count =
-				static_cast<std::uint32_t>(job.events.size());
-			header.correlation_tai_nanoseconds =
-				job.correlation.tai_nanoseconds;
-			header.correlation_pl_tick = job.correlation.pl_tick;
-			header.correlation_frame_sequence =
-				job.correlation.frame_sequence;
-			header.correlation_uncertainty_nanoseconds =
-				job.correlation.uncertainty_nanoseconds;
-			header.event_table_offset =
-				header.channel_table_offset +
-				sizeof(job.channel_metadata);
-			header.frame_data_offset =
-				header.event_table_offset +
-				job.events.size() * 24u;
-			header.frame_count = job.frames.size();
-			header.trigger_realtime_nanoseconds =
-				job.summary.trigger_realtime_nanoseconds;
-			header.decimation =
-				std::max<std::uint32_t>(1u, job.summary.decimation);
-			output.write(reinterpret_cast<const char *>(&header),
-				     sizeof(header));
-			output.write(
-				reinterpret_cast<const char *>(
-					job.channel_metadata.data()),
-				sizeof(job.channel_metadata));
-
-			for (const auto &event : job.events) {
-				write_binary(output, event.sequence);
-				write_binary(output, event.tai_nanoseconds);
-				const auto source =
-					static_cast<std::uint32_t>(event.source);
-				write_binary(output, source);
-				const std::uint32_t event_reserved = 0;
-				write_binary(output, event_reserved);
-			}
+			MncwfV4Document document{};
+			document.capture_metadata = job.context.capture_metadata;
+			document.timebase_segments.push_back({
+				.first_frame = 0u,
+				.frame_count = job.frames.size(),
+				.first_sequence = job.summary.first_sequence,
+				.sequence_step = job.summary.decimation,
+				.acquisition_rate_numerator = job.summary.sample_rate_hz,
+				.acquisition_rate_denominator = 1u,
+				.persisted_rate_numerator = job.summary.sample_rate_hz,
+				.persisted_rate_denominator = job.summary.decimation,
+				.correlation_sequence = job.correlation.frame_sequence,
+				.correlation_pl_tick = job.correlation.pl_tick,
+				.correlation_tai_nanoseconds =
+					job.correlation.tai_nanoseconds,
+				.correlation_utc_nanoseconds =
+					job.correlation_utc_nanoseconds,
+				.uncertainty_nanoseconds =
+					job.correlation.uncertainty_nanoseconds,
+				.decimation_divisor = job.summary.decimation,
+				.decimation_method = job.summary.decimation == 1u
+					? MncwfDecimationMethod::none
+					: MncwfDecimationMethod::boxcar_mean_toward_zero,
+				.clock_source = job.context.clock_source,
+				.time_quality = job.context.time_quality,
+				.flags = job.context.time_flags,
+				.utc_offset_seconds = job.context.utc_offset_seconds,
+				.source_frame_count = job.source_frame_count,
+			});
+			document.channels = job.context.channels;
+			document.events = job.events;
+			document.lineage = job.lineage;
+			document.sample_frame_count = job.frames.size();
+			document.sample_frame_bytes = static_cast<std::uint32_t>(
+				document.channels.size() * sizeof(std::int32_t));
+			document.sample_data.reserve(job.frames.size() *
+				document.sample_frame_bytes);
 			for (const auto &frame : job.frames) {
-				output.write(
-					reinterpret_cast<const char *>(
-						frame.data()),
-					waveform_persisted_channels *
-						sizeof(std::int32_t));
+				for (const auto &channel : document.channels) {
+					if (channel.source_channel >= frame.size() ||
+					    channel.storage_bits != 32u)
+						throw std::runtime_error(
+							"MNCWF v4 channel geometry is unsupported");
+					const auto value = std::bit_cast<std::uint32_t>(
+						frame[channel.source_channel]);
+					for (unsigned byte = 0; byte < 4u; ++byte)
+						document.sample_data.push_back(
+							static_cast<std::byte>(
+								(value >> (byte * 8u)) & 0xffu));
+				}
 			}
+			if (job.context.time_quality != MncwfTimeQuality::locked)
+				document.quality_intervals.push_back({
+					.first_frame = 0u,
+					.frame_count = job.frames.size(),
+					.first_sequence = job.summary.first_sequence,
+					.last_sequence = job.summary.last_sequence,
+					.channel_mask = 0u,
+					.flags = mncwf_quality_timing_uncertain,
+					.severity = 1u,
+					.source = 1u,
+					.detail_code = 0u,
+				});
+			const auto encoded = encode_mncwf_v4(document);
+			output.write(reinterpret_cast<const char *>(encoded.data()),
+				static_cast<std::streamsize>(encoded.size()));
 			output.close();
 			if (!output)
 				throw std::runtime_error(
@@ -339,32 +468,37 @@ private:
 
 WaveformCapture::WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory,
-				 std::array<WaveformChannelMetadata,
-					    waveform_persisted_channels>
-					 channel_metadata)
+				 WaveformCaptureContext context,
+				 WaveformCaptureOptions options)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
-	  channel_metadata_(std::move(channel_metadata)),
-	  history_(waveform_history_frames),
+	  history_(options.history_capacity_frames),
 	  writer_(std::make_unique<AsyncWriter>())
 {
-	static constexpr std::array<const char *, waveform_persisted_channels>
-		default_names{"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
-	for (std::size_t channel = 0; channel < channel_metadata_.size();
-	     ++channel) {
-		auto &metadata = channel_metadata_[channel];
-		if (metadata.name.front() != '\0')
-			continue;
-		metadata.source_channel = static_cast<std::uint32_t>(channel);
-		metadata.kind = channel < 4u ? WaveformChannelKind::current
-					   : WaveformChannelKind::voltage;
-		std::copy_n(default_names[channel],
-			    std::min(std::strlen(default_names[channel]),
-				     metadata.name.size() - 1u),
-			    metadata.name.begin());
-		const char *unit = channel < 4u ? "A" : "V";
-		std::copy_n(unit, 1u, metadata.unit.begin());
-	}
+	if (history_.empty())
+		throw std::invalid_argument(
+			"waveform history capacity must be non-zero");
+	set_context(std::move(context));
+}
+
+void WaveformCapture::set_context(WaveformCaptureContext context)
+{
+	if (context.channels.empty() ||
+	    context.channels.size() > waveform_persisted_channels)
+		throw std::invalid_argument(
+			"MNCWF v4 capture context has an invalid channel count");
+	context_ = std::move(context);
+}
+
+void WaveformCapture::set_time_context(MncwfClockSource source,
+	MncwfTimeQuality quality, std::uint16_t leap_flags) noexcept
+{
+	context_.clock_source = source;
+	context_.time_quality = quality;
+	context_.time_flags = static_cast<std::uint16_t>(
+		(context_.time_flags & mncwf_time_utc_offset_known) |
+		(leap_flags & (mncwf_time_positive_leap_pending |
+			mncwf_time_negative_leap_pending)));
 }
 
 WaveformCapture::~WaveformCapture()
@@ -435,6 +569,7 @@ void WaveformCapture::begin_stream_epoch() noexcept
 	gaps_.clear();
 	configuration_generation_.reset();
 	correlation_ = {};
+	correlation_utc_nanoseconds_ = 0u;
 }
 
 void WaveformCapture::discover_persisted_sessions()
@@ -456,6 +591,123 @@ void WaveformCapture::discover_persisted_sessions()
 			continue;
 
 		std::ifstream input(entry.path(), std::ios::binary);
+		std::array<std::byte, 16> prefix{};
+		input.read(reinterpret_cast<char *>(prefix.data()), prefix.size());
+		if (input.gcount() != static_cast<std::streamsize>(prefix.size()) ||
+		    !std::ranges::equal(std::span{prefix}.first(mncwf_magic.size()),
+			mncwf_magic))
+			continue;
+		const auto version = read_little_u32(prefix, 8u);
+		if (version == mncwf_v4_version) {
+			const auto session_id = session_id_from_filename(entry.path());
+			const auto file_bytes = entry.file_size(error);
+			if (!session_id || error ||
+			    file_bytes < mncwf_v4_header_bytes ||
+			    file_bytes > mncwf_v4_max_file_bytes) {
+				error.clear();
+				continue;
+			}
+			std::vector<std::byte> bytes(
+				static_cast<std::size_t>(file_bytes));
+			input.clear();
+			input.seekg(0, std::ios::beg);
+			input.read(reinterpret_cast<char *>(bytes.data()),
+				static_cast<std::streamsize>(bytes.size()));
+			if (input.gcount() !=
+			    static_cast<std::streamsize>(bytes.size()))
+				continue;
+			try {
+				const MncwfV4Reader reader(bytes);
+				const auto &segments = reader.timebase_segments();
+				const auto &first = segments.front();
+				const auto &last = segments.back();
+				if (first.acquisition_rate_numerator %
+						first.acquisition_rate_denominator != 0u)
+					continue;
+				const auto sample_rate = first.acquisition_rate_numerator /
+					first.acquisition_rate_denominator;
+				if (sample_rate == 0u ||
+				    sample_rate > std::numeric_limits<std::uint32_t>::max() ||
+				    last.source_frame_count - 1u >
+					std::numeric_limits<std::uint64_t>::max() -
+						last.first_sequence ||
+				    !std::ranges::all_of(segments,
+					[&first](const auto &segment) {
+						return segment.acquisition_rate_numerator ==
+								first.acquisition_rate_numerator &&
+						       segment.acquisition_rate_denominator ==
+								first.acquisition_rate_denominator &&
+						       segment.decimation_divisor ==
+								first.decimation_divisor;
+					}))
+					continue;
+
+				Session session{};
+				session.summary.id = *session_id;
+				session.summary.capture_uuid =
+					reader.capture_metadata().capture_uuid;
+				session.summary.first_sequence = first.first_sequence;
+				session.summary.last_sequence = last.first_sequence +
+					last.source_frame_count - 1u;
+				session.summary.trigger_sequence =
+					session.summary.first_sequence;
+				session.summary.trigger_tai_nanoseconds =
+					reader.capture_metadata().created_tai_nanoseconds;
+				session.summary.trigger_realtime_nanoseconds =
+					reader.capture_metadata().created_utc_nanoseconds;
+				const auto trigger = std::ranges::find_if(reader.events(),
+					[](const auto &event) {
+						return (event.flags &
+							mncwf_event_trigger_valid) != 0u;
+					});
+				if (trigger != reader.events().end()) {
+					session.summary.trigger_sequence =
+						trigger->trigger_sequence;
+					if ((trigger->flags & mncwf_event_tai_valid) != 0u)
+						session.summary.trigger_tai_nanoseconds =
+							trigger->trigger_tai_nanoseconds;
+					if ((trigger->flags & mncwf_event_utc_valid) != 0u)
+						session.summary.trigger_realtime_nanoseconds =
+							trigger->trigger_utc_nanoseconds;
+				}
+				session.summary.sample_rate_hz =
+					static_cast<std::uint32_t>(sample_rate);
+				session.summary.event_count = static_cast<std::uint32_t>(
+					reader.events().size());
+				for (const auto &event : reader.events())
+					session.summary.trigger_source_mask |=
+						trigger_source_bit(event.trigger_source);
+				session.summary.decimation = first.decimation_divisor;
+				session.summary.master_session_id = *session_id;
+				session.summary.state = WaveformSessionState::complete;
+				for (const auto &lineage : reader.lineage()) {
+					if (lineage.relation ==
+						MncwfLineageRelation::previous_continuation)
+						session.previous_capture_uuid =
+							lineage.related_capture_uuid;
+					else if (lineage.relation ==
+						MncwfLineageRelation::next_continuation)
+						session.next_capture_uuid =
+							lineage.related_capture_uuid;
+				}
+				const auto filename = entry.path().filename().string();
+				std::copy_n(filename.c_str(),
+					std::min(filename.size(),
+						session.summary.filename.size() - 1u),
+					session.summary.filename.begin());
+				sessions_.push_back(std::move(session));
+				next_session_id_ =
+					std::max(next_session_id_, *session_id + 1u);
+			} catch (const std::exception &) {
+				/* A malformed or unsupported persisted file is not listed. */
+			}
+			continue;
+		}
+
+		if (version != 1u && version != 2u && version != 3u)
+			continue;
+		input.clear();
+		input.seekg(0, std::ios::beg);
 		WaveformFileHeaderV2 header{};
 		input.read(reinterpret_cast<char *>(&header), sizeof(header));
 		const auto bytes_read = static_cast<std::size_t>(input.gcount());
@@ -463,8 +715,7 @@ void WaveformCapture::discover_persisted_sessions()
 		    header.magic !=
 			    std::array<char, 8>{
 				    'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} ||
-		    (header.version != 1u && header.version != 2u &&
-		     header.version != 3u))
+		    header.version != version)
 			continue;
 
 		/* v2 wrote zeros where v3 keeps the decimation divisor. */
@@ -563,6 +814,45 @@ void WaveformCapture::discover_persisted_sessions()
 		[](const Session &left, const Session &right) {
 			return left.summary.id < right.summary.id;
 		});
+	/* MNCWF v4 persists UUID lineage rather than daemon-local session IDs.
+	 * Resolve those UUIDs only after every file has been validated and loaded,
+	 * then rebuild the numeric summaries used by IPC/API clients. */
+	for (auto &session : sessions_) {
+		if (uuid_is_zero(session.previous_capture_uuid))
+			continue;
+		const auto predecessor = std::ranges::find_if(sessions_,
+			[&session](const Session &candidate) {
+				return candidate.summary.capture_uuid ==
+						session.previous_capture_uuid;
+			});
+		if (predecessor == sessions_.end() ||
+		    predecessor->summary.id >= session.summary.id ||
+		    predecessor->summary.last_sequence ==
+				std::numeric_limits<std::uint64_t>::max() ||
+		    predecessor->summary.last_sequence + 1u !=
+				session.summary.first_sequence ||
+		    predecessor->next_capture_uuid != session.summary.capture_uuid)
+			continue;
+		session.summary.continuation_of_session_id =
+			predecessor->summary.id;
+	}
+	for (auto &session : sessions_) {
+		auto master = session.summary.id;
+		auto predecessor_id = session.summary.continuation_of_session_id;
+		for (std::size_t depth = 0u;
+		     predecessor_id != 0u && depth < sessions_.size(); ++depth) {
+			const auto predecessor = std::ranges::find_if(sessions_,
+				[predecessor_id](const Session &candidate) {
+					return candidate.summary.id == predecessor_id;
+				});
+			if (predecessor == sessions_.end())
+				break;
+			master = predecessor->summary.id;
+			predecessor_id =
+				predecessor->summary.continuation_of_session_id;
+		}
+		session.summary.master_session_id = master;
+	}
 }
 
 std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
@@ -798,12 +1088,16 @@ WaveformSessionSummary WaveformCapture::trigger(
 		correlation_ = *current;
 	const auto now_tai = tai_now_nanoseconds();
 	const auto now_realtime = realtime_now_nanoseconds();
+	if (correlation_.tai_nanoseconds != 0u)
+		correlation_utc_nanoseconds_ = translate_clock(
+			correlation_.tai_nanoseconds, now_tai, now_realtime);
 
 	auto active = std::find_if(sessions_.begin(), sessions_.end(),
 		[](const Session &session) {
 			return session.summary.state ==
 				       WaveformSessionState::capturing &&
-				!session.materialization_queued;
+				!session.materialization_queued &&
+				!session.capacity_sealed;
 		});
 	if (active == sessions_.end() ||
 	    requested_first > active->summary.last_sequence + 1u) {
@@ -817,6 +1111,12 @@ WaveformSessionSummary WaveformCapture::trigger(
 		session.summary.sample_rate_hz = sample_rate_hz_;
 		session.summary.decimation = decimation;
 		session.summary.state = WaveformSessionState::capturing;
+		session.summary.capture_uuid = mncwf_random_uuid();
+		session.context = context_;
+		session.context.capture_metadata.capture_uuid =
+			session.summary.capture_uuid;
+		session.context.capture_metadata.created_tai_nanoseconds = now_tai;
+		session.context.capture_metadata.created_utc_nanoseconds = now_realtime;
 		sessions_.push_back(std::move(session));
 		active = std::prev(sessions_.end());
 	} else {
@@ -841,9 +1141,174 @@ WaveformSessionSummary WaveformCapture::trigger(
 				"waveform_decimation_kept", fields);
 		}
 	}
-	active->events.push_back({anchor, now_tai, source});
+	active->events.push_back({{}, false,
+		manual_event_descriptor(anchor, now_tai, now_realtime, source,
+			active->context)});
 	active->summary.event_count =
 		static_cast<std::uint32_t>(active->events.size());
+	active->summary.trigger_source_mask |= trigger_source_bit(source);
+	return active->summary;
+}
+
+WaveformSessionSummary WaveformCapture::track_power_quality_event(
+	WaveformEventIdentity event_id, WaveformEventLifecycle lifecycle,
+	std::uint64_t trigger_sequence, std::uint64_t current_sequence,
+	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
+	std::uint32_t decimation, MncwfV4EventDescriptor descriptor)
+{
+	collect_materialization_results();
+	if (event_id.session == 0u || event_id.counter == 0u)
+		throw std::invalid_argument("power-quality event ID is zero");
+	if (!have_history_ || sample_rate_hz_ == 0)
+		throw std::runtime_error("waveform history is not ready");
+	if (trigger_sequence > current_sequence)
+		throw std::invalid_argument("event trigger is after its current sample");
+	if (pretrigger_ms > 120000u || posttrigger_ms > 120000u)
+		throw std::invalid_argument("waveform duration exceeds 120 seconds");
+	if (!valid_decimation(decimation))
+		throw std::invalid_argument(
+			"waveform decimation must be 1, 2, 4, 8, 16, or 32");
+	if (uuid_is_zero(descriptor.event_uuid))
+		throw std::invalid_argument("power-quality event UUID is zero");
+	const auto frames_for = [this](std::uint32_t milliseconds) {
+		return (static_cast<std::uint64_t>(sample_rate_hz_) * milliseconds +
+			999u) / 1000u;
+	};
+	const auto requested_first = trigger_sequence > frames_for(pretrigger_ms)
+		? trigger_sequence - frames_for(pretrigger_ms) : 0u;
+	if (current_sequence > std::numeric_limits<std::uint64_t>::max() -
+			frames_for(posttrigger_ms))
+		throw std::invalid_argument("event post-trigger range overflows");
+	const auto requested_last = current_sequence + frames_for(posttrigger_ms);
+	const auto budget = max_capture_frames();
+	if (frames_for(pretrigger_ms) + frames_for(posttrigger_ms) + 1u >
+	    budget)
+		throw std::invalid_argument(
+			"one event waveform policy exceeds the history budget");
+
+	if (const auto current = correlate())
+		correlation_ = *current;
+	const auto now_tai = tai_now_nanoseconds();
+	const auto now_realtime = realtime_now_nanoseconds();
+	if (correlation_.tai_nanoseconds != 0u)
+		correlation_utc_nanoseconds_ = translate_clock(
+			correlation_.tai_nanoseconds, now_tai, now_realtime);
+	const auto has_event = [&event_id](const Session &session) {
+		return std::find(session.active_events.begin(),
+			session.active_events.end(), event_id) !=
+			session.active_events.end();
+	};
+	auto active = std::find_if(sessions_.begin(), sessions_.end(),
+		[&](const Session &session) {
+			return session.summary.state == WaveformSessionState::capturing &&
+				!session.materialization_queued && has_event(session);
+		});
+	if (active == sessions_.end()) {
+		active = std::find_if(sessions_.begin(), sessions_.end(),
+			[&](const Session &session) {
+				return session.summary.state ==
+						WaveformSessionState::capturing &&
+					!session.materialization_queued &&
+					!session.capacity_sealed &&
+					requested_first <= session.summary.last_sequence + 1u;
+			});
+	}
+
+	auto new_session = [&](std::uint64_t first, std::uint64_t last,
+		std::uint64_t continuation, std::uint64_t master,
+		const WaveformCaptureContext &snapshot) {
+		Session session{};
+		session.summary.id = next_session_id_++;
+		session.summary.trigger_sequence = trigger_sequence;
+		session.summary.first_sequence = first;
+		session.summary.last_sequence = last;
+		session.summary.trigger_tai_nanoseconds = now_tai;
+		session.summary.trigger_realtime_nanoseconds = now_realtime;
+		session.summary.sample_rate_hz = sample_rate_hz_;
+		session.summary.decimation = decimation;
+		session.summary.state = WaveformSessionState::capturing;
+		session.summary.continuation_of_session_id = continuation;
+		session.summary.master_session_id = master == 0u
+			? session.summary.id : master;
+		session.summary.capture_uuid = mncwf_random_uuid();
+		session.context = snapshot;
+		session.context.capture_metadata.capture_uuid =
+			session.summary.capture_uuid;
+		session.context.capture_metadata.created_tai_nanoseconds = now_tai;
+		session.context.capture_metadata.created_utc_nanoseconds = now_realtime;
+		sessions_.push_back(std::move(session));
+		return std::prev(sessions_.end());
+	};
+	if (active == sessions_.end()) {
+		/* Recovery can first observe an UPDATE after an APU restart. Keep the
+		 * materializable tail if the already-active event predates the ring. */
+		const auto budget_limited_first =
+			requested_last - requested_first + 1u > budget
+				? requested_last - budget + 1u : requested_first;
+		const auto recoverable_first = requested_last < oldest_sequence_
+			? requested_last
+			: std::max(budget_limited_first, oldest_sequence_);
+		active = new_session(recoverable_first, requested_last, 0u, 0u,
+			context_);
+	}
+	else {
+		/* Later records for an already-linked event still carry its original
+		 * trigger and must not pull a restart-clipped tail or continuation back
+		 * across its materializable boundary. Only a new overlapping event may
+		 * extend an unsealed master's lower bound. */
+		if (!has_event(*active) &&
+		    active->summary.continuation_of_session_id == 0u)
+			active->summary.first_sequence = std::min(
+				active->summary.first_sequence, requested_first);
+		if (requested_last - active->summary.first_sequence + 1u > budget) {
+			const auto predecessor = active->summary.id;
+			const auto master = active->summary.master_session_id;
+			const auto predecessor_uuid = active->summary.capture_uuid;
+			const auto predecessor_index = static_cast<std::size_t>(
+				std::distance(sessions_.begin(), active));
+			const auto continuation_context = active->context;
+			const auto continuation_first = active->summary.first_sequence + budget;
+			active->summary.last_sequence = continuation_first - 1u;
+			active->capacity_sealed = true;
+			auto carrying = active->active_events;
+			std::vector<Event> carrying_descriptors;
+			for (const auto &candidate : active->events)
+				if (candidate.stable_identity &&
+				    std::ranges::find(carrying, candidate.identity) !=
+					carrying.end())
+					carrying_descriptors.push_back(candidate);
+			active->active_events.clear();
+			active = new_session(continuation_first,
+				std::max(continuation_first, requested_last), predecessor,
+				master, continuation_context);
+			active->previous_capture_uuid = predecessor_uuid;
+			sessions_[predecessor_index].next_capture_uuid =
+				active->summary.capture_uuid;
+			active->active_events = std::move(carrying);
+			active->events = std::move(carrying_descriptors);
+		} else {
+			active->summary.last_sequence = std::max(
+				active->summary.last_sequence, requested_last);
+		}
+	}
+
+	if (!has_event(*active))
+		active->active_events.push_back(event_id);
+	const auto marker = std::find_if(active->events.begin(),
+		active->events.end(), [&event_id](const Event &event) {
+			return event.stable_identity && event.identity == event_id;
+		});
+	if (marker == active->events.end())
+		active->events.push_back({event_id, true, std::move(descriptor)});
+	else
+		marker->descriptor = std::move(descriptor);
+	active->summary.event_count = static_cast<std::uint32_t>(
+		active->events.size());
+	active->summary.trigger_source_mask |=
+		trigger_source_bit(WaveformTriggerSource::pq_event);
+	if (lifecycle == WaveformEventLifecycle::end ||
+	    lifecycle == WaveformEventLifecycle::abort)
+		std::erase(active->active_events, event_id);
 	return active->summary;
 }
 
@@ -906,6 +1371,7 @@ void WaveformCapture::finish_sessions()
 	for (auto &session : sessions_) {
 		if (session.summary.state != WaveformSessionState::capturing ||
 		    session.materialization_queued ||
+		    !session.active_events.empty() ||
 		    latest_sequence_ < session.summary.last_sequence)
 			continue;
 		const bool evicted =
@@ -964,14 +1430,27 @@ void WaveformCapture::enqueue_materialization(Session &session)
 {
 	AsyncWriter::Job job{};
 	job.summary = session.summary;
-	job.events = session.events;
+	job.context = session.context;
 	job.correlation = correlation_;
+	job.correlation_utc_nanoseconds = correlation_utc_nanoseconds_;
+	if (job.correlation.tai_nanoseconds == 0u) {
+		job.correlation.tai_nanoseconds =
+			session.summary.trigger_tai_nanoseconds;
+		job.correlation.pl_tick = session.summary.trigger_sequence;
+		job.correlation.frame_sequence = session.summary.trigger_sequence;
+		job.correlation.uncertainty_nanoseconds = 1'000'000u;
+	}
+	if (job.correlation_utc_nanoseconds == 0u)
+		job.correlation_utc_nanoseconds = translate_clock(
+			job.correlation.tai_nanoseconds,
+			session.summary.trigger_tai_nanoseconds,
+			session.summary.trigger_realtime_nanoseconds);
 	job.output_directory = output_directory_;
-	job.channel_metadata = channel_metadata_;
 
 	const auto window =
 		session.summary.last_sequence -
 		session.summary.first_sequence + 1u;
+	job.source_frame_count = window;
 	if (window > history_.size())
 		throw std::runtime_error("waveform session exceeds history");
 	/*
@@ -984,9 +1463,6 @@ void WaveformCapture::enqueue_materialization(Session &session)
 	const std::uint64_t decimation =
 		std::max<std::uint32_t>(1u, session.summary.decimation);
 	const auto output_count = (window + decimation - 1u) / decimation;
-	session.summary.last_sequence = session.summary.first_sequence +
-		(output_count - 1u) * decimation;
-	job.summary = session.summary;
 	job.frames.reserve(static_cast<std::size_t>(output_count));
 	for (std::uint64_t output = 0; output < output_count; ++output) {
 		const auto group_first =
@@ -1010,6 +1486,121 @@ void WaveformCapture::enqueue_materialization(Session &session)
 				static_cast<std::int64_t>(group_frames));
 		job.frames.push_back(frame);
 	}
+
+	const auto timestamp_at = [&](std::uint64_t sequence,
+		std::uint64_t anchor_time) {
+		const auto anchor_sequence = job.correlation.frame_sequence;
+		const auto rate = static_cast<std::uint64_t>(job.summary.sample_rate_hz);
+		if (rate == 0u)
+			throw std::runtime_error("waveform sample rate is zero");
+		if (sequence >= anchor_sequence) {
+			const auto delta = sequence - anchor_sequence;
+			const auto nanoseconds = delta * 1'000'000'000ull / rate;
+			if (nanoseconds > std::numeric_limits<std::uint64_t>::max() -
+					anchor_time)
+				throw std::overflow_error("waveform event time overflow");
+			return anchor_time + nanoseconds;
+		}
+		const auto delta = anchor_sequence - sequence;
+		const auto nanoseconds = delta * 1'000'000'000ull / rate;
+		if (nanoseconds > anchor_time)
+			throw std::overflow_error("waveform event time underflow");
+		return anchor_time - nanoseconds;
+	};
+	for (const auto &stored : session.events) {
+		auto event = stored.descriptor;
+		const auto capture_first = session.summary.first_sequence;
+		const auto capture_last = session.summary.last_sequence;
+		const auto clamp = [capture_first, capture_last](std::uint64_t value) {
+			return std::clamp(value, capture_first, capture_last);
+		};
+		const bool clipped_start = event.start_sequence < capture_first ||
+			event.start_sequence > capture_last;
+		event.start_sequence = clamp(event.start_sequence);
+		if ((event.flags & mncwf_event_current_valid) != 0u)
+			event.current_sequence = clamp(event.current_sequence);
+		else {
+			event.current_sequence = event.start_sequence;
+			event.flags |= mncwf_event_current_valid;
+		}
+		if ((event.flags & mncwf_event_end_valid) != 0u &&
+		    event.end_sequence > capture_last) {
+			event.flags &= ~mncwf_event_end_valid;
+			event.end_sequence = 0u;
+			event.lifecycle = MncwfEventLifecycle::update;
+		}
+		if ((event.flags & mncwf_event_end_valid) != 0u)
+			event.end_sequence = clamp(event.end_sequence);
+		if ((event.flags & mncwf_event_trigger_valid) != 0u &&
+		    (event.trigger_sequence < capture_first ||
+		     event.trigger_sequence > capture_last)) {
+			event.flags &= ~mncwf_event_trigger_valid;
+			event.trigger_sequence = 0u;
+		}
+		if (clipped_start) {
+			event.flags |= mncwf_event_discontinuous;
+			if (event.lifecycle == MncwfEventLifecycle::start)
+				event.lifecycle = MncwfEventLifecycle::update;
+		}
+		if ((event.lifecycle == MncwfEventLifecycle::end ||
+		     event.lifecycle == MncwfEventLifecycle::abort ||
+		     event.lifecycle == MncwfEventLifecycle::complete) &&
+		    (event.flags & mncwf_event_end_valid) == 0u)
+			event.lifecycle = MncwfEventLifecycle::update;
+		event.start_tai_nanoseconds = timestamp_at(event.start_sequence,
+			job.correlation.tai_nanoseconds);
+		event.current_tai_nanoseconds = timestamp_at(event.current_sequence,
+			job.correlation.tai_nanoseconds);
+		event.start_utc_nanoseconds = timestamp_at(event.start_sequence,
+			job.correlation_utc_nanoseconds);
+		event.current_utc_nanoseconds = timestamp_at(event.current_sequence,
+			job.correlation_utc_nanoseconds);
+		if ((event.flags & mncwf_event_end_valid) != 0u) {
+			event.end_tai_nanoseconds = timestamp_at(event.end_sequence,
+				job.correlation.tai_nanoseconds);
+			event.end_utc_nanoseconds = timestamp_at(event.end_sequence,
+				job.correlation_utc_nanoseconds);
+		} else {
+			event.end_tai_nanoseconds = 0u;
+			event.end_utc_nanoseconds = 0u;
+		}
+		if ((event.flags & mncwf_event_trigger_valid) != 0u) {
+			event.trigger_tai_nanoseconds = timestamp_at(
+				event.trigger_sequence, job.correlation.tai_nanoseconds);
+			event.trigger_utc_nanoseconds = timestamp_at(
+				event.trigger_sequence, job.correlation_utc_nanoseconds);
+		} else {
+			event.trigger_tai_nanoseconds = 0u;
+			event.trigger_utc_nanoseconds = 0u;
+		}
+		event.flags |= mncwf_event_tai_valid | mncwf_event_utc_valid;
+		event.uncertainty_nanoseconds =
+			job.correlation.uncertainty_nanoseconds;
+		event.duration_samples = (event.flags & mncwf_event_end_valid) != 0u
+			? event.end_sequence - event.start_sequence
+			: event.current_sequence - event.start_sequence;
+		job.events.push_back(std::move(event));
+	}
+
+	const auto add_capture_lineage = [&](MncwfLineageRelation relation,
+		const MncwfUuid &related) {
+		if (uuid_is_zero(related))
+			return;
+		job.lineage.push_back({relation, 0u, related, {},
+			session.summary.first_sequence, session.summary.last_sequence,
+			0u, 1u});
+	};
+	add_capture_lineage(MncwfLineageRelation::previous_continuation,
+		session.previous_capture_uuid);
+	add_capture_lineage(MncwfLineageRelation::next_continuation,
+		session.next_capture_uuid);
+	for (const auto &event : job.events)
+		job.lineage.push_back({MncwfLineageRelation::event, 0u,
+			session.summary.capture_uuid, event.event_uuid,
+			event.start_sequence,
+			(event.flags & mncwf_event_end_valid) != 0u
+				? event.end_sequence : event.current_sequence,
+			0u, 1u});
 	writer_->enqueue(std::move(job));
 	session.materialization_queued = true;
 }
@@ -1085,6 +1676,7 @@ WaveformStatus WaveformCapture::status()
 	result.max_capture_frames = max_capture_frames();
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
+	result.history_capacity_frames = history_.size();
 	result.correlation = correlation_;
 	for (const auto &session : sessions_) {
 		if (session.summary.state == WaveformSessionState::complete)

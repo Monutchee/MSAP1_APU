@@ -39,7 +39,7 @@ void signed64(msap1::MeterRecord &record, std::size_t word,
 	record.words[word + 1] = static_cast<std::uint32_t>(bits >> 32);
 }
 
-/* Minimal valid MTR1 record: a locked 12-cycle block at exactly the 60 Hz
+/* Minimal valid Basic record: a locked 12-cycle block at exactly the 60 Hz
  * nominal (6400 samples at 32 kSPS), the 64-bit first-sample index in
  * envelope words 9/10, the timing word at 13, and the transport drop words
  * 11/12 zero — as every emitted record carries them. */
@@ -340,9 +340,9 @@ void decode_and_period_independence()
 	require(update.period == msap1::MeasurementPeriod::Basic &&
 		update.kind == msap1::RecordKind::fundamental &&
 		update.sequence == 42 && update.fundamental.has_value(),
-		"MTR1 did not decode as a basic fundamental update");
+		"10/12-cycle record did not decode as a basic fundamental update");
 	require(update.timing.has_value(),
-		"an MTR1 record decoded without cycle-timing metadata");
+		"a basic record decoded without cycle-timing metadata");
 	const auto &values = *update.fundamental;
 	require(values.frequency.valid() && values.frequency.value == 60001 &&
 		values.frequency.measured_at == timestamp &&
@@ -398,9 +398,9 @@ void decode_block_timing()
 	require(update.period == msap1::MeasurementPeriod::Basic &&
 		update.kind == msap1::RecordKind::fundamental &&
 		update.sequence == 42 && update.fundamental.has_value(),
-		"MTR1 did not decode as a basic fundamental update");
+		"10/12-cycle record did not decode as a basic fundamental update");
 	require(update.timing.has_value(),
-		"an MTR1 record decoded without cycle-timing metadata");
+		"a basic record decoded without cycle-timing metadata");
 	const auto &timing = *update.timing;
 	require(timing.sequence == 42 &&
 		timing.configuration_generation == 0x12345678,
@@ -501,7 +501,7 @@ void decode_rejects_retired_formats()
 		require(!record.header_valid(),
 			"a retired format word passed header validation");
 		require_throws([&] { (void)registry.decode(record); },
-			       "a retired MTR1 format word decoded");
+			       "a retired basic-record format word decoded");
 	}
 }
 

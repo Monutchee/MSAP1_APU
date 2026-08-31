@@ -10,16 +10,20 @@ static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
 static_assert(sizeof(msap1_adc_health_payload) == 238,
 	      "unexpected ADC health payload layout");
-static_assert(sizeof(msap1_aggregation_health_payload) == 200,
+static_assert(sizeof(msap1_aggregation_health_payload) == 216,
 	      "unexpected aggregation health payload layout");
 static_assert(sizeof(msap1_demand_config_payload) == 12,
 	      "unexpected demand configuration payload layout");
 static_assert(sizeof(msap1_demand_config_ack_payload) == 16,
 	      "unexpected demand configuration acknowledgement layout");
-/* Wire v7: four simulator harmonic/interharmonic slots use three words
- * apiece between the noise levels and flags. The five Urms(1/2) detection
- * fields still close the payload after nominal_frequency_hz. */
-static_assert(sizeof(msap1_meter_config_payload) == 312,
+static_assert(sizeof(msap1_m18_event_profile) == 28,
+	      "unexpected M18 event profile layout");
+static_assert(sizeof(msap1_m18_config_payload) == 316,
+	      "unexpected M18 configuration layout");
+static_assert(sizeof(msap1_m18_config_ack_payload) == 8,
+	      "unexpected M18 configuration acknowledgement layout");
+/* Wire v9 appends simulator-v1.5 AM and absolute carrier fields. */
+static_assert(sizeof(msap1_meter_config_payload) == 352,
 	      "unexpected meter configuration payload layout");
 static_assert(sizeof(msap1_simulator_event_payload) == 24,
 	      "unexpected simulator event payload layout");
@@ -40,6 +44,12 @@ static_assert(sizeof(msap1_rpu_msg_header) +
 	      sizeof(msap1_adc_diagnostic_payload) <=
 		      MSAP1_RPU_MAX_FRAME_SIZE,
 	      "ADC diagnostic response exceeds RPMsg protocol frame");
+static_assert(sizeof(msap1_rpu_msg_header) +
+	      sizeof(msap1_meter_config_payload) <= MSAP1_RPU_MAX_FRAME_SIZE,
+	      "meter configuration exceeds RPMsg protocol frame");
+static_assert(sizeof(msap1_rpu_msg_header) +
+	      sizeof(msap1_m18_config_payload) <= MSAP1_RPU_MAX_FRAME_SIZE,
+	      "M18 configuration exceeds RPMsg protocol frame");
 
 std::vector<std::uint8_t> encode_request(std::uint8_t type,
 					std::uint32_t sequence,
@@ -126,6 +136,23 @@ msap1_demand_config_ack_payload decode_demand_config_ack(
 		sizeof(acknowledgement));
 	if (acknowledgement.profile_generation == 0u)
 		throw std::runtime_error("R5C1 returned a zero demand profile generation");
+	return acknowledgement;
+}
+
+msap1_m18_config_ack_payload decode_m18_config_ack(const Message &message)
+{
+	if (message.header.type != MSAP1_RPU_MSG_M18_CONFIG ||
+	    message.header.status != MSAP1_RPU_STATUS_OK ||
+	    message.payload.size() != sizeof(msap1_m18_config_ack_payload))
+		throw std::runtime_error(
+			"message is not an M18 configuration acknowledgement");
+
+	msap1_m18_config_ack_payload acknowledgement{};
+	std::memcpy(&acknowledgement, message.payload.data(),
+		sizeof(acknowledgement));
+	if (acknowledgement.generation == 0u)
+		throw std::runtime_error(
+			"R5 returned a zero M18 configuration generation");
 	return acknowledgement;
 }
 

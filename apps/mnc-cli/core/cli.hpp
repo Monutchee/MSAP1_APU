@@ -47,6 +47,9 @@ struct Options {
 	std::optional<std::string> simulator_harmonics;
 	/* Harmonic output period: 3s (default), 10m, 2h, or base. */
 	std::optional<std::string> harmonic_period;
+	std::optional<std::string> meter_event_id;
+	std::optional<std::int64_t> meter_event_start_utc_ns;
+	std::optional<std::int64_t> meter_event_end_utc_ns;
 	/* Event sequencer (roadmap M12): the burst description for
 	 * `mnc adc simulator event`. `event_action` selects arm, cancel,
 	 * clear, or query; the rest describe an ARM. */
@@ -59,6 +62,10 @@ struct Options {
 	std::uint32_t waveform_pretrigger_ms = waveform_duration_unspecified;
 	std::uint32_t waveform_decimation = 0;
 	std::uint32_t waveform_posttrigger_ms = waveform_duration_unspecified;
+	std::optional<std::uint64_t> waveform_session_id;
+	std::optional<std::string> waveform_event_id;
+	std::optional<std::string> waveform_export_format;
+	std::optional<std::string> waveform_export_file;
 	std::optional<std::string> log_component;
 	std::optional<std::string> log_module;
 	std::optional<std::string> log_priority;

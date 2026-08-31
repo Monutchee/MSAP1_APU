@@ -74,6 +74,27 @@ struct SimulatorHarmonicConfig {
 	std::string channels = "voltage";
 };
 
+struct SimulatorAmplitudeModulationConfig {
+	bool enabled = false;
+	double frequency_hz = 8.8;
+	double depth_percent = 0.0;
+	/* "voltage", "current", or "all". */
+	std::string channels = "voltage";
+};
+
+struct SimulatorCarrierConfig {
+	bool enabled = false;
+	double frequency_hz = 1000.0;
+	double percent = 0.0;
+	/* Conceptual voltage phases A/B/C in bits 0..2. */
+	std::uint32_t phase_mask = 0x7u;
+	double phase_degrees = 0.0;
+	/* A zero adjacent percent disables this independent rejection tone. */
+	double adjacent_frequency_hz = 1020.0;
+	double adjacent_percent = 0.0;
+	double adjacent_phase_degrees = 0.0;
+};
+
 /*
  * IEC 61000-4-30 Urms(1/2) event detection (metrology M12). Everything
  * here is in engineering units like the rest of this file; the PL wants
@@ -111,10 +132,12 @@ struct SimulatorConfig {
 	};
 	/* Up to four global harmonic slots; empty keeps a pure tone. */
 	std::vector<SimulatorHarmonicConfig> harmonics{};
+	SimulatorAmplitudeModulationConfig amplitude_modulation{};
+	SimulatorCarrierConfig carrier{};
 };
 
 struct MeterConversionFile {
-	std::uint32_t schema_version = 3;
+	std::uint32_t schema_version = 4;
 	std::string profile_id;
 	std::string adc_source = "physical";
 	/* Superseded: kept for schema compatibility; the PL window is now
@@ -140,6 +163,7 @@ struct MeterConversionFile {
 struct PreparedMeterConfiguration {
 	MeterConversionFile source;
 	msap1_meter_config_payload wire{};
+	msap1_m18_config_payload m18_wire{};
 };
 
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
@@ -148,6 +172,9 @@ PreparedMeterConfiguration load_meter_configuration(
 	std::uint32_t sample_rate_hz = 128000);
 PreparedMeterConfiguration prepare_meter_configuration(
 	MeterConversionFile source, std::uint32_t sample_rate_hz = 128000);
+void coordinate_configuration_generation(
+	msap1_meter_config_payload &meter,
+	msap1_m18_config_payload &m18) noexcept;
 [[nodiscard]] MeterConversionFile decode_meter_configuration(
 	std::string_view json);
 [[nodiscard]] std::string encode_meter_configuration(

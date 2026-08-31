@@ -13,7 +13,7 @@
 #include <stdexcept>
 
 /*
- * AGG-v3/MTR2 (0x00020003) aggregate-record tests: the test-only reference
+ * AGG-v3 (0x00020003) aggregate-record tests: the test-only reference
  * aggregator against golden vectors, the decoder against records built from
  * reference output, and the defensive validation of shapes R5C1 must never
  * emit. R5C1 is the authoritative aggregator; nothing here computes
@@ -58,9 +58,9 @@ constant_blocks(std::uint64_t rms_q16, std::uint32_t frequency_millihz)
 }
 
 /**
- * Wire-image builder for one MTR2 record, defaulting to a valid 60 Hz
- * aggregate (15 blocks, 180 cycles). Tests override single fields to build
- * the malformed variants.
+ * Wire-image builder for one 150/180-cycle aggregate record, defaulting to a
+ * valid 60 Hz aggregate (15 blocks, 180 cycles). Tests override single fields
+ * to build the malformed variants.
  */
 struct AggregateSpec {
 	std::uint32_t sequence = 1;
@@ -564,10 +564,23 @@ void aggregate_decodes_and_validates_utc_overlap_provenance()
 	require_throws([&] { (void)registry.decode(unmarked_short); },
 		"an unmarked shortened aggregate range decoded");
 
-	auto marked_contiguous = aggregate_record(spec);
-	marked_contiguous.words[8] |= 1u << 3;
-	require_throws([&] { (void)registry.decode(marked_contiguous); },
-		"a UTC-overlap flag without overlap geometry decoded");
+	/* If the UTC target lands exactly on a Basic boundary, the continuing
+	 * aggregate still overlaps the new synchronized aggregate but its own
+	 * contributors remain contiguous. This is the geometry seen on target at
+	 * the 2026-08-30 00:10 UTC boundary. */
+	auto boundary_aligned_overlap = aggregate_record(spec);
+	boundary_aligned_overlap.words[8] |= 1u << 3;
+	const auto boundary_update = registry.decode(boundary_aligned_overlap);
+	require(boundary_update.aggregate_timing->utc_overlap &&
+		boundary_update.aggregate_timing->last_sample_index ==
+			contiguous_last,
+		"an exact-boundary UTC-overlap aggregate did not decode");
+
+	auto overextended_overlap = aggregate_record(spec);
+	overextended_overlap.words[8] |= 1u << 3;
+	set_last(overextended_overlap, contiguous_last + 1u);
+	require_throws([&] { (void)registry.decode(overextended_overlap); },
+		"an overextended UTC-overlap aggregate range decoded");
 }
 
 /* The aggregate sibling records (M11) decode on the Cycles150_180 period
@@ -676,7 +689,7 @@ void reference_matches_hand_computed_vectors()
 
 /*
  * End-to-end 60 Hz: compute the expected aggregate from 15 varying basic
- * blocks with the reference, emit it as an MTR2 wire record exactly as the
+ * blocks with the reference, emit it as an AGG-v3 wire record exactly as the
  * PL would, and decode it back through the builtin registry.
  */
 void decode_reference_built_record_60hz()
@@ -717,13 +730,13 @@ void decode_reference_built_record_60hz()
 		update.sequence == 7 &&
 		update.configuration_generation == 0x12345678u &&
 		update.fundamental.has_value(),
-		"MTR2 did not decode as a 150/180-cycle fundamental update");
+		"aggregate record did not decode as a 150/180-cycle fundamental update");
 	require(!update.timing.has_value(),
 		"an aggregate record fabricated basic BlockTiming");
 	require(update.aggregate_timing.has_value(),
 		"an aggregate record decoded without AggregateTiming");
 
-	/* Same channel mapping and micro-unit encoding as MTR1. */
+	/* Same channel mapping and micro-unit encoding as the Basic record. */
 	const auto &values = *update.fundamental;
 	require(values.voltage_ln.phase_a.value ==
 			expected.rms_micro_units[6] &&
@@ -888,7 +901,7 @@ void decode_applies_rms_quality_priority()
 /*
  * Malformed aggregation identities must never silently become valid
  * aggregates: the decoder rejects every shape the PL cannot emit, exactly
- * like the hardened MTR1 rules.
+ * like the hardened Basic-record rules.
  */
 void decode_rejects_malformed_aggregates()
 {

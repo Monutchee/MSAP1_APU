@@ -206,6 +206,7 @@ target_link_libraries(msap1_meter PUBLIC
 )
 target_link_libraries(msap1_meter PRIVATE
     glaze::glaze
+	OpenSSL::Crypto
 )
 
 msap1_library(msap1_meter_data_provider_stream
@@ -255,9 +256,15 @@ target_link_libraries(msap1_settings PRIVATE
 # Waveform device/session ownership is isolated from the meter record path so
 # future analysis code does not acquire access to the DMA descriptor.
 msap1_library(msap1_waveform msap1::waveform
+    msap1/waveform/mncwf_v4.cpp
+	msap1/waveform/mncwf_v4_export.cpp
     msap1/waveform/waveform_capture.cpp
 )
-target_link_libraries(msap1_waveform PRIVATE mnc::logging)
+target_link_libraries(msap1_waveform PRIVATE
+    mnc::logging
+	msap1::meter
+    OpenSSL::Crypto
+)
 
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
 # dependencies are intentional: acquisition_ipc.hpp binds the typed command
@@ -386,6 +393,14 @@ if(BUILD_TESTING)
     target_compile_options(meter_data_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME meter_data_test COMMAND meter_data_test)
 
+    # Public meter-record IDs are a co-release contract with PL/R5C1.
+    add_executable(meter_record_contract_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_record_contract_test.cpp)
+    target_link_libraries(meter_record_contract_test PRIVATE msap1::meter)
+    target_compile_options(meter_record_contract_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_record_contract_test COMMAND meter_record_contract_test)
+
     # The reference aggregator under tests/support is deliberately test-only:
     # R5C1 is the authoritative aggregator and APU production code never
     # computes aggregates, so only this test target sees tests/ includes.
@@ -425,6 +440,31 @@ if(BUILD_TESTING)
     target_compile_options(pq_event_decode_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME pq_event_decode_test COMMAND pq_event_decode_test)
+
+	# M18 final FLICKER-v1 public record decode and reserved-field guards.
+	add_executable(flicker_decode_test
+		${PROJECT_SOURCE_DIR}/tests/flicker_decode_test.cpp)
+	target_link_libraries(flicker_decode_test PRIVATE msap1::meter)
+	target_compile_options(flicker_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME flicker_decode_test COMMAND flicker_decode_test)
+
+	# Final MAINS-SIGNAL-v1 public record decode and provenance guards.
+	add_executable(mains_signal_decode_test
+		${PROJECT_SOURCE_DIR}/tests/mains_signal_decode_test.cpp)
+	target_link_libraries(mains_signal_decode_test PRIVATE msap1::meter)
+	target_compile_options(mains_signal_decode_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME mains_signal_decode_test COMMAND mains_signal_decode_test)
+
+	# M18 durable lifecycle catalogue, replay idempotence, and waveform links.
+	add_executable(pq_event_history_test
+		${PROJECT_SOURCE_DIR}/tests/pq_event_history_test.cpp)
+	target_link_libraries(pq_event_history_test PRIVATE
+		msap1::meter-data-provider-stream)
+	target_compile_options(pq_event_history_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME pq_event_history_test COMMAND pq_event_history_test)
 
 	# M16 HARMONIC-v1 decode and atomic 42-record family assembly.
 	add_executable(harmonic_decode_test
@@ -555,6 +595,13 @@ if(BUILD_TESTING)
     target_compile_options(waveform_capture_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME waveform_capture_test COMMAND waveform_capture_test)
+
+    add_executable(mncwf_v4_reader_test
+        ${PROJECT_SOURCE_DIR}/tests/mncwf_v4_reader_test.cpp)
+    target_link_libraries(mncwf_v4_reader_test PRIVATE msap1::waveform)
+    target_compile_options(mncwf_v4_reader_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME mncwf_v4_reader_test COMMAND mncwf_v4_reader_test)
 
     # The ingestor continuity rules are daemon code; compile the pipeline
     # source into the test rather than opening real devices.

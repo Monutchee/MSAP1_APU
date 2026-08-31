@@ -429,6 +429,10 @@ MeterHealthDto meter_health_dto(const msap1::InfoResponse &response)
 		 aggregation.validator_records_processed,
 		 aggregation.validator_max_runtime_us,
 		 aggregation.validator_max_schedule_gap_us,
+		 aggregation.control_stack_high_water_bytes,
+		 aggregation.input_stack_high_water_bytes,
+		 aggregation.output_stack_high_water_bytes,
+		 aggregation.validator_stack_high_water_bytes,
 		 std::move(aggregation_reasons)},
 		status.frequency_arithmetic_ok,
 	};

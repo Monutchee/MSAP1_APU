@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace msap1::acquisition::daemon {
@@ -86,9 +87,11 @@ MeterRecordIngestor::MeterRecordIngestor(
 	msap1::acquisition::MeterRecordSource &meter,
 	const msap1::PreparedMeterConfiguration &configuration,
 	const msap1::meter::MeasurementTimebase &timebase,
-	mnc::meter_stream::MeterRecordPublisher &publisher)
+	mnc::meter_stream::MeterRecordPublisher &publisher,
+	PqLifecycleCallback pq_lifecycle_callback)
 	: meter_(meter), configuration_(configuration),
-	  timebase_(timebase), publisher_(publisher)
+	  timebase_(timebase), publisher_(publisher),
+	  pq_lifecycle_callback_(std::move(pq_lifecycle_callback))
 {
 }
 
@@ -129,6 +132,13 @@ void MeterRecordIngestor::begin_epoch()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_pq_lifecycle_sequence_.reset();
+	latest_pq_lifecycle_.reset();
+	last_flicker_sequence_.reset();
+	for (auto &latest : latest_flicker_)
+		latest.reset();
+	last_mains_signal_sequence_.reset();
+	latest_mains_signal_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -138,6 +148,9 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
+	pq_lifecycle_sequence_gaps_ = 0;
+	flicker_sequence_gaps_ = 0;
+	mains_signal_sequence_gaps_ = 0;
 	for (auto &assembler : harmonic_assemblers_)
 		assembler.reset();
 	for (auto &pending : pending_harmonic_families_)
@@ -160,6 +173,13 @@ void MeterRecordIngestor::clear_latest()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_pq_lifecycle_sequence_.reset();
+	latest_pq_lifecycle_.reset();
+	last_flicker_sequence_.reset();
+	for (auto &latest : latest_flicker_)
+		latest.reset();
+	last_mains_signal_sequence_.reset();
+	latest_mains_signal_.reset();
 	latest_aggregate_record_.reset();
 	latest_aggregate_time_quality_ =
 		msap1::meter::TimeQuality::Unsynchronized;
@@ -214,7 +234,7 @@ bool MeterRecordIngestor::matches_configuration(
 }
 
 /*
- * Basic (MTR1) continuity: wire-sequence tracking against the newest
+ * Basic 10/12-cycle continuity: wire-sequence tracking against the newest
  * accepted basic record, plus — for consecutive sequences — sample-range
  * continuity on the PL conversion-domain counter. Interleaved aggregate
  * records never participate: they neither advance nor break this baseline.
@@ -335,7 +355,7 @@ bool MeterRecordIngestor::track_basic_continuity(
 }
 
 /*
- * Aggregate (MTR2) continuity: wire-sequence tracking only, on the
+ * Aggregate 150/180-cycle continuity: wire-sequence tracking only, on the
  * aggregate stream's own counter. A gap is counted, logged, and resynced.
  * There is deliberately NO sample-range check against the previous
  * aggregate: the PL enforces continuity of the 15 blocks INSIDE one
@@ -585,6 +605,224 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 					error.what(),
 				"meter_record_decode_rejected", record);
 		}
+		return;
+	}
+
+	/* PQ-EVENT-v1 is the final R5C1 lifecycle product. Decode it before
+	 * touching this family's continuity baseline, stamp its first-sample UTC
+	 * mapping into the durable envelope, and publish the exact 256-byte record.
+	 * It never participates in the BASIC/aggregate sequence trackers. */
+	if (record.record_format() == msap1::meter_pq_event_lifecycle_format) {
+		msap1::PowerQualityEventLifecycleSnapshot event{};
+		try {
+			event = msap1::decode_pq_event_lifecycle_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("PQ-EVENT-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_pq_lifecycle_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				event.sequence - (*last_pq_lifecycle_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				pq_lifecycle_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = event.sequence;
+		timing.configuration_generation = event.configuration_generation;
+		timing.first_sample_index = event.first_sample;
+		timing.sample_count = record.block_sample_count();
+		timing.sample_rate_hz = event.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::power_quality_event);
+		stream_record.measurement_period = static_cast<std::uint8_t>(
+			msap1::MeasurementPeriod::Basic);
+		stream_record.source_sequence = event.sequence;
+		stream_record.configuration_generation =
+			event.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = event.first_sample;
+		stream_record.timing.sample_count = record.block_sample_count();
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+		if (pq_lifecycle_callback_) {
+			try {
+				pq_lifecycle_callback_(event);
+			} catch (const std::exception &error) {
+				log_rejected_record(
+					std::string("PQ event waveform trigger: ") +
+						error.what(),
+					"pq_event_waveform_trigger_failed", record);
+			}
+		}
+
+		last_pq_lifecycle_sequence_ = event.sequence;
+		latest_pq_lifecycle_ = std::move(event);
+		++pq_lifecycle_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
+		return;
+	}
+
+	/* FLICKER-v1 has a private R5C1 sequence and three independently useful
+	 * latest views. Validate the complete public record before advancing that
+	 * sequence, then place the exact 256-byte source record in the durable
+	 * stream before replacing its typed latest slot. */
+	if (record.record_format() == msap1::meter_flicker_format) {
+		msap1::FlickerSnapshot flicker{};
+		try {
+			flicker = msap1::decode_flicker_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("FLICKER-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_flicker_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				flicker.sequence - (*last_flicker_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				flicker_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = flicker.sequence;
+		timing.configuration_generation =
+			flicker.configuration_generation;
+		timing.first_sample_index = flicker.first_sample;
+		timing.sample_count = flicker.sample_count;
+		timing.sample_rate_hz = flicker.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::flicker);
+		const auto period = flicker.kind == msap1::FlickerRecordKind::live
+			? msap1::MeasurementPeriod::Basic
+			: flicker.kind == msap1::FlickerRecordKind::pst
+				? msap1::MeasurementPeriod::Min10
+				: msap1::MeasurementPeriod::Hour2;
+		stream_record.measurement_period = static_cast<std::uint8_t>(period);
+		stream_record.source_sequence = flicker.sequence;
+		stream_record.configuration_generation =
+			flicker.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = flicker.first_sample;
+		stream_record.timing.sample_count = flicker.sample_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+
+		last_flicker_sequence_ = flicker.sequence;
+		latest_flicker_[static_cast<std::size_t>(flicker.kind)] = flicker;
+		++flicker_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
+		return;
+	}
+
+	/* MAINS-SIGNAL-v1 is one strict 200 ms observation per record. Its
+	 * producer sequence is independent of every other family; malformed or
+	 * stale observations are quarantined before the durable/latest boundary. */
+	if (record.record_format() == msap1::meter_mains_signal_format) {
+		msap1::MainsSignalSnapshot mains{};
+		try {
+			mains = msap1::decode_mains_signal_record(record);
+		} catch (const std::exception &error) {
+			note_invalid_record();
+			log_rejected_record(
+				std::string("MAINS-SIGNAL-v1 record: ") + error.what(),
+				"meter_record_decode_rejected", record);
+			return;
+		}
+		if (last_mains_signal_sequence_) {
+			const auto delta = static_cast<std::int32_t>(
+				mains.sequence - (*last_mains_signal_sequence_ + 1u));
+			if (delta < 0)
+				return;
+			if (delta > 0)
+				mains_signal_sequence_gaps_ +=
+					static_cast<std::uint32_t>(delta);
+		}
+
+		const auto received_at = std::chrono::system_clock::now();
+		msap1::meter::BlockTiming timing{};
+		timing.sequence = mains.sequence;
+		timing.configuration_generation = mains.configuration_generation;
+		timing.first_sample_index = mains.first_sample;
+		timing.sample_count = mains.sample_count;
+		timing.sample_rate_hz = mains.sample_rate_hz;
+		stamp_time_state(timing, timebase_);
+
+		mnc::meter_stream::MeterStreamRecord stream_record{};
+		stream_record.record_format = record.record_format();
+		stream_record.record_kind = static_cast<std::uint16_t>(
+			msap1::RecordKind::mains_signal);
+		stream_record.measurement_period = static_cast<std::uint8_t>(
+			msap1::MeasurementPeriod::Basic);
+		stream_record.source_sequence = mains.sequence;
+		stream_record.configuration_generation =
+			mains.configuration_generation;
+		stream_record.ingested_at_nanoseconds =
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				received_at.time_since_epoch()).count();
+		stream_record.timing.first_sample_index = mains.first_sample;
+		stream_record.timing.sample_count = mains.sample_count;
+		stream_record.timing.time_quality =
+			static_cast<std::uint8_t>(timing.time_quality);
+		if (timing.utc_start)
+			stream_record.timing.utc_start_nanoseconds =
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					timing.utc_start->time_since_epoch()).count();
+		stream_record.timing.utc_uncertainty_nanoseconds =
+			timing.utc_uncertainty_ns;
+		const auto *bytes = reinterpret_cast<const std::byte *>(&record);
+		stream_record.payload.assign(bytes, bytes + sizeof(record));
+		(void)publisher_.publish(stream_record);
+
+		last_mains_signal_sequence_ = mains.sequence;
+		latest_mains_signal_ = std::move(mains);
+		++mains_signal_records_;
+		++meter_records_;
+		last_record_time_ = Clock::now();
 		return;
 	}
 

@@ -77,6 +77,18 @@ webengine::Response get_meter_readings(AppContext &,
 /** @brief GET /api/v1/meter/power-quality — Urms(1/2) record and event. */
 webengine::Response get_meter_power_quality(AppContext &,
 					    const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/power-quality/events — durable M18 catalogue. */
+webengine::Response get_power_quality_events(AppContext &,
+	const webengine::RequestContext &);
+/** @brief DELETE /api/v1/meter/power-quality/events — remove catalogue rows. */
+webengine::Response delete_power_quality_events(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/flicker — latest live/Pst/Plt records. */
+webengine::Response get_meter_flicker(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/mains-signalling — latest carrier observation. */
+webengine::Response get_meter_mains_signalling(AppContext &,
+	const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/harmonics — latest complete M16 spectrum. */
 webengine::Response get_meter_harmonics(AppContext &,
 					const webengine::RequestContext &);
@@ -160,6 +172,9 @@ webengine::Response post_waveform_trigger(AppContext &,
 /** @brief DELETE /api/v1/waveforms — delete one completed session. */
 webengine::Response
 delete_waveform_session(AppContext &, const webengine::RequestContext &);
+/** @brief GET /api/v1/waveforms/export — streamed event-specific MNCWF. */
+webengine::HandlerResult export_waveform_event(
+	AppContext &, const webengine::RequestContext &);
 
 /* ── settings_routes.cpp — persistent settings authority ───────────────── */
 
@@ -282,6 +297,19 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/power-quality",
 	 webengine::Role::Viewer, &get_meter_power_quality,
 	 "Latest Urms(1/2) record and the newest sag/swell/interruption"},
+	{webengine::http::verb::get, "/api/v1/meter/power-quality/events",
+	 webengine::Role::Viewer, &get_power_quality_events,
+	 "Durable M18 power-quality event catalogue and detail"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/meter/power-quality/events",
+	 webengine::Role::Admin, &delete_power_quality_events,
+	 "Delete selected or all durable power-quality catalogue events"},
+	{webengine::http::verb::get, "/api/v1/meter/flicker",
+	 webengine::Role::Viewer, &get_meter_flicker,
+	 "Latest independent flicker live, Pst, and Plt values"},
+	{webengine::http::verb::get, "/api/v1/meter/mains-signalling",
+	 webengine::Role::Viewer, &get_meter_mains_signalling,
+	 "Latest mains-signalling carrier observation"},
 	{webengine::http::verb::get, "/api/v1/meter/harmonics",
 	 webengine::Role::Viewer, &get_meter_harmonics,
 	 "Latest complete seven-channel harmonic subgroup spectrum"},
@@ -342,7 +370,7 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	 "Trigger a manual waveform capture"},
 	{webengine::http::verb::delete_, "/api/v1/waveforms",
 	 webengine::Role::Admin, &delete_waveform_session,
-	 "Delete one completed waveform session"},
+	 "Delete one completed waveform session or all inactive sessions"},
 
 	/* Settings (settings_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/settings/active",
@@ -443,6 +471,11 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 				return handler(context, request);
 			},
 			route.min_role);
+
+	engine.add_streaming_download("/api/v1/waveforms/export",
+		[&context](const auto &request) {
+			return export_waveform_event(context, request);
+		}, webengine::Role::Viewer);
 
 	constexpr std::size_t certificate_limit = 1024 * 1024;
 	const std::vector<std::string> certificate_types{

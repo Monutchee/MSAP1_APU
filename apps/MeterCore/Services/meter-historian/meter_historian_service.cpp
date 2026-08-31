@@ -259,6 +259,29 @@ bool MeterHistorianService::rebuilds_volatile_period(
 bool MeterHistorianService::ingest(
 	const mnc::meter_stream::MeterStreamRecord &envelope)
 {
+	if (envelope.record_format == msap1::meter_pq_event_lifecycle_format) {
+		try {
+			if (envelope.payload.size() != sizeof(msap1::MeterRecord))
+				throw std::invalid_argument(
+					"historian PQ event record size mismatch");
+			msap1::MeterRecord raw{};
+			std::memcpy(&raw, envelope.payload.data(), sizeof(raw));
+			store_->upsert_power_quality_event(raw, envelope.cursor,
+				envelope.timing.utc_start_nanoseconds,
+				static_cast<msap1::TimeQuality>(
+					envelope.timing.time_quality),
+				envelope.timing.utc_uncertainty_nanoseconds);
+			return true;
+		} catch (const std::invalid_argument &error) {
+			const auto skipped = ++undecodable_records_;
+			if (skipped == 1 || skipped % 100 == 0)
+				(void)logger().write(mnc::logging::Priority::warning,
+					"skipped an undecodable PQ event at cursor " +
+						std::to_string(envelope.cursor) + ": " +
+						error.what(), "historian_record_skipped");
+			return false;
+		}
+	}
 	/* ENERGY is an atomic two-record family already committed by meter-stream.
 	 * Its durable ledger view is sampled into history at the UTC boundary. */
 	if (envelope.record_format == msap1::meter_energy_format)
@@ -603,6 +626,61 @@ void MeterHistorianService::handle(
 			}
 			break;
 		}
+		case ipc::Command::query_power_quality_events: {
+			const auto query = ipc::decode_power_quality_event_query(input);
+			input.require_finished();
+			const auto events = store_->query_power_quality_events(query);
+			output.u32(0);
+			output.u32(static_cast<std::uint32_t>(events.size()));
+			for (const auto &event : events)
+				ipc::encode_power_quality_event_entry(output, event);
+			break;
+		}
+		case ipc::Command::link_power_quality_event_waveform: {
+			PowerQualityEventUuid event_uuid{};
+			WaveformCaptureUuid capture_uuid{};
+			const auto event_bytes = input.bytes(event_uuid.size());
+			const auto capture_bytes = input.bytes(capture_uuid.size());
+			input.require_finished();
+			std::copy(event_bytes.begin(), event_bytes.end(),
+				event_uuid.begin());
+			std::copy(capture_bytes.begin(), capture_bytes.end(),
+				capture_uuid.begin());
+			store_->link_power_quality_event_waveform(
+				event_uuid, capture_uuid);
+			output.u32(0);
+			break;
+		}
+		case ipc::Command::delete_power_quality_events: {
+			const bool all = input.u8() != 0u;
+			const auto count = input.u32();
+			if ((all && count != 0u) ||
+			    (!all && (count == 0u || count > 1000u)))
+				throw std::invalid_argument(
+					"invalid power-quality event deletion selection");
+			std::vector<PowerQualityEventUuid> event_uuids;
+			event_uuids.reserve(count);
+			for (std::uint32_t index = 0; index < count; ++index) {
+				PowerQualityEventUuid uuid{};
+				const auto bytes = input.bytes(uuid.size());
+				std::copy(bytes.begin(), bytes.end(), uuid.begin());
+				event_uuids.push_back(uuid);
+			}
+			input.require_finished();
+			std::scoped_lock maintenance(migration_mutex_);
+			const auto deleted = all
+				? store_->clear_power_quality_events()
+				: store_->delete_power_quality_events(event_uuids);
+			const std::array fields{
+				mnc::logging::Field{"MNC_PQ_EVENTS_DELETED",
+					std::to_string(deleted)}};
+			(void)logger().write(mnc::logging::Priority::notice,
+				"power-quality catalogue events deleted",
+				"power_quality_events_deleted", fields);
+			output.u32(0);
+			output.u64(deleted);
+			break;
+		}
 		case ipc::Command::get_historian_status: {
 			input.require_finished();
 			auto status = store_->status();
@@ -620,6 +698,7 @@ void MeterHistorianService::handle(
 			output.u64(status.oldest_available_stream_cursor);
 			output.u64(status.block_count);
 			output.u64(status.storage_bytes);
+			output.u64(status.power_quality_event_count);
 			output.u32(static_cast<std::uint32_t>(
 				status.datasets.size()));
 			for (const auto &item : status.datasets) {

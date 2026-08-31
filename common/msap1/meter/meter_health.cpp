@@ -155,6 +155,22 @@ std::vector<HealthReason> evaluate_rpu_aggregation_health_reasons(
 				std::to_string(health.software_ring_current) + "/" +
 				std::to_string(health.software_ring_capacity) +
 				" records occupied)");
+	if (health.control_stack_high_water_bytes <
+			r5_task_stack_minimum_headroom_bytes ||
+	    health.input_stack_high_water_bytes <
+			r5_task_stack_minimum_headroom_bytes ||
+	    health.output_stack_high_water_bytes <
+			r5_task_stack_minimum_headroom_bytes ||
+	    health.validator_stack_high_water_bytes <
+			r5_task_stack_minimum_headroom_bytes)
+		append_reason(
+			reasons, "task_stack_headroom_low",
+			"R5C1 task stack headroom is below 2048 bytes "
+			"(control/input/output/validator " +
+				std::to_string(health.control_stack_high_water_bytes) + "/" +
+				std::to_string(health.input_stack_high_water_bytes) + "/" +
+				std::to_string(health.output_stack_high_water_bytes) + "/" +
+				std::to_string(health.validator_stack_high_water_bytes) + ")");
 
 	/* Engine/output readiness is required only after R5C1 declares itself
 	 * authoritative. During shadow validation these zero flags document the

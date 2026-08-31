@@ -13,7 +13,7 @@ namespace msap1::settings {
 
 struct ProductSettings {
 	//Constraints declaration
-	static constexpr std::uint32_t supported_schema_version = 3;
+	static constexpr std::uint32_t supported_schema_version = 4;
 
 	//Setting Payload
 	std::uint32_t schema_version = supported_schema_version;
@@ -31,5 +31,8 @@ struct ProductSettings {
 
 [[nodiscard]] MeterConversionFile
 to_meter_configuration(const ProductSettings &settings);
+[[nodiscard]] msap1_m18_config_payload
+to_m18_configuration(const ProductSettings &settings,
+	std::uint32_t configuration_generation);
 
 } // namespace msap1::settings

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "msap1/waveform/mncwf_v4.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -63,11 +65,41 @@ enum class WaveformSessionState : std::uint32_t {
 	incomplete = 3,
 };
 
+struct WaveformEventIdentity {
+	std::uint64_t session = 0;
+	std::uint64_t counter = 0;
+	bool operator==(const WaveformEventIdentity &) const = default;
+};
+
+enum class WaveformEventLifecycle : std::uint8_t {
+	start = 0,
+	update = 1,
+	end = 2,
+	abort = 3,
+};
+
 struct WaveformCorrelation {
 	std::uint64_t tai_nanoseconds = 0;
 	std::uint64_t pl_tick = 0;
 	std::uint64_t frame_sequence = 0;
 	std::uint64_t uncertainty_nanoseconds = 0;
+};
+
+/** Immutable authorities copied into each session when its first trigger lands. */
+struct WaveformCaptureContext {
+	MncwfV4CaptureMetadata capture_metadata{};
+	std::vector<MncwfV4ChannelDefinition> channels;
+	MncwfClockSource clock_source = MncwfClockSource::system;
+	MncwfTimeQuality time_quality = MncwfTimeQuality::unknown;
+	std::uint16_t time_flags = 0;
+	std::int32_t utc_offset_seconds = 0;
+};
+
+/** Construction limits. Production uses the 128 MiB default; a smaller ring
+ * lets deterministic verification exercise capacity rollover without changing
+ * the runtime policy or allocating a production-sized test fixture. */
+struct WaveformCaptureOptions {
+	std::size_t history_capacity_frames = waveform_history_frames;
 };
 
 /*
@@ -94,6 +126,14 @@ struct WaveformSessionSummary {
 	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
+	/** Bit N is set when at least one trigger from WaveformTriggerSource N
+	 * contributed to this (possibly merged) capture session. */
+	std::uint32_t trigger_source_mask = 0;
+	/** Zero for a master; otherwise the immediately preceding contiguous
+	 * session sealed at the 128 MiB safe materialization limit. */
+	std::uint64_t continuation_of_session_id = 0;
+	/** First session in a continuation chain (equal to id for a master). */
+	std::uint64_t master_session_id = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
 	/**
 	 * Capture-file decimation divisor: each persisted sample is the mean
@@ -102,6 +142,7 @@ struct WaveformSessionSummary {
 	 */
 	std::uint32_t decimation = 1;
 	std::array<char, waveform_session_name_size> filename{};
+	MncwfUuid capture_uuid{};
 };
 
 struct WaveformStatus {
@@ -215,9 +256,8 @@ class WaveformCapture {
 public:
 	explicit WaveformCapture(std::string device_path,
 				 std::filesystem::path output_directory,
-				 std::array<WaveformChannelMetadata,
-					    waveform_persisted_channels>
-					 channel_metadata = {});
+				 WaveformCaptureContext context = {},
+				 WaveformCaptureOptions options = {});
 	~WaveformCapture();
 
 	WaveformCapture(const WaveformCapture &) = delete;
@@ -233,6 +273,19 @@ public:
 				       std::uint32_t posttrigger_ms,
 				       std::uint32_t decimation,
 				       WaveformTriggerSource source);
+	/** Merge one stable PQ lifecycle into the active capture union. START and
+	 * recovery UPDATE edges add one marker; UPDATE/END extend without duplicate
+	 * markers. A session stays open while any linked event remains active. */
+	WaveformSessionSummary track_power_quality_event(
+		WaveformEventIdentity event_id, WaveformEventLifecycle lifecycle,
+		std::uint64_t trigger_sequence, std::uint64_t current_sequence,
+		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
+		std::uint32_t decimation, MncwfV4EventDescriptor descriptor);
+	/** Replace the authority used by sessions created after this call. Existing
+	 * sessions retain their original capture-time snapshot. */
+	void set_context(WaveformCaptureContext context);
+	void set_time_context(MncwfClockSource source, MncwfTimeQuality quality,
+		std::uint16_t leap_flags = 0u) noexcept;
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
 	std::vector<WaveformSessionSummary> sessions();
@@ -277,8 +330,7 @@ private:
 
 	std::string device_path_;
 	std::filesystem::path output_directory_;
-	std::array<WaveformChannelMetadata, waveform_persisted_channels>
-		channel_metadata_{};
+	WaveformCaptureContext context_{};
 	bool persisted_sessions_discovered_ = false;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
@@ -302,6 +354,7 @@ private:
 	std::vector<GapRange> gaps_;
 	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};
+	std::uint64_t correlation_utc_nanoseconds_ = 0;
 };
 
 } // namespace msap1

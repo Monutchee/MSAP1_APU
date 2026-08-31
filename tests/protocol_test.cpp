@@ -151,8 +151,8 @@ void adc_health_round_trip()
 
 void aggregation_health_round_trip()
 {
-	static_assert(sizeof(msap1_aggregation_health_payload) == 200,
-		      "aggregation health ABI must be 50 packed words");
+	static_assert(sizeof(msap1_aggregation_health_payload) == 216,
+		      "aggregation health ABI must be 54 packed words");
 	msap1_aggregation_health_payload health{};
 	health.health_flags = MSAP1_AGGREGATION_HEALTH_TRANSPORT_AVAILABLE |
 		MSAP1_AGGREGATION_HEALTH_TRANSPORT_INITIALIZED |
@@ -186,6 +186,10 @@ void aggregation_health_round_trip()
 	health.validator_records_processed = 17;
 	health.validator_max_runtime_us = 18;
 	health.validator_max_schedule_gap_us = 19;
+	health.control_stack_high_water_bytes = 4096;
+	health.input_stack_high_water_bytes = 4100;
+	health.output_stack_high_water_bytes = 4200;
+	health.validator_stack_high_water_bytes = 4300;
 
 	const auto wire = msap1::encode_request(
 		MSAP1_RPU_MSG_AGGREGATION_HEALTH, 37, &health,
@@ -221,6 +225,47 @@ void demand_configuration_round_trip()
 		invalid_wire.data(), invalid_wire.size());
 	require_throws([&] { (void)msap1::decode_demand_config_ack(invalid); },
 		"zero demand profile generation was accepted");
+}
+
+void m18_configuration_round_trip()
+{
+	static_assert(sizeof(msap1_m18_event_profile) == 28,
+		"M18 event profile must be seven packed words");
+	static_assert(sizeof(msap1_m18_config_payload) == 316,
+		"M18 configuration must fit one RPMsg frame");
+	static_assert(sizeof(msap1_rpu_msg_header) +
+		      sizeof(msap1_m18_config_payload) <=
+		      MSAP1_RPU_MAX_FRAME_SIZE);
+	static_assert(offsetof(msap1_m18_config_payload, event) == 16);
+	static_assert(offsetof(msap1_m18_config_payload, flicker_flags) == 268);
+	static_assert(offsetof(msap1_m18_config_payload, mains_flags) == 292);
+
+	msap1_m18_config_payload configuration{};
+	configuration.generation = 77u;
+	configuration.event_profile_count = MSAP1_M18_EVENT_TYPE_COUNT;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].flags =
+		MSAP1_M18_EVENT_ENABLED | MSAP1_M18_EVENT_WAVEFORM_ENABLED |
+		MSAP1_M18_EVENT_PER_PHASE | MSAP1_M18_EVENT_IEC_CLASSIFICATION;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].threshold_e4 = 9000u;
+	configuration.event[MSAP1_M18_EVENT_VOLTAGE_SAG].hysteresis_e4 = 200u;
+	configuration.flicker_pst_interval_seconds = 600u;
+	configuration.mains_carrier_millihz = 1000000u;
+	const auto request = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG_SET,
+		93u, &configuration, sizeof(configuration));
+	const auto decoded_request =
+		msap1::decode_message(request.data(), request.size());
+	require(decoded_request.header.version == 10u &&
+			decoded_request.payload.size() == sizeof(configuration),
+		"M18 configuration did not preserve its v10 frame geometry");
+
+	msap1_m18_config_ack_payload acknowledgement{77u, 0u};
+	const auto response = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG,
+		94u, &acknowledgement, sizeof(acknowledgement));
+	const auto decoded = msap1::decode_m18_config_ack(
+		msap1::decode_message(response.data(), response.size()));
+	require(decoded.generation == 77u &&
+		(decoded.capability_flags & MSAP1_M18_TRANSIENT_CAPABLE) == 0u,
+		"M18 acknowledgement changed during wire round trip");
 }
 
 void adc_diagnostic_round_trip()
@@ -263,11 +308,11 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Wire v7 expands each of the four simulator tone slots from two words
-	 * to three: Q16.16 frequency ratio, lane-mask/Q16 amplitude, and Q0.32
-	 * phase. The complete frame remains below the 384-byte RPMsg cap. */
-	static_assert(sizeof(msap1_meter_config_payload) == 312,
-		      "meter config payload must be 312 packed bytes");
+	/* Wire v9 introduced simulator-v1.5 AM and absolute carrier controls; v10
+	 * retains that meter payload, extends aggregation health, and keeps the
+	 * complete frame below the 384-byte RPMsg cap. */
+	static_assert(sizeof(msap1_meter_config_payload) == 352,
+		      "meter config payload must be 352 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_dc_offset_counts) == 172,
 		      "DC offsets must follow the simulator phase step");
@@ -288,7 +333,10 @@ void meter_config_wire_layout()
 		      "the PQ reference must follow the nominal frequency");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       pq_hysteresis_e4) == 308,
-		      "the PQ hysteresis must be the trailing field");
+		      "the PQ hysteresis must retain its v8 offset");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       simulator_am_frequency_millihz) == 312,
+		      "simulator v1.5 fields must be append-only");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
@@ -301,6 +349,8 @@ void meter_config_wire_layout()
 	payload.simulator_flags = MSAP1_SIMULATOR_FLAG_PRESERVE_PHASE;
 	payload.pq_reference_microvolts = 230000000u;
 	payload.pq_hysteresis_e4 = 200u;
+	payload.simulator_am_frequency_millihz = 8800u;
+	payload.simulator_carrier_frequency_millihz = 1000000u;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
 	const auto decoded = msap1::decode_message(wire.data(), wire.size());
@@ -340,6 +390,11 @@ void meter_config_wire_layout()
 		    sizeof(hysteresis));
 	require(hysteresis == 200u,
 		"the PQ hysteresis was not encoded at its normative offset");
+	std::uint32_t am_frequency = 0;
+	std::memcpy(&am_frequency, decoded.payload.data() + 312,
+		    sizeof(am_frequency));
+	require(am_frequency == 8800u,
+		"the AM frequency was not encoded at its normative offset");
 }
 
 void simulator_event_wire_layout()
@@ -367,8 +422,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 8u,
-		"the simulator event message belongs to wire version 8");
+			MSAP1_RPU_VERSION == 10u,
+		"the simulator event message belongs to wire version 10");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -435,7 +490,7 @@ void meter_record_contract()
 	require(timing.nominal_frequency_hz == 60 && timing.cycle_count == 12 &&
 		timing.cycle_locked && !timing.free_run_fallback,
 		"wrong timing word decoding");
-	/* MTR1 capture diagnostics latched at block close, words 60..63. */
+	/* Basic-record capture diagnostics latched at block close, words 60..63. */
 	require(record.capture_frames() == 5 && record.header_errors() == 6 &&
 		record.fifo_overflows() == 7 && record.adc_alerts() == 8,
 		"wrong capture diagnostic words");
@@ -785,6 +840,10 @@ void meter_health_evaluation()
 		MSAP1_AGGREGATION_HEALTH_OUTPUT_ACTIVE |
 		MSAP1_AGGREGATION_HEALTH_AUTHORITATIVE;
 	aggregation.software_ring_capacity = 64;
+	aggregation.control_stack_high_water_bytes = 4096;
+	aggregation.input_stack_high_water_bytes = 4096;
+	aggregation.output_stack_high_water_bytes = 4096;
+	aggregation.validator_stack_high_water_bytes = 4096;
 	response.has_aggregation_health = true;
 	response.rpu_aggregation_health = aggregation;
 	const auto aggregation_healthy = msap1::evaluate_meter_health(response);
@@ -814,6 +873,15 @@ void meter_health_evaluation()
 		"deterministic input loss was not diagnosed");
 	require(has_aggregation_reason("input_ring_pressure_critical"),
 		"critical ring pressure was not diagnosed");
+	aggregation.validator_stack_high_water_bytes = 2047;
+	const auto stack_reasons =
+		msap1::evaluate_rpu_aggregation_health_reasons(aggregation);
+	bool has_stack_reason = false;
+	for (const auto &reason : stack_reasons)
+		if (reason.code == "task_stack_headroom_low")
+			has_stack_reason = true;
+	require(has_stack_reason,
+		"sub-2-KiB runtime task-stack headroom was not diagnosed");
 	response.has_aggregation_health = false;
 	response.rpu_aggregation_health = msap1_aggregation_health_payload{};
 
@@ -882,6 +950,7 @@ int main()
 		adc_health_round_trip();
 		aggregation_health_round_trip();
 		demand_configuration_round_trip();
+		m18_configuration_round_trip();
 		adc_diagnostic_round_trip();
 		meter_config_wire_layout();
 		simulator_event_wire_layout();

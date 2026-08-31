@@ -19,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace msap1::acquisition::daemon {
@@ -26,7 +27,7 @@ namespace msap1::acquisition::daemon {
 /**
  * @brief Consumes meter records from the meter DMA and publishes them.
  *
- * The DMA stream interleaves basic MTR1, 150/180-cycle aggregate MTR2,
+ * The DMA stream interleaves 10/12-cycle basic, 150/180-cycle aggregate,
  * clock-aligned ten-minute M13 records, and two-hour M14 records, each on an
  * INDEPENDENT sequence counter.
  * Responsibilities, in the order a record flows through:
@@ -55,6 +56,8 @@ namespace msap1::acquisition::daemon {
  */
 class MeterRecordIngestor final {
 public:
+	using PqLifecycleCallback = std::function<void(
+		const msap1::PowerQualityEventLifecycleSnapshot &)>;
 	/**
 	 * @param meter         Record source (the DMA reader in production).
 	 * @param configuration The coordinator's ACTIVE configuration; read
@@ -65,7 +68,8 @@ public:
 	MeterRecordIngestor(msap1::acquisition::MeterRecordSource &meter,
 			    const msap1::PreparedMeterConfiguration &configuration,
 			    const msap1::meter::MeasurementTimebase &timebase,
-			    mnc::meter_stream::MeterRecordPublisher &publisher);
+			    mnc::meter_stream::MeterRecordPublisher &publisher,
+			    PqLifecycleCallback pq_lifecycle_callback = {});
 
 	/** @brief Drain and process every complete record the DMA has ready. */
 	void read_available();
@@ -98,7 +102,7 @@ public:
 		return latest_record_;
 	}
 	/**
-	 * @brief Newest accepted AGGREGATE (MTR2) record (raw wire form).
+	 * @brief Newest accepted 150/180-cycle aggregate record (raw wire form).
 	 *
 	 * The 150/180-cycle counterpart of latest_record(): a separate cache
 	 * on its own record stream, so exposing aggregates never changes what
@@ -196,6 +200,49 @@ public:
 	{
 		return latest_power_quality_event_;
 	}
+	/** Final M18 lifecycle edges committed to the durable meter stream. */
+	[[nodiscard]] std::uint64_t pq_lifecycle_records() const
+	{
+		return pq_lifecycle_records_;
+	}
+	[[nodiscard]] std::uint64_t pq_lifecycle_sequence_gaps() const
+	{
+		return pq_lifecycle_sequence_gaps_;
+	}
+	[[nodiscard]] const std::optional<
+		msap1::PowerQualityEventLifecycleSnapshot> &
+	latest_pq_lifecycle() const
+	{
+		return latest_pq_lifecycle_;
+	}
+	/** Accepted FLICKER-v1 records on the independent R5C1 sequence. */
+	[[nodiscard]] std::uint64_t flicker_records() const
+	{
+		return flicker_records_;
+	}
+	[[nodiscard]] std::uint64_t flicker_sequence_gaps() const
+	{
+		return flicker_sequence_gaps_;
+	}
+	[[nodiscard]] const std::optional<msap1::FlickerSnapshot> &
+	latest_flicker(msap1::FlickerRecordKind kind) const
+	{
+		return latest_flicker_[static_cast<std::size_t>(kind)];
+	}
+	/** Accepted MAINS-SIGNAL-v1 observations on their private sequence. */
+	[[nodiscard]] std::uint64_t mains_signal_records() const
+	{
+		return mains_signal_records_;
+	}
+	[[nodiscard]] std::uint64_t mains_signal_sequence_gaps() const
+	{
+		return mains_signal_sequence_gaps_;
+	}
+	[[nodiscard]] const std::optional<msap1::MainsSignalSnapshot> &
+	latest_mains_signal() const
+	{
+		return latest_mains_signal_;
+	}
 	/** @brief Accepted HARMONIC-v1 chunks, including incomplete families. */
 	[[nodiscard]] std::uint64_t harmonic_records() const
 	{
@@ -289,6 +336,7 @@ private:
 	const msap1::PreparedMeterConfiguration &configuration_;
 	const msap1::meter::MeasurementTimebase &timebase_;
 	mnc::meter_stream::MeterRecordPublisher &publisher_;
+	PqLifecycleCallback pq_lifecycle_callback_;
 	msap1::MeterDecoderRegistry decoders_ =
 		msap1::MeterDecoderRegistry::with_builtin_decoders();
 	msap1::MeterData meter_data_;
@@ -312,6 +360,22 @@ private:
 	std::uint64_t pq_events_ = 0;
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_{};
 	std::optional<msap1::PowerQualitySnapshot> latest_power_quality_event_{};
+	/* M18 final lifecycle records have their own R5C1 sequence space and are
+	 * published durably one edge at a time. Malformed edges never advance this
+	 * family baseline or affect any older metrology stream. */
+	std::uint64_t pq_lifecycle_records_ = 0;
+	std::uint64_t pq_lifecycle_sequence_gaps_ = 0;
+	std::optional<std::uint32_t> last_pq_lifecycle_sequence_{};
+	std::optional<msap1::PowerQualityEventLifecycleSnapshot>
+		latest_pq_lifecycle_{};
+	std::uint64_t flicker_records_ = 0;
+	std::uint64_t flicker_sequence_gaps_ = 0;
+	std::optional<std::uint32_t> last_flicker_sequence_{};
+	std::array<std::optional<msap1::FlickerSnapshot>, 3> latest_flicker_{};
+	std::uint64_t mains_signal_records_ = 0;
+	std::uint64_t mains_signal_sequence_gaps_ = 0;
+	std::optional<std::uint32_t> last_mains_signal_sequence_{};
+	std::optional<msap1::MainsSignalSnapshot> latest_mains_signal_{};
 	/* M16 publishes one spectrum only after all 42 channel/chunk records
 	 * agree. The bounded assembler and publication buffer each retain at most
 	 * one partial family; incomplete/mismatched families never reach the

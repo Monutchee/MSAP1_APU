@@ -27,7 +27,7 @@ live metering; see the
 
 `MeterUpdate` is a sparse decoded PL update. A decoder declares its
 measurement period and supplies only the value groups present in that record.
-The `MTR1` decoders produce Basic fundamental updates — cycle-defined blocks
+The BASIC-v4 decoders produce Basic fundamental updates — cycle-defined blocks
 (10 cycles @ 50 Hz, 12 @ 60 Hz; see [TIMING_MODEL.md](TIMING_MODEL.md)), not
 fixed 200 ms intervals — and v2 records additionally carry `BlockTiming`.
 Future power, energy, demand, and power-quality formats register their own

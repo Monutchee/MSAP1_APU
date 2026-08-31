@@ -35,6 +35,8 @@ public:
 	 * transactional and throws so central settings can roll back. */
 	[[nodiscard]] msap1_demand_config_ack_payload configure_demand(
 		const msap1_demand_config_payload &configuration);
+	[[nodiscard]] msap1_m18_config_ack_payload configure_m18(
+		const msap1_m18_config_payload &configuration);
 
 	[[nodiscard]] bool has_cached_health() const noexcept
 	{
@@ -69,6 +71,7 @@ private:
 	std::string resolved_device_;
 	std::unique_ptr<msap1::acquisition::RpuController> controller_;
 	std::optional<msap1_demand_config_payload> desired_demand_;
+	std::optional<msap1_m18_config_payload> desired_m18_;
 	std::optional<std::uint32_t> demand_profile_generation_;
 	msap1_aggregation_health_payload cached_health_{};
 	bool has_cached_health_ = false;

@@ -31,6 +31,9 @@ enum class Command : std::uint32_t {
 	subscribe_historian_events,
 	clear_datasets,
 	recreate_database,
+	query_power_quality_events,
+	link_power_quality_event_waveform,
+	delete_power_quality_events,
 };
 
 /** Server-pushed notifications emitted after a subscription is accepted. */
@@ -48,6 +51,15 @@ class HistorianClient final {
 public:
 	explicit HistorianClient(std::string path = std::string(socket_path));
 	[[nodiscard]] std::vector<HistoryPoint> query(const HistoryQuery &query) const;
+	[[nodiscard]] std::vector<PowerQualityEventCatalogEntry>
+	query_power_quality_events(
+		const PowerQualityEventQuery &query = {}) const;
+	[[nodiscard]] std::uint64_t delete_power_quality_events(
+		std::span<const PowerQualityEventUuid> event_uuids) const;
+	[[nodiscard]] std::uint64_t clear_power_quality_events() const;
+	void link_power_quality_event_waveform(
+		const PowerQualityEventUuid &event_uuid,
+		const WaveformCaptureUuid &capture_uuid) const;
 	[[nodiscard]] HistorianStatus status() const;
 	[[nodiscard]] HistorianCapabilities capabilities() const;
 	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
@@ -66,5 +78,13 @@ private:
 
 [[nodiscard]] std::vector<std::byte> encode_query(const HistoryQuery &query);
 [[nodiscard]] HistoryQuery decode_query(mnc::ipc::ByteReader &reader);
+[[nodiscard]] std::vector<std::byte> encode_power_quality_event_query(
+	const PowerQualityEventQuery &query);
+[[nodiscard]] PowerQualityEventQuery decode_power_quality_event_query(
+	mnc::ipc::ByteReader &reader);
+void encode_power_quality_event_entry(mnc::ipc::ByteWriter &writer,
+	const PowerQualityEventCatalogEntry &entry);
+[[nodiscard]] PowerQualityEventCatalogEntry decode_power_quality_event_entry(
+	mnc::ipc::ByteReader &reader);
 
 } // namespace msap1::history::ipc

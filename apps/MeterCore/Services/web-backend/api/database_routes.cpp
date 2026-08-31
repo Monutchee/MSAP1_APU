@@ -51,6 +51,7 @@ struct HistorianStatusDto {
 	std::uint64_t lag_records = 0;
 	std::uint64_t block_count = 0;
 	std::uint64_t storage_bytes = 0;
+	std::uint64_t power_quality_event_count = 0;
 	std::vector<DatasetStatusDto> datasets;
 };
 
@@ -139,6 +140,8 @@ DatabaseStatusDto database_status(AppContext &app)
 		? stream.newest_cursor - historian.acknowledged_cursor : 0;
 	result.historian.block_count = historian.block_count;
 	result.historian.storage_bytes = historian.storage_bytes;
+	result.historian.power_quality_event_count =
+		historian.power_quality_event_count;
 	for (const auto &dataset : historian.datasets) {
 		result.historian.datasets.push_back({
 			database_dataset_name(dataset.dataset),

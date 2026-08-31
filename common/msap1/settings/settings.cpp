@@ -7,6 +7,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -90,12 +91,27 @@ std::string encode_document(const T &document, bool pretty)
 ProductSettings SettingsCodec::decode(std::string_view json)
 {
 	auto settings = decode_document<ProductSettings>(json, "product settings");
-	// Schema 1 predates MQTT and schema 3 adds presentation-only measurement
-	// topology. Missing members already receive typed defaults; advancing old
+	// Schema 1 predates MQTT, schema 3 adds presentation-only measurement
+	// topology, and schema 4 adds M18 event/flicker/mains policy plus neutral
+	// waveform identity. Missing members receive typed defaults; advancing old
 	// documents here provides a lossless in-memory migration and the next
 	// successful save persists the current schema.
-	if (settings.schema_version == 1 || settings.schema_version == 2)
+	if (settings.schema_version >= 1 && settings.schema_version <= 3) {
+		/* Schema 1-3 had only the M12 voltage-event thresholds. Carry those
+		 * exact operator values into the corresponding M18 profiles; the new
+		 * product-alarm/transient profiles keep their disabled defaults. */
+		const auto &legacy = settings.metering.power_quality;
+		auto &events = settings.metering.events;
+		events.voltage_sag.threshold_percent = legacy.sag_percent;
+		events.voltage_sag.hysteresis_percent = legacy.hysteresis_percent;
+		events.voltage_swell.threshold_percent = legacy.swell_percent;
+		events.voltage_swell.hysteresis_percent = legacy.hysteresis_percent;
+		events.voltage_interruption.threshold_percent =
+			legacy.interruption_percent;
+		events.voltage_interruption.hysteresis_percent =
+			legacy.hysteresis_percent;
 		settings.schema_version = ProductSettings::supported_schema_version;
+	}
 	return settings;
 }
 
@@ -137,7 +153,7 @@ void SettingsValidator::validate(const ProductSettings &settings)
 MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 {
 	MeterConversionFile result;
-	result.schema_version = 3;
+	result.schema_version = 4;
 	result.profile_id = settings.metering.conversion.profile_id;
 	result.adc_source = settings.adc.source;
 	result.rms_window_ms = settings.metering.rms.window_ms;
@@ -150,6 +166,80 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 	result.frequency = settings.metering.frequency;
 	result.power_quality = settings.metering.power_quality;
 	result.simulator = settings.adc.simulator;
+	return result;
+}
+
+msap1_m18_config_payload to_m18_configuration(
+	const ProductSettings &settings, std::uint32_t configuration_generation)
+{
+	settings.validate();
+	if (configuration_generation == 0u)
+		throw std::runtime_error("M18 configuration generation must be non-zero");
+
+	msap1_m18_config_payload result{};
+	result.generation = configuration_generation;
+	result.event_profile_count = MSAP1_M18_EVENT_TYPE_COUNT;
+	result.reference_current_microamperes =
+		static_cast<std::uint32_t>(std::llround(
+			settings.metering.events.reference_current_amperes * 1000000.0));
+	result.reference_voltage_microvolts =
+		static_cast<std::uint32_t>(std::llround(
+			settings.metering.power_quality.reference_volts * 1000000.0));
+
+	const std::array profiles{
+		&settings.metering.events.voltage_sag,
+		&settings.metering.events.voltage_swell,
+		&settings.metering.events.voltage_interruption,
+		&settings.metering.events.rapid_voltage_change,
+		&settings.metering.events.voltage_unbalance,
+		&settings.metering.events.current_sag,
+		&settings.metering.events.current_swell,
+		&settings.metering.events.current_unbalance,
+		&settings.metering.events.transient_voltage,
+	};
+	for (std::size_t index = 0; index < profiles.size(); ++index) {
+		const auto &source = *profiles[index];
+		auto &wire = result.event[index];
+		wire.flags = (source.enabled ?
+			static_cast<std::uint32_t>(MSAP1_M18_EVENT_ENABLED) : 0u) |
+			(source.waveform.enabled ? static_cast<std::uint32_t>(
+				MSAP1_M18_EVENT_WAVEFORM_ENABLED) : 0u) |
+			(source.phase_policy == "per_phase" ?
+				static_cast<std::uint32_t>(MSAP1_M18_EVENT_PER_PHASE) : 0u) |
+			(index <= MSAP1_M18_EVENT_RAPID_VOLTAGE_CHANGE ||
+			 index == MSAP1_M18_EVENT_TRANSIENT_VOLTAGE ?
+				static_cast<std::uint32_t>(
+					MSAP1_M18_EVENT_IEC_CLASSIFICATION) : 0u);
+		wire.threshold_e4 = static_cast<std::uint32_t>(
+			std::llround(source.threshold_percent * 100.0));
+		wire.hysteresis_e4 = static_cast<std::uint32_t>(
+			std::llround(source.hysteresis_percent * 100.0));
+		wire.phase_mask = source.phase_mask;
+		wire.waveform_pretrigger_ms = source.waveform.pretrigger_ms;
+		wire.waveform_posttrigger_ms = source.waveform.posttrigger_ms;
+		wire.waveform_decimation = source.waveform.decimation;
+	}
+
+	const auto &flicker = settings.metering.flicker;
+	result.flicker_flags = flicker.enabled ?
+		static_cast<std::uint32_t>(MSAP1_M18_ENGINE_ENABLED) : 0u;
+	result.flicker_phase_mask = flicker.phase_mask;
+	result.flicker_lamp_voltage = flicker.lamp_voltage;
+	result.flicker_live_cadence_ms = flicker.live_cadence_ms;
+	result.flicker_pst_interval_seconds = flicker.pst_interval_seconds;
+	result.flicker_plt_pst_count = flicker.plt_pst_count;
+
+	const auto &mains = settings.metering.mains_signalling;
+	result.mains_flags = mains.enabled ?
+		static_cast<std::uint32_t>(MSAP1_M18_ENGINE_ENABLED) : 0u;
+	result.mains_carrier_millihz = static_cast<std::uint32_t>(
+		std::llround(mains.carrier_frequency_hz * 1000.0));
+	result.mains_bandwidth_millihz = static_cast<std::uint32_t>(
+		std::llround(mains.bandwidth_hz * 1000.0));
+	result.mains_observation_ms = mains.observation_ms;
+	result.mains_phase_mask = mains.phase_mask;
+	result.mains_threshold_e4 = static_cast<std::uint32_t>(
+		std::llround(mains.threshold_percent * 100.0));
 	return result;
 }
 

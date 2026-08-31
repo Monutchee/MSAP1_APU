@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include <openssl/sha.h>
+
 namespace msap1 {
 namespace {
 
@@ -81,6 +83,30 @@ Reading<Unit> payload_reading(std::int64_t value, bool available,
 }
 
 } // namespace
+
+PowerQualityEventUuid stable_power_quality_event_uuid(
+	const PowerQualityEventId &id)
+{
+	std::array<std::byte, 16> source{};
+	for (unsigned byte = 0; byte < 8u; ++byte) {
+		source[byte] = static_cast<std::byte>(
+			(id.session >> (byte * 8u)) & 0xffu);
+		source[8u + byte] = static_cast<std::byte>(
+			(id.counter >> (byte * 8u)) & 0xffu);
+	}
+	std::array<std::byte, SHA256_DIGEST_LENGTH> digest{};
+	if (SHA256(reinterpret_cast<const unsigned char *>(source.data()),
+			source.size(),
+			reinterpret_cast<unsigned char *>(digest.data())) == nullptr)
+		throw std::runtime_error("power-quality event UUID hash failed");
+	PowerQualityEventUuid result{};
+	std::copy_n(digest.begin(), result.size(), result.begin());
+	result[6] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[6]) & 0x0fu) | 0x50u);
+	result[8] = static_cast<std::byte>(
+		(std::to_integer<std::uint8_t>(result[8]) & 0x3fu) | 0x80u);
+	return result;
+}
 
 void MeterLatestStore::apply(const MeterUpdate &update)
 {
@@ -289,7 +315,7 @@ MeterData::Subscription MeterData::subscribe(MeasurementPeriod period,
 namespace {
 
 /**
- * Channel and frequency decoding for the periodic (MTR1) record format.
+ * Channel and frequency decoding for the 10/12-cycle basic record format.
  * Word 6 is the actual block sample count — the sample count the PL
  * accumulated into these values.
  */
@@ -353,8 +379,8 @@ FundamentalValues decode_fundamental_values(const MeterRecord &record,
 }
 
 /**
- * Aggregate (MTR2) fundamental decoding. Channel order and micro-unit
- * encoding are identical to MTR1; only the word layout differs — two words
+ * 150/180-cycle aggregate fundamental decoding. Channel order and micro-unit
+ * encoding match the basic record; only the word layout differs — two words
  * per channel at words 16..31, one mean-frequency word gated by status
  * bit 2, and channel validity from the word-7 mask (the AND across the 15
  * contributing blocks).
@@ -389,7 +415,7 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 {
 	FundamentalValues fundamental{};
 	/*
-	 * The MTR2 frequency field is informational only: it is the mean of
+	 * The aggregate frequency field is informational only: it is the mean of
 	 * the 15 basic frequency estimates, not a standardized measurement.
 	 * IEC 61000-4-30 defines the frequency product over its own (10 s)
 	 * interval, which will be implemented with that interval in a later
@@ -979,14 +1005,14 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	if (timing_word.nominal_frequency_hz != 50u &&
 	    timing_word.nominal_frequency_hz != 60u)
 		throw std::invalid_argument(
-			"invalid nominal frequency in MTR1 timing word");
+			"invalid nominal frequency in 10/12-cycle basic timing word");
 	const auto nominal = timing_word.nominal_frequency_hz == 50u
 		? NominalFrequency::Hz50
 		: NominalFrequency::Hz60;
 	const auto sample_count = record.block_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(
-			"MTR1 block has a zero sample count");
+			"10/12-cycle basic interval has a zero sample count");
 	const auto first_sample_index = record.first_sample_index();
 	/*
 	 * Zero is not a reachable index. The PL conversion stage issues index 1
@@ -1003,18 +1029,18 @@ MeterUpdate decode_periodic_meter_record(const MeterRecord &record,
 	 */
 	if (first_sample_index == 0u)
 		throw std::invalid_argument(
-			"MTR1 block has a zero first-sample index");
+			"10/12-cycle basic interval has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
-			"MTR1 sample range overflows the 64-bit counter");
+			"10/12-cycle basic sample range overflows the 64-bit counter");
 	/* A locked block is cycle-defined by construction: exactly the
 	 * nominal's cycles-per-block. Fallback blocks are time-defined and
 	 * may close any cycle count, including 0 or a partial tail. */
 	if (timing_word.cycle_locked && !timing_word.free_run_fallback &&
 	    timing_word.cycle_count != cycles_per_basic_block(nominal))
 		throw std::invalid_argument(
-			"MTR1 cycle-locked block has an impossible cycle count");
+			"10/12-cycle basic interval has an impossible cycle count");
 
 	const auto sequence = static_cast<std::uint64_t>(record.sequence());
 	/* Word 6 is the ACTUAL sample count of this cycle-defined block. */
@@ -1051,11 +1077,12 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 {
 	if (!record.header_valid() ||
 	    record.record_format() != meter_aggregate_format)
-		throw std::invalid_argument("invalid MTR2 aggregate record");
+		throw std::invalid_argument(
+			"invalid 150/180-cycle aggregate record");
 	/*
 	 * Validate the aggregation identity before building anything,
-	 * mirroring the hardened MTR1 rules: the PL emits only complete
-	 * 15-block aggregates whose cycle count follows the nominal, so any
+	 * mirroring the hardened 10/12-cycle basic rules: the producer emits only
+	 * complete 15-block aggregates whose cycle count follows the nominal, so any
 	 * other shape is corruption or a future RTL regression and must
 	 * never silently decode into a valid aggregate.
 	 */
@@ -1068,21 +1095,21 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	const auto status = record.aggregate_status();
 	if (!status.complete)
 		throw std::invalid_argument(
-			"MTR2 aggregate is not marked complete");
+			"150/180-cycle aggregate is not marked complete");
 	const auto composition = record.aggregate_composition();
 	if (composition.nominal_frequency_hz != 50u &&
 	    composition.nominal_frequency_hz != 60u)
 		throw std::invalid_argument(
-			"invalid nominal frequency in MTR2 composition word");
+			"invalid nominal frequency in 150/180-cycle aggregate composition word");
 	const auto nominal = composition.nominal_frequency_hz == 50u
 		? NominalFrequency::Hz50
 		: NominalFrequency::Hz60;
 	if (composition.basic_block_count != meter::basic_blocks_per_aggregate)
 		throw std::invalid_argument(
-			"MTR2 aggregate is not built from exactly 15 basic blocks");
+			"150/180-cycle aggregate is not built from exactly 15 basic intervals");
 	if (composition.cycle_count != cycles_per_aggregate(nominal))
 		throw std::invalid_argument(
-			"MTR2 aggregate cycle count does not match its nominal");
+			"150/180-cycle aggregate cycle count does not match its nominal frequency");
 	/*
 	 * The first/last basic sequences must describe exactly 15 consecutive
 	 * basic blocks. Both accessors return uint32_t, so the subtraction is
@@ -1093,11 +1120,11 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 					   record.first_basic_sequence());
 	if (basic_span != meter::basic_blocks_per_aggregate - 1u)
 		throw std::invalid_argument(
-			"MTR2 basic sequence span is not 15 consecutive blocks");
+			"150/180-cycle aggregate does not span 15 consecutive basic intervals");
 	const auto sample_count = record.aggregate_sample_count();
 	if (sample_count == 0u)
 		throw std::invalid_argument(
-			"MTR2 aggregate has a zero sample count");
+			"150/180-cycle aggregate has a zero sample count");
 	const auto first_sample_index = record.aggregate_first_sample_index();
 	/* Same unreachable-zero rule as the basic block: the aggregate's first
 	 * sample is the first sample of its first contributing block, on the
@@ -1105,24 +1132,31 @@ MeterUpdate decode_aggregate_meter_record(const MeterRecord &record,
 	 * aggregate seeded on a block whose index was zeroed inherits it. */
 	if (first_sample_index == 0u)
 		throw std::invalid_argument(
-			"MTR2 aggregate has a zero first-sample index");
+			"150/180-cycle aggregate has a zero first-sample index");
 	if (first_sample_index >
 	    std::numeric_limits<std::uint64_t>::max() - sample_count)
 		throw std::invalid_argument(
-			"MTR2 sample range overflows the 64-bit counter");
+			"150/180-cycle aggregate sample range overflows the 64-bit counter");
 	if (status.utc_overlap && status.utc_resynchronized)
 		throw std::invalid_argument(
-			"MTR2 aggregate has conflicting UTC provenance");
+			"150/180-cycle aggregate has conflicting UTC provenance");
 	const auto expected_last =
 		first_sample_index + static_cast<std::uint64_t>(sample_count) - 1u;
 	const auto actual_last = record.aggregate_last_sample_index();
 	if (status.utc_overlap) {
-		if (actual_last < first_sample_index || actual_last >= expected_last)
+		/* A continuing aggregate overlaps the new synchronized aggregate
+		 * because both include the synchronized Basic interval. When UTC
+		 * lands inside an open Basic interval, the continuing aggregate's
+		 * summed contributions overlap internally and actual_last is earlier
+		 * than expected_last. At an exact Basic boundary its contributors are
+		 * contiguous and actual_last equals expected_last. Both geometries are
+		 * valid; only a range beyond the contribution span is impossible. */
+		if (actual_last < first_sample_index || actual_last > expected_last)
 			throw std::invalid_argument(
-				"MTR2 UTC-overlap range is not shorter than its contribution count");
+				"150/180-cycle UTC-overlap range exceeds its contribution span");
 	} else if (actual_last != expected_last) {
 		throw std::invalid_argument(
-			"MTR2 aggregate sample range is discontinuous");
+			"150/180-cycle aggregate sample range is discontinuous");
 	}
 
 	const auto sequence =
@@ -1574,7 +1608,7 @@ MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 			return decode_periodic_meter_record(record,
 							    received_at);
 		});
-	/* MTR2 aggregates interleave with basic records on the same DMA
+	/* 150/180-cycle aggregates interleave with basic records on the same DMA
 	 * stream; the registry routes them by the format word. */
 	result.register_decoder(meter_aggregate_format,
 		[](const MeterRecord &record, SystemTime received_at) {
@@ -1743,6 +1777,375 @@ PowerQualitySnapshot decode_pq_event_record(const MeterRecord &record)
 				      quality(pq_current_lane_bit[2]), sequence,
 				      received_at, window}};
 	return snapshot;
+}
+
+PowerQualityEventLifecycleSnapshot
+decode_pq_event_lifecycle_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_pq_event_lifecycle_format)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 record header");
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    record.sample_rate_hz() == 0u || record.emit_drops() != 0u)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 common provenance");
+	if ((record.status() & ~0x0fu) != 0u ||
+	    (record.status() & 0x0au) != 0x0au)
+		throw std::invalid_argument("invalid PQ-EVENT-v1 status");
+
+	const auto identity = record.word(13);
+	if ((identity & ~0x000307f3u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 identity has reserved bits");
+	const auto lifecycle = static_cast<std::uint8_t>(identity & 0x3u);
+	const auto type = static_cast<std::uint8_t>((identity >> 4u) & 0x0fu);
+	const auto phase_mask = static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	const auto trigger_source = static_cast<std::uint8_t>(
+		(identity >> 16u) & 0x3u);
+	if (lifecycle > meter_event_lifecycle_abort || type > 8u ||
+	    phase_mask == 0u || trigger_source > 2u)
+		throw std::invalid_argument("PQ-EVENT-v1 identity is out of range");
+
+	PowerQualityEventLifecycleSnapshot result{};
+	result.lifecycle = static_cast<PowerQualityEventLifecycle>(lifecycle);
+	result.type = static_cast<PowerQualityLifecycleType>(type);
+	result.phase_mask = phase_mask;
+	result.trigger_source = trigger_source;
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation = record.word(meter_event_profile_generation_word);
+	result.sample_rate_hz = record.sample_rate_hz();
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_event_last_sample_word);
+	result.id = {record.unsigned64(meter_event_id_word),
+		record.unsigned64(meter_event_id_word + 2u)};
+	result.threshold_e4 = record.word(meter_event_threshold_word);
+	result.hysteresis_e4 = record.word(meter_event_hysteresis_word);
+	const auto waveform = record.word(meter_event_waveform_policy_word);
+	result.waveform_enabled = (waveform & 0x1u) != 0u;
+	result.per_phase = (waveform & 0x2u) != 0u;
+	result.iec_classification = (waveform & 0x4u) != 0u;
+	result.waveform_decimation = waveform >> 8u;
+	result.waveform_pretrigger_ms =
+		record.word(meter_event_waveform_pre_ms_word);
+	result.waveform_posttrigger_ms =
+		record.word(meter_event_waveform_post_ms_word);
+	result.reference_micro_units = record.word(meter_event_reference_word);
+	for (std::size_t phase = 0; phase < 3u; ++phase) {
+		result.minimum_micro_units[phase] =
+			record.word(meter_event_minimum_word + phase);
+		result.maximum_micro_units[phase] =
+			record.word(meter_event_maximum_word + phase);
+		result.current_micro_units[phase] =
+			record.word(meter_event_current_word + phase);
+	}
+	result.duration_samples = record.unsigned64(meter_event_duration_word);
+	result.trigger_sample = record.unsigned64(meter_event_trigger_sample_word);
+	result.start_utc_nanoseconds =
+		record.unsigned64(meter_event_start_utc_ns_word);
+	result.last_utc_nanoseconds =
+		record.unsigned64(meter_event_last_utc_ns_word);
+	result.time_quality = static_cast<TimeQuality>(
+		record.word(meter_event_time_quality_word));
+	result.discontinuities = record.word(meter_event_discontinuity_word);
+	result.update_count = record.word(47u);
+	for (std::size_t lane = 0; lane < result.settings_digest.size(); ++lane)
+		result.settings_digest[lane] =
+			record.word(meter_event_settings_digest_word + lane);
+	result.valid_mask = record.word(7u);
+	result.status = record.status();
+
+	const auto valid_decimation = [](std::uint32_t value) {
+		return value == 1u || value == 2u || value == 4u || value == 8u ||
+		       value == 16u || value == 32u;
+	};
+	if (result.id.session == 0u || result.id.counter == 0u ||
+	    result.profile_generation != result.configuration_generation ||
+	    result.last_sample < result.first_sample ||
+	    result.trigger_sample < result.first_sample ||
+	    result.trigger_sample > result.last_sample ||
+	    result.duration_samples != result.last_sample - result.first_sample ||
+	    result.update_count == 0u || result.reference_micro_units == 0u ||
+	    result.threshold_e4 == 0u || result.threshold_e4 > 0xffffu ||
+	    result.hysteresis_e4 >= result.threshold_e4 ||
+	    result.waveform_pretrigger_ms > 120000u ||
+	    result.waveform_posttrigger_ms > 120000u ||
+	    !valid_decimation(result.waveform_decimation))
+		throw std::invalid_argument("PQ-EVENT-v1 provenance is inconsistent");
+	if ((waveform & ~0x00003f07u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 waveform policy has reserved bits");
+	const bool expected_iec = type <= 3u || type == 8u;
+	if (result.iec_classification != expected_iec)
+		throw std::invalid_argument("PQ-EVENT-v1 taxonomy is inconsistent");
+	const auto expected_valid = result.voltage_event()
+		? static_cast<std::uint32_t>(phase_mask) << 4u
+		: static_cast<std::uint32_t>(phase_mask);
+	if (result.valid_mask != expected_valid)
+		throw std::invalid_argument("PQ-EVENT-v1 phase validity is inconsistent");
+	const auto covered = result.duration_samples ==
+		std::numeric_limits<std::uint64_t>::max()
+		? std::numeric_limits<std::uint64_t>::max()
+		: result.duration_samples + 1u;
+	const auto expected_count = static_cast<std::uint32_t>(std::min(
+		covered, static_cast<std::uint64_t>(
+			std::numeric_limits<std::uint32_t>::max())));
+	if (record.block_sample_count() != expected_count ||
+	    result.discontinuities != record.result_drops())
+		throw std::invalid_argument("PQ-EVENT-v1 span is inconsistent");
+	for (std::size_t phase = 0; phase < 3u; ++phase)
+		if (result.minimum_micro_units[phase] >
+				result.maximum_micro_units[phase] ||
+		    result.current_micro_units[phase] <
+				result.minimum_micro_units[phase] ||
+		    result.current_micro_units[phase] >
+				result.maximum_micro_units[phase])
+			throw std::invalid_argument(
+				"PQ-EVENT-v1 extrema are inconsistent");
+	const auto quality = static_cast<std::uint32_t>(result.time_quality);
+	if (quality > static_cast<std::uint32_t>(TimeQuality::Holdover) ||
+	    (quality == 0u && (result.start_utc_nanoseconds != 0u ||
+			       result.last_utc_nanoseconds != 0u)) ||
+	    (quality != 0u && (result.start_utc_nanoseconds == 0u ||
+			       result.last_utc_nanoseconds <
+				       result.start_utc_nanoseconds)))
+		throw std::invalid_argument("PQ-EVENT-v1 time provenance is inconsistent");
+	bool digest_present = false;
+	for (const auto word : result.settings_digest)
+		digest_present = digest_present || word != 0u;
+	if (!digest_present || record.word(27u) != 0u)
+		throw std::invalid_argument("PQ-EVENT-v1 reserved/snapshot fields are invalid");
+	for (std::size_t word = 52u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument("PQ-EVENT-v1 reserved word is nonzero");
+	return result;
+}
+
+FlickerSnapshot decode_flicker_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_flicker_format)
+		throw std::invalid_argument("invalid FLICKER-v1 record header");
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    record.sample_rate_hz() < 2000u ||
+	    record.sample_rate_hz() > 128000u ||
+	    record.sample_rate_hz() % 2000u != 0u ||
+	    record.emit_drops() != 0u || record.result_drops() != 0u)
+		throw std::invalid_argument("invalid FLICKER-v1 common provenance");
+	if ((record.status() & ~0x5u) != 0u)
+		throw std::invalid_argument("invalid FLICKER-v1 status");
+
+	const auto identity = record.word(13u);
+	const auto kind = static_cast<std::uint8_t>(identity & 0xffu);
+	const auto phase_mask = static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	if ((identity & ~0x000007ffu) != 0u || kind > meter_flicker_kind_plt ||
+	    record.valid_mask() != static_cast<std::uint8_t>(phase_mask << 4u))
+		throw std::invalid_argument("invalid FLICKER-v1 kind or phase mask");
+
+	FlickerSnapshot result{};
+	result.kind = static_cast<FlickerRecordKind>(kind);
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation =
+		record.word(meter_flicker_profile_generation_word);
+	result.sample_rate_hz = record.sample_rate_hz();
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_flicker_last_sample_word);
+	result.sample_count = record.block_sample_count();
+	result.interval_seconds =
+		record.word(meter_flicker_interval_seconds_word);
+	result.phase_valid_mask = phase_mask;
+	const auto model = record.word(meter_flicker_model_word);
+	result.lamp_voltage = static_cast<std::uint16_t>(model & 0xffffu);
+	result.nominal_frequency_hz = static_cast<std::uint8_t>(model >> 16u);
+	result.status = record.status();
+	result.source_status = record.word(meter_flicker_source_status_word);
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		result.pinst_q16[phase] =
+			record.word(meter_flicker_pinst_word + phase);
+		result.pst_q16[phase] = record.word(meter_flicker_pst_word + phase);
+		result.plt_q16[phase] = record.word(meter_flicker_plt_word + phase);
+		result.valid_internal_samples[phase] =
+			record.word(meter_flicker_valid_count_word + phase);
+	}
+
+	const std::uint32_t expected_seconds =
+		kind == meter_flicker_kind_live ? 1u :
+		kind == meter_flicker_kind_pst ? 600u : 7200u;
+	const std::uint32_t expected_internal = expected_seconds * 2000u;
+	const auto expected_span = static_cast<std::uint64_t>(expected_seconds) *
+		result.sample_rate_hz;
+	std::uint32_t maximum_valid = 0u;
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		const auto count = result.valid_internal_samples[phase];
+		maximum_valid = std::max(maximum_valid, count);
+		if (count > expected_internal ||
+		    ((phase_mask & (1u << phase)) != 0u &&
+		     count != expected_internal))
+			throw std::invalid_argument(
+				"FLICKER-v1 phase validity is inconsistent");
+	}
+	const auto expected_count = static_cast<std::uint64_t>(maximum_valid) *
+		(result.sample_rate_hz / 2000u);
+	if (result.profile_generation != result.configuration_generation ||
+	    result.interval_seconds != expected_seconds ||
+	    result.last_sample < result.first_sample ||
+	    result.last_sample - result.first_sample + 1u != expected_span ||
+	    result.sample_count != expected_count ||
+	    record.unsigned64(meter_flicker_interval_first_word) !=
+		    result.first_sample ||
+	    (model & 0xff000000u) != 0u ||
+	    (result.lamp_voltage != 120u && result.lamp_voltage != 230u) ||
+	    (result.nominal_frequency_hz != 50u &&
+	     result.nominal_frequency_hz != 60u) ||
+	    (result.source_status & ~0xffu) != 0u)
+		throw std::invalid_argument("FLICKER-v1 provenance is inconsistent");
+	if (kind != meter_flicker_kind_live &&
+	    (result.source_status & (1u << 7u)) != 0u)
+		throw std::invalid_argument("completed FLICKER-v1 interval is settling");
+	if (kind == meter_flicker_kind_live) {
+		for (std::size_t phase = 0u; phase < 3u; ++phase)
+			if (result.pst_q16[phase] != 0u || result.plt_q16[phase] != 0u)
+				throw std::invalid_argument(
+					"live FLICKER-v1 carries completed metrics");
+	} else if (kind == meter_flicker_kind_pst) {
+		for (const auto value : result.plt_q16)
+			if (value != 0u)
+				throw std::invalid_argument(
+					"Pst FLICKER-v1 carries a Plt result");
+	} else if (phase_mask == 0u) {
+		throw std::invalid_argument("Plt FLICKER-v1 has no valid phase");
+	}
+	for (std::size_t word = 34u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument("FLICKER-v1 reserved word is nonzero");
+	return result;
+}
+
+MainsSignalSnapshot decode_mains_signal_record(const MeterRecord &record)
+{
+	if (!record.header_valid() ||
+	    record.record_format() != meter_mains_signal_format)
+		throw std::invalid_argument("invalid MAINS-SIGNAL-v1 record header");
+	const auto rate = record.sample_rate_hz();
+	const bool supported_rate = rate == 2000u || rate == 4000u ||
+		rate == 8000u || rate == 16000u || rate == 32000u ||
+		rate == 64000u || rate == 128000u;
+	if (record.sequence() == 0u || record.configuration_generation() == 0u ||
+	    !supported_rate || record.emit_drops() != 0u ||
+	    record.result_drops() != 0u)
+		throw std::invalid_argument(
+			"invalid MAINS-SIGNAL-v1 common provenance");
+	if ((record.status() & ~0x5u) != 0u)
+		throw std::invalid_argument("invalid MAINS-SIGNAL-v1 status");
+
+	const auto identity = record.word(13u);
+	const auto valid_mask = static_cast<std::uint8_t>(identity & 0x7u);
+	const auto detected_mask =
+		static_cast<std::uint8_t>((identity >> 8u) & 0x7u);
+	if ((identity & ~0x00000707u) != 0u ||
+	    (detected_mask & ~valid_mask) != 0u ||
+	    record.word(7u) != static_cast<std::uint32_t>(valid_mask) << 4u)
+		throw std::invalid_argument(
+			"invalid MAINS-SIGNAL-v1 phase identity");
+
+	MainsSignalSnapshot result{};
+	result.sequence = record.sequence();
+	result.configuration_generation = record.configuration_generation();
+	result.profile_generation =
+		record.word(meter_mains_profile_generation_word);
+	result.sample_rate_hz = rate;
+	result.first_sample = record.first_sample_index();
+	result.last_sample = record.unsigned64(meter_mains_last_sample_word);
+	result.sample_count = record.block_sample_count();
+	result.phase_valid_mask = valid_mask;
+	result.detected_phase_mask = detected_mask;
+	result.configured_millihz =
+		record.word(meter_mains_configured_millihz_word);
+	result.measured_millihz =
+		record.word(meter_mains_measured_millihz_word);
+	result.bandwidth_millihz =
+		record.word(meter_mains_bandwidth_millihz_word);
+	result.observation_ms = record.word(meter_mains_observation_ms_word);
+	result.source_status = record.word(meter_mains_source_status_word);
+	result.threshold_e4 = record.word(meter_mains_threshold_e4_word);
+	result.reference_microvolts =
+		record.word(meter_mains_reference_microvolts_word);
+	result.status = record.status();
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		result.magnitude_microvolts[phase] =
+			record.word(meter_mains_magnitude_word + phase);
+		result.background_microvolts[phase] =
+			record.word(meter_mains_background_word + phase);
+	}
+
+	const auto upper_frequency =
+		static_cast<std::uint64_t>(result.configured_millihz) +
+		result.bandwidth_millihz;
+	const auto nyquist_millihz = static_cast<std::uint64_t>(rate) * 500u;
+	const auto expected_samples = rate / 5u;
+	if (result.profile_generation != result.configuration_generation ||
+	    result.configured_millihz == 0u ||
+	    result.bandwidth_millihz < 4u ||
+	    result.bandwidth_millihz >= result.configured_millihz ||
+	    upper_frequency >= nyquist_millihz ||
+	    upper_frequency >= 12500000u || result.observation_ms != 200u ||
+	    result.threshold_e4 > 0xffffu || result.reference_microvolts == 0u ||
+	    result.sample_count != expected_samples ||
+	    result.last_sample < result.first_sample ||
+	    result.last_sample - result.first_sample + 1u != expected_samples ||
+	    (result.source_status & ~0x3fu) != 0u ||
+	    (result.source_status & 1u) == 0u)
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 provenance is inconsistent");
+
+	const bool source_arithmetic =
+		(result.source_status & (1u << 4u)) != 0u;
+	const bool public_arithmetic = (result.status & 1u) != 0u;
+	if (source_arithmetic != public_arithmetic ||
+	    ((result.source_status & (1u << 3u)) != 0u &&
+	     (result.status & (1u << 2u)) == 0u))
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 status provenance is inconsistent");
+
+	const auto threshold_microvolts =
+		(static_cast<std::uint64_t>(result.reference_microvolts) *
+			 result.threshold_e4 + 9999u) /
+		10000u;
+	std::uint8_t expected_detected = 0u;
+	bool background_dominant = false;
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		if ((valid_mask & (1u << phase)) == 0u)
+			continue;
+		if (result.magnitude_microvolts[phase] >= threshold_microvolts)
+			expected_detected |= static_cast<std::uint8_t>(1u << phase);
+		if (result.background_microvolts[phase] >
+		    result.magnitude_microvolts[phase])
+			background_dominant = true;
+	}
+	if (detected_mask != expected_detected ||
+	    background_dominant !=
+		((result.source_status & (1u << 5u)) != 0u))
+		throw std::invalid_argument(
+			"MAINS-SIGNAL-v1 detection result is inconsistent");
+
+	if (detected_mask == 0u) {
+		if (result.measured_millihz != result.configured_millihz)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 idle frequency is inconsistent");
+	} else {
+		const auto half_bandwidth = result.bandwidth_millihz / 2u;
+		const auto lower = result.configured_millihz - half_bandwidth;
+		const auto upper = static_cast<std::uint64_t>(
+			result.configured_millihz) + half_bandwidth;
+		if (result.measured_millihz < lower ||
+		    result.measured_millihz > upper)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 measured frequency is out of band");
+	}
+
+	for (std::size_t word = 30u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument(
+				"MAINS-SIGNAL-v1 reserved word is nonzero");
+	return result;
 }
 
 } // namespace msap1

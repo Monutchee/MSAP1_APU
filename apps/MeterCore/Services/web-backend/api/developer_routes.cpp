@@ -5,6 +5,7 @@
  */
 
 #include "response.hpp"
+#include "query.hpp"
 #include "routes.hpp"
 
 #include "msap1/system/soc_temperature.hpp"
@@ -84,66 +85,6 @@ struct DeveloperAboutDto {
 	std::string digest_purpose;
 	std::vector<ComponentFingerprintDto> components;
 };
-
-unsigned hex_digit(char value)
-{
-	if (value >= '0' && value <= '9')
-		return static_cast<unsigned>(value - '0');
-	if (value >= 'a' && value <= 'f')
-		return static_cast<unsigned>(value - 'a' + 10);
-	if (value >= 'A' && value <= 'F')
-		return static_cast<unsigned>(value - 'A' + 10);
-	throw std::invalid_argument("invalid URL encoding");
-}
-
-std::string url_decode(std::string_view value)
-{
-	std::string result;
-	result.reserve(value.size());
-	for (std::size_t index = 0; index < value.size(); ++index) {
-		if (value[index] == '+') {
-			result.push_back(' ');
-			continue;
-		}
-		if (value[index] != '%') {
-			result.push_back(value[index]);
-			continue;
-		}
-		if (index + 2 >= value.size())
-			throw std::invalid_argument("invalid URL encoding");
-		const auto byte = (hex_digit(value[index + 1]) << 4u) |
-				  hex_digit(value[index + 2]);
-		result.push_back(static_cast<char>(byte));
-		index += 2;
-	}
-	return result;
-}
-
-/** Parse the query string of @p target into decoded name/value pairs. */
-std::unordered_map<std::string, std::string>
-query_parameters(std::string_view target)
-{
-	std::unordered_map<std::string, std::string> result;
-	const auto question = target.find('?');
-	if (question == std::string_view::npos)
-		return result;
-	auto query = target.substr(question + 1);
-	while (!query.empty()) {
-		const auto separator = query.find('&');
-		const auto item = query.substr(0, separator);
-		const auto equals = item.find('=');
-		const auto name = url_decode(item.substr(0, equals));
-		const auto value = equals == std::string_view::npos
-			? std::string{}
-			: url_decode(item.substr(equals + 1));
-		if (!name.empty())
-			result.insert_or_assign(name, value);
-		if (separator == std::string_view::npos)
-			break;
-		query.remove_prefix(separator + 1);
-	}
-	return result;
-}
 
 /** @throws std::invalid_argument unless 1 <= limit <= 500 (default 100). */
 std::size_t

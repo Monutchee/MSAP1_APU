@@ -18,6 +18,7 @@
 #include "msap1/waveform/waveform_capture.hpp"
 #include "ipc/ipc_channel.hpp"
 #include "pipeline/aggregation_health_monitor.hpp"
+#include "pipeline/event_waveform_linker.hpp"
 #include "pipeline/health_monitor.hpp"
 #include "pipeline/record_ingestor.hpp"
 #include "support/options.hpp"
@@ -114,6 +115,8 @@ public:
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
 	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;
 	[[nodiscard]] msap1::PowerQualityResponse power_quality_response() const;
+	[[nodiscard]] msap1::FlickerResponse flicker_response() const;
+	[[nodiscard]] msap1::MainsSignalResponse mains_signal_response() const;
 	[[nodiscard]] msap1::HarmonicResponse harmonic_response(
 		msap1::MeasurementPeriod period) const;
 	/**
@@ -186,6 +189,7 @@ private:
 	 * and force a fresh mapping. */
 	bool ten_minute_boundary_programmed_ = false;
 	msap1::meter_stream::MeterRecordStreamClient meter_stream_;
+	EventWaveformLinker event_waveform_linker_;
 	MeterRecordIngestor ingest_;
 	msap1::meter::InProcessMeterSnapshotProvider snapshot_provider_;
 	/* Composition root for the two consumer-facing meter-data paths. Narrow

@@ -14,7 +14,7 @@ The provider is the single typed access point for current MSAP1 measurements:
 ```mermaid
 flowchart LR
     PL["PL meter DMA records"] --> ACQ["msap1-fpga-acquisition"]
-    ACQ --> DEC["typed MTR1/MTR2 decoder registry"]
+    ACQ --> DEC["typed basic/aggregate decoder registry"]
     DEC --> DATA["msap1::MeterData"]
     DATA --> PROVIDER["InProcessMeterSnapshotProvider"]
     PROVIDER --> SNAP["MeterSnapshotProvider API"]
@@ -25,7 +25,7 @@ flowchart LR
 
 `MeterData` owns latest period views. `InProcessMeterSnapshotProvider` projects a typed
 MSAP1 view into the product-neutral `mnc::meter::MeterSnapshot` shape. Consumers
-do not open `/dev/msap1-meter`, read RPMsg, parse MTR1 records, or know the PL
+do not open `/dev/msap1-meter`, read RPMsg, parse raw meter records, or know the PL
 record layout.
 
 `MeterDataProvider` is the common consumer-facing facade. It exposes two
@@ -281,7 +281,7 @@ sequenceDiagram
 
 The Web backend maps the typed result to `MeterSnapshotResponse` and JSON DTOs.
 The CLI uses the same request and selects human or machine output. Neither
-frontend parses MTR1 or accesses DMA.
+frontend parses raw meter records or accesses DMA.
 
 ## 10. Recommended workflow and tests
 

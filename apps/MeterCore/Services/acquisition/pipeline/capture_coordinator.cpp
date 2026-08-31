@@ -6,11 +6,15 @@
 #include "support/logs.hpp"
 #include "support/utc_clock.hpp"
 
+#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -20,6 +24,19 @@
 namespace msap1::acquisition::daemon {
 
 using namespace std::chrono_literals;
+
+msap1::PreparedMeterConfiguration prepare_product_configuration(
+	const msap1::settings::ProductSettings &settings)
+{
+	auto result = msap1::prepare_meter_configuration(
+		msap1::settings::to_meter_configuration(settings),
+		settings.metering.sample_rate_hz);
+	result.m18_wire = msap1::settings::to_m18_configuration(
+		settings, result.wire.generation);
+	msap1::coordinate_configuration_generation(
+		result.wire, result.m18_wire);
+	return result;
+}
 
 msap1_demand_config_payload demand_configuration(
 	const msap1::settings::DemandSettings &settings)
@@ -32,18 +49,149 @@ msap1_demand_config_payload demand_configuration(
 	};
 }
 
+std::string event_label(PowerQualityLifecycleType type)
+{
+	switch (type) {
+	case PowerQualityLifecycleType::voltage_sag: return "voltage sag";
+	case PowerQualityLifecycleType::voltage_swell: return "voltage swell";
+	case PowerQualityLifecycleType::voltage_interruption:
+		return "voltage interruption";
+	case PowerQualityLifecycleType::rapid_voltage_change:
+		return "rapid voltage change";
+	case PowerQualityLifecycleType::voltage_unbalance:
+		return "voltage unbalance";
+	case PowerQualityLifecycleType::current_sag: return "current sag";
+	case PowerQualityLifecycleType::current_swell: return "current swell";
+	case PowerQualityLifecycleType::current_unbalance:
+		return "current unbalance";
+	case PowerQualityLifecycleType::transient_voltage:
+		return "transient voltage";
+	}
+	return "power-quality event";
+}
+
+MncwfTimeQuality waveform_time_quality(meter::TimeQuality quality)
+{
+	switch (quality) {
+	case meter::TimeQuality::Synchronized: return MncwfTimeQuality::locked;
+	case meter::TimeQuality::Holdover: return MncwfTimeQuality::holdover;
+	case meter::TimeQuality::Unsynchronized:
+		return MncwfTimeQuality::unlocked;
+	}
+	return MncwfTimeQuality::unknown;
+}
+
+MncwfV4EventDescriptor waveform_event_descriptor(
+	const PowerQualityEventLifecycleSnapshot &snapshot)
+{
+	MncwfV4EventDescriptor result{};
+	result.event_uuid = mncwf_stable_event_uuid(
+		snapshot.id.session, snapshot.id.counter);
+	result.taxonomy = snapshot.iec_classification
+		? MncwfEventTaxonomy::iec_61000_4_30
+		: MncwfEventTaxonomy::product_alarm;
+	result.event_type = static_cast<std::uint16_t>(snapshot.type) + 1u;
+	result.lifecycle = static_cast<MncwfEventLifecycle>(
+		static_cast<std::uint16_t>(snapshot.lifecycle) + 1u);
+	result.time_quality = waveform_time_quality(snapshot.time_quality);
+	result.flags = mncwf_event_start_valid | mncwf_event_current_valid |
+		mncwf_event_trigger_valid | mncwf_event_settings_snapshot_valid;
+	if (snapshot.terminal())
+		result.flags |= mncwf_event_end_valid;
+	if (snapshot.start_utc_nanoseconds != 0u &&
+	    snapshot.last_utc_nanoseconds != 0u)
+		result.flags |= mncwf_event_utc_valid;
+	if (snapshot.discontinuities != 0u)
+		result.flags |= mncwf_event_contaminated |
+			mncwf_event_discontinuous;
+	result.phase_mask = snapshot.phase_mask;
+	result.quantity = static_cast<std::uint8_t>(snapshot.type) >=
+		static_cast<std::uint8_t>(PowerQualityLifecycleType::current_sag) &&
+		static_cast<std::uint8_t>(snapshot.type) <=
+		static_cast<std::uint8_t>(PowerQualityLifecycleType::current_unbalance)
+		? MncwfQuantity::current : MncwfQuantity::voltage;
+	result.si_unit = result.quantity == MncwfQuantity::current
+		? MncwfSiUnit::ampere : MncwfSiUnit::volt;
+	result.trigger_source = snapshot.trigger_source;
+	result.configuration_generation = snapshot.configuration_generation;
+	result.start_sequence = snapshot.first_sample;
+	result.current_sequence = snapshot.last_sample;
+	result.end_sequence = snapshot.terminal() ? snapshot.last_sample : 0u;
+	result.trigger_sequence = snapshot.trigger_sample;
+	result.start_utc_nanoseconds = snapshot.start_utc_nanoseconds;
+	result.current_utc_nanoseconds = snapshot.last_utc_nanoseconds;
+	result.end_utc_nanoseconds = snapshot.terminal()
+		? snapshot.last_utc_nanoseconds : 0u;
+	result.trigger_utc_nanoseconds = snapshot.start_utc_nanoseconds;
+	result.reference_micro_units = snapshot.reference_micro_units;
+	result.threshold_micro_units = static_cast<std::int64_t>(
+		(static_cast<std::uint64_t>(snapshot.reference_micro_units) *
+			snapshot.threshold_e4 + 5000u) / 10000u);
+	result.hysteresis_micro_units = static_cast<std::int64_t>(
+		(static_cast<std::uint64_t>(snapshot.reference_micro_units) *
+			snapshot.hysteresis_e4 + 5000u) / 10000u);
+	const bool minimum_event =
+		snapshot.type == PowerQualityLifecycleType::voltage_sag ||
+		snapshot.type == PowerQualityLifecycleType::voltage_interruption ||
+		snapshot.type == PowerQualityLifecycleType::current_sag;
+	for (std::size_t phase = 0; phase < result.extrema_micro_units.size();
+	     ++phase)
+		result.extrema_micro_units[phase] = minimum_event
+			? snapshot.minimum_micro_units[phase]
+			: snapshot.maximum_micro_units[phase];
+	result.duration_samples = snapshot.duration_samples;
+	result.update_count = snapshot.update_count;
+	result.status = snapshot.status;
+	result.taxonomy_name = snapshot.iec_classification
+		? "IEC 61000-4-30 voltage event" : "MSAP1 product alarm";
+	result.label = event_label(snapshot.type);
+	std::ostringstream settings;
+	settings << "{\"configuration_generation\":"
+		 << snapshot.configuration_generation
+		 << ",\"profile_generation\":" << snapshot.profile_generation
+		 << ",\"reference_micro_units\":"
+		 << snapshot.reference_micro_units
+		 << ",\"threshold_e4\":" << snapshot.threshold_e4
+		 << ",\"hysteresis_e4\":" << snapshot.hysteresis_e4
+		 << ",\"phase_mask\":" << static_cast<unsigned>(snapshot.phase_mask)
+		 << ",\"per_phase\":" << (snapshot.per_phase ? "true" : "false")
+		 << ",\"waveform\":{\"pretrigger_ms\":"
+		 << snapshot.waveform_pretrigger_ms
+		 << ",\"posttrigger_ms\":" << snapshot.waveform_posttrigger_ms
+		 << ",\"decimation\":" << snapshot.waveform_decimation
+		 << "},\"settings_digest\":\"" << std::hex << std::setfill('0');
+	for (const auto word : snapshot.settings_digest)
+		settings << std::setw(8) << word;
+	settings << "\"}";
+	result.settings_snapshot_json = settings.str();
+	return result;
+}
+
 CaptureCoordinator::CaptureCoordinator(const Options &options)
 	: options_(options),
 	  product_settings_(load_runtime_settings()),
-	  configuration_(msap1::prepare_meter_configuration(
-		  msap1::settings::to_meter_configuration(product_settings_),
-		  product_settings_.metering.sample_rate_hz)),
+	  configuration_(prepare_product_configuration(product_settings_)),
 	  meter_(options.meter_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
-		    waveform_metadata(configuration_)),
+		    waveform_capture_context(product_settings_, configuration_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
-	  ingest_(meter_, configuration_, timebase_, meter_stream_),
+	  ingest_(meter_, configuration_, timebase_, meter_stream_,
+		  [this](const msap1::PowerQualityEventLifecycleSnapshot &event) {
+			  if (!event.waveform_enabled)
+				  return;
+			  const auto session = waveform_.track_power_quality_event(
+				  {event.id.session, event.id.counter},
+				  static_cast<msap1::WaveformEventLifecycle>(
+					  event.lifecycle),
+				  event.trigger_sample, event.last_sample,
+				  event.waveform_pretrigger_ms,
+				  event.waveform_posttrigger_ms,
+				  event.waveform_decimation,
+				  waveform_event_descriptor(event));
+			  event_waveform_linker_.enqueue(event.id,
+				  session.capture_uuid);
+		  }),
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
 	  health_(rpu_),
@@ -169,6 +317,15 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		? 0u
 		: 16ull * 1'000'000'000ull / sample_rate;
 	const auto clock_status = read_utc_clock_status();
+	std::uint16_t leap_flags = 0u;
+	if (clock_status.positive_leap_pending)
+		leap_flags |= mncwf_time_positive_leap_pending;
+	if (clock_status.negative_leap_pending)
+		leap_flags |= mncwf_time_negative_leap_pending;
+	waveform_.set_time_context(MncwfClockSource::system,
+		clock_status.synchronized ? MncwfTimeQuality::locked
+			: MncwfTimeQuality::unlocked,
+		leap_flags);
 	timebase_.record_sync(
 		{.sample_counter = sync->sample_counter,
 		 .utc_ns = static_cast<std::int64_t>(sync->realtime_nanoseconds),
@@ -249,6 +406,18 @@ void CaptureCoordinator::configure_meter()
 		  std::to_string(configuration_.wire.generation)},
 		 {"MNC_SAMPLE_RATE_HZ",
 		  std::to_string(configuration_.wire.sample_rate_hz)}});
+	const auto r5c1_ack =
+		aggregation_health_.configure_m18(configuration_.m18_wire);
+	if (r5c1_ack.generation != configuration_.wire.generation)
+		throw std::runtime_error(
+			"R5C1 M18 configuration generation does not match");
+	const auto r5c0_m18 = msap1::decode_m18_config_ack(
+		rpu_.transact(MSAP1_RPU_MSG_M18_CONFIG_SET,
+			&configuration_.m18_wire,
+			sizeof(configuration_.m18_wire), 1000ms));
+	if (r5c0_m18.generation != configuration_.wire.generation)
+		throw std::runtime_error(
+			"R5C0 M18 configuration generation does not match");
 	const auto response = rpu_.transact(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		&configuration_.wire, sizeof(configuration_.wire), 1000ms);
 	const auto acknowledgement = msap1::decode_meter_config_ack(response);
@@ -422,14 +591,9 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 {
 	auto candidate = msap1::settings::SettingsCodec::decode(json);
 	msap1::settings::SettingsValidator::validate(candidate);
-	auto meter_settings =
-		msap1::settings::to_meter_configuration(candidate);
+	auto staged = prepare_product_configuration(candidate);
 	const bool pipeline_changed =
-		candidate.metering.sample_rate_hz !=
-			configuration_.wire.sample_rate_hz ||
-		msap1::encode_meter_configuration(meter_settings, false) !=
-		msap1::encode_meter_configuration(
-				configuration_.source, false);
+		staged.wire.generation != configuration_.wire.generation;
 	const bool demand_changed =
 		candidate.metering.demand.method !=
 			product_settings_.metering.demand.method ||
@@ -442,9 +606,6 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 			(void)aggregation_health_.configure_demand(
 				demand_configuration(candidate.metering.demand));
 		if (pipeline_changed) {
-			auto staged = msap1::prepare_meter_configuration(
-				std::move(meter_settings),
-				candidate.metering.sample_rate_hz);
 			apply_complete_configuration(std::move(staged),
 				"central_settings_applied");
 		} else {
@@ -465,7 +626,9 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 		}
 		throw;
 	}
+	auto capture_context = waveform_capture_context(candidate, configuration_);
 	product_settings_ = std::move(candidate);
+	waveform_.set_context(std::move(capture_context));
 }
 
 void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
@@ -475,6 +638,12 @@ void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
 
 	auto staged = msap1::prepare_meter_configuration(
 		configuration_.source, sample_rate_hz);
+	auto staged_settings = product_settings_;
+	staged_settings.metering.sample_rate_hz = sample_rate_hz;
+	staged.m18_wire = msap1::settings::to_m18_configuration(
+		staged_settings, staged.wire.generation);
+	msap1::coordinate_configuration_generation(
+		staged.wire, staged.m18_wire);
 	const auto previous = configuration_;
 	const bool restart = running_;
 	if (restart)
@@ -522,6 +691,8 @@ void CaptureCoordinator::apply_sample_rate(std::uint32_t sample_rate_hz)
 		{{"MNC_SAMPLE_RATE_HZ", std::to_string(sample_rate_hz)},
 		 {"MNC_CONFIGURATION_GENERATION",
 		  std::to_string(configuration_.wire.generation)}});
+	waveform_.set_context(
+		waveform_capture_context(staged_settings, configuration_));
 }
 
 void CaptureCoordinator::run_adc_diagnostic(std::uint32_t flow)
@@ -664,7 +835,7 @@ msap1::MeterSnapshotResponse CaptureCoordinator::meter_snapshot_response(
 		}
 	}
 
-	/* MTR1 transport diagnostics are meaningful only for the current basic
+	/* Basic-record transport diagnostics are meaningful only for the current
 	 * record. They deliberately remain outside the generic provider model. */
 	if (request.selection.period != mnc::meter::MeasurementPeriod::Basic ||
 	    !ingest_.latest_record())
@@ -834,6 +1005,38 @@ msap1::PowerQualityResponse CaptureCoordinator::power_quality_response() const
 	return response;
 }
 
+msap1::FlickerResponse CaptureCoordinator::flicker_response() const
+{
+	msap1::FlickerResponse response{};
+	response.running = running_;
+	response.records = ingest_.flicker_records();
+	response.sequence_gaps = ingest_.flicker_sequence_gaps();
+	const auto copy = [&response, this](msap1::FlickerRecordKind kind,
+		bool &present, msap1::FlickerSnapshot &target) {
+		const auto &source = ingest_.latest_flicker(kind);
+		present = source.has_value();
+		if (source)
+			target = *source;
+	};
+	copy(msap1::FlickerRecordKind::live, response.has_live, response.live);
+	copy(msap1::FlickerRecordKind::pst, response.has_pst, response.pst);
+	copy(msap1::FlickerRecordKind::plt, response.has_plt, response.plt);
+	return response;
+}
+
+msap1::MainsSignalResponse CaptureCoordinator::mains_signal_response() const
+{
+	msap1::MainsSignalResponse response{};
+	response.running = running_;
+	response.records = ingest_.mains_signal_records();
+	response.sequence_gaps = ingest_.mains_signal_sequence_gaps();
+	const auto &latest = ingest_.latest_mains_signal();
+	response.has_snapshot = latest.has_value();
+	if (latest)
+		response.snapshot = *latest;
+	return response;
+}
+
 msap1::HarmonicResponse CaptureCoordinator::harmonic_response(
 	msap1::MeasurementPeriod period) const
 {
@@ -896,15 +1099,22 @@ msap1::WaveformResponse CaptureCoordinator::waveform_response()
 {
 	msap1::WaveformResponse response{};
 	response.waveform = waveform_.status();
-	for (const auto &session : waveform_.sessions())
+	for (const auto &session : waveform_.sessions()) {
+		const auto capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
+			? std::string{} : mncwf_uuid_string(session.capture_uuid);
 		response.sessions.push_back(
 			{session.id, session.trigger_sequence,
 			 session.first_sequence, session.last_sequence,
 			 session.trigger_tai_nanoseconds,
 			 session.trigger_realtime_nanoseconds,
 			 session.sample_rate_hz, session.event_count,
+			 session.trigger_source_mask,
 			 session.state, session.decimation,
-			 std::string(session.filename.data())});
+			 std::string(session.filename.data()),
+			 session.continuation_of_session_id,
+			 session.master_session_id, capture_uuid});
+	}
+	response.waveform_directory = options_.waveform_directory;
 	return response;
 }
 

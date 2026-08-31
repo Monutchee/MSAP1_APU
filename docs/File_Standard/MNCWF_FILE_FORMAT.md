@@ -12,7 +12,8 @@ waveform capture files. It is intended for:
 - AI-assisted diagnostic tools.
 
 The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
-The authoritative writer and public data definitions are:
+The production writer emits version 4. Its authoritative implementation and
+public data definitions are:
 
 ```text
 common/msap1/waveform/waveform_capture.cpp
@@ -22,13 +23,21 @@ common/msap1/waveform/waveform_capture.hpp
 Consumers in other repositories should link to this document instead of
 maintaining a second copy of the binary definition.
 
+The version 4 section-directory contract, encoder, defensive reader, and
+capture-time metadata rules are specified in
+[`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Versions 1 through 3
+remain accepted for existing persisted history. Future COMTRADE and PQDIF
+programs are converters from MNCWF v4, not alternate on-device recorders.
+Their source-field matrix is in
+[`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
+
 Completed captures are stored under:
 
 ```text
 /data/mnc/waveform/
 ```
 
-The version 2 writer uses this UTC filename convention:
+The production writer uses this UTC filename convention:
 
 ```text
 waveform-<session-id>-YYYY-MM-DD_HH-MM-SS-mmm.mncwf
@@ -53,7 +62,7 @@ Two related formats exist, but they serve different purposes:
 | Format | Scope | Header | Channels | Purpose |
 |---|---|---:|---:|---|
 | `WFM1` | PL-to-Linux DMA transport | 64 bytes | 8 | Fixed 32,832-byte blocks used by the kernel driver and acquisition daemon |
-| `.mncwf` | Persistent capture file | 256 bytes in v2 | 7 | Variable-length, self-describing product waveform archive |
+| `.mncwf` | Persistent capture file | 64-byte header plus section directory in v4 | 7 | Variable-length, self-describing product waveform archive |
 
 Each `WFM1` block contains 1024 frames of eight signed 32-bit channel words.
 The daemon uses these blocks to maintain its rolling history. When a completed
@@ -85,7 +94,7 @@ structure after validating the available size.
 
 ## Channel model
 
-Version 2 stores exact raw ADC samples for seven product channels:
+Versions 2 and 3 store seven product channels:
 
 | Stored index | ADC source | Name | Kind | Engineering unit |
 |---:|---:|---|---|---|
@@ -98,17 +107,21 @@ Version 2 stores exact raw ADC samples for seven product channels:
 | 6 | CH6 | `Va` | voltage | V |
 
 ADC CH7 remains present in the live PL/DMA transport for internal diagnostics,
-but it is deliberately omitted from version 2 product capture files. Version
-1 files contain all eight legacy channels and remain readable.
+but it is deliberately omitted from version 2 and 3 product capture files.
+Version 1 files contain all eight legacy channels and remain readable.
 
 Each stored sample is the signed 24-bit AD7771 value sign-extended to `s32`.
 The upper eight bits must therefore equal the sign extension of bit 23 for
 files produced by the current capture path. Readers should preserve all 32
 bits and should not silently mask the value to 24 bits.
 
+Version 2 and version 3 with `decimation == 1` retain each acquisition sample
+exactly. Version 3 with a larger divisor stores boxcar means in ADC-count
+units, as specified below; such a frame is not an individual raw conversion.
+
 ### Raw-to-engineering conversion
 
-The file stores raw samples only once. Each version 2 channel descriptor
+The file stores sample words only once. Each version 2 or 3 channel descriptor
 contains the profile-specific conversion scale active when the capture was
 created. This lets a viewer switch between raw ADC counts and converted
 amperes or volts without duplicating the sample payload.
@@ -142,7 +155,7 @@ raw-only for that capture. The conversion coefficients are a capture-time
 snapshot; a later meter profile change must not alter conversion of an older
 file.
 
-## Version 2 file layout
+## Versions 2 and 3 file layout
 
 ```text
 +-----------------------------+ offset 0
@@ -156,16 +169,17 @@ file.
 +-----------------------------+ exact end of file
 ```
 
-The current version 2 writer emits all regions contiguously without padding.
+The version 2 writer and current version 3 writer emit all regions contiguously
+without padding.
 
 ### Fixed header
 
-The version 2 fixed header is exactly 256 bytes:
+The version 2 and 3 fixed header is exactly 256 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
 | 0 | 8 | bytes | Magic: `MNCWF1\0\0` |
-| 8 | 4 | `u32` | Format version: `2` |
+| 8 | 4 | `u32` | Format version: `2` or `3` |
 | 12 | 4 | `u32` | Header bytes: `256` |
 | 16 | 8 | `u64` | Session ID |
 | 24 | 8 | `u64` | First frame sequence |
@@ -187,7 +201,31 @@ The version 2 fixed header is exactly 256 bytes:
 | 128 | 8 | `u64` | Frame-data offset |
 | 136 | 8 | `u64` | Frame count |
 | 144 | 8 | `u64` | Primary trigger `CLOCK_REALTIME`, nanoseconds |
-| 152 | 104 | bytes | Reserved; currently zero |
+| 152 | 4 | `u32` | Version 3 decimation divisor; this location is zero/reserved in version 2 |
+| 156 | 100 | bytes | Reserved; currently zero |
+
+#### Version 3 decimation
+
+Version 3 adds only the `decimation` field at offset 152; every other header,
+descriptor, event, and frame field keeps its version 2 layout and meaning.
+The current writer accepts divisors `1`, `2`, `4`, `8`, `16`, and `32`.
+Readers must use an implicit divisor of `1` for version 1 and version 2 files.
+
+For a divisor greater than one, each stored channel word is the signed integer
+mean, truncated toward zero, of a consecutive group of up to `decimation`
+acquisition frames. The last group may contain fewer frames. The header keeps
+`sample_rate_hz` and all sequences in the acquisition-frame domain; therefore:
+
+```text
+effective_sample_rate_hz = sample_rate_hz / decimation
+sequence(n) = first_sequence + n * decimation
+frame_count = (last_sequence - first_sequence) / decimation + 1
+```
+
+`last_sequence` identifies the first acquisition frame folded into the last
+stored frame. Version 3 does not retain the number of source frames in a short
+final group. A converter that requires that distinction must not guess it;
+MNCWF v4 will carry an explicit rate/decimation segment contract.
 
 #### Session and trigger fields
 
@@ -221,7 +259,7 @@ the measured sample rate.
 
 ### Channel descriptor
 
-Each version 2 channel descriptor is exactly 32 bytes:
+Each version 2 and 3 channel descriptor is exactly 32 bytes:
 
 | Offset | Size | Type | Field |
 |---:|---:|---|---|
@@ -267,17 +305,19 @@ frame 1: sample[0], sample[1], ... sample[channel_count - 1]
 ```
 
 There is no timestamp, sequence, or padding word inside an individual frame.
-For zero-based frame index `n`:
+Let `decimation` be the version 3 field, or `1` for a version 1 or 2 file. For
+zero-based stored-frame index `n`:
 
 ```text
-sequence(n) = first_sequence + n
+sequence(n) = first_sequence + n * decimation
 file_offset(n) = frame_data_offset + n * frame_bytes
 ```
 
-The primary trigger index is:
+The primary trigger need not fall exactly on a stored decimation-group anchor.
+Its fractional position in the stored-frame domain is:
 
 ```text
-trigger_index = trigger_sequence - first_sequence
+trigger_index = (trigger_sequence - first_sequence) / decimation
 ```
 
 Time relative to the primary trigger is:
@@ -299,13 +339,13 @@ tai_nanoseconds(n) =
 The same equation can use `trigger_realtime_nanoseconds` for human display,
 but realtime is not the preferred clock for cross-system event correlation.
 
-## Version 2 validation rules
+## Versions 2 and 3 validation rules
 
-A current, complete version 2 file satisfies all of these invariants:
+A complete version 2 or 3 file satisfies all of these invariants:
 
 ```text
 magic == "MNCWF1\0\0"
-version == 2
+version in {2, 3}
 header_bytes == 256
 channel_count > 0
 channel_count <= 8
@@ -317,9 +357,14 @@ event_table_offset ==
 frame_data_offset ==
     event_table_offset + event_count * 24
 last_sequence >= first_sequence
-frame_count == last_sequence - first_sequence + 1
+(last_sequence - first_sequence) % decimation == 0
+frame_count == (last_sequence - first_sequence) / decimation + 1
 file_size == frame_data_offset + frame_count * frame_bytes
 ```
+
+For version 2, `decimation` in these equations is the implicit value `1` and
+the four bytes at offset 152 are reserved. For version 3, `decimation` must be
+one of `1`, `2`, `4`, `8`, `16`, or `32`.
 
 Also validate:
 
@@ -334,7 +379,12 @@ The current daemon requires the exact expected file size when rediscovering
 captures after a reboot. Appending private data to the file is therefore not
 supported.
 
-## Version 1 compatibility
+## Version 2 and version 1 compatibility
+
+Version 2 has the same descriptors and region layout as version 3, but it has
+no decimation field. Readers must interpret version 2 offset 152 as reserved
+and use `decimation = 1`; they must not reject a valid version 2 file because
+that reserved value is zero.
 
 Legacy version 1 has a 128-byte header. Fields at offsets 0 through 95 match
 the corresponding fields in version 2. Version 1 does not contain the version
@@ -419,7 +469,7 @@ class Mncwf:
             "<8sII", self.data, 0)
         if magic != MAGIC:
             raise ValueError("not an MNCWF file")
-        if self.version not in (1, 2):
+        if self.version not in (1, 2, 3):
             raise ValueError(f"unsupported MNCWF version {self.version}")
 
         if len(self.data) < self.header_bytes:
@@ -437,13 +487,13 @@ class Mncwf:
 
         if self.last_sequence < self.first_sequence:
             raise ValueError("invalid sequence range")
-        sequence_frame_count = (
-            self.last_sequence - self.first_sequence + 1
-        )
+        self.decimation = 1
+        sequence_span = self.last_sequence - self.first_sequence
+        sequence_frame_count = sequence_span + 1
 
-        if self.version == 2:
+        if self.version >= 2:
             if self.header_bytes != 256:
-                raise ValueError("invalid version 2 header size")
+                raise ValueError("invalid version 2/3 header size")
             (
                 self.channel_count,
                 self.frame_bytes,
@@ -458,14 +508,18 @@ class Mncwf:
                 self.trigger_realtime_ns,
             ) = struct.unpack_from("<QQQQQ", self.data, 112)
 
+            if self.version >= 3:
+                self.decimation = struct.unpack_from(
+                    "<I", self.data, 152)[0]
+                if self.decimation not in (1, 2, 4, 8, 16, 32):
+                    raise ValueError("invalid version 3 decimation")
+
             if not 0 < self.channel_count <= 8:
                 raise ValueError("invalid channel count")
             if descriptor_bytes != 32:
                 raise ValueError("unsupported channel descriptor size")
             if self.frame_bytes != self.channel_count * 4:
                 raise ValueError("invalid frame size")
-            if self.frame_count != sequence_frame_count:
-                raise ValueError("frame count and sequence range disagree")
             if channel_offset != self.header_bytes:
                 raise ValueError("invalid channel table offset")
             if self.event_offset != channel_offset + self.channel_count * 32:
@@ -499,6 +553,15 @@ class Mncwf:
                 Channel(i, 3, 0, False, f"CH{i}", "")
                 for i in range(8)
             ]
+
+        if sequence_span % self.decimation:
+            raise ValueError("sequence range is not decimation-aligned")
+        sequence_frame_count = sequence_span // self.decimation + 1
+        if self.frame_count != sequence_frame_count:
+            raise ValueError("frame count and sequence range disagree")
+        self.effective_sample_rate_hz = (
+            self.sample_rate_hz / self.decimation
+        )
 
         checked_range(len(self.data), self.event_offset,
                       self.event_count, EVENT_BYTES)
@@ -540,7 +603,7 @@ class Mncwf:
         ]
 
     def relative_seconds(self, index: int):
-        sequence = self.first_sequence + index
+        sequence = self.first_sequence + index * self.decimation
         return (
             sequence - self.trigger_sequence
         ) / self.sample_rate_hz
@@ -578,10 +641,12 @@ transients; a min/max envelope is preferred.
 
 ## Integrity and security
 
-Version 2 currently has no embedded checksum, signature, compression, or
-encryption. Files stored by the product are protected by filesystem and
-authenticated download policy, but an external `.mncwf` file must still be
-treated as untrusted binary input.
+Versions 1 through 3 have no embedded checksum, signature, compression, or
+encryption. Version 4 adds CRC32C integrity for the header, directory, and
+every section, as specified in the version 4 document; CRC is integrity error
+detection, not authenticity or encryption. Files stored by the product are
+protected by filesystem and authenticated download policy, but an external
+`.mncwf` file must still be treated as untrusted binary input.
 
 Structural validation can identify truncation and many corrupt layouts, but it
 cannot prove the sample payload is authentic. If transport or archival
@@ -612,8 +677,10 @@ after the current payload.
 4. Use little-endian signed interpretation for sample words.
 5. Use 64-bit integer or `BigInt` handling for sequences, timestamps, counts,
    and offsets.
-6. Do not infer channel ordering when version 2 descriptors are available.
+6. Do not infer channel ordering when version 2 or 3 descriptors are available.
 7. Treat conversion-invalid descriptors as raw-only.
 8. Use the capture's stored scale rather than the device's current profile.
 9. Display every event in the event table, including unknown event sources.
 10. Treat TAI as event-correlation time and realtime as filename/UI time.
+11. For version 3, validate and apply the stored decimation divisor to every
+    sequence, time-axis, and effective-rate calculation.

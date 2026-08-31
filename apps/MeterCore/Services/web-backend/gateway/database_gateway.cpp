@@ -24,6 +24,24 @@ DatabaseGateway::query(const history::HistoryQuery &query) const
 	return historian_.query(query);
 }
 
+std::vector<history::PowerQualityEventCatalogEntry>
+DatabaseGateway::query_power_quality_events(
+	const history::PowerQualityEventQuery &query) const
+{
+	return historian_.query_power_quality_events(query);
+}
+
+std::uint64_t DatabaseGateway::delete_power_quality_events(
+	std::span<const PowerQualityEventUuid> event_uuids) const
+{
+	return historian_.delete_power_quality_events(event_uuids);
+}
+
+std::uint64_t DatabaseGateway::clear_power_quality_events() const
+{
+	return historian_.clear_power_quality_events();
+}
+
 void DatabaseGateway::clear_history(
 	std::span<const mnc::meter_stream::DatabaseDataset> datasets) const
 {

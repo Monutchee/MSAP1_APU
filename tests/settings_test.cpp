@@ -48,8 +48,23 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
-		assert(initial.settings.schema_version == 3u);
+		assert(initial.settings.schema_version == 4u);
+		assert(initial.settings.metering.events.voltage_sag.enabled);
+		assert(initial.settings.metering.events.voltage_sag.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.voltage_swell.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.voltage_interruption.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.rapid_voltage_change.waveform.decimation == 8u);
+		assert(!initial.settings.metering.events.current_sag.enabled);
+		assert(initial.settings.metering.events.voltage_unbalance.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.current_sag.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.current_swell.waveform.decimation == 8u);
+		assert(initial.settings.metering.events.current_unbalance.waveform.decimation == 8u);
+		assert(!initial.settings.metering.events.transient_voltage.enabled);
+		assert(initial.settings.metering.events.transient_voltage.waveform.decimation == 8u);
+		assert(initial.settings.metering.flicker.pst_interval_seconds == 600u);
+		assert(!initial.settings.metering.mains_signalling.enabled);
 		assert(initial.settings.metering.sample_rate_hz == 128000u);
+		assert(initial.settings.waveform.default_decimation == 1u);
 		assert(initial.settings.metering.measurement_topology == "wye");
 		assert(initial.settings.metering.system_nominal_voltage_v == 120.0);
 		assert(initial.settings.metering.demand.method == "sliding");
@@ -102,6 +117,73 @@ void test_demand_profile_validation()
 		}
 		assert(rejected);
 	}
+}
+
+void test_power_quality_settings_and_wire_snapshot()
+{
+	TestTree tree("power-quality-contract");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	auto settings = handler.active().settings;
+	settings.metering.power_quality.reference_volts = 120.0;
+	settings.metering.events.voltage_sag.threshold_percent = 88.5;
+	settings.metering.events.current_sag.enabled = true;
+	settings.metering.events.reference_current_amperes = 5.0;
+	settings.metering.events.current_sag.waveform.enabled = true;
+	settings.metering.flicker.lamp_voltage = 230u;
+	settings.metering.mains_signalling.enabled = true;
+	settings.metering.mains_signalling.carrier_frequency_hz = 1000.0;
+	settings.waveform.station_id = "station-a";
+	settings.waveform.site_id = "site-a";
+	settings.waveform.circuit_id = "circuit-a";
+	const auto saved = handler.save(settings);
+	const auto prepared = msap1::prepare_meter_configuration(
+		msap1::settings::to_meter_configuration(saved.settings),
+		saved.settings.metering.sample_rate_hz);
+	const auto wire = msap1::settings::to_m18_configuration(
+		saved.settings, prepared.wire.generation);
+	assert(wire.generation == prepared.wire.generation);
+	assert(wire.event_profile_count == MSAP1_M18_EVENT_TYPE_COUNT);
+	assert(wire.event[MSAP1_M18_EVENT_VOLTAGE_SAG].threshold_e4 == 8850u);
+	assert((wire.event[MSAP1_M18_EVENT_CURRENT_SAG].flags &
+		MSAP1_M18_EVENT_ENABLED) != 0u);
+	assert(wire.reference_current_microamperes == 5000000u);
+	assert(wire.reference_voltage_microvolts == 120000000u);
+	assert(wire.flicker_lamp_voltage == 230u);
+	assert(wire.mains_carrier_millihz == 1000000u);
+
+	settings = saved.settings;
+	settings.metering.events.transient_voltage.enabled = true;
+	bool transient_rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		transient_rejected = true;
+	}
+	assert(transient_rejected);
+
+	settings = saved.settings;
+	settings.metering.mains_signalling.carrier_frequency_hz = 12490.0;
+	settings.metering.mains_signalling.bandwidth_hz = 20.0;
+	bool frontend_band_rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		frontend_band_rejected = true;
+	}
+	assert(frontend_band_rejected);
+
+	settings = saved.settings;
+	settings.metering.sample_rate_hz = 2000u;
+	settings.metering.mains_signalling.carrier_frequency_hz = 990.0;
+	settings.metering.mains_signalling.bandwidth_hz = 20.0;
+	bool nyquist_band_rejected = false;
+	try {
+		(void)handler.save(settings);
+	} catch (const std::runtime_error &) {
+		nyquist_band_rejected = true;
+	}
+	assert(nyquist_band_rejected);
 }
 
 void test_nominal_frequency_validation()
@@ -187,7 +269,7 @@ void test_existing_settings_default_system_nominal_voltage()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 			 std::istreambuf_iterator<char>());
-	const std::string schema = "\"schema_version\": 3";
+	const std::string schema = "\"schema_version\": 4";
 	const auto schema_position = json.find(schema);
 	assert(schema_position != std::string::npos);
 	json.replace(schema_position, schema.size(), "\"schema_version\": 2");
@@ -208,16 +290,47 @@ void test_existing_settings_default_system_nominal_voltage()
 	assert(pretrigger_position != std::string::npos);
 	json.replace(pretrigger_position, original_pretrigger.size(),
 		     "\"default_pretrigger_ms\": 4321");
+	const std::string original_sag = "\"sag_percent\": 90.0";
+	const auto sag_position = json.find(original_sag);
+	assert(sag_position != std::string::npos);
+	json.replace(sag_position, original_sag.size(), "\"sag_percent\": 87.5");
+	const std::string original_swell = "\"swell_percent\": 110.0";
+	const auto swell_position = json.find(original_swell);
+	assert(swell_position != std::string::npos);
+	json.replace(swell_position, original_swell.size(),
+		     "\"swell_percent\": 112.5");
+	const std::string original_interruption =
+		"\"interruption_percent\": 10.0";
+	const auto interruption_position = json.find(original_interruption);
+	assert(interruption_position != std::string::npos);
+	json.replace(interruption_position, original_interruption.size(),
+		     "\"interruption_percent\": 7.5");
+	const std::string original_hysteresis =
+		"\"hysteresis_percent\": 2.0";
+	const auto hysteresis_position = json.find(original_hysteresis);
+	assert(hysteresis_position != std::string::npos);
+	json.replace(hysteresis_position, original_hysteresis.size(),
+		     "\"hysteresis_percent\": 1.5");
 	std::filesystem::create_directories(tree.data);
 	std::ofstream(tree.data / "active.json") << json;
 
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
-	assert(handler.active().settings.schema_version == 3u);
+	assert(handler.active().settings.schema_version == 4u);
 	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
 	assert(handler.active().settings.metering.measurement_topology == "wye");
 	assert(handler.active().settings.metering.system_nominal_voltage_v ==
 	       120.0);
+	const auto &events = handler.active().settings.metering.events;
+	assert(events.voltage_sag.threshold_percent == 87.5);
+	assert(events.voltage_swell.threshold_percent == 112.5);
+	assert(events.voltage_interruption.threshold_percent == 7.5);
+	assert(events.voltage_sag.hysteresis_percent == 1.5);
+	assert(events.voltage_swell.hysteresis_percent == 1.5);
+	assert(events.voltage_interruption.hysteresis_percent == 1.5);
+	assert(!events.current_sag.enabled);
+	assert(!events.voltage_unbalance.enabled);
+	assert(!events.transient_voltage.enabled);
 }
 
 void test_failed_apply_preserves_active()
@@ -350,6 +463,7 @@ int main()
 {
 	test_first_boot_and_direct_save();
 	test_demand_profile_validation();
+	test_power_quality_settings_and_wire_snapshot();
 	test_nominal_frequency_validation();
 	test_system_nominal_voltage_validation();
 	test_measurement_topology_validation();

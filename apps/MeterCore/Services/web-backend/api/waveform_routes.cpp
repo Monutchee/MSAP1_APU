@@ -5,12 +5,23 @@
  */
 
 #include "health_dto.hpp"
+#include "query.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
+#include "msap1/waveform/mncwf_v4_export.hpp"
+
+#include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <exception>
+#include <memory>
+#include <ranges>
+#include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -30,6 +41,8 @@ struct WaveformTriggerDto {
 /** Body of DELETE /api/v1/waveforms. */
 struct WaveformDeleteDto {
 	std::uint64_t session_id = 0;
+	bool all = false;
+	bool confirmed = false;
 };
 
 /** One capture session in the waveform status document. */
@@ -43,8 +56,12 @@ struct WaveformSessionDto {
 	std::uint64_t trigger_realtime_nanoseconds;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t event_count;
+	std::string origin;
 	std::uint32_t decimation;
 	std::string filename;
+	std::uint64_t continuation_of_session_id;
+	std::uint64_t master_session_id;
+	std::string capture_uuid;
 };
 
 /** Body of GET /api/v1/waveforms (also returned by trigger/delete). */
@@ -67,6 +84,7 @@ struct WaveformDto {
 	std::uint64_t history_capacity_frames;
 	std::uint64_t completed_sessions;
 	std::uint64_t incomplete_sessions;
+	std::vector<std::string> export_formats;
 	std::vector<WaveformSessionDto> sessions;
 };
 
@@ -78,6 +96,19 @@ std::string waveform_state_name(msap1::WaveformSessionState state)
 	case msap1::WaveformSessionState::incomplete: return "incomplete";
 	}
 	return "unknown";
+}
+
+std::string waveform_origin(std::uint32_t mask)
+{
+	const auto manual = (mask &
+		((1u << static_cast<unsigned>(WaveformTriggerSource::manual_cli)) |
+		 (1u << static_cast<unsigned>(WaveformTriggerSource::manual_web)))) != 0u;
+	const auto power_quality = (mask &
+		(1u << static_cast<unsigned>(WaveformTriggerSource::pq_event))) != 0u;
+	if (manual && power_quality) return "mixed";
+	if (manual) return "manual";
+	if (power_quality) return "power_quality";
+	return "legacy";
 }
 
 /** Project a daemon waveform response onto the JSON status document. */
@@ -103,6 +134,7 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 		status.history_capacity_frames,
 		status.completed_sessions,
 		status.incomplete_sessions,
+		{"mncwf"},
 		{},
 	};
 	result.sessions.reserve(response.sessions.size());
@@ -117,11 +149,45 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 			session.trigger_realtime_nanoseconds,
 			session.sample_rate_hz,
 			session.event_count,
+			waveform_origin(session.trigger_source_mask),
 			session.decimation,
 			session.filename,
+			session.continuation_of_session_id,
+			session.master_session_id,
+			session.capture_uuid,
 		});
 	}
 	return result;
+}
+
+struct WaveformExportSelection {
+	std::uint64_t session_id;
+	MncwfUuid event_uuid;
+};
+
+WaveformExportSelection export_selection(std::string_view target)
+{
+	const auto parameters = query_parameters(target);
+	if (parameters.size() != 3u || !parameters.contains("session_id") ||
+	    !parameters.contains("event_id") || !parameters.contains("format"))
+		throw std::invalid_argument(
+			"required query: session_id, event_id, format=mncwf");
+	if (parameters.at("format") != "mncwf")
+		throw std::invalid_argument(
+			"unsupported waveform export format; available formats: mncwf");
+	std::uint64_t session_id = 0u;
+	const auto &session = parameters.at("session_id");
+	const auto parsed = std::from_chars(session.data(),
+		session.data() + session.size(), session_id);
+	if (parsed.ec != std::errc{} ||
+	    parsed.ptr != session.data() + session.size() || session_id == 0u)
+		throw std::invalid_argument(
+			"session_id must be a positive integer");
+	const auto event_uuid = mncwf_uuid_from_string(parameters.at("event_id"));
+	if (!event_uuid || mncwf_uuid_is_zero(*event_uuid))
+		throw std::invalid_argument(
+			"event_id must be a nonzero canonical UUID");
+	return {session_id, *event_uuid};
 }
 
 } // namespace
@@ -221,8 +287,8 @@ webengine::Response post_waveform_trigger(AppContext &app,
 /**
  * @brief DELETE /api/v1/waveforms (Admin)
  *
- * Deletes one completed waveform capture session and its persisted file.
- * The session is identified by the body's non-zero "session_id".
+ * Deletes one completed waveform capture session and its persisted file, or
+ * every inactive session when the explicitly confirmed "all" selector is set.
  *
  * @return 200 with the updated waveform status, 400 for invalid JSON or a
  *         missing session ID, or 409 when the daemon rejects the deletion.
@@ -239,25 +305,122 @@ delete_waveform_session(AppContext &app,
 			return error_response(
 				webengine::http::status::bad_request,
 				"invalid waveform deletion JSON");
-		if (deletion.session_id == 0u)
+		if (deletion.all && deletion.session_id != 0u)
+			return error_response(
+				webengine::http::status::bad_request,
+				"select waveform session_id or all, but not both");
+		if (deletion.all && !deletion.confirmed)
+			return error_response(
+				webengine::http::status::bad_request,
+				"bulk waveform deletion requires explicit confirmation");
+		if (!deletion.all && deletion.session_id == 0u)
 			return error_response(
 				webengine::http::status::bad_request,
 				"waveform session ID is required");
-		const auto response =
-			app.acquisition.delete_waveform(deletion.session_id);
+
+		auto response = app.acquisition.waveform_status();
 		require_acquisition_ok(response.status);
+		std::vector<std::uint64_t> targets;
+		if (deletion.all) {
+			if (std::ranges::any_of(response.sessions,
+					[](const auto &session) {
+						return session.state ==
+							WaveformSessionState::capturing;
+					}))
+				return error_response(webengine::http::status::conflict,
+					"all waveform data cannot be cleared while a capture is active");
+			for (const auto &session : response.sessions)
+				targets.push_back(session.id);
+		} else {
+			targets.push_back(deletion.session_id);
+		}
+		for (const auto session_id : targets) {
+			response = app.acquisition.delete_waveform(session_id);
+			require_acquisition_ok(response.status);
+		}
 		log_api_event(mnc::logging::Priority::notice,
-			"waveform capture deleted",
-			"waveform_deleted",
+			deletion.all ? "all waveform captures deleted"
+				: "waveform capture deleted",
+			deletion.all ? "waveforms_cleared" : "waveform_deleted",
 			{{"MNC_REQUEST_ID", correlation},
-			 {"MNC_WAVEFORM_SESSION",
-			  std::to_string(deletion.session_id)}});
+			 {deletion.all ? "MNC_WAVEFORMS_DELETED"
+				: "MNC_WAVEFORM_SESSION",
+			  std::to_string(deletion.all ? targets.size()
+				: deletion.session_id)}});
 		return json_response(webengine::http::status::ok,
 			waveform_status(response));
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/waveforms", error);
 		return error_response(webengine::http::status::conflict,
 			error.what());
+	}
+}
+
+webengine::HandlerResult export_waveform_event(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	WaveformExportSelection selection{};
+	try {
+		const auto target = context.request.target();
+		selection = export_selection(
+			std::string_view(target.data(), target.size()));
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
+	}
+
+	try {
+		const auto response = app.acquisition.waveform_status();
+		require_acquisition_ok(response.status);
+		const auto session = std::ranges::find_if(response.sessions,
+			[&selection](const auto &candidate) {
+				return candidate.id == selection.session_id;
+			});
+		if (session == response.sessions.end())
+			return error_response(webengine::http::status::not_found,
+				"waveform session was not found");
+		if (session->state != WaveformSessionState::complete ||
+		    session->filename.empty())
+			return error_response(webengine::http::status::conflict,
+				"waveform session is not a completed capture");
+		if (response.waveform_directory.empty())
+			throw std::runtime_error(
+				"acquisition daemon returned no waveform directory");
+
+		auto file = MncwfV4ExportFile::open(response.waveform_directory,
+			session->filename, selection.event_uuid);
+		const auto event_text = mncwf_uuid_string(selection.event_uuid);
+		const auto download_name = "waveform-" +
+			std::to_string(selection.session_id) + "-event-" +
+			event_text + ".mncwf";
+		log_api_event(mnc::logging::Priority::info,
+			"MNCWF event export opened", "waveform_export_opened",
+			{{"MNC_WAVEFORM_SESSION",
+			  std::to_string(selection.session_id)},
+			 {"MNC_EVENT_ID", event_text},
+			 {"MNC_EXPORT_FORMAT", "mncwf"}});
+		return webengine::StreamingDownload{
+			download_name,
+			"application/x-mncwf",
+			file->size(),
+			[file = std::move(file)](std::uint64_t offset,
+				std::span<std::byte> destination) {
+				return file->read(offset, destination);
+			}};
+	} catch (const AcquisitionUnavailable &error) {
+		log_api_failure("/api/v1/waveforms/export", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	} catch (const std::system_error &error) {
+		log_api_failure("/api/v1/waveforms/export", error);
+		return error_response(webengine::http::status::conflict,
+			"waveform master is unavailable: " +
+				std::string(error.what()));
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveforms/export", error);
+		return error_response(webengine::http::status::unprocessable_entity,
+			"waveform master cannot produce this event export: " +
+				std::string(error.what()));
 	}
 }
 

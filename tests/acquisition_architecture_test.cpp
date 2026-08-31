@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 
 namespace {
@@ -35,6 +36,9 @@ void rejection_interval_categories_cover_meter_tiers()
 	constexpr std::array cases{
 		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
 		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_flicker_format, 0, "flicker", "flicker interval"},
+		Case{msap1::meter_mains_signal_format, 0, "mains_signal",
+			"mains-signalling observation"},
 		Case{msap1::meter_aggregate_format, 0, "cycles_150_180",
 			"150/180-cycle"},
 		Case{msap1::meter_ten_minute_open_format, 0, "minutes_10_live",
@@ -280,15 +284,16 @@ void typed_commands_round_trip_through_the_registry()
 			response.has_snapshot = true;
 			response.snapshot.period = request.selection.period;
 			response.snapshot.sequence = 0x1'0000'0002ull;
-			response.snapshot.timing = mnc::meter::MeterSnapshotTiming{
-				.quality = mnc::meter::TimeQuality::Synchronized,
-				.utc_start_nanoseconds = 1'700'000'000'000'000'000ll,
-				.utc_uncertainty_nanoseconds = 250,
-				.first_sample_index = 123456,
-				.sample_count = 7680,
-				.cycle_count = 12,
-				.nominal_frequency_hz = 60,
-			};
+			mnc::meter::MeterSnapshotTiming timing{};
+			timing.quality = mnc::meter::TimeQuality::Synchronized;
+			timing.utc_start_nanoseconds =
+				1'700'000'000'000'000'000ll;
+			timing.utc_uncertainty_nanoseconds = 250;
+			timing.first_sample_index = 123456;
+			timing.sample_count = 7680;
+			timing.cycle_count = 12;
+			timing.nominal_frequency_hz = 60;
+			response.snapshot.timing = timing;
 			response.snapshot.values.push_back({
 				.attribute = request.selection.attributes.front(),
 				.unit = mnc::meter::MeterUnit::MicroVolts,
@@ -362,6 +367,93 @@ void typed_commands_round_trip_through_the_registry()
 		order_127.angle_millidegrees == 359'999 &&
 		order_127.magnitude_valid && order_127.angle_valid,
 		"typed harmonic family did not round trip");
+
+	registry.on<msap1::FlickerRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::FlickerRequest &) {
+			msap1::FlickerResponse response{};
+			response.running = true;
+			response.records = 14u;
+			response.sequence_gaps = 2u;
+			response.has_pst = true;
+			response.pst.kind = msap1::FlickerRecordKind::pst;
+			response.pst.sequence = 9u;
+			response.pst.pst_q16[1] = 65536u;
+			return response;
+		});
+	const auto flicker_response =
+		msap1::decode_acquisition_payload<msap1::FlickerResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				msap1::FlickerRequest{})));
+	require(flicker_response.running && flicker_response.records == 14u &&
+			flicker_response.sequence_gaps == 2u &&
+			flicker_response.has_pst &&
+			flicker_response.pst.sequence == 9u &&
+			flicker_response.pst.pst_q16[1] == 65536u,
+		"typed flicker latest views did not round trip");
+
+	registry.on<msap1::MainsSignalRequest>(
+		msap1::AcquisitionStatus::internal_error,
+		[](const msap1::MainsSignalRequest &) {
+			msap1::MainsSignalResponse response{};
+			response.running = true;
+			response.records = 4u;
+			response.has_snapshot = true;
+			response.snapshot.sequence = 7u;
+			response.snapshot.configured_millihz = 105000u;
+			response.snapshot.detected_phase_mask = 0x5u;
+			return response;
+		});
+	const auto mains_response =
+		msap1::decode_acquisition_payload<msap1::MainsSignalResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				msap1::MainsSignalRequest{})));
+	require(mains_response.running && mains_response.records == 4u &&
+			mains_response.has_snapshot &&
+			mains_response.snapshot.sequence == 7u &&
+			mains_response.snapshot.configured_millihz == 105000u &&
+			mains_response.snapshot.detected_phase_mask == 0x5u,
+		"typed mains-signalling observation did not round trip");
+
+	/* IPC v38 carries private storage authority plus public v4 capture,
+	 * lineage, and trigger-origin identities used by catalogue projection. */
+	registry.on<msap1::WaveformListRequest>(
+		msap1::AcquisitionStatus::dma_error,
+		[](const msap1::WaveformListRequest &request) {
+			require(request.version == msap1::acquisition_ipc_version,
+				"wrong decoded waveform request version");
+			msap1::WaveformResponse response{};
+			response.waveform.completed_sessions = 1u;
+			response.waveform_directory = "/data/mnc/waveform";
+			msap1::WaveformSessionIpc session{};
+			session.id = 17u;
+			session.state = msap1::WaveformSessionState::complete;
+			session.filename = "waveform-17-test.mncwf";
+			session.continuation_of_session_id = 16u;
+			session.master_session_id = 15u;
+			session.trigger_source_mask = 1u << static_cast<unsigned>(
+				msap1::WaveformTriggerSource::pq_event);
+			session.capture_uuid =
+				"01234567-89ab-4def-8123-456789abcdef";
+			response.sessions.push_back(std::move(session));
+			return response;
+		});
+	const auto waveform_reply = registry.dispatch(
+		msap1::encode_acquisition_request(msap1::WaveformListRequest{}));
+	const auto waveform_response =
+		msap1::decode_acquisition_payload<msap1::WaveformResponse>(
+			waveform_reply);
+	require(waveform_response.waveform.completed_sessions == 1u &&
+			waveform_response.waveform_directory == "/data/mnc/waveform" &&
+			waveform_response.sessions.size() == 1u &&
+			waveform_response.sessions[0].continuation_of_session_id == 16u &&
+			waveform_response.sessions[0].master_session_id == 15u &&
+			waveform_response.sessions[0].trigger_source_mask ==
+				(1u << static_cast<unsigned>(
+					msap1::WaveformTriggerSource::pq_event)) &&
+			waveform_response.sessions[0].capture_uuid ==
+				"01234567-89ab-4def-8123-456789abcdef",
+		"typed waveform export authority did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */
@@ -380,7 +472,7 @@ public:
 	msap1::acquisition::MeterRecordBatch next;
 };
 
-/* Minimal valid basic (MTR1) record for the continuity checks: first-sample
+/* Minimal valid 10/12-cycle Basic record for the continuity checks: first-sample
  * index in envelope words 9/10, timing word 13; channel words stay zero
  * because validation never inspects the electrical payload. */
 msap1::MeterRecord basic_record(std::uint32_t sequence,
@@ -491,6 +583,249 @@ msap1::MeterRecord demand_record(std::uint32_t sequence,
 	record.words[msap1::meter_demand_source_status_word] = record.words[8];
 	record.words[msap1::meter_demand_profile_generation_word] = 1U;
 	return record;
+}
+
+msap1::MeterRecord pq_lifecycle_record(std::uint32_t sequence,
+	std::uint32_t generation, std::uint64_t first, std::uint64_t last)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_pq_event_lifecycle_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000;
+	record.words[6] = static_cast<std::uint32_t>(last - first + 1u);
+	record.words[7] = 0x10;
+	record.words[8] = 0x0a;
+	write_record_u64(record, 9, first);
+	record.words[13] = msap1::meter_event_lifecycle_update | (1u << 8u);
+	write_record_u64(record, 14, last);
+	write_record_u64(record, 16, 0x123456789abcdef0ull);
+	write_record_u64(record, 18, 8);
+	record.words[20] = generation;
+	record.words[21] = 9000;
+	record.words[22] = 200;
+	record.words[23] = 0x5u | (1u << 8u);
+	record.words[24] = 100;
+	record.words[25] = 500;
+	record.words[26] = 230000000;
+	for (std::size_t phase = 0; phase < 3; ++phase) {
+		record.words[28 + phase] = 180000000 + phase;
+		record.words[31 + phase] = 230000000 + phase;
+		record.words[34 + phase] = 200000000 + phase;
+	}
+	write_record_u64(record, 37, last - first);
+	write_record_u64(record, 39, first);
+	record.words[47] = sequence;
+	record.words[48] = 1;
+	record.words[49] = 2;
+	record.words[50] = 3;
+	record.words[51] = 4;
+	return record;
+}
+
+msap1::MeterRecord flicker_record(std::uint32_t sequence,
+	std::uint32_t generation, msap1::FlickerRecordKind kind,
+	std::uint64_t first)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_flicker_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000u;
+	const auto interval = kind == msap1::FlickerRecordKind::live ? 1u :
+		kind == msap1::FlickerRecordKind::pst ? 600u : 7200u;
+	record.words[6] = interval * 32000u;
+	record.words[7] = 0x70u;
+	record.words[8] = 0x4u;
+	write_record_u64(record, 9u, first);
+	record.words[13] = static_cast<std::uint32_t>(kind) | (0x7u << 8u);
+	write_record_u64(record, 14u,
+		first + static_cast<std::uint64_t>(interval) * 32000u - 1u);
+	for (std::size_t phase = 0u; phase < 3u; ++phase) {
+		record.words[16u + phase] = (phase + 1u) << 16u;
+		record.words[25u + phase] = interval * 2000u;
+		if (kind != msap1::FlickerRecordKind::live)
+			record.words[19u + phase] = (phase + 2u) << 16u;
+		if (kind == msap1::FlickerRecordKind::plt)
+			record.words[22u + phase] = (phase + 3u) << 16u;
+	}
+	record.words[28] = interval;
+	record.words[29] = generation;
+	record.words[30] = 120u | (60u << 16u);
+	record.words[31] = 0x3u;
+	write_record_u64(record, 32u, first);
+	return record;
+}
+
+msap1::MeterRecord mains_signal_record(std::uint32_t sequence,
+	std::uint32_t generation, std::uint64_t first)
+{
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_mains_signal_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 32000u;
+	record.words[6] = 6400u;
+	record.words[7] = 0x70u;
+	record.words[8] = 0x4u;
+	write_record_u64(record, 9u, first);
+	record.words[13] = 0x507u;
+	write_record_u64(record, 14u, first + 6399u);
+	record.words[16] = 500000u;
+	record.words[17] = 505000u;
+	record.words[18] = 1200000u;
+	record.words[19] = 100000u;
+	record.words[20] = 700000u;
+	record.words[21] = 50000u;
+	record.words[22] = 50000u;
+	record.words[23] = 50000u;
+	record.words[24] = 20000u;
+	record.words[25] = 200u;
+	record.words[26] = generation;
+	record.words[27] = 0x3u;
+	record.words[28] = 50u;
+	record.words[29] = 120000000u;
+	return record;
+}
+
+void ingestor_isolates_and_publishes_mains_signal_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(mains_signal_record(1u, configuration.wire.generation, 1000u));
+	auto malformed = mains_signal_record(
+		2u, configuration.wire.generation, 7400u);
+	malformed.words[63] = 1u;
+	feed(malformed);
+	feed(mains_signal_record(3u, configuration.wire.generation, 13800u));
+	feed(basic_record(1u, 20'000'000u, 100u,
+		configuration.wire.generation));
+	feed(basic_record(2u, 20'000'100u, 100u,
+		configuration.wire.generation));
+
+	require(ingest.mains_signal_records() == 2u &&
+		ingest.mains_signal_sequence_gaps() == 1u &&
+		ingest.invalid_records() == 1u,
+		"mains-signalling continuity did not quarantine one malformed record");
+	require(ingest.sequence_gaps() == 0u &&
+		ingest.latest_record()->sequence() == 2u,
+		"a malformed mains-signalling record poisoned BASIC continuity");
+	require(ingest.latest_mains_signal()->sequence == 3u &&
+		publisher.records.size() == 4u &&
+		publisher.records.front().record_kind ==
+			static_cast<std::uint16_t>(msap1::RecordKind::mains_signal),
+		"validated mains-signalling records did not cross the durability barrier");
+}
+
+void ingestor_isolates_and_publishes_flicker_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(flicker_record(1u, configuration.wire.generation,
+		msap1::FlickerRecordKind::live, 1000u));
+	auto malformed = flicker_record(2u, configuration.wire.generation,
+		msap1::FlickerRecordKind::pst, 33000u);
+	malformed.words[63] = 1u;
+	feed(malformed);
+	feed(flicker_record(3u, configuration.wire.generation,
+		msap1::FlickerRecordKind::pst, 33000u));
+	feed(basic_record(1u, 20'000'000u, 100u,
+		configuration.wire.generation));
+	feed(basic_record(2u, 20'000'100u, 100u,
+		configuration.wire.generation));
+
+	require(ingest.flicker_records() == 2u &&
+		ingest.flicker_sequence_gaps() == 1u &&
+		ingest.invalid_records() == 1u,
+		"FLICKER decoder/continuity did not quarantine one malformed record");
+	require(ingest.sequence_gaps() == 0u &&
+		ingest.latest_record()->sequence() == 2u,
+		"a malformed FLICKER record poisoned BASIC continuity");
+	require(ingest.latest_flicker(msap1::FlickerRecordKind::live)->sequence ==
+			1u &&
+		ingest.latest_flicker(msap1::FlickerRecordKind::pst)->sequence == 3u &&
+		publisher.records.size() == 4u &&
+		publisher.records.front().record_kind == static_cast<std::uint16_t>(
+			msap1::RecordKind::flicker),
+		"validated FLICKER records did not cross the durability barrier");
+}
+
+void ingestor_isolates_and_publishes_pq_lifecycle_records()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefU;
+	configuration.wire.sample_rate_hz = 32000U;
+	const msap1::meter::MeasurementTimebase timebase;
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1U;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+
+	feed(pq_lifecycle_record(1, configuration.wire.generation, 1000, 1100));
+	auto malformed = pq_lifecycle_record(
+		2, configuration.wire.generation, 1101, 1200);
+	malformed.words[63] = 1;
+	feed(malformed);
+	feed(pq_lifecycle_record(3, configuration.wire.generation, 1201, 1300));
+	feed(basic_record(1, 2000, 100, configuration.wire.generation));
+	feed(basic_record(2, 2100, 100, configuration.wire.generation));
+
+	require(ingest.pq_lifecycle_records() == 2 &&
+			ingest.pq_lifecycle_sequence_gaps() == 1 &&
+			ingest.invalid_records() == 1,
+		"PQ lifecycle decoder/continuity did not quarantine one malformed edge");
+	require(ingest.sequence_gaps() == 0 &&
+			ingest.latest_record()->sequence() == 2,
+		"a malformed PQ lifecycle edge poisoned BASIC continuity");
+	require(ingest.latest_pq_lifecycle()->sequence == 3 &&
+			publisher.records.size() == 4 &&
+			publisher.records.front().record_kind == static_cast<std::uint16_t>(
+				msap1::RecordKind::power_quality_event),
+		"validated lifecycle edges did not cross the durability barrier");
 }
 
 void ingestor_quarantines_m17_ledger_conflicts()
@@ -731,7 +1066,7 @@ void ingestor_validates_sample_range_continuity()
 	}
 }
 
-/* Minimal valid MTR2 aggregate for the interleaving checks: 15 blocks of
+/* Minimal valid 150/180-cycle aggregate for the interleaving checks: 15 blocks of
  * 6400 samples at 32 kSPS, 60 Hz nominal -> 180 cycles. Channel words stay
  * zero because continuity validation never inspects the electrical
  * payload. */
@@ -915,7 +1250,7 @@ void ingestor_tracks_two_hour_stream_independently()
 }
 
 /*
- * The DMA stream interleaves basic MTR1 and aggregate MTR2 records with
+ * The DMA stream interleaves Basic and 150/180-cycle aggregate records with
  * INDEPENDENT sequence counters. Continuity must be tracked per format,
  * latest_record() must remain the newest BASIC record, and aggregate
  * timing must be UTC-stamped from the timebase exactly like basic timing.
@@ -1256,6 +1591,9 @@ int main()
 	device_interfaces_are_substitutable();
 	typed_commands_round_trip_through_the_registry();
 	ingestor_quarantines_m17_ledger_conflicts();
+	ingestor_isolates_and_publishes_pq_lifecycle_records();
+	ingestor_isolates_and_publishes_flicker_records();
+	ingestor_isolates_and_publishes_mains_signal_records();
 	ingestor_publishes_only_complete_harmonic_families();
 	ingestor_validates_sample_range_continuity();
 	ingestor_tracks_interleaved_aggregate_stream();

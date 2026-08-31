@@ -16,6 +16,12 @@ public:
 	historian_capabilities() const;
 	[[nodiscard]] std::vector<history::HistoryPoint>
 	query(const history::HistoryQuery &query) const;
+	[[nodiscard]] std::vector<history::PowerQualityEventCatalogEntry>
+	query_power_quality_events(
+		const history::PowerQualityEventQuery &query = {}) const;
+	[[nodiscard]] std::uint64_t delete_power_quality_events(
+		std::span<const PowerQualityEventUuid> event_uuids) const;
+	[[nodiscard]] std::uint64_t clear_power_quality_events() const;
 	void clear_history(
 		std::span<const mnc::meter_stream::DatabaseDataset> datasets) const;
 	void recreate_history_database() const;

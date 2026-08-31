@@ -5,6 +5,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -33,6 +34,9 @@ enum class RecordKind : std::uint16_t {
 	phasor = 6,
 	unbalance = 7,
 	harmonic = 8,
+	power_quality_event = 9,
+	flicker = 10,
+	mains_signal = 11,
 };
 
 enum class MeasurementQuality : std::uint8_t {
@@ -362,7 +366,7 @@ struct MeterUpdate {
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
 	/* Cycle-timing identity of the source block. Present for every
-	 * periodic (MTR1) update; absent for aggregate updates.
+	 * 10/12-cycle basic update; absent for aggregate updates.
 	 * The Basic period has no fixed duration — the actual duration is
 	 * sample_count / sample_rate per block (see SampleWindow). */
 	std::optional<BlockTiming> timing;
@@ -432,7 +436,7 @@ private:
 /**
  * Extensible decoder table keyed by the PL record format/version word.
  * Future power, energy, demand, and PQ records can register new decoders
- * without modifying the existing MTR1 fundamental decoder.
+ * without modifying the existing basic fundamental decoder.
  */
 /*
  * Decoded view of one SCYC-v2 single-cycle diagnostic record (PL
@@ -507,6 +511,169 @@ struct PowerQualitySnapshot {
 };
 
 [[nodiscard]] PowerQualitySnapshot decode_pq_event_record(
+	const MeterRecord &record);
+
+/** Stable 128-bit M18 event identity: one R5C1 session plus its monotone ID. */
+struct PowerQualityEventId {
+	std::uint64_t session = 0;
+	std::uint64_t counter = 0;
+	bool operator==(const PowerQualityEventId &) const = default;
+};
+
+/** Canonical externally visible identity derived from the stable R5C1 ID. */
+using PowerQualityEventUuid = std::array<std::byte, 16>;
+
+/** Deterministic RFC-4122 variant/version-5 identity for API and file links. */
+[[nodiscard]] PowerQualityEventUuid stable_power_quality_event_uuid(
+	const PowerQualityEventId &id);
+
+enum class PowerQualityEventLifecycle : std::uint8_t {
+	start = meter_event_lifecycle_start,
+	update = meter_event_lifecycle_update,
+	end = meter_event_lifecycle_end,
+	abort = meter_event_lifecycle_abort,
+};
+
+enum class PowerQualityLifecycleType : std::uint8_t {
+	voltage_sag = 0,
+	voltage_swell = 1,
+	voltage_interruption = 2,
+	rapid_voltage_change = 3,
+	voltage_unbalance = 4,
+	current_sag = 5,
+	current_swell = 6,
+	current_unbalance = 7,
+	transient_voltage = 8,
+};
+
+/** Exact decoded view of one final R5C1 PQ-EVENT-v1 lifecycle record. */
+struct PowerQualityEventLifecycleSnapshot {
+	PowerQualityEventId id{};
+	PowerQualityEventLifecycle lifecycle = PowerQualityEventLifecycle::start;
+	PowerQualityLifecycleType type = PowerQualityLifecycleType::voltage_sag;
+	std::uint8_t phase_mask = 0;
+	std::uint8_t trigger_source = 0;
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint64_t trigger_sample = 0;
+	std::uint64_t duration_samples = 0;
+	std::uint32_t valid_mask = 0;
+	std::uint32_t status = 0;
+	std::uint32_t threshold_e4 = 0;
+	std::uint32_t hysteresis_e4 = 0;
+	std::uint32_t reference_micro_units = 0;
+	std::array<std::uint32_t, 3> minimum_micro_units{};
+	std::array<std::uint32_t, 3> maximum_micro_units{};
+	std::array<std::uint32_t, 3> current_micro_units{};
+	bool waveform_enabled = false;
+	bool per_phase = false;
+	bool iec_classification = false;
+	std::uint32_t waveform_pretrigger_ms = 0;
+	std::uint32_t waveform_posttrigger_ms = 0;
+	std::uint32_t waveform_decimation = 1;
+	std::uint64_t start_utc_nanoseconds = 0;
+	std::uint64_t last_utc_nanoseconds = 0;
+	TimeQuality time_quality = TimeQuality::Unsynchronized;
+	std::uint32_t discontinuities = 0;
+	std::uint32_t update_count = 0;
+	std::array<std::uint32_t, 4> settings_digest{};
+
+	[[nodiscard]] bool terminal() const noexcept
+	{
+		return lifecycle == PowerQualityEventLifecycle::end ||
+		       lifecycle == PowerQualityEventLifecycle::abort;
+	}
+	[[nodiscard]] bool voltage_event() const noexcept
+	{
+		return static_cast<std::uint8_t>(type) <= 4u ||
+		       type == PowerQualityLifecycleType::transient_voltage;
+	}
+};
+
+[[nodiscard]] PowerQualityEventLifecycleSnapshot
+decode_pq_event_lifecycle_record(const MeterRecord &record);
+
+enum class FlickerRecordKind : std::uint8_t {
+	live = meter_flicker_kind_live,
+	pst = meter_flicker_kind_pst,
+	plt = meter_flicker_kind_plt,
+};
+
+/** Exact decoded view of one final R5C1 FLICKER-v1 record. */
+struct FlickerSnapshot {
+	FlickerRecordKind kind = FlickerRecordKind::live;
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint32_t interval_seconds = 0;
+	std::uint8_t phase_valid_mask = 0;
+	std::uint16_t lamp_voltage = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::array<std::uint32_t, 3> pinst_q16{};
+	std::array<std::uint32_t, 3> pst_q16{};
+	std::array<std::uint32_t, 3> plt_q16{};
+	std::array<std::uint32_t, 3> valid_internal_samples{};
+	std::uint32_t status = 0;
+	std::uint32_t source_status = 0;
+
+	[[nodiscard]] bool first_after_gap() const noexcept
+	{
+		return (status & (1u << 2u)) != 0u;
+	}
+	[[nodiscard]] bool arithmetic_error() const noexcept
+	{
+		return (status & 1u) != 0u;
+	}
+};
+
+[[nodiscard]] FlickerSnapshot decode_flicker_record(
+	const MeterRecord &record);
+
+/** Exact decoded view of one final R5C1 MAINS-SIGNAL-v1 record. */
+struct MainsSignalSnapshot {
+	std::uint32_t sequence = 0;
+	std::uint32_t configuration_generation = 0;
+	std::uint32_t profile_generation = 0;
+	std::uint32_t sample_rate_hz = 0;
+	std::uint64_t first_sample = 0;
+	std::uint64_t last_sample = 0;
+	std::uint32_t sample_count = 0;
+	std::uint8_t phase_valid_mask = 0;
+	std::uint8_t detected_phase_mask = 0;
+	std::uint32_t configured_millihz = 0;
+	std::uint32_t measured_millihz = 0;
+	std::array<std::uint32_t, 3> magnitude_microvolts{};
+	std::array<std::uint32_t, 3> background_microvolts{};
+	std::uint32_t bandwidth_millihz = 0;
+	std::uint32_t observation_ms = 0;
+	std::uint32_t threshold_e4 = 0;
+	std::uint32_t reference_microvolts = 0;
+	std::uint32_t status = 0;
+	std::uint32_t source_status = 0;
+
+	[[nodiscard]] bool any_detected() const noexcept
+	{
+		return detected_phase_mask != 0;
+	}
+	[[nodiscard]] bool first_after_gap() const noexcept
+	{
+		return (status & (1u << 2u)) != 0u;
+	}
+	[[nodiscard]] bool arithmetic_error() const noexcept
+	{
+		return (status & 1u) != 0u;
+	}
+};
+
+[[nodiscard]] MainsSignalSnapshot decode_mains_signal_record(
 	const MeterRecord &record);
 
 class MeterDecoderRegistry {
@@ -591,7 +758,7 @@ MeterUpdate decode_two_hour_open_unbalance_meter_record(
 	const MeterRecord &record, SystemTime received_at);
 
 /**
- * Decode an MTR1 (0x00010003) record: fundamental values plus the
+ * Decode a BASIC-v4 (0x00010004) record: fundamental values plus the
  * BlockTiming identity from envelope words 6/9/10 and the timing word 13.
  * TimeQuality and utc_start are NOT in the record — the PL does not know
  * UTC state — so the decoder leaves them at Unsynchronized/absent and the
@@ -606,7 +773,7 @@ MeterUpdate decode_two_hour_open_unbalance_meter_record(
  * Decode an AGG-v3 aggregate (0x00020003) record: 150/180-cycle fundamental
  * values plus the AggregateTiming identity. The PL is the authoritative
  * aggregator — this only DECODES what the PL computed; the APU never
- * recomputes aggregate values. As for MTR1, TimeQuality and utc_start are
+ * recomputes aggregate values. As for the basic record, TimeQuality and utc_start are
  * not in the record: the caller (the ingestor) stamps them from the
  * MeasurementTimebase after decoding.
  */

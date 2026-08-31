@@ -4,6 +4,7 @@ add_executable(msap1-fpga-acquisition
     support/options.cpp
     config/runtime_config.cpp
     pipeline/capture_coordinator.cpp
+	pipeline/event_waveform_linker.cpp
     pipeline/aggregation_health_monitor.cpp
     pipeline/health_monitor.cpp
     pipeline/record_ingestor.cpp
@@ -16,6 +17,7 @@ target_link_libraries(msap1-fpga-acquisition PRIVATE
     msap1::acquisition
     msap1::meter
     msap1::settings
+    msap1::system
     msap1::waveform
     mnc::logging
     mnc::service

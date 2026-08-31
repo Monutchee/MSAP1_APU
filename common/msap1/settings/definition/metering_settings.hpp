@@ -1,6 +1,7 @@
 #pragma once
 
 #include "msap1/meter/meter_config.hpp"
+#include "msap1/settings/definition/power_quality_settings.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -88,6 +89,9 @@ struct MeteringSettings {
 	 * the documented DISARMED state; the band ordering is enforced by
 	 * prepare_meter_configuration(), which owns the threshold math. */
 	PowerQualityConfig power_quality;
+	PowerQualityEventSettings events;
+	FlickerSettings flicker;
+	MainsSignallingSettings mains_signalling;
 	DemandSettings demand;
 	MeterConversionSettings conversion;
 
@@ -108,6 +112,15 @@ struct MeteringSettings {
 			throw std::runtime_error(
 				"system nominal voltage must be 1..1000000 V");
 		rms.validate();
+		events.validate();
+		flicker.validate();
+		mains_signalling.validate(sample_rate_hz);
+		/* A missing Udin leaves flicker configured but disarmed, matching the
+		 * HLS missing-reference behavior and the factory migration. A requested
+		 * mains carrier must instead have a threshold reference up front. */
+		if (mains_signalling.enabled && power_quality.reference_volts <= 0.0)
+			throw std::runtime_error(
+				"mains-signalling requires a positive voltage reference");
 		demand.validate();
 	}
 };

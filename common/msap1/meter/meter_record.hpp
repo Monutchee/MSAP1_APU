@@ -28,10 +28,10 @@ inline constexpr std::size_t meter_record_word_count = 64;
 inline constexpr std::size_t meter_record_size = 256;
 inline constexpr std::uint32_t meter_record_magic = 0x3152544du;
 /* Record type rides in [31:16] of word 1, version in [15:0]. The
- * reservation table (energy/demand/harmonics/PQ) lives with the PL
- * contract header; allocate there, never ad hoc. */
-/* BASIC-v4 (metrology M7): the 10/12-cycle merge tier that retired the
- * MTR1 engine. Interior identical to MTR1-v3 for the envelope, timing
+ * reservation table (energy/demand/harmonics/PQ/flicker/mains signalling)
+ * lives with the PL contract header; allocate there, never ad hoc. */
+/* BASIC-v4 (metrology M7): the current 10/12-cycle merge tier. Its interior
+ * retains the BASIC-v3 envelope, timing
  * word, per-lane slots, and words 56..63; additions: block last-sample
  * anchor (words 14/15), merged line-line RMS (words 51..53, micro-units,
  * 32-bit), status bit 2 = first block after a discontinuity, and timing
@@ -101,8 +101,8 @@ inline constexpr std::size_t meter_demand_interval_anchor_sample_word = 58u;
 inline constexpr std::size_t meter_demand_source_interval_count_word = 60u;
 inline constexpr std::size_t meter_demand_source_status_word = 61u;
 inline constexpr std::size_t meter_demand_profile_generation_word = 62u;
-/* AGG v3 (metrology M11/M15): the R5C1 150/180-cycle tier record
- * (Mtr2Engine retired). MTR2-v2 interior plus:
+/* AGG-v3 (metrology M11/M15): the R5C1 150/180-cycle aggregate record.
+ * It retains the AGG-v2 interior plus:
  * words 36/37 = interval last-sample index, words 38..40 = VAB/VBC/VCA
  * aggregate RMS (u32 micro-units). SEMANTIC upgrade: per-lane RMS is the
  * whole-interval finalize of the summed raw accumulators (mean-corrected
@@ -113,7 +113,7 @@ inline constexpr std::uint32_t meter_aggregate_format = 0x00020003u;
 /* AGG-POWER/PHASOR/UNBAL v1 (M11): the aggregate tier's siblings, same
  * sequence/anchors as their AGG-v3 record; payload word maps (16+)
  * IDENTICAL to the basic-period POWER/PHASOR/UNBAL v1 maps. Word 13
- * carries the MTR2 shape word and 14/15 the folded basic-sequence range. */
+ * carries the aggregate shape word and 14/15 the folded basic-sequence range. */
 inline constexpr std::uint32_t meter_aggregate_power_format = 0x00100001u;
 inline constexpr std::uint32_t meter_aggregate_phasor_format = 0x00110002u;
 inline constexpr std::uint32_t meter_aggregate_unbalance_format = 0x00120002u;
@@ -136,15 +136,17 @@ inline constexpr std::uint32_t meter_two_hour_phasor_format = 0x00170002u;
 inline constexpr std::uint32_t meter_two_hour_unbalance_format = 0x00180002u;
 /* M15 live-partial views. These records expose an open accumulator for
  * operations only. They use independent sequence spaces and can never replace
- * the immutable completed M13/M14 results. */
-inline constexpr std::uint32_t meter_ten_minute_open_format = 0x000E0001u;
-inline constexpr std::uint32_t meter_ten_minute_open_power_format = 0x00190001u;
-inline constexpr std::uint32_t meter_ten_minute_open_phasor_format = 0x001A0002u;
-inline constexpr std::uint32_t meter_ten_minute_open_unbalance_format = 0x001B0002u;
-inline constexpr std::uint32_t meter_two_hour_open_format = 0x000F0001u;
-inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x001C0001u;
-inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x001D0002u;
-inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x001E0002u;
+ * the immutable completed M13/M14 results. M18 moved the pre-production IDs
+ * out of the 0x000E/0x000F reservations; volatile preview/latest state using
+ * the old IDs is intentionally incompatible and discarded on upgrade. */
+inline constexpr std::uint32_t meter_ten_minute_open_format = 0x00200001u;
+inline constexpr std::uint32_t meter_ten_minute_open_power_format = 0x00210001u;
+inline constexpr std::uint32_t meter_ten_minute_open_phasor_format = 0x00220002u;
+inline constexpr std::uint32_t meter_ten_minute_open_unbalance_format = 0x00230002u;
+inline constexpr std::uint32_t meter_two_hour_open_format = 0x00240001u;
+inline constexpr std::uint32_t meter_two_hour_open_power_format = 0x00250001u;
+inline constexpr std::uint32_t meter_two_hour_open_phasor_format = 0x00260002u;
+inline constexpr std::uint32_t meter_two_hour_open_unbalance_format = 0x00270002u;
 /* HARMONIC v1 (metrology M16): one 10/12-cycle spectrum is a 42-record
  * family: seven product channels, six consecutive order chunks per channel,
  * and one shared producer sequence. Each record carries up to 24 packed
@@ -166,6 +168,62 @@ inline constexpr std::uint32_t meter_harmonic_aggregate_format = 0x001F0001u;
  * count. Words 32..36 echo the reference and thresholds the record was
  * evaluated against, so a stored event stays interpretable. */
 inline constexpr std::uint32_t meter_pq_event_format = 0x000B0001u;
+/* M18 final S02 record allocations. Payload decoders are added with their
+ * producers; reserving the values here prevents another pre-production
+ * feature from reusing them. The lifecycle PQ event is distinct from the
+ * low-level PQEVT diagnostic above. */
+inline constexpr std::uint32_t meter_pq_event_lifecycle_format = 0x00060001u;
+inline constexpr std::uint32_t meter_flicker_format = 0x000E0001u;
+inline constexpr std::uint32_t meter_mains_signal_format = 0x000F0001u;
+inline constexpr std::uint8_t meter_event_lifecycle_start = 0u;
+inline constexpr std::uint8_t meter_event_lifecycle_update = 1u;
+inline constexpr std::uint8_t meter_event_lifecycle_end = 2u;
+inline constexpr std::uint8_t meter_event_lifecycle_abort = 3u;
+inline constexpr std::size_t meter_event_last_sample_word = 14u;
+inline constexpr std::size_t meter_event_id_word = 16u;
+inline constexpr std::size_t meter_event_profile_generation_word = 20u;
+inline constexpr std::size_t meter_event_threshold_word = 21u;
+inline constexpr std::size_t meter_event_hysteresis_word = 22u;
+inline constexpr std::size_t meter_event_waveform_policy_word = 23u;
+inline constexpr std::size_t meter_event_waveform_pre_ms_word = 24u;
+inline constexpr std::size_t meter_event_waveform_post_ms_word = 25u;
+inline constexpr std::size_t meter_event_reference_word = 26u;
+inline constexpr std::size_t meter_event_minimum_word = 28u;
+inline constexpr std::size_t meter_event_maximum_word = 31u;
+inline constexpr std::size_t meter_event_current_word = 34u;
+inline constexpr std::size_t meter_event_duration_word = 37u;
+inline constexpr std::size_t meter_event_trigger_sample_word = 39u;
+inline constexpr std::size_t meter_event_start_utc_ns_word = 41u;
+inline constexpr std::size_t meter_event_last_utc_ns_word = 43u;
+inline constexpr std::size_t meter_event_time_quality_word = 45u;
+inline constexpr std::size_t meter_event_discontinuity_word = 46u;
+inline constexpr std::size_t meter_event_settings_digest_word = 48u;
+
+inline constexpr std::uint8_t meter_flicker_kind_live = 0u;
+inline constexpr std::uint8_t meter_flicker_kind_pst = 1u;
+inline constexpr std::uint8_t meter_flicker_kind_plt = 2u;
+inline constexpr std::size_t meter_flicker_last_sample_word = 14u;
+inline constexpr std::size_t meter_flicker_pinst_word = 16u;
+inline constexpr std::size_t meter_flicker_pst_word = 19u;
+inline constexpr std::size_t meter_flicker_plt_word = 22u;
+inline constexpr std::size_t meter_flicker_valid_count_word = 25u;
+inline constexpr std::size_t meter_flicker_interval_seconds_word = 28u;
+inline constexpr std::size_t meter_flicker_profile_generation_word = 29u;
+inline constexpr std::size_t meter_flicker_model_word = 30u;
+inline constexpr std::size_t meter_flicker_source_status_word = 31u;
+inline constexpr std::size_t meter_flicker_interval_first_word = 32u;
+
+inline constexpr std::size_t meter_mains_last_sample_word = 14u;
+inline constexpr std::size_t meter_mains_configured_millihz_word = 16u;
+inline constexpr std::size_t meter_mains_measured_millihz_word = 17u;
+inline constexpr std::size_t meter_mains_magnitude_word = 18u;
+inline constexpr std::size_t meter_mains_background_word = 21u;
+inline constexpr std::size_t meter_mains_bandwidth_millihz_word = 24u;
+inline constexpr std::size_t meter_mains_observation_ms_word = 25u;
+inline constexpr std::size_t meter_mains_profile_generation_word = 26u;
+inline constexpr std::size_t meter_mains_source_status_word = 27u;
+inline constexpr std::size_t meter_mains_threshold_e4_word = 28u;
+inline constexpr std::size_t meter_mains_reference_microvolts_word = 29u;
 /* Single-cycle diagnostic records (PL metrology roadmap M2). */
 inline constexpr std::uint32_t meter_single_cycle_format = 0x000A0005u;
 
@@ -318,6 +376,9 @@ struct MeterRecord {
 				record_format() == meter_harmonic_format ||
 				record_format() == meter_harmonic_aggregate_format ||
 			record_format() == meter_pq_event_format ||
+			record_format() == meter_pq_event_lifecycle_format ||
+			record_format() == meter_flicker_format ||
+			record_format() == meter_mains_signal_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}
@@ -482,7 +543,7 @@ struct MeterRecord {
 	std::uint32_t fifo_overflows() const { return word(62); }
 	std::uint32_t adc_alerts() const { return word(63); }
 
-	/* ---- aggregate (AGG-v3/MTR2, 0x00020003) fields ------------------ */
+	/* ---- 150/180-cycle aggregate (AGG-v3, 0x00020003) fields -------- */
 
 	std::uint32_t aggregate_sequence() const { return sequence(); }
 	std::uint32_t aggregate_sample_count() const
@@ -521,7 +582,7 @@ struct MeterRecord {
 	std::uint32_t first_basic_sequence() const { return word(14); }
 	std::uint32_t last_basic_sequence() const { return word(15); }
 	/* Words 16..31: aggregate RMS in signed 64-bit micro-units, two
-	 * words (lo, hi) per channel. Channel order is identical to MTR1:
+	 * words (lo, hi) per channel. Channel order matches the basic record:
 	 * Ia, Ib, Ic, In, Vc, Vb, Va, ch7 = 0. Validity comes from the
 	 * word-7 mask (the AND across the 15 contributing blocks). */
 	std::int64_t aggregate_rms_micro_units(std::size_t index) const

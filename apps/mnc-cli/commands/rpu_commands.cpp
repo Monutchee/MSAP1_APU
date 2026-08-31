@@ -62,6 +62,10 @@ struct AggregationHealthResult {
 	std::uint32_t validator_records_processed = 0;
 	std::uint32_t validator_max_runtime_us = 0;
 	std::uint32_t validator_max_schedule_gap_us = 0;
+	std::uint32_t control_stack_high_water_bytes = 0;
+	std::uint32_t input_stack_high_water_bytes = 0;
+	std::uint32_t output_stack_high_water_bytes = 0;
+	std::uint32_t validator_stack_high_water_bytes = 0;
 	std::vector<HealthReason> degraded_reasons;
 };
 
@@ -161,6 +165,12 @@ AggregationHealthResult aggregation_result(const InfoResponse &response)
 	result.validator_max_runtime_us = health.validator_max_runtime_us;
 	result.validator_max_schedule_gap_us =
 		health.validator_max_schedule_gap_us;
+	result.control_stack_high_water_bytes =
+		health.control_stack_high_water_bytes;
+	result.input_stack_high_water_bytes = health.input_stack_high_water_bytes;
+	result.output_stack_high_water_bytes = health.output_stack_high_water_bytes;
+	result.validator_stack_high_water_bytes =
+		health.validator_stack_high_water_bytes;
 	return result;
 }
 
@@ -302,7 +312,12 @@ public:
 			       << " max-runtime="
 			       << aggregation.validator_max_runtime_us
 			       << " us max-schedule-gap="
-			       << aggregation.validator_max_schedule_gap_us << " us\n";
+			       << aggregation.validator_max_schedule_gap_us << " us\n"
+			       << "    stack high-water bytes control/input/output/validator="
+			       << aggregation.control_stack_high_water_bytes << '/'
+			       << aggregation.input_stack_high_water_bytes << '/'
+			       << aggregation.output_stack_high_water_bytes << '/'
+			       << aggregation.validator_stack_high_water_bytes << '\n';
 			for (const auto &reason : aggregation.degraded_reasons)
 				output << "    - " << reason.message << '\n';
 		}

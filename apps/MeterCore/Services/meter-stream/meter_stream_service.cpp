@@ -70,12 +70,12 @@ msap1::MeterRecord wire_record(
 {
 	if (stream_record.payload.size() != sizeof(msap1::MeterRecord))
 		throw std::invalid_argument(
-			"M17 meter-stream payload is not one complete MTR1 record");
+			"meter-stream payload is not one complete meter record");
 	msap1::MeterRecord result{};
 	std::memcpy(&result, stream_record.payload.data(), sizeof result);
 	if (result.record_format() != stream_record.record_format)
 		throw std::invalid_argument(
-			"meter-stream envelope and MTR1 record formats differ");
+			"meter-stream envelope and payload record formats differ");
 	return result;
 }
 

@@ -36,7 +36,7 @@ namespace msap1 {
 
 inline constexpr const char *acquisition_socket_path =
 	"/run/monutchee/fpga-acquisition.sock";
-/* 18: InfoResponse carries the newest 150/180-cycle aggregate (MTR2) record
+/* 18: InfoResponse carries the newest 150/180-cycle aggregate record
  * beside the basic latest record.
  * 19: InfoResponse carries the time quality stamped onto that aggregate at
  * ingest, so its provenance no longer follows the daemon's current clock
@@ -64,7 +64,13 @@ inline constexpr const char *acquisition_socket_path =
  * 33: The simulator tone ratio becomes fractional for interharmonic injection.
  * 34: InfoResponse distinguishes current-capture-epoch record rejections
  * from the process-lifetime forensic total. */
-inline constexpr std::uint16_t acquisition_ipc_version = 35;
+/* 36: M18 flicker/mains latest views and MNCWF capture authorities use typed
+ * payloads. The durable event catalogue has its own historian IPC. */
+/* 37: Waveform session summaries expose the contributing trigger origins so
+ * manual history can remain distinct from PQ-event evidence.
+ * 38: R5C1 aggregation health exposes control/input/output/validator runtime
+ * stack high-water headroom in bytes. */
+inline constexpr std::uint16_t acquisition_ipc_version = 38;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -213,9 +219,14 @@ struct WaveformSessionIpc {
 	std::uint64_t trigger_realtime_nanoseconds = 0;
 	std::uint32_t sample_rate_hz = 0;
 	std::uint32_t event_count = 0;
+	std::uint32_t trigger_source_mask = 0;
 	WaveformSessionState state = WaveformSessionState::capturing;
 	std::uint32_t decimation = 1;
 	std::string filename;
+	std::uint64_t continuation_of_session_id = 0;
+	std::uint64_t master_session_id = 0;
+	/** Canonical MNCWF capture UUID; empty for retained pre-v4 files. */
+	std::string capture_uuid;
 };
 
 /* ---- responses ------------------------------------------------------- */
@@ -289,7 +300,7 @@ struct InfoResponse {
 	MeterRecord latest_aggregate_record{};
 };
 
-/** Per-channel diagnostics that are specific to today's MTR1 record. */
+/** Per-channel diagnostics that are specific to today's basic record. */
 struct MeterChannelDiagnostics {
 	std::int64_t mean_micro_units = 0;
 	std::uint32_t rms_count = 0;
@@ -380,6 +391,8 @@ struct WaveformResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	WaveformStatus waveform{};
 	std::vector<WaveformSessionIpc> sessions;
+	/** Local trusted path authority; API responses must not expose it. */
+	std::string waveform_directory;
 };
 
 struct AdcSourceResponse {
@@ -430,6 +443,30 @@ struct PowerQualityResponse {
 	bool has_event = false;
 	PowerQualityIpcSnapshot latest{};
 	PowerQualityIpcSnapshot event{};
+};
+
+/** Latest independently finalized live/Pst/Plt FLICKER-v1 records. */
+struct FlickerResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	bool has_live = false;
+	bool has_pst = false;
+	bool has_plt = false;
+	FlickerSnapshot live{};
+	FlickerSnapshot pst{};
+	FlickerSnapshot plt{};
+};
+
+/** Latest finalized MAINS-SIGNAL-v1 observation. */
+struct MainsSignalResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	bool running = false;
+	std::uint64_t records = 0;
+	std::uint64_t sequence_gaps = 0;
+	bool has_snapshot = false;
+	MainsSignalSnapshot snapshot{};
 };
 
 /** Latest complete M16 family. Partial 42-record families are never exposed. */
@@ -579,6 +616,20 @@ struct PowerQualityRequest {
 	std::uint16_t version = acquisition_ipc_version;
 };
 
+/** Latest M18 flicker live and interval values. */
+struct FlickerRequest {
+	static constexpr std::string_view command = "meter-flicker";
+	using Response = FlickerResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
+/** Latest M18 mains-signalling carrier observation. */
+struct MainsSignalRequest {
+	static constexpr std::string_view command = "meter-mains-signalling";
+	using Response = MainsSignalResponse;
+	std::uint16_t version = acquisition_ipc_version;
+};
+
 /** Latest complete IEC-style harmonic subgroup spectrum (roadmap M16). */
 struct HarmonicRequest {
 	static constexpr std::string_view command = "meter-harmonics";
@@ -627,7 +678,7 @@ using AcquisitionCommandList = std::tuple<
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
 	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
 	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
-	HarmonicRequest,
+	FlickerRequest, MainsSignalRequest, HarmonicRequest,
 	SimulatorEventRequest, ConfigurationApplyRequest>;
 
 namespace detail {
