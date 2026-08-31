@@ -15,6 +15,18 @@
 
 namespace msap1::history {
 
+/** Complete stable ordering key used for lossless bounded continuation. */
+struct HistoryCursor {
+	std::int64_t measured_at_nanoseconds = 0;
+	std::uint64_t block_source_sequence = 0;
+	std::uint32_t record_kind = 0;
+	std::uint64_t block_id = 0;
+	mnc::meter::MeterAttributeId attribute =
+		mnc::meter::MeterAttributeId::Frequency;
+
+	auto operator<=>(const HistoryCursor &) const = default;
+};
+
 struct HistoryPoint {
 	std::int64_t measured_at_nanoseconds = 0;
 	std::uint64_t source_sequence = 0;
@@ -24,6 +36,8 @@ struct HistoryPoint {
 	MeasurementQuality quality = MeasurementQuality::unavailable;
 	/** Present for M17 energy/demand points so clients can break reset epochs. */
 	std::optional<std::uint64_t> reset_epoch;
+	/** Opaque-to-consumers database ordering key for the next bounded page. */
+	HistoryCursor cursor;
 };
 
 struct HistoryQuery {
@@ -32,6 +46,8 @@ struct HistoryQuery {
 	std::int64_t start_nanoseconds = 0;
 	std::int64_t end_nanoseconds = 0;
 	std::uint32_t limit = 10000;
+	/** Return rows strictly after this complete ordering key. */
+	std::optional<HistoryCursor> after;
 };
 
 /** Exact query surface implemented by the running historian. */

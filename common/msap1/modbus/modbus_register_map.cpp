@@ -66,6 +66,10 @@ float engineering_value(const MeterAttributeValue *value)
 	case mnc::meter::MeterUnit::MicroVoltAmpereHours:
 	case mnc::meter::MeterUnit::MicroWatts:
 		return static_cast<float>(value->value);
+	case mnc::meter::MeterUnit::CrestTenThousandths:
+		return static_cast<float>(value->value) / 10'000.0f;
+	case mnc::meter::MeterUnit::CategoricalCode:
+		return static_cast<float>(value->value);
 	}
 	return std::numeric_limits<float>::quiet_NaN();
 }

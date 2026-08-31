@@ -141,6 +141,14 @@ reading_quality_name(mnc::meter::ReadingQuality quality)
 		value = static_cast<double>(reading.value);
 		unit = "uW";
 		break;
+	case mnc::meter::MeterUnit::CrestTenThousandths:
+		value = static_cast<double>(reading.value) / 10000.0;
+		unit = "crest";
+		break;
+	case mnc::meter::MeterUnit::CategoricalCode:
+		value = static_cast<double>(reading.value);
+		unit = "code";
+		break;
 	}
 	return {std::string(descriptor.key), unit,
 		reading.quality == mnc::meter::ReadingQuality::Valid, value,

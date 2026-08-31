@@ -1258,6 +1258,14 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 			value = static_cast<double>(reading.value);
 			unit = "uW";
 			break;
+		case mnc::meter::MeterUnit::CrestTenThousandths:
+			value = static_cast<double>(reading.value) / 10000.0;
+			unit = "crest";
+			break;
+		case mnc::meter::MeterUnit::CategoricalCode:
+			value = static_cast<double>(reading.value);
+			unit = "code";
+			break;
 		}
 		result.readings.push_back({std::string(descriptor.key),
 					   unit, valid, value});

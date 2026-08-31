@@ -1,5 +1,7 @@
 #include "mnc/service/service_manager.hpp"
+#include "product_units.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <map>
@@ -90,12 +92,39 @@ void dependency_order_and_adoption()
 	require(duplicate_rejected, "duplicate service unit was accepted");
 }
 
+void product_topology_orders_the_data_sender_without_owning_mqtt()
+{
+	auto controller = std::make_shared<FakeController>();
+	mnc::ServiceManager manager(controller);
+	msap1::service_manager::daemon::register_product_units(manager);
+	manager.start_registered();
+	const auto position = [&](std::string_view name) {
+		const auto found = std::ranges::find(controller->controls, name,
+			[](const auto &item) { return std::string_view(item.first); });
+		return found == controller->controls.end()
+			? controller->controls.size()
+			: static_cast<std::size_t>(found - controller->controls.begin());
+	};
+	const auto settings = position("settings");
+	const auto stream = position("meter-stream");
+	const auto historian = position("meter-historian");
+	const auto sender = position("data-sender");
+	const auto acquisition = position("fpga-acquisition");
+	const auto web = position("web-backend");
+	require(settings < stream && stream < historian && settings < sender &&
+		historian < sender && sender < web && acquisition < web,
+		"product topology did not order Data Sender after its durable sources");
+	require(position("mqtt-publisher") == controller->controls.size(),
+		"settings-controlled MQTT was started unconditionally");
+}
+
 } // namespace
 
 int main()
 {
 	try {
 		dependency_order_and_adoption();
+		product_topology_orders_the_data_sender_without_owning_mqtt();
 		std::cout << "service manager tests passed\n";
 		return 0;
 	} catch (const std::exception &error) {

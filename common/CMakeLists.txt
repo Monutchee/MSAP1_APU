@@ -5,6 +5,13 @@ option(MNC_LOGGING_REQUIRE_SYSTEMD
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
+option(MNC_DATA_SENDER_REQUIRE_CURL
+    "Fail configuration when the Data Sender libcurl adapter is unavailable"
+    OFF)
+find_package(CURL QUIET)
+if(MNC_DATA_SENDER_REQUIRE_CURL AND NOT CURL_FOUND)
+    message(FATAL_ERROR "M19 Data Sender requires libcurl development files")
+endif()
 find_library(SQLITE3_LIBRARY NAMES sqlite3)
 if(NOT SQLITE3_LIBRARY)
     # Some development hosts install only the versioned runtime SONAME.
@@ -190,6 +197,38 @@ target_compile_features(mnc_meter_data_provider PUBLIC cxx_std_23)
 target_compile_options(mnc_meter_data_provider PRIVATE
     -Wall -Wextra -Wpedantic)
 
+# Product-neutral M19 historian aggregation and dependency-injected content
+# strategies. Product identity, IPC, scheduling and service policy stay in
+# adapters/applications above this target.
+add_library(mnc_datalogger STATIC
+    mnc/datalogger/datalogger.cpp
+	mnc/datalogger/data_channel.cpp
+	mnc/datalogger/curl_transfer_client.cpp
+    mnc/datalogger/meter_data_content_writer.cpp
+	mnc/datalogger/outbox_repository.cpp
+	mnc/datalogger/scheduler.cpp
+)
+add_library(mnc::datalogger ALIAS mnc_datalogger)
+target_include_directories(mnc_datalogger PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_datalogger PUBLIC cxx_std_23)
+target_compile_options(mnc_datalogger PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_datalogger PUBLIC
+	mnc::meter-data-provider
+	mnc::sqlite
+)
+target_link_libraries(mnc_datalogger PRIVATE OpenSSL::Crypto)
+if(CURL_FOUND)
+    target_link_libraries(mnc_datalogger PRIVATE CURL::libcurl)
+    target_compile_definitions(mnc_datalogger PRIVATE
+        MNC_DATALOGGER_HAVE_CURL=1)
+else()
+    message(STATUS
+        "libcurl development files not found; Data Sender uses the host-test stub")
+endif()
+
 # Product data types and latest-state publication deliberately have no
 # dependency on IPC, WebEngine, persistence, or command-line presentation.
 msap1_library(msap1_meter msap1::meter
@@ -225,6 +264,17 @@ target_link_libraries(msap1_meter_data_provider_stream PRIVATE
 	mnc::sqlite
 )
 
+msap1_library(msap1_datalogger msap1::datalogger
+    msap1/datalogger/msap1_datalogger.cpp
+	msap1/datalogger/data_sender_ipc.cpp
+)
+target_link_libraries(msap1_datalogger PUBLIC
+    mnc::datalogger
+	mnc::ipc
+    msap1::meter-data-provider-stream
+)
+target_link_libraries(msap1_datalogger PRIVATE glaze::glaze)
+
 add_library(mnc_settings STATIC
     mnc/settings/settings_repository.cpp
 )
@@ -240,6 +290,7 @@ target_link_libraries(mnc_settings PRIVATE glaze::glaze)
 msap1_library(msap1_settings msap1::settings
     msap1/settings/settings.cpp
     msap1/settings/settings_ipc.cpp
+	msap1/settings/definition/data_logging_settings.cpp
 )
 target_link_libraries(msap1_settings PUBLIC
     mnc::settings
@@ -370,6 +421,57 @@ msap1_forbid_direct_dependencies(mnc_ipc
 )
 
 if(BUILD_TESTING)
+	add_executable(datalogger_test
+		${PROJECT_SOURCE_DIR}/tests/datalogger_test.cpp)
+	target_link_libraries(datalogger_test PRIVATE mnc::datalogger)
+	target_compile_options(datalogger_test PRIVATE -Wall -Wextra -Wpedantic)
+	add_test(NAME datalogger_test COMMAND datalogger_test)
+
+	add_executable(outbox_test
+		${PROJECT_SOURCE_DIR}/tests/outbox_test.cpp)
+	target_link_libraries(outbox_test PRIVATE mnc::datalogger)
+	target_compile_options(outbox_test PRIVATE -Wall -Wextra -Wpedantic)
+	add_test(NAME outbox_test COMMAND outbox_test)
+
+	add_executable(data_channel_test
+		${PROJECT_SOURCE_DIR}/tests/data_channel_test.cpp)
+	target_link_libraries(data_channel_test PRIVATE mnc::datalogger)
+	target_compile_options(data_channel_test PRIVATE -Wall -Wextra -Wpedantic)
+	add_test(NAME data_channel_test COMMAND data_channel_test)
+	if(CURL_FOUND)
+		add_executable(data_channel_integration_probe
+			${PROJECT_SOURCE_DIR}/tests/integration/data_channel_integration_probe.cpp)
+		target_link_libraries(data_channel_integration_probe PRIVATE
+			mnc::datalogger)
+		target_compile_options(data_channel_integration_probe PRIVATE
+			-Wall -Wextra -Wpedantic)
+	endif()
+
+	add_executable(data_sender_engine_test
+		${PROJECT_SOURCE_DIR}/tests/data_sender_engine_test.cpp)
+	target_link_libraries(data_sender_engine_test PRIVATE mnc::datalogger)
+	target_compile_options(data_sender_engine_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME data_sender_engine_test COMMAND data_sender_engine_test)
+
+	add_executable(data_sender_ipc_test
+		${PROJECT_SOURCE_DIR}/tests/data_sender_ipc_test.cpp)
+	target_link_libraries(data_sender_ipc_test PRIVATE msap1::datalogger)
+	target_compile_options(data_sender_ipc_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME data_sender_ipc_test COMMAND data_sender_ipc_test)
+
+	add_executable(data_sender_access_policy_test
+		${PROJECT_SOURCE_DIR}/tests/data_sender_access_policy_test.cpp)
+	target_include_directories(data_sender_access_policy_test PRIVATE
+		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/data-sender)
+	target_link_libraries(data_sender_access_policy_test PRIVATE
+		msap1::datalogger)
+	target_compile_options(data_sender_access_policy_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME data_sender_access_policy_test
+		COMMAND data_sender_access_policy_test)
+
 	add_executable(modbus_test ${PROJECT_SOURCE_DIR}/tests/modbus_test.cpp)
 	target_link_libraries(modbus_test PRIVATE mnc::modbus)
 	target_compile_options(modbus_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -559,6 +661,8 @@ if(BUILD_TESTING)
     add_executable(service_manager_test
         ${PROJECT_SOURCE_DIR}/tests/service_manager_test.cpp)
     target_link_libraries(service_manager_test PRIVATE mnc::service)
+	target_include_directories(service_manager_test PRIVATE
+		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/service-manager)
     target_compile_options(service_manager_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME service_manager_test COMMAND service_manager_test)
@@ -632,6 +736,18 @@ if(BUILD_TESTING)
         PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     target_compile_options(settings_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME settings_test COMMAND settings_test)
+
+	add_executable(settings_access_policy_test
+		${PROJECT_SOURCE_DIR}/tests/settings_access_policy_test.cpp)
+	target_include_directories(settings_access_policy_test PRIVATE
+		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/settings)
+	target_link_libraries(settings_access_policy_test PRIVATE
+		msap1::settings
+		mnc::ipc)
+	target_compile_options(settings_access_policy_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME settings_access_policy_test
+		COMMAND settings_access_policy_test)
 
     add_executable(mqtt_test
         ${PROJECT_SOURCE_DIR}/tests/mqtt_test.cpp)

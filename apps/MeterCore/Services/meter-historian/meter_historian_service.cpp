@@ -31,13 +31,14 @@ constexpr std::array<MeasurementPeriod, 5> supported_periods = {
 };
 
 const std::vector<mnc::meter::MeterAttributeId> supported_attributes = [] {
-	using Id = mnc::meter::MeterAttributeId;
-	std::vector<Id> result{Id::Frequency, Id::VanRms, Id::VbnRms,
-		Id::VcnRms, Id::IaRms, Id::IbRms, Id::IcRms, Id::InRms};
-	for (const auto group : {mnc::meter::MeterAttributeGroup::Energy,
-		mnc::meter::MeterAttributeGroup::Demand})
-		for (const auto key : mnc::meter::attributes_in(group))
-			result.push_back(key.id);
+	std::vector<mnc::meter::MeterAttributeId> result;
+	for (const auto period : supported_periods) {
+		for (const auto attribute : mnc::meter::attributes_for(period,
+			mnc::meter::MeterAttributeUsage::Historian)) {
+			if (std::ranges::find(result, attribute.id) == result.end())
+				result.push_back(attribute.id);
+		}
+	}
 	return result;
 }();
 
@@ -381,13 +382,27 @@ bool MeterHistorianService::ingest(
 	if (update.period == MeasurementPeriod::Min10 &&
 	    update.kind == RecordKind::unbalance) {
 		/* The 150/180-cycle sliding DEMAND record precedes a coincident
-		 * ten-minute family. Reuse this final sibling's unique stream cursor for
-		 * the dedicated demand dataset, avoiding a three-second forever log. */
+		 * ten-minute family. Materialize the final Min10 unbalance sibling first,
+		 * then reuse its unique stream cursor in the independent demand database.
+		 * This avoids a three-second forever log without dropping the scalar
+		 * unbalance history that the Data Sender consumes. */
 		if (auto demand = stream_.demand(); demand &&
 		    demand->method == msap1::DemandMethod::sliding) {
-			update.period = MeasurementPeriod::Demand;
-			update.kind = RecordKind::demand;
-			update.demand = std::move(demand);
+			const auto measured_at =
+				envelope.timing.utc_start_nanoseconds.value_or(
+					envelope.ingested_at_nanoseconds);
+			store_->append(update, envelope.cursor, measured_at);
+			auto demand_update = update;
+			demand_update.period = MeasurementPeriod::Demand;
+			demand_update.kind = RecordKind::demand;
+			demand_update.fundamental.reset();
+			demand_update.power.reset();
+			demand_update.phasor.reset();
+			demand_update.unbalance.reset();
+			demand_update.energy.reset();
+			demand_update.demand = std::move(demand);
+			store_->append(demand_update, envelope.cursor, measured_at);
+			return true;
 		}
 	}
 	store_->append(update, envelope.cursor,
@@ -623,6 +638,12 @@ void MeterHistorianService::handle(
 				output.u8(point.reset_epoch.has_value());
 				output.i64(point.value);
 				output.u64(point.reset_epoch.value_or(0));
+				output.i64(point.cursor.measured_at_nanoseconds);
+				output.u64(point.cursor.block_source_sequence);
+				output.u32(point.cursor.record_kind);
+				output.u64(point.cursor.block_id);
+				output.u16(static_cast<std::uint16_t>(
+					point.cursor.attribute));
 			}
 			break;
 		}

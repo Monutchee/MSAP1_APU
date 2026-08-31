@@ -10,7 +10,7 @@
 
 namespace msap1::settings::ipc {
 
-inline constexpr std::uint32_t protocol_version = 3;
+inline constexpr std::uint32_t protocol_version = 4;
 
 enum class Command : std::uint32_t {
 	get_active = 1,
@@ -28,6 +28,8 @@ enum class Command : std::uint32_t {
 	get_asset_status = 13,
 	download_asset = 14,
 	resolve_mqtt_assets = 15,
+	resolve_data_channel_credentials = 16,
+	resolve_data_channel_assets = 17,
 };
 
 enum class Status : std::uint32_t {
@@ -78,6 +80,12 @@ public:
 	runtime_mqtt_credentials(int timeout_ms = 3000) const;
 	[[nodiscard]] std::map<std::string, std::string>
 	runtime_mqtt_assets(int timeout_ms = 3000) const;
+	[[nodiscard]] std::map<std::string, std::string>
+	runtime_data_channel_credentials(std::string channel_id,
+		int timeout_ms = 3000) const;
+	[[nodiscard]] std::map<std::string, std::string>
+	runtime_data_channel_assets(std::string channel_id,
+		int timeout_ms = 3000) const;
 	void put_asset(std::string name, std::string contents,
 		int timeout_ms = 5000) const;
 	void delete_asset(std::string name, int timeout_ms = 5000) const;

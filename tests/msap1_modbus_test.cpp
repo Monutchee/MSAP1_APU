@@ -195,6 +195,8 @@ public:
 			case mnc::meter::MeterUnit::Picovars:
 			case mnc::meter::MeterUnit::Millidegrees:
 			case mnc::meter::MeterUnit::RatioMillionths:
+			case mnc::meter::MeterUnit::CrestTenThousandths:
+			case mnc::meter::MeterUnit::CategoricalCode:
 				value.value = 1;
 				break;
 			}

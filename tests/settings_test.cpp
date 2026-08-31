@@ -1,6 +1,9 @@
 #include "msap1/settings/settings.hpp"
 #include "msap1/settings/settings_ipc.hpp"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +17,12 @@ namespace {
 
 using msap1::settings::ProductSettings;
 using msap1::settings::SettingsHandler;
+
+void require(bool condition, std::string_view message)
+{
+	if (!condition)
+		throw std::runtime_error(std::string(message));
+}
 
 struct TestTree {
 	std::filesystem::path root;
@@ -48,7 +57,7 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
-		assert(initial.settings.schema_version == 4u);
+		assert(initial.settings.schema_version == 5u);
 		assert(initial.settings.metering.events.voltage_sag.enabled);
 		assert(initial.settings.metering.events.voltage_sag.waveform.decimation == 8u);
 		assert(initial.settings.metering.events.voltage_swell.waveform.decimation == 8u);
@@ -269,7 +278,7 @@ void test_existing_settings_default_system_nominal_voltage()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 			 std::istreambuf_iterator<char>());
-	const std::string schema = "\"schema_version\": 4";
+	const std::string schema = "\"schema_version\": 5";
 	const auto schema_position = json.find(schema);
 	assert(schema_position != std::string::npos);
 	json.replace(schema_position, schema.size(), "\"schema_version\": 2");
@@ -316,7 +325,7 @@ void test_existing_settings_default_system_nominal_voltage()
 
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
-	assert(handler.active().settings.schema_version == 4u);
+	assert(handler.active().settings.schema_version == 5u);
 	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
 	assert(handler.active().settings.metering.measurement_topology == "wye");
 	assert(handler.active().settings.metering.system_nominal_voltage_v ==
@@ -423,6 +432,143 @@ void test_secrets_and_factory_reset()
 	assert(!handler.has_secrets());
 }
 
+void test_schema_four_migrates_to_empty_data_logging()
+{
+	TestTree tree("schema-four-migration");
+	std::ifstream input(tree.factory);
+	std::string json((std::istreambuf_iterator<char>(input)),
+		std::istreambuf_iterator<char>());
+	const auto version = json.find("\"schema_version\": 5");
+	require(version != std::string::npos, "factory schema marker is missing");
+	json.replace(version, std::string_view{"\"schema_version\": 5"}.size(),
+		"\"schema_version\": 4");
+	const auto data_logging = json.find(",\n  \"data_logging\"");
+	require(data_logging != std::string::npos,
+		"factory data_logging section is missing");
+	const auto root_close = json.rfind("\n}");
+	require(root_close != std::string::npos && root_close > data_logging,
+		"factory root closing brace is missing");
+	json.erase(data_logging, root_close - data_logging);
+
+	const auto migrated = msap1::settings::SettingsCodec::decode(json);
+	require(migrated.schema_version == 5u,
+		"schema-four document did not migrate to schema five");
+	require(migrated.data_logging.channels.empty() &&
+		migrated.data_logging.jobs.empty(),
+		"schema migration enabled outbound traffic");
+	require(migrated.metering.events.voltage_sag.enabled &&
+		migrated.waveform.default_pretrigger_ms == 3000u,
+		"schema migration changed an M18 setting");
+}
+
+void test_data_logging_configuration_validation()
+{
+	using namespace msap1::settings;
+	TestTree tree("data-logging-validation");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	auto settings = handler.active().settings;
+	DataChannelSettings channel;
+	channel.id = "2ee37d86-4625-4f25-9d50-27cbd734d189";
+	channel.name = "Operations HTTPS";
+	channel.enabled = true;
+	channel.protocol = DataChannelProtocol::https;
+	channel.host = "collector.example.test";
+	channel.port = 0;
+	channel.http_path = "/meter-data";
+	channel.authentication = DataChannelAuthentication::bearer;
+	settings.data_logging.channels = {channel};
+	settings.data_logging.jobs = {{
+		.id = "10f9b506-2ff7-48ac-bc8a-7a12e359cd83",
+		.name = "Five minute meter data",
+		.enabled = true,
+		.revision = 1,
+		.source_period = "basic",
+		.generation_interval_seconds = 300,
+		.row_interval_seconds = 60,
+		.selections = {{"voltage.ln.a.rms", "minimum"},
+			{"voltage.ln.a.rms", "maximum"},
+			{"voltage.ln.a.rms", "average"}},
+		.format = "json",
+		.destination = DataLoggingDestination::remote,
+		.channel_ids = {channel.id},
+	}};
+	const auto saved = handler.save(settings);
+	require(saved.settings.data_logging.jobs.size() == 1,
+		"valid data logging job was not persisted");
+
+	auto invalid = saved.settings;
+	invalid.data_logging.channels.front().protocol = DataChannelProtocol::http;
+	invalid.data_logging.channels.front().insecure_transport_acknowledged = false;
+	bool rejected = false;
+	try {
+		(void)handler.save(invalid);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	require(rejected, "clear-text HTTP was accepted without acknowledgement");
+
+	invalid = saved.settings;
+	invalid.data_logging.jobs.front().destination =
+		DataLoggingDestination::local_only;
+	rejected = false;
+	try {
+		(void)handler.save(invalid);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	require(rejected, "Local-only job accepted a remote channel");
+
+	invalid = saved.settings;
+	invalid.data_logging.jobs.front().source_period = "minutes_10";
+	invalid.data_logging.jobs.front().row_interval_seconds = 60;
+	rejected = false;
+	try {
+		(void)handler.save(invalid);
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	require(rejected, "10-minute source accepted a one-minute row");
+}
+
+void test_channel_scoped_credentials_and_assets()
+{
+	TestTree tree("channel-secrets");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	const std::string id = "2ee37d86-4625-4f25-9d50-27cbd734d189";
+	const auto prefix = "data-channel." + id + ".";
+	handler.set_secret(prefix + "bearer-token", "secret-token");
+	require(handler.has_secret(prefix + "bearer-token"),
+		"channel bearer token presence was lost");
+	require(handler.runtime_secret(prefix + "bearer-token") == "secret-token",
+		"runtime channel token resolution failed");
+	handler.put_asset(prefix + "ca",
+		"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n");
+	handler.put_asset(prefix + "known-hosts",
+		"example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n");
+	require(handler.has_asset(prefix + "ca") &&
+		handler.has_asset(prefix + "known-hosts"),
+		"channel trust assets were not stored");
+	const auto public_json = msap1::settings::SettingsCodec::encode(
+		handler.active().settings, false);
+	require(!public_json.contains("secret-token"),
+		"channel secret leaked into public settings");
+	handler.clear_secret(prefix + "bearer-token");
+	handler.delete_asset(prefix + "ca");
+	require(!handler.has_secret(prefix + "bearer-token") &&
+		!handler.has_asset(prefix + "ca") &&
+		handler.has_asset(prefix + "known-hosts"),
+		"channel material deletion changed an unrelated material");
+	handler.set_secret(prefix + "bearer-token", "secret-token");
+	handler.put_asset(prefix + "ca",
+		"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n");
+	(void)handler.factory_reset(true);
+	require(!handler.has_secret(prefix + "bearer-token") &&
+		!handler.has_asset(prefix + "ca"),
+		"factory reset retained channel credentials");
+}
+
 void test_settings_ipc_round_trip()
 {
 	using namespace msap1::settings::ipc;
@@ -472,5 +618,8 @@ int main()
 	test_empty_active_recovers_factory_defaults();
 	test_invalid_active_recovers_factory_defaults();
 	test_secrets_and_factory_reset();
+	test_schema_four_migrates_to_empty_data_logging();
+	test_data_logging_configuration_validation();
+	test_channel_scoped_credentials_and_assets();
 	test_settings_ipc_round_trip();
 }

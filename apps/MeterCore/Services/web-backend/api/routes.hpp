@@ -66,6 +66,12 @@ webengine::Response get_health(AppContext &,
 webengine::Response get_about(AppContext &,
 			      const webengine::RequestContext &);
 
+/* ── attribute_routes.cpp — canonical meter attribute capabilities ────── */
+
+/** @brief GET /api/v1/meter/attributes?usage=snapshot|historian. */
+webengine::Response get_meter_attributes(AppContext &,
+	const webengine::RequestContext &);
+
 /* ── meter_routes.cpp — metering health, readings, frequency config ────── */
 
 /** @brief GET /api/v1/meter/health — metering pipeline health. */
@@ -250,6 +256,38 @@ std::optional<webengine::FileDownload> download_mqtt_ca(AppContext &,
 std::optional<webengine::FileDownload> download_mqtt_client_certificate(
 	AppContext &, const webengine::RequestContext &);
 
+/* ── data_logging_routes.cpp — M19 jobs, channels, and generated files ── */
+webengine::Response get_data_logging_configuration(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response put_data_logging_configuration(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_data_logging_status(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_data_logging_artifacts(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_data_logging_artifact(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_data_logging_preview(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response post_data_logging_retry(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_data_logging_artifacts(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response post_data_logging_channel_test(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response get_data_logging_materials(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response put_data_logging_credential(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_data_logging_credential(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response delete_data_logging_asset(AppContext &,
+	const webengine::RequestContext &);
+webengine::Response upload_data_logging_asset(AppContext &,
+	const webengine::RequestContext &, const webengine::FileUpload &);
+webengine::HandlerResult download_data_logging_artifact(AppContext &,
+	const webengine::RequestContext &);
+
 /**
  * @brief Every route of the external JSON API, grouped by module.
  *
@@ -273,6 +311,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/health",
 	 webengine::Role::Viewer, &get_meter_health,
 	 "Metering pipeline health"},
+	{webengine::http::verb::get, "/api/v1/meter/attributes",
+	 webengine::Role::Viewer, &get_meter_attributes,
+	 "Canonical period-aware meter attribute capabilities"},
 	{webengine::http::verb::get, "/api/v1/meter/readings",
 	 webengine::Role::Viewer, &get_meter_readings,
 	 "Latest RMS and frequency readings"},
@@ -451,7 +492,120 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::delete_, "/api/v1/mqtt/tls/client-key",
 	 webengine::Role::Admin, &delete_mqtt_client_key,
 	 "Remove the upload-only MQTT private key"},
+
+	/* M19 Data Logging (data_logging_routes.cpp) */
+	{webengine::http::verb::get, "/api/v1/data-logging/configuration",
+	 webengine::Role::Admin, &get_data_logging_configuration,
+	 "Data Logging jobs, channels, storage policy, and material presence"},
+	{webengine::http::verb::put, "/api/v1/data-logging/configuration",
+	 webengine::Role::Admin, &put_data_logging_configuration,
+	 "Validate and persist Data Logging jobs and Data Channels"},
+	{webengine::http::verb::get, "/api/v1/data-logging/status",
+	 webengine::Role::Viewer, &get_data_logging_status,
+	 "Data Sender jobs, channels, queue, archive, and storage status"},
+	{webengine::http::verb::get, "/api/v1/data-logging/artifacts",
+	 webengine::Role::Viewer, &get_data_logging_artifacts,
+	 "Bounded generated-file listing"},
+	{webengine::http::verb::delete_, "/api/v1/data-logging/artifacts",
+	 webengine::Role::Admin, &delete_data_logging_artifacts,
+	 "Delete selected or all generated files with unsent confirmation"},
+	{webengine::http::verb::get, "/api/v1/data-logging/artifact",
+	 webengine::Role::Viewer, &get_data_logging_artifact,
+	 "Generated-file manifest and per-channel delivery detail"},
+	{webengine::http::verb::get, "/api/v1/data-logging/artifacts/preview",
+	 webengine::Role::Viewer, &get_data_logging_preview,
+	 "Bounded generated-file text preview"},
+	{webengine::http::verb::post, "/api/v1/data-logging/artifacts/retry",
+	 webengine::Role::Admin, &post_data_logging_retry,
+	 "Retry selected generated-file deliveries"},
+	{webengine::http::verb::post, "/api/v1/data-logging/channels/test",
+	 webengine::Role::Admin, &post_data_logging_channel_test,
+	 "Send a clearly marked zero-data probe through a saved channel"},
+	{webengine::http::verb::get, "/api/v1/data-logging/channel-materials",
+	 webengine::Role::Admin, &get_data_logging_materials,
+	 "Channel credential and verification-asset presence"},
+	{webengine::http::verb::put, "/api/v1/data-logging/channel-credential",
+	 webengine::Role::Admin, &put_data_logging_credential,
+	 "Replace one channel-scoped secret"},
+	{webengine::http::verb::delete_,
+	 "/api/v1/data-logging/channel-credential", webengine::Role::Admin,
+	 &delete_data_logging_credential, "Remove one channel-scoped secret"},
+	{webengine::http::verb::delete_, "/api/v1/data-logging/channel-asset",
+	 webengine::Role::Admin, &delete_data_logging_asset,
+	 "Remove one channel certificate, key, or known-host asset"},
 });
+
+struct RequiredRouteContract {
+	webengine::http::verb method;
+	std::string_view path;
+	webengine::Role role;
+};
+
+inline constexpr auto m19_route_contract =
+	std::to_array<RequiredRouteContract>({
+		{webengine::http::verb::get, "/api/v1/meter/attributes",
+		 webengine::Role::Viewer},
+		{webengine::http::verb::get,
+		 "/api/v1/data-logging/configuration", webengine::Role::Admin},
+		{webengine::http::verb::put,
+		 "/api/v1/data-logging/configuration", webengine::Role::Admin},
+		{webengine::http::verb::get, "/api/v1/data-logging/status",
+		 webengine::Role::Viewer},
+		{webengine::http::verb::get, "/api/v1/data-logging/artifacts",
+		 webengine::Role::Viewer},
+		{webengine::http::verb::delete_, "/api/v1/data-logging/artifacts",
+		 webengine::Role::Admin},
+		{webengine::http::verb::get, "/api/v1/data-logging/artifact",
+		 webengine::Role::Viewer},
+		{webengine::http::verb::get,
+		 "/api/v1/data-logging/artifacts/preview", webengine::Role::Viewer},
+		{webengine::http::verb::post,
+		 "/api/v1/data-logging/artifacts/retry", webengine::Role::Admin},
+		{webengine::http::verb::post,
+		 "/api/v1/data-logging/channels/test", webengine::Role::Admin},
+		{webengine::http::verb::get,
+		 "/api/v1/data-logging/channel-materials", webengine::Role::Admin},
+		{webengine::http::verb::put,
+		 "/api/v1/data-logging/channel-credential", webengine::Role::Admin},
+		{webengine::http::verb::delete_,
+		 "/api/v1/data-logging/channel-credential", webengine::Role::Admin},
+		{webengine::http::verb::delete_,
+		 "/api/v1/data-logging/channel-asset", webengine::Role::Admin},
+	});
+
+consteval bool route_table_is_unique()
+{
+	for (std::size_t left = 0; left < route_table.size(); ++left)
+		for (std::size_t right = left + 1; right < route_table.size(); ++right)
+			if (route_table[left].method == route_table[right].method &&
+			    route_table[left].path == route_table[right].path)
+				return false;
+	return true;
+}
+
+consteval bool m19_routes_have_required_roles()
+{
+	for (const auto &required : m19_route_contract) {
+		bool found = false;
+		for (const auto &route : route_table)
+			if (route.method == required.method && route.path == required.path &&
+			    route.min_role == required.role) {
+				found = true;
+				break;
+			}
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+static_assert(route_table_is_unique(),
+	"external API method/path pairs must be unique");
+static_assert(m19_routes_have_required_roles(),
+	"M19 external API role contract changed");
+
+inline constexpr auto data_logging_download_role = webengine::Role::Viewer;
+inline constexpr auto data_logging_asset_upload_role = webengine::Role::Admin;
 
 /**
  * @brief Register every route_table entry with the engine.
@@ -476,6 +630,10 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 		[&context](const auto &request) {
 			return export_waveform_event(context, request);
 		}, webengine::Role::Viewer);
+	engine.add_streaming_download("/api/v1/data-logging/artifacts/download",
+		[&context](const auto &request) {
+			return download_data_logging_artifact(context, request);
+		}, data_logging_download_role);
 
 	constexpr std::size_t certificate_limit = 1024 * 1024;
 	const std::vector<std::string> certificate_types{
@@ -501,6 +659,15 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 		[&context](const auto &request, const auto &file) {
 			return upload_mqtt_client_key(context, request, file);
 		}, webengine::Role::Admin, certificate_limit, certificate_types);
+	const std::vector<std::string> data_channel_asset_types{
+		"application/octet-stream", "application/x-pem-file",
+		"application/pkix-cert", "application/x-x509-ca-cert",
+		"text/plain"};
+	engine.add_file_upload("/api/v1/data-logging/channel-asset",
+		[&context](const auto &request, const auto &file) {
+			return upload_data_logging_asset(context, request, file);
+		}, data_logging_asset_upload_role, certificate_limit,
+		data_channel_asset_types);
 }
 
 } // namespace msap1::web::api

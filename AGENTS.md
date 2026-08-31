@@ -144,6 +144,37 @@
   use the typed settings IPC API rather than reading or writing product
   configuration files. Do not add drafts or revision history, reintroduce
   legacy `/etc` ADC profiles, or duplicate factory values in packaging recipes.
+- The canonical meter attribute identity and capability catalog lives under
+  `common/mnc/MeterDataProvider/attributes`. Snapshot and historian are
+  filtered views of one stable ID/key table. MQTT, historian, REST, CSV, and
+  Web adapters must consume that catalog and must not introduce another
+  attribute identity list. Period support and allowed calculations are catalog
+  capabilities, not UI-only policy.
+- Keep reusable historical artifact generation under `common/mnc/datalogger`.
+  Its abstract history source, Datalogger, content writer, outbox, transfer,
+  channel, scheduler, and clock contracts must remain product-neutral and free
+  of WebEngine/service/process dependencies. MSAP1 historian/settings/IPC
+  adapters belong under `common/msap1/datalogger`; runtime orchestration belongs
+  only in `apps/MeterCore/Services/data-sender`.
+- `msap1-data-sender` reads history through typed historian IPC and never opens
+  historian SQLite, the raw spool, acquisition snapshots, DMA, RPMsg, or device
+  nodes. Its `/data/mnc/data-sender` outbox is authoritative for generated
+  payload and per-channel delivery state. Delivery is at least once and
+  independently acknowledged; never delete an unsent payload, resend an
+  acknowledged sibling channel, or implement implicit drop-oldest behavior.
+- M19 generated content is `mnc.meter.datalog.v1`. JSON and CSV writers are
+  injected strategies over one ordered typed dataset. Keep UTC windows
+  half-open, filenames deterministic/safe, 64-bit counters exact, quality and
+  coverage explicit, and publication crash-safe through fsync plus atomic
+  rename.
+- Data-channel credentials and assets are scoped by validated channel ID and
+  owned by `msap1-settings`. Only the dedicated Data Sender identity may use
+  the runtime resolution command. Web/API responses expose presence status,
+  never passwords, tokens, passphrases, private keys, client assets, runtime
+  paths, or generated secret-bearing configuration.
+- Generated-file view/download must remain authenticated and manifest-
+  authorized through the backend streaming route. Do not add an unauthenticated
+  nginx alias or raw listing for `/data/mnc/data-sender`.
 - The ADC capture rate defaults to 128,000 frames/s. Persistent changes to the
   ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
   waveform defaults must be saved through the settings authority and

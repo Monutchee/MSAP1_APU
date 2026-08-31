@@ -16,7 +16,12 @@ AD7771 capture -> PL conversion -> PL RMS + VLA frequency -> AXI DMA
     -> typed decoder -> R5C1 ENERGY family assembler
     -> msap1-meter-stream SQLite lifetime ledger
     -> latest-period MeterDataProvider after durable acknowledgement
-    -> CLI, authenticated JSON API, and future publishers
+    -> CLI, authenticated JSON API, and snapshot publishers
+
+msap1-meter-historian -> typed, paged historian IPC
+    -> reusable mnc::datalogger aggregation + JSON/CSV writer
+    -> msap1-data-sender durable outbox
+    -> Local-only archive or independent HTTP(S)/FTP/SFTP deliveries
 
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
     -> /dev/msap1-waveform -> 128 MiB daemon history
@@ -38,8 +43,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The project uses C++23, Boost.Asio, Glaze 8.0.0, OpenAMP-helper-APU, and
-WebEngine.
+The project uses C++23, Boost.Asio, Glaze 8.0.0, OpenAMP-helper-APU, WebEngine,
+SQLite, and libcurl. The product-neutral `mnc::datalogger` target contains the
+generation, serialization, scheduling, channel, and outbox contracts; the
+`msap1::datalogger` target supplies the MSAP1 historian and IPC adapters.
 The reusable `mnc::logging` library writes and reads structured systemd
 journal entries; MSAP1-specific component/event policy remains in this
 repository.
@@ -78,8 +85,10 @@ validates the factory document and initializes
 `/data/mnc/settings/active.json`. It is the only process that may mutate the
 active settings or the separately protected secrets document. Frequency, RMS,
 conversion, normal sample rate, ADC source/simulator, and waveform defaults
-are all part of this one schema-version-1 product document. No legacy `/etc`
-profile is read or migrated.
+are all part of this one schema-version-5 product document. Schema versions
+1 through 4 migrate in place to version 5 with empty Data Logging channels and
+jobs, so an upgrade never starts outbound traffic. No legacy `/etc` profile is
+read or migrated.
 
 Each settings update validates the complete candidate, invokes acquisition's
 coordinated stop/configure/readback/restart transaction, and atomically saves
@@ -135,6 +144,41 @@ Modbus, and telemetry publishers. Durable historian delivery is implemented
 by `msap1-meter-stream` and `msap1-meter-historian`; see
 [Meter data streaming and historian architecture](common/mnc/MeterDataProvider/stream/README.md).
 
+## Meter Data Sender and reusable Datalogger
+
+M19 adds one canonical meter attribute catalog under
+`common/mnc/MeterDataProvider/attributes/`. Snapshot and historian lists are
+capability-filtered views of that catalog, including stable IDs/keys, friendly
+labels, groups, units, search aliases, value kinds, supported calculations,
+and period support. MQTT, history, the external API, and the Web attribute
+picker consume those views rather than maintaining parallel attribute tables.
+
+Reusable generation code lives under `common/mnc/datalogger/`; it depends on
+abstract historical-data, content-writer, outbox, transfer, and clock
+interfaces. The MSAP1 implementation under `common/msap1/datalogger/` queries
+the typed historian IPC API. It never opens historian SQLite, acquisition IPC,
+DMA, RPMsg, or device nodes. See the
+[reusable Datalogger contract](common/mnc/datalogger/README.md).
+
+`msap1-data-sender` is a dedicated `mnc::Service` daemon. It aligns completed
+job windows to UTC, creates deterministic `mnc.meter.datalog.v1` JSON or CSV
+artifacts, and commits them to `/data/mnc/data-sender/`. Local-only artifacts
+remain in the archive without a network attempt. Remote artifacts have one
+durable delivery row per selected channel and use at-least-once delivery;
+already acknowledged channels are not resent when another channel fails.
+Payloads remain until all selected channels acknowledge them. A quota or
+free-space guard pauses new generation without deleting unsent data.
+
+HTTP and HTTPS use a raw POST with MIME type, stable artifact identity,
+filename, checksum, and idempotency headers. FTP and SFTP upload to a temporary
+name and then rename to the deterministic final filename. HTTP/FTP require an
+explicit insecure-transport acknowledgement, HTTPS always verifies peer and
+hostname, and SFTP requires installed known-host material. Channel credentials
+and TLS/SSH assets are channel-scoped settings material resolved only to the
+dedicated Data Sender runtime identity; secrets never enter `active.json` or
+REST responses. The Data Sender IPC contract is framed version 1 at
+`/run/monutchee/data-sender/data-sender.sock`.
+
 The authenticated external API is:
 
 - `POST /api/login` and `POST /api/logout`
@@ -143,6 +187,8 @@ The authenticated external API is:
 - `GET /api/v1/about` (viewer-safe MNCOS version, image build identifier, and
   software build date)
 - `GET /api/v1/meter/health`
+- `GET /api/v1/meter/attributes?usage=snapshot|historian` (canonical,
+  period-aware attribute descriptors and calculation capabilities)
 - `GET /api/v1/meter/readings`
 - `GET /api/v1/meter/aggregate` (newest 150/180-cycle aggregate; always 200
   while acquisition answers, with `{"available": false}` until the first
@@ -174,6 +220,23 @@ The authenticated external API is:
 - `GET /api/v1/meter/history/capabilities`
 - `POST /api/v1/meter/history/query`
 - `GET /api/v1/meter/history/health`
+- `GET /api/v1/data-logging/configuration` (administrator only)
+- `PUT /api/v1/data-logging/configuration` (administrator only)
+- `GET /api/v1/data-logging/status`
+- `GET /api/v1/data-logging/artifacts` and
+  `GET /api/v1/data-logging/artifact`
+- `GET /api/v1/data-logging/artifacts/preview` and
+  `GET /api/v1/data-logging/artifacts/download` (authenticated, manifest-
+  authorized generated content; no raw filesystem alias)
+- `POST /api/v1/data-logging/artifacts/retry` and
+  `DELETE /api/v1/data-logging/artifacts` (administrator only; discarding
+  incomplete delivery requires explicit `discard_unsent` confirmation)
+- `POST /api/v1/data-logging/channels/test` (administrator-only zero-data
+  saved-channel probe)
+- `GET /api/v1/data-logging/channel-materials`,
+  `PUT/DELETE /api/v1/data-logging/channel-credential`, and upload/delete
+  `/api/v1/data-logging/channel-asset` (administrator only; presence/status is
+  returned, never secret material)
 - `GET /api/v1/developer/database` (administrator only)
 - `PUT /api/v1/developer/database` (administrator only)
 - `POST /api/v1/developer/database/maintenance` (administrator only; clears

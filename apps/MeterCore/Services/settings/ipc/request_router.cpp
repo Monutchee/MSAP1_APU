@@ -56,6 +56,12 @@ void RequestRouter::handle(mnc::ipc::UnixStreamServer::Connection connection,
 			response.status = Status::permission_denied;
 			response.message =
 				"MQTT runtime credentials require the MQTT service identity";
+		} else if (data_sender_runtime_only(command) &&
+			   !may_resolve_data_sender_runtime(
+				   connection->peer_credentials())) {
+			response.status = Status::permission_denied;
+			response.message =
+				"data channel credentials require the Data Sender identity";
 		} else if (mutation_command(command) &&
 			   !access.operator_access) {
 			response.status = Status::permission_denied;
@@ -164,7 +170,9 @@ void RequestRouter::dispatch(
 			? "present" : "absent";
 		break;
 	case Command::download_asset:
-		if (request.name == "client-key") {
+		if (request.name == "client-key" ||
+		    request.name.ends_with(".client-key") ||
+		    request.name.ends_with(".sftp-private-key")) {
 			response.status = Status::permission_denied;
 			response.message = "private keys are upload-only";
 		} else {
@@ -176,6 +184,34 @@ void RequestRouter::dispatch(
 		for (const auto name : {"ca", "client-certificate", "client-key"})
 			if (handler_.has_asset(name))
 				assets.emplace(name, handler_.read_asset(name));
+		response.json = glz::write_json(assets).value_or("{}");
+		break;
+	}
+	case Command::resolve_data_channel_credentials: {
+		if (!msap1::settings::valid_data_channel_id(request.name))
+			throw std::invalid_argument("invalid data channel ID");
+		const auto prefix = "data-channel." + request.name + ".";
+		std::map<std::string, std::string> credentials;
+		for (const auto key : {"password", "bearer-token",
+			     "private-key-passphrase"}) {
+			const auto name = prefix + key;
+			if (handler_.has_secret(name))
+				credentials.emplace(key, handler_.runtime_secret(name));
+		}
+		response.json = glz::write_json(credentials).value_or("{}");
+		break;
+	}
+	case Command::resolve_data_channel_assets: {
+		if (!msap1::settings::valid_data_channel_id(request.name))
+			throw std::invalid_argument("invalid data channel ID");
+		const auto prefix = "data-channel." + request.name + ".";
+		std::map<std::string, std::string> assets;
+		for (const auto key : {"ca", "client-certificate", "client-key",
+			     "sftp-private-key", "known-hosts"}) {
+			const auto name = prefix + key;
+			if (handler_.has_asset(name))
+				assets.emplace(key, handler_.read_asset(name));
+		}
 		response.json = glz::write_json(assets).value_or("{}");
 		break;
 	}

@@ -649,6 +649,7 @@ void historian_persists_atomic_m17_boundary_snapshots()
 		.start_nanoseconds = 0,
 		.end_nanoseconds = 700'000'000'000ll,
 		.limit = 64,
+		.after = std::nullopt,
 	};
 	const msap1::history::HistoryQuery demand_query{
 		.period = msap1::MeasurementPeriod::Demand,
@@ -659,6 +660,7 @@ void historian_persists_atomic_m17_boundary_snapshots()
 		.start_nanoseconds = 0,
 		.end_nanoseconds = 700'000'000'000ll,
 		.limit = 64,
+		.after = std::nullopt,
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -687,6 +689,138 @@ void historian_persists_atomic_m17_boundary_snapshots()
 		require(reopened.query(energy_query).size() == 2 &&
 			reopened.query(demand_query).size() == 2,
 			"M17 energy/demand boundary snapshot was not persistent");
+	}
+	remove_database(path);
+}
+
+void historian_persists_complete_m19_scalar_projection()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	using Id = mnc::meter::MeterAttributeId;
+	const auto path = temporary_database("history-m19-scalar-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::persistent, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
+	};
+	{
+	msap1::history::MeterHistoryStore history(path, policies);
+	auto stamp = [](auto &reading, std::int64_t value,
+		std::uint64_t sequence) {
+		reading.value = value;
+		reading.quality = msap1::MeasurementQuality::valid;
+		reading.source_sequence = sequence;
+	};
+
+	msap1::MeterUpdate power;
+	power.period = msap1::MeasurementPeriod::Basic;
+	power.kind = msap1::RecordKind::power;
+	power.sequence = 10;
+	power.power.emplace();
+	stamp(power.power->active_power.phase_a, 101, 10);
+	stamp(power.power->voltage_crest.phase_a, 14142, 10);
+	history.append(power, 10, 1'000'000'000ll);
+
+	msap1::MeterUpdate phasor;
+	phasor.period = msap1::MeasurementPeriod::Basic;
+	phasor.kind = msap1::RecordKind::phasor;
+	phasor.sequence = 11;
+	phasor.phasor.emplace();
+	stamp(phasor.phasor->fundamental_voltage.phase_a, 120'000'000, 11);
+	stamp(phasor.phasor->current_angle.neutral, 359000, 11);
+	stamp(phasor.phasor->displacement_power_factor.phase_a, 900000, 11);
+	phasor.phasor->load_nature.phase_a = msap1::LoadNature::lagging;
+	history.append(phasor, 11, 1'000'000'000ll);
+
+	msap1::MeterUpdate unbalance;
+	unbalance.period = msap1::MeasurementPeriod::Basic;
+	unbalance.kind = msap1::RecordKind::unbalance;
+	unbalance.sequence = 12;
+	unbalance.unbalance.emplace();
+	stamp(unbalance.unbalance->voltage_positive_sequence, 119'000'000, 12);
+	stamp(unbalance.unbalance->voltage_positive_angle, 250, 12);
+	history.append(unbalance, 12, 1'000'000'000ll);
+
+	const msap1::history::HistoryQuery query{
+		.period = msap1::MeasurementPeriod::Basic,
+		.attributes = {Id::ActivePowerA, Id::VoltageCrestA,
+			Id::FundamentalVoltageA, Id::CurrentPhaseAngleN,
+			Id::LoadNatureA, Id::PositiveSequenceVoltage,
+			Id::VoltagePositiveSequenceAngle},
+		.start_nanoseconds = 0,
+		.end_nanoseconds = 2'000'000'000ll,
+		.limit = 64,
+		.after = std::nullopt,
+	};
+	const auto points = history.query(query);
+	require(points.size() == query.attributes.size(),
+		"M19 historian omitted a decoded scalar family");
+	/* Page directly through one timestamp containing multiple record kinds and
+	 * attributes. The complete cursor must reproduce the unpaged order without
+	 * timestamp overlap, duplicate suppression, or missing siblings. */
+	auto paged_query = query;
+	paged_query.limit = 2;
+	std::vector<msap1::history::HistoryPoint> paged;
+	for (;;) {
+		const auto page = history.query(paged_query);
+		paged.insert(paged.end(), page.begin(), page.end());
+		if (page.size() < paged_query.limit)
+			break;
+		paged_query.after = page.back().cursor;
+	}
+	require(paged.size() == points.size(),
+		"history cursor omitted or duplicated a bounded page sibling");
+	for (std::size_t index = 0; index < points.size(); ++index)
+		require(paged[index].cursor == points[index].cursor &&
+			paged[index].attribute == points[index].attribute &&
+			paged[index].value == points[index].value,
+			"history cursor did not preserve the complete ordering key");
+	const auto nature = std::ranges::find_if(points, [](const auto &point) {
+		return point.attribute == Id::LoadNatureA;
+	});
+	require(nature != points.end() &&
+		nature->value == static_cast<std::int64_t>(msap1::LoadNature::lagging),
+		"load nature did not retain categorical identity");
+
+	/* The final Min10 sibling and sampled Demand legitimately share one
+	 * durable stream cursor but remain independently queryable periods. */
+	msap1::MeterUpdate min10;
+	min10.period = msap1::MeasurementPeriod::Min10;
+	min10.kind = msap1::RecordKind::unbalance;
+	min10.sequence = 20;
+	min10.unbalance.emplace();
+	stamp(min10.unbalance->voltage_unbalance, 1000, 20);
+	history.append(min10, 20, 600'000'000'000ll);
+	auto demand = energy_demand_history_update();
+	demand.period = msap1::MeasurementPeriod::Demand;
+	demand.energy.reset();
+	history.append(demand, 20, 600'000'000'000ll);
+	const msap1::history::HistoryQuery min10_query{
+		.period = msap1::MeasurementPeriod::Min10,
+		.attributes = {Id::VoltageUnbalance},
+		.start_nanoseconds = 0,
+		.end_nanoseconds = 700'000'000'000ll,
+		.limit = 8,
+		.after = std::nullopt,
+	};
+	const msap1::history::HistoryQuery demand_query{
+		.period = msap1::MeasurementPeriod::Demand,
+		.attributes = {Id::CurrentActiveDemandA},
+		.start_nanoseconds = 0,
+		.end_nanoseconds = 700'000'000'000ll,
+		.limit = 8,
+		.after = std::nullopt,
+	};
+	require(history.query(min10_query).size() == 1 &&
+		history.query(demand_query).size() == 1,
+		"shared Min10/Demand stream cursor lost one period projection");
 	}
 	remove_database(path);
 }
@@ -805,7 +939,7 @@ void historian_status_reports_incremental_storage_and_indexed_range()
 			"basic dataset is missing from historian status");
 		require(basic->block_count == 3,
 			"historian status block count drifted from committed rows");
-		require(basic->storage_bytes == 3u * (96u + 8u * 40u),
+		require(basic->storage_bytes == 3u * (96u + 11u * 40u),
 			"historian status did not use exact incremental storage bytes");
 		require(basic->oldest_nanoseconds == 10'000'000'000ll &&
 			basic->newest_nanoseconds == 30'000'000'000ll,
@@ -906,14 +1040,15 @@ void historian_enforces_retention_without_rescanning()
 	query.end_nanoseconds = 1'000'000'000'000ll;
 	query.limit = 50000;
 
-	/* One block is 96 bytes plus 40 per reading, and every append writes all
-	 * eight attributes: 416 bytes. A 900-byte cap therefore holds exactly two
+	/* One block is 96 bytes plus 40 per reading, and every M19 fundamental
+	 * append writes all eleven scalar attributes: 536 bytes. A 1200-byte cap
+	 * therefore holds exactly two
 	 * blocks, so from the third append onward the oldest must be evicted and
 	 * exactly two must remain. A cap that evicted the whole selection batch
 	 * instead of just the surplus would leave zero. */
 	{
 		const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
-			{D::basic, B::memory, {std::nullopt, 900ull}},
+			{D::basic, B::memory, {std::nullopt, 1200ull}},
 			{D::cycles_150_180, B::persistent, {}},
 			{D::minutes_10, B::persistent, {}},
 			{D::hours_2, B::persistent, {}},
@@ -1053,6 +1188,7 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 			.start_nanoseconds = 0,
 			.end_nanoseconds = 4'000'000'000,
 			.limit = 64,
+			.after = std::nullopt,
 		};
 		require(history.query(basic_query).empty(),
 			"cleared basic projection still returned data");
@@ -1088,6 +1224,7 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 			.start_nanoseconds = 0,
 			.end_nanoseconds = 4'000'000'000,
 			.limit = 64,
+			.after = std::nullopt,
 		};
 		require(history.query(query).empty(),
 			"database recreation floor was lost after reopen");
@@ -1114,6 +1251,7 @@ int main()
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
 	historian_persists_atomic_m17_boundary_snapshots();
+	historian_persists_complete_m19_scalar_projection();
 	historian_status_reports_incremental_storage_and_indexed_range();
 	historian_commits_harmonics_as_one_durable_family();
 	historian_enforces_retention_without_rescanning();

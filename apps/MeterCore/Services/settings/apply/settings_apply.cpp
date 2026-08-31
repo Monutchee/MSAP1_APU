@@ -1,11 +1,13 @@
 #include "apply/settings_apply.hpp"
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
+#include "msap1/datalogger/data_sender_ipc.hpp"
 #include "msap1/meter/history/historian_ipc.hpp"
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/service/service_control.hpp"
 
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace msap1::settings::daemon {
@@ -57,6 +59,31 @@ void apply_to_mqtt_service(const msap1::settings::ProductSettings &settings)
 	const auto response = manager.request(command, "mqtt-publisher", 10000);
 	if (response.status != msap1::service_control::Status::ok)
 		throw std::runtime_error("MQTT publisher service action failed: " +
+			response.message);
+}
+
+void apply_to_data_sender_service(
+	const msap1::settings::ProductSettings &settings)
+{
+	msap1::datalogger::ipc::Request validation;
+	validation.command = msap1::datalogger::ipc::Command::validate_channels;
+	validation.ids.reserve(settings.data_logging.channels.size());
+	for (const auto &channel : settings.data_logging.channels)
+		validation.ids.push_back(channel.id);
+	const msap1::datalogger::ipc::DataSenderClient data_sender;
+	const auto validation_response = data_sender.request(
+		std::move(validation), 10000);
+	if (validation_response.status !=
+	    msap1::datalogger::ipc::Status::ok)
+		throw std::runtime_error(
+			"Data Sender rejected settings apply: " +
+			validation_response.message);
+
+	msap1::service_control::Client manager;
+	const auto response = manager.request(
+		msap1::service_control::Command::reload, "data-sender", 10000);
+	if (response.status != msap1::service_control::Status::ok)
+		throw std::runtime_error("Data Sender reload failed: " +
 			response.message);
 }
 

@@ -143,6 +143,10 @@ std::pair<double, std::string> engineering(std::int64_t value,
 		return {0.0, "uVAh"};
 	case mnc::meter::MeterUnit::MicroWatts:
 		return {0.0, "uW"};
+	case mnc::meter::MeterUnit::CrestTenThousandths:
+		return {static_cast<double>(value) / 10'000.0, "crest"};
+	case mnc::meter::MeterUnit::CategoricalCode:
+		return {static_cast<double>(value), "code"};
 	}
 	return {0.0, "unknown"};
 }

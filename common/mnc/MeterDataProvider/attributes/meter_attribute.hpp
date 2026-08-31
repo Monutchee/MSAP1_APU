@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace mnc::meter {
 
@@ -137,6 +138,45 @@ enum class MeterAttributeId : std::uint16_t {
 	ExportDemandPeakB,
 	ExportDemandPeakC,
 	ExportDemandPeakTotal,
+	/* M19 completes the scalar public catalog. Appended — never renumber. */
+	FundamentalVoltageA,
+	FundamentalVoltageB,
+	FundamentalVoltageC,
+	FundamentalVoltageLlAB,
+	FundamentalVoltageLlBC,
+	FundamentalVoltageLlCA,
+	FundamentalCurrentA,
+	FundamentalCurrentB,
+	FundamentalCurrentC,
+	FundamentalCurrentN,
+	VoltageCrestA,
+	VoltageCrestB,
+	VoltageCrestC,
+	CurrentCrestA,
+	CurrentCrestB,
+	CurrentCrestC,
+	CurrentCrestN,
+	FundamentalActivePowerA,
+	FundamentalActivePowerB,
+	FundamentalActivePowerC,
+	FundamentalActivePowerTotal,
+	CurrentPhaseAngleN,
+	VoltageLlPhaseAngleAB,
+	VoltageLlPhaseAngleBC,
+	VoltageLlPhaseAngleCA,
+	DisplacementAngleA,
+	DisplacementAngleB,
+	DisplacementAngleC,
+	VoltageZeroSequenceAngle,
+	VoltagePositiveSequenceAngle,
+	VoltageNegativeSequenceAngle,
+	CurrentZeroSequenceAngle,
+	CurrentPositiveSequenceAngle,
+	CurrentNegativeSequenceAngle,
+	LoadNatureA,
+	LoadNatureB,
+	LoadNatureC,
+	LoadNatureTotal,
 };
 
 /**
@@ -177,7 +217,35 @@ enum class MeterAttributeGroup : std::uint8_t {
 	SequenceComponents,
 	Energy,
 	Demand,
+	CrestFactor,
+	LoadNature,
 	AllDefined,
+};
+
+/** Semantic value family used to offer only mathematically valid rollups. */
+enum class MeterAttributeValueKind : std::uint8_t {
+	Linear,
+	CircularAngle,
+	CumulativeCounter,
+	Peak,
+	Categorical,
+};
+
+/** Product-neutral calculations understood by historian-backed consumers. */
+enum class MeterAttributeCalculation : std::uint8_t {
+	Minimum,
+	Maximum,
+	Average,
+	Last,
+	CircularAverage,
+	First,
+	Delta,
+};
+
+/** The two catalog views exposed to applications and the external API. */
+enum class MeterAttributeUsage : std::uint8_t {
+	Snapshot,
+	Historian,
 };
 
 enum class MeterUnit : std::uint8_t {
@@ -201,6 +269,8 @@ enum class MeterUnit : std::uint8_t {
 	MicroVarHours,
 	MicroVoltAmpereHours,
 	MicroWatts,
+	CrestTenThousandths,
+	CategoricalCode,
 };
 
 enum class ReadingQuality : std::uint8_t {
@@ -213,10 +283,32 @@ enum class ReadingQuality : std::uint8_t {
 };
 
 struct MeterAttributeDescriptor {
+	constexpr MeterAttributeDescriptor() = default;
+	constexpr MeterAttributeDescriptor(MeterAttributeKey logical_attribute,
+		std::string_view stable_key, MeterUnit stable_unit) noexcept
+		: attribute(logical_attribute), key(stable_key), unit(stable_unit)
+	{
+	}
+
 	MeterAttributeKey attribute;
 	/** Stable external textual identity; backed by static catalog storage. */
 	std::string_view key;
 	MeterUnit unit = MeterUnit::MicroVolts;
+	/** Friendly, stable English label. Web may localize this later. */
+	std::string_view label;
+	MeterAttributeGroup group = MeterAttributeGroup::AllDefined;
+	MeterAttributeValueKind value_kind = MeterAttributeValueKind::Linear;
+	std::span<const MeterAttributeCalculation> calculations;
+	/** Additional case-insensitive search terms; key and label are implicit. */
+	std::span<const std::string_view> search_aliases;
+};
+
+struct MeasurementPeriodDescriptor {
+	MeasurementPeriod period = MeasurementPeriod::Basic;
+	std::string_view key;
+	std::string_view label;
+	bool snapshot = false;
+	bool historian = false;
 };
 
 [[nodiscard]] MeterAttributeDescriptor describe(MeterAttributeKey attribute);
@@ -227,5 +319,20 @@ find_attribute(std::string_view key) noexcept;
 
 /** Enumerate the stable scalar catalog in declaration order. */
 [[nodiscard]] std::span<const MeterAttributeKey> defined_attributes() noexcept;
+
+/** Stable period IDs and user-facing labels in UI declaration order. */
+[[nodiscard]] std::span<const MeasurementPeriodDescriptor>
+defined_measurement_periods() noexcept;
+
+/** Exact period/attribute capability matrix for one access model. */
+[[nodiscard]] bool supports_attribute(MeterAttributeKey attribute,
+	MeasurementPeriod period, MeterAttributeUsage usage) noexcept;
+
+/** Enumerate one capability view while preserving canonical catalog order. */
+[[nodiscard]] std::vector<MeterAttributeKey> attributes_for(
+	MeasurementPeriod period, MeterAttributeUsage usage);
+
+/** Stable unit token used by JSON/CSV/API adapters. */
+[[nodiscard]] std::string_view unit_name(MeterUnit unit) noexcept;
 
 } // namespace mnc::meter
