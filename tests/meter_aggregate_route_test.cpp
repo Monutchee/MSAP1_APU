@@ -103,15 +103,21 @@ msap1::MeterSnapshotResponse contract_response()
 	return response;
 }
 
-void selection_requests_the_complete_catalog()
+void selection_requests_period_capabilities_and_frequency()
 {
 	const auto selection = meter_aggregate_snapshot_selection();
-	const auto defined = mnc::meter::defined_attributes();
+	const auto supported = mnc::meter::attributes_for(
+		mnc::meter::MeasurementPeriod::Cycles150_180,
+		mnc::meter::MeterAttributeUsage::Snapshot);
 	require(selection.period ==
 			mnc::meter::MeasurementPeriod::Cycles150_180,
 		"the endpoint selected the wrong period");
-	require(selection.attributes.size() == defined.size(),
-		"the endpoint did not request the complete scalar catalog");
+	require(selection.attributes.size() == supported.size() + 1u &&
+		selection.attributes.front() ==
+			Key{Id::Frequency, std::nullopt} &&
+		std::equal(supported.begin(), supported.end(),
+			selection.attributes.begin() + 1),
+		"the endpoint did not request the period capabilities plus frequency");
 	const auto contains = [&selection](Id id) {
 		return std::ranges::any_of(selection.attributes,
 			[id](const auto &attribute) {
@@ -123,6 +129,9 @@ void selection_requests_the_complete_catalog()
 		contains(Id::CurrentPhaseAngleC) &&
 		contains(Id::VoltageUnbalance),
 		"the aggregate selection omitted a required attribute family");
+	require(!contains(Id::ActiveImportEnergyTotal) &&
+		!contains(Id::CurrentActiveDemandTotal),
+		"the aggregate selection included another period's attributes");
 }
 
 void absence_renders_the_unavailable_shape()
@@ -287,7 +296,7 @@ void measurement_quality_and_malformed_snapshots_are_preserved()
 int main()
 {
 	try {
-		selection_requests_the_complete_catalog();
+		selection_requests_period_capabilities_and_frequency();
 		absence_renders_the_unavailable_shape();
 		a_typed_aggregate_exposes_derived_attributes();
 		exact_quality_and_family_completeness_are_exposed();
