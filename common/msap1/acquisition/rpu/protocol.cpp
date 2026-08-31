@@ -8,7 +8,7 @@ namespace msap1 {
 
 static_assert(sizeof(msap1_rpu_msg_header) == 16,
 	      "unexpected RPMsg header layout");
-static_assert(sizeof(msap1_adc_health_payload) == 238,
+static_assert(sizeof(msap1_adc_health_payload) == 262,
 	      "unexpected ADC health payload layout");
 static_assert(sizeof(msap1_aggregation_health_payload) == 216,
 	      "unexpected aggregation health payload layout");
@@ -22,14 +22,14 @@ static_assert(sizeof(msap1_m18_config_payload) == 316,
 	      "unexpected M18 configuration layout");
 static_assert(sizeof(msap1_m18_config_ack_payload) == 8,
 	      "unexpected M18 configuration acknowledgement layout");
-/* Wire v9 appends simulator-v1.5 AM and absolute carrier fields. */
-static_assert(sizeof(msap1_meter_config_payload) == 352,
+/* Wire v11 appends physical-ADC current routing and direction fields. */
+static_assert(sizeof(msap1_meter_config_payload) == 360,
 	      "unexpected meter configuration payload layout");
 static_assert(sizeof(msap1_simulator_event_payload) == 24,
 	      "unexpected simulator event payload layout");
 static_assert(sizeof(msap1_simulator_event_ack_payload) == 20,
 	      "unexpected simulator event acknowledgement layout");
-static_assert(sizeof(msap1_meter_config_ack_payload) == 28,
+static_assert(sizeof(msap1_meter_config_ack_payload) == 36,
 	      "unexpected meter configuration acknowledgement layout");
 static_assert(sizeof(msap1_adc_diagnostic_payload) == 188,
 	      "unexpected ADC diagnostic payload layout");

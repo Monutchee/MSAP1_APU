@@ -220,10 +220,13 @@
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
-- The prototype wire version is 6 (`MSAP1_RPU_VERSION`). Keep the coordinated
+- The prototype wire version is 11 (`MSAP1_RPU_VERSION`). Keep the coordinated
   APU/RPU copies byte-identical when adding configuration fields or
   acknowledgements.
-- `msap1_meter_config_payload` is 296 packed bytes. `nominal_frequency_hz`
+- `msap1_meter_config_payload` is 360 packed bytes. Its trailing current-wiring
+  fields carry the physical CH0–CH3 phase permutation and direction mask;
+  validate them at every boundary and include them in the configuration
+  generation. `nominal_frequency_hz`
   (50 or 60) selects the cycles-per-block rule (50→10, 60→12) and the derived
   PL free-run fallback window; it is configuration, never inferred from
   measured frequency. The five trailing `pq_*` fields are the IEC 61000-4-30

@@ -77,6 +77,23 @@ void option_parsing()
 			health.options.health_refresh && health.options.health_full,
 		"meter health diagnostic options were not parsed");
 
+	const auto wiring = application.parse({
+		"meter", "wiring", "set", "--preset", "acb",
+		"--ch0-direction", "reversed", "--ch3-direction", "normal"});
+	require(!wiring.show_help && wiring.command->name() == "set" &&
+		wiring.options.current_wiring_preset == "acb" &&
+		wiring.options.current_channel_direction[0] == "reversed" &&
+		wiring.options.current_channel_direction[3] == "normal",
+		"current wiring preset/direction options were not parsed");
+	const auto custom_wiring = application.parse({
+		"meter", "wiring", "set", "--ch0-phase", "c",
+		"--ch1-phase", "a", "--ch2-phase", "n", "--ch3-phase", "b"});
+	require(custom_wiring.options.current_channel_phase[0] == "c" &&
+		custom_wiring.options.current_channel_phase[1] == "a" &&
+		custom_wiring.options.current_channel_phase[2] == "n" &&
+		custom_wiring.options.current_channel_phase[3] == "b",
+		"explicit current channel phases were not parsed");
+
 	const auto flow =
 		application.parse({"adc", "testflw", "--flow", "1"});
 	require(!flow.show_help && flow.command->name() == "testflw",
@@ -188,6 +205,12 @@ void help_and_errors()
 	require(application.execute(
 		{"log", "--follow=true"}, output, error) == 2,
 		"flag option accepted an inline value");
+	output.str({});
+	error.str({});
+	require(application.execute(
+		{"meter", "wiring", "set", "--preset", "abc", "--ch0-phase", "a"},
+		output, error) == 2,
+		"current wiring accepted a preset with explicit phases");
 
 	output.str({});
 	error.str({});
@@ -233,6 +256,15 @@ void machine_interface()
 			view->metadata.access ==
 				msap1::cli::AccessLevel::local_only,
 		"meter view metadata is not local-only");
+	const auto wiring_show = find("mnc meter wiring show");
+	const auto wiring_set = find("mnc meter wiring set");
+	require(wiring_show != descriptors.end() && wiring_set != descriptors.end() &&
+		wiring_show->metadata.access ==
+			msap1::cli::AccessLevel::diagnostic &&
+		wiring_set->metadata.access ==
+			msap1::cli::AccessLevel::operator_control &&
+		wiring_set->metadata.side_effect == msap1::cli::SideEffect::control,
+		"current wiring command metadata is incorrect");
 	const auto waveform_export = find("mnc waveform export");
 	require(waveform_export != descriptors.end() &&
 			waveform_export->metadata.access ==
@@ -319,8 +351,16 @@ void completion()
 		"root completion omitted command groups");
 	candidates = application.complete({"meter", ""});
 	require(contains(candidates, "health") && contains(candidates, "view") &&
-			contains(candidates, "snapshot"),
+			contains(candidates, "snapshot") && contains(candidates, "wiring"),
 		"meter completion omitted actions");
+	candidates = application.complete({"meter", "wiring", ""});
+	require(contains(candidates, "show") && contains(candidates, "set"),
+		"current wiring completion omitted actions");
+	candidates = application.complete({"meter", "wiring", "set", "--"});
+	require(contains(candidates, "--preset") &&
+		contains(candidates, "--ch0-phase") &&
+		contains(candidates, "--ch3-direction"),
+		"current wiring completion omitted configuration options");
 	candidates = application.complete({"meter", "health", "--"});
 	require(contains(candidates, "--refresh") &&
 			contains(candidates, "--full"),

@@ -167,6 +167,7 @@ msap1::WaveformCaptureContext waveform_capture_context(
 	constexpr std::int64_t raw_high = (1ll << 23u) - 1ll;
 	constexpr std::uint64_t engineering_denominator =
 		65'536ull * 1'000'000ull;
+	static constexpr std::array current_names{"ILA", "ILB", "ILC", "ILN"};
 	for (std::uint32_t source = 0; source < waveform_persisted_channels;
 	     ++source) {
 		if ((configuration.wire.valid_mask & (1u << source)) == 0u)
@@ -189,8 +190,12 @@ msap1::WaveformCaptureContext waveform_capture_context(
 		channel.storage_bits = 32u;
 		channel.valid_bits = 24u;
 		channel.display_exponent10 = -6;
+		const auto physical_source = source < 4u
+			? physical_current_channel_for_logical(
+				configuration.source.current_wiring, source)
+			: source;
 		channel.gain_numerator =
-			configuration.wire.scale_micro_units_q16[source];
+			configuration.wire.scale_micro_units_q16[physical_source];
 		channel.gain_denominator = engineering_denominator;
 		channel.offset_denominator = 1u;
 		channel.range_minimum_numerator = raw_low * channel.gain_numerator;
@@ -205,12 +210,16 @@ msap1::WaveformCaptureContext waveform_capture_context(
 		if (source < 4u) {
 			const auto found = std::ranges::find_if(
 				configuration.source.current_channels,
-				[source](const auto &value) { return value.channel == source; });
+				[physical_source](const auto &value) {
+					return value.channel == physical_source;
+				});
 			if (found == configuration.source.current_channels.end())
 				throw std::runtime_error("missing waveform current channel");
-			channel.name = found->name;
+			channel.name = current_names[source];
 			channel.unit_symbol = "A";
-			channel.description = found->sensor_model;
+			channel.description = "ADC CH" +
+				std::to_string(physical_source) + ": " +
+				found->sensor_model;
 			channel.nominal_numerator = static_cast<std::int64_t>(std::llround(
 				found->primary_rated_amps * 1'000'000.0));
 			channel.nominal_denominator = 1'000'000u;

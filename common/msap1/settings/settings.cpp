@@ -124,7 +124,8 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 	auto settings = decode_document<ProductSettings>(json, "product settings");
 	// Schema 1 predates MQTT, schema 3 adds presentation-only measurement
 	// topology, schema 4 adds M18 event/flicker/mains policy plus neutral
-	// waveform identity, and schema 5 adds M19 data logging. Missing members
+	// waveform identity, schema 5 adds M19 data logging, and schema 6 adds
+	// physical-ADC current wiring. Missing members
 	// receive typed defaults; advancing old documents here provides a lossless
 	// in-memory migration and the next successful save persists the current
 	// schema. The M19 default contains no jobs, so migration cannot initiate
@@ -144,8 +145,10 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 		events.voltage_interruption.hysteresis_percent =
 			legacy.hysteresis_percent;
 	}
-	if (settings.schema_version >= 1 && settings.schema_version <= 4)
+	if (settings.schema_version >= 1 && settings.schema_version <= 5) {
+		settings.metering.current_wiring = CurrentWiringConfig{};
 		settings.schema_version = ProductSettings::supported_schema_version;
+	}
 	return settings;
 }
 
@@ -188,7 +191,7 @@ void SettingsValidator::validate(const ProductSettings &settings)
 MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 {
 	MeterConversionFile result;
-	result.schema_version = 4;
+	result.schema_version = 5;
 	result.profile_id = settings.metering.conversion.profile_id;
 	result.adc_source = settings.adc.source;
 	result.rms_window_ms = settings.metering.rms.window_ms;
@@ -198,6 +201,7 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 		settings.metering.conversion.adc_reference_volts;
 	result.current_channels = settings.metering.conversion.current_channels;
 	result.voltage_channels = settings.metering.conversion.voltage_channels;
+	result.current_wiring = settings.metering.current_wiring;
 	result.frequency = settings.metering.frequency;
 	result.power_quality = settings.metering.power_quality;
 	result.simulator = settings.adc.simulator;

@@ -229,6 +229,28 @@ MeterHealth evaluate_meter_health(const InfoResponse &response)
 	result.meter_generation_match =
 		meter_flag(adc, MSAP1_METER_HEALTH_GENERATION_MATCH) &&
 		adc.meter_generation == response.configuration_generation;
+	result.requested_current_adc_phase_map =
+		response.requested_current_adc_phase_map;
+	result.requested_current_adc_invert_mask =
+		response.requested_current_adc_invert_mask;
+	result.requested_current_input_order = response.requested_current_input_order;
+	result.active_current_adc_phase_map =
+		adc.meter_active_current_adc_phase_map;
+	result.active_current_adc_invert_mask =
+		adc.meter_active_current_adc_invert_mask;
+	result.current_wiring_apply_status = adc.meter_wiring_apply_status;
+	result.current_wiring_readback_mismatch_count =
+		adc.meter_wiring_readback_mismatch_count;
+	result.current_wiring_match =
+		meter_flag(adc, MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH) &&
+		adc.meter_requested_current_adc_phase_map ==
+			response.requested_current_adc_phase_map &&
+		adc.meter_requested_current_adc_invert_mask ==
+			response.requested_current_adc_invert_mask &&
+		adc.meter_active_current_adc_phase_map ==
+			response.requested_current_adc_phase_map &&
+		adc.meter_active_current_adc_invert_mask ==
+			response.requested_current_adc_invert_mask;
 	if (!meter_flag(adc, MSAP1_METER_HEALTH_CORES_PRESENT))
 		append_reason(result.adc_degraded_reasons,
 			      "meter_cores_unavailable",
@@ -245,6 +267,15 @@ MeterHealth evaluate_meter_health(const InfoResponse &response)
 		append_reason(result.adc_degraded_reasons,
 			      "configuration_generation_mismatch",
 			      "APU and PL configuration generations do not match");
+	if (!result.current_wiring_match)
+		append_reason(result.adc_degraded_reasons,
+			      "current_wiring_mismatch",
+			      "requested and active ADC current wiring do not match");
+	if (result.current_wiring_apply_status !=
+		    MSAP1_METER_WIRING_APPLY_SUCCESS)
+		append_reason(result.adc_degraded_reasons,
+			      "current_wiring_apply_failed",
+			      "the last ADC current-wiring application did not succeed");
 	result.dc_offset_removal =
 		meter_flag(adc, MSAP1_METER_HEALTH_REMOVE_DC);
 	const auto frequency = response.latest_record.frequency();
@@ -289,7 +320,9 @@ MeterHealth evaluate_meter_health(const InfoResponse &response)
 	result.adc_healthy = source_healthy && result.rate_match &&
 		result.capture_active && result.fifo_ok && result.headers_valid &&
 		result.meter_configured &&
-		result.meter_generation_match;
+		result.meter_generation_match && result.current_wiring_match &&
+		result.current_wiring_apply_status ==
+			MSAP1_METER_WIRING_APPLY_SUCCESS;
 	result.healthy = result.acquisition_healthy && result.adc_healthy &&
 		(!result.aggregation_authoritative ||
 		 result.aggregation_healthy);
