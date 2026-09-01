@@ -635,6 +635,21 @@ if(BUILD_TESTING)
     add_test(NAME meter_aggregate_route_test
         COMMAND meter_aggregate_route_test)
 
+    # GET /api/v1/meter/frequency-10s is the typed standardized result and
+    # exact audit projection; pin its JSON contract without the HTTP stack.
+    add_executable(meter_frequency_10s_route_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_frequency_10s_route_test.cpp)
+    target_link_libraries(meter_frequency_10s_route_test PRIVATE
+        msap1::acquisition
+        glaze::glaze
+    )
+    target_include_directories(meter_frequency_10s_route_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
+    target_compile_options(meter_frequency_10s_route_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_frequency_10s_route_test
+        COMMAND meter_frequency_10s_route_test)
+
     # GET /api/v1/meter/minutes-10 projects the typed provider snapshot;
     # pin that JSON contract without linking the HTTP stack.
     add_executable(meter_ten_minute_route_test

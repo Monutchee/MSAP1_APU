@@ -6,9 +6,10 @@
  *        finalized aggregate transfer objects and their projections.
  *
  * The channel naming, units, and micro-unit scaling live here because
- * GET /api/v1/meter/readings, GET /api/v1/meter/aggregate, and
- * GET /api/v1/meter/minutes-10 must present the same channels and engineering
- * units the same way; duplicating the table would let the documents drift.
+ * GET /api/v1/meter/readings, GET /api/v1/meter/aggregate,
+ * GET /api/v1/meter/frequency-10s, and GET /api/v1/meter/minutes-10 must
+ * present measurements and provenance consistently; duplicating the common
+ * projections would let the documents drift.
  *
  * The aggregate projection is deliberately free of WebEngine: it maps one
  * typed acquisition snapshot onto the response DTO and nothing else, so the
@@ -30,6 +31,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace msap1::web::api {
@@ -213,6 +215,332 @@ time_quality_name(mnc::meter::TimeQuality quality)
 	return "unsynchronized";
 }
 
+struct Frequency10sFlagName {
+	std::uint32_t bit;
+	std::string_view name;
+};
+
+template<std::size_t Count>
+[[nodiscard]] inline std::vector<std::string> frequency_10s_flag_names(
+	std::uint32_t value,
+	const std::array<Frequency10sFlagName, Count> &catalog)
+{
+	std::vector<std::string> result;
+	for (const auto &[bit, name] : catalog)
+		if ((value & bit) != 0u)
+			result.emplace_back(name);
+	return result;
+}
+
+inline constexpr std::array frequency_10s_status_catalog{
+	Frequency10sFlagName{meter_frequency_10s_status_arithmetic_error,
+		"arithmetic_error"},
+	Frequency10sFlagName{meter_frequency_10s_status_result_valid,
+		"result_valid"},
+	Frequency10sFlagName{meter_frequency_10s_status_time_aligned,
+		"time_aligned"},
+	Frequency10sFlagName{meter_frequency_10s_status_profile_supported,
+		"profile_supported"},
+	Frequency10sFlagName{meter_frequency_10s_status_time_synchronized,
+		"time_synchronized"},
+	Frequency10sFlagName{meter_frequency_10s_status_filter_ready,
+		"filter_ready"},
+	Frequency10sFlagName{meter_frequency_10s_status_reference_valid,
+		"reference_valid"},
+	Frequency10sFlagName{meter_frequency_10s_status_discontinuity,
+		"discontinuity"},
+	Frequency10sFlagName{meter_frequency_10s_status_crossing_overflow,
+		"crossing_overflow"},
+	Frequency10sFlagName{meter_frequency_10s_status_observer_drop,
+		"observer_drop"},
+	Frequency10sFlagName{meter_frequency_10s_status_insufficient_crossings,
+		"insufficient_crossings"},
+	Frequency10sFlagName{meter_frequency_10s_status_out_of_range,
+		"out_of_range"},
+	Frequency10sFlagName{meter_frequency_10s_status_transport_gap,
+		"transport_gap"},
+	Frequency10sFlagName{meter_frequency_10s_status_calibration_valid,
+		"calibration_valid"},
+	Frequency10sFlagName{meter_frequency_10s_status_sample_rate_valid,
+		"sample_rate_valid"},
+	Frequency10sFlagName{meter_frequency_10s_status_resynchronized,
+		"resynchronized"},
+};
+
+inline constexpr std::array frequency_10s_reason_catalog{
+	Frequency10sFlagName{meter_frequency_10s_reason_unsupported_profile,
+		"unsupported_profile"},
+	Frequency10sFlagName{meter_frequency_10s_reason_time_unsynchronized,
+		"time_unsynchronized"},
+	Frequency10sFlagName{meter_frequency_10s_reason_time_uncertainty,
+		"time_uncertainty"},
+	Frequency10sFlagName{meter_frequency_10s_reason_filter_warmup,
+		"filter_warmup"},
+	Frequency10sFlagName{meter_frequency_10s_reason_reference_invalid,
+		"reference_invalid"},
+	Frequency10sFlagName{meter_frequency_10s_reason_discontinuity,
+		"discontinuity"},
+	Frequency10sFlagName{meter_frequency_10s_reason_crossing_overflow,
+		"crossing_overflow"},
+	Frequency10sFlagName{meter_frequency_10s_reason_observer_drop,
+		"observer_drop"},
+	Frequency10sFlagName{meter_frequency_10s_reason_sample_rate_invalid,
+		"sample_rate_invalid"},
+	Frequency10sFlagName{meter_frequency_10s_reason_boundary_invalid,
+		"boundary_invalid"},
+	Frequency10sFlagName{meter_frequency_10s_reason_calibration_invalid,
+		"calibration_invalid"},
+	Frequency10sFlagName{meter_frequency_10s_reason_insufficient_crossings,
+		"insufficient_crossings"},
+	Frequency10sFlagName{meter_frequency_10s_reason_out_of_range,
+		"out_of_range"},
+	Frequency10sFlagName{meter_frequency_10s_reason_arithmetic,
+		"arithmetic"},
+	Frequency10sFlagName{meter_frequency_10s_reason_transport_gap,
+		"transport_gap"},
+	Frequency10sFlagName{meter_frequency_10s_reason_cycle_geometry,
+		"cycle_geometry"},
+	Frequency10sFlagName{meter_frequency_10s_reason_time_geometry,
+		"time_geometry"},
+};
+
+inline constexpr std::array frequency_10s_source_status_catalog{
+	Frequency10sFlagName{1u << 0u, "boundary_valid"},
+	Frequency10sFlagName{1u << 1u, "time_synchronized"},
+	Frequency10sFlagName{1u << 2u, "sample_rate_valid"},
+	Frequency10sFlagName{1u << 3u, "filter_ready"},
+	Frequency10sFlagName{1u << 4u, "reference_valid"},
+	Frequency10sFlagName{1u << 5u, "source_discontinuity"},
+	Frequency10sFlagName{1u << 6u, "crossing_overflow"},
+	Frequency10sFlagName{1u << 7u, "observer_drop"},
+	Frequency10sFlagName{1u << 8u, "resynchronized"},
+	Frequency10sFlagName{1u << 9u, "calibration_valid"},
+	Frequency10sFlagName{1u << 10u, "profile_supported"},
+};
+
+inline constexpr std::array frequency_10s_guard_catalog{
+	Frequency10sFlagName{1u << 0u, "before_start"},
+	Frequency10sFlagName{1u << 1u, "after_end"},
+	Frequency10sFlagName{1u << 2u, "exact_start"},
+	Frequency10sFlagName{1u << 3u, "exact_end"},
+};
+
+/** Available body of GET /api/v1/meter/frequency-10s. */
+struct MeterFrequency10sDto {
+	bool available;
+	std::uint32_t sequence;
+	std::uint32_t configuration_generation;
+	bool valid;
+	std::string quality;
+	std::optional<double> frequency_hz;
+	std::optional<std::uint32_t> frequency_millihz;
+	std::string time_quality;
+	std::uint32_t age_ms;
+	std::string first_sample_index;
+	std::string interval_end_sample_index;
+	std::uint32_t sample_count;
+	std::uint32_t sample_rate_hz;
+	std::uint32_t measured_sample_rate_millihz;
+	std::uint32_t cycle_count;
+	std::string utc_start_nanoseconds;
+	std::string utc_end_nanoseconds;
+	std::string utc_uncertainty_nanoseconds;
+	std::uint32_t source_sequence;
+	std::uint32_t boundary_generation;
+	std::uint32_t source_status;
+	std::vector<std::string> source_status_flags;
+	std::uint32_t status;
+	std::vector<std::string> status_flags;
+	std::uint32_t reasons;
+	std::vector<std::string> rejection_reasons;
+	std::uint32_t observer_drop_count;
+	std::uint32_t guard_flags;
+	std::vector<std::string> guard_flag_names;
+	std::uint32_t observed_crossings;
+	std::uint32_t included_crossings;
+	std::uint32_t rejected_cycles;
+	std::string duration_q16_samples;
+	std::string first_crossing_q16_samples;
+	std::string last_crossing_q16_samples;
+	std::uint32_t nominal_frequency_hz;
+	std::uint32_t reference_channel;
+	std::uint32_t filter_profile;
+	std::uint32_t calibration_profile;
+};
+
+/** No complete UTC ten-second result exists yet. */
+struct MeterFrequency10sUnavailableDto {
+	bool available = false;
+};
+
+/** Select only the standardized typed frequency value and its audit block. */
+[[nodiscard]] inline mnc::meter::MeterSnapshotRequest
+meter_frequency_10s_snapshot_selection()
+{
+	return {
+		.period = mnc::meter::MeasurementPeriod::Seconds10,
+		.attributes = {{mnc::meter::MeterAttributeId::Frequency,
+			std::nullopt}},
+	};
+}
+
+/** Project an already-validated R5C1 ten-second result without recomputing it. */
+[[nodiscard]] inline std::optional<MeterFrequency10sDto>
+meter_frequency_10s_dto(const msap1::MeterSnapshotResponse &response)
+{
+	using Id = mnc::meter::MeterAttributeId;
+	using Quality = mnc::meter::ReadingQuality;
+	using Unit = mnc::meter::MeterUnit;
+	if (!response.running || !response.has_snapshot)
+		return std::nullopt;
+	const auto &snapshot = response.snapshot;
+	if (snapshot.period != mnc::meter::MeasurementPeriod::Seconds10)
+		throw std::invalid_argument(
+			"cached meter snapshot is not a ten-second frequency result");
+	if (!snapshot.timing || !snapshot.frequency_10s ||
+	    !snapshot.timing->utc_start_nanoseconds ||
+	    !snapshot.timing->utc_uncertainty_nanoseconds ||
+	    !snapshot.timing->first_sample_index ||
+	    !snapshot.timing->sample_count ||
+	    !snapshot.timing->sample_rate_hz ||
+	    !snapshot.timing->cycle_count ||
+	    !snapshot.timing->nominal_frequency_hz)
+		throw std::invalid_argument(
+			"ten-second frequency has incomplete timing or audit provenance");
+	const auto &timing = *snapshot.timing;
+	const auto &audit = *snapshot.frequency_10s;
+	const auto frequency = std::find_if(snapshot.values.begin(),
+		snapshot.values.end(), [](const auto &reading) {
+			return reading.attribute.id == Id::Frequency &&
+				!reading.attribute.index;
+		});
+	if (frequency == snapshot.values.end() ||
+	    std::count_if(snapshot.values.begin(), snapshot.values.end(),
+		[](const auto &reading) {
+			return reading.attribute.id == Id::Frequency &&
+				!reading.attribute.index;
+		}) != 1 ||
+	    frequency->unit != Unit::MilliHertz || frequency->value < 0 ||
+	    static_cast<std::uint64_t>(frequency->value) >
+		std::numeric_limits<std::uint32_t>::max())
+		throw std::invalid_argument(
+			"ten-second frequency has no unique millihertz value");
+	if (snapshot.sequence > std::numeric_limits<std::uint32_t>::max() ||
+	    frequency->source_sequence != snapshot.sequence ||
+	    audit.source_sequence != snapshot.sequence)
+		throw std::invalid_argument(
+			"ten-second frequency source sequence disagrees");
+	if (*timing.sample_count == 0u || *timing.sample_rate_hz == 0u ||
+	    *timing.first_sample_index >
+		std::numeric_limits<std::uint64_t>::max() -
+		*timing.sample_count ||
+	    *timing.first_sample_index + *timing.sample_count !=
+		audit.interval_end_sample_index ||
+	    frequency->sample_count != *timing.sample_count ||
+	    frequency->calculation_window_nanoseconds != 10'000'000'000ll)
+		throw std::invalid_argument(
+			"ten-second frequency sample interval disagrees");
+	if (*timing.utc_start_nanoseconds < 0 ||
+	    static_cast<std::uint64_t>(*timing.utc_start_nanoseconds) !=
+		audit.utc_start_nanoseconds ||
+	    *timing.utc_uncertainty_nanoseconds !=
+		audit.utc_uncertainty_nanoseconds ||
+	    audit.utc_start_nanoseconds >
+		std::numeric_limits<std::uint64_t>::max() - 10'000'000'000ull ||
+	    audit.utc_start_nanoseconds + 10'000'000'000ull !=
+		audit.utc_end_nanoseconds ||
+	    audit.utc_end_nanoseconds >
+		static_cast<std::uint64_t>(
+			std::numeric_limits<std::int64_t>::max()) ||
+	    frequency->measured_at_nanoseconds !=
+		static_cast<std::int64_t>(audit.utc_end_nanoseconds))
+		throw std::invalid_argument(
+			"ten-second frequency UTC interval disagrees");
+	if ((audit.source_status & ~meter_frequency_10s_source_status_mask) != 0u ||
+	    (audit.status & ~meter_frequency_10s_status_mask) != 0u ||
+	    (audit.reasons & ~meter_frequency_10s_reason_mask) != 0u ||
+	    (static_cast<std::uint32_t>(audit.guard_flags) &
+		~meter_frequency_10s_guard_flags_mask) != 0u ||
+	    audit.nominal_frequency_hz != *timing.nominal_frequency_hz)
+		throw std::invalid_argument(
+			"ten-second frequency audit flags or profile disagree");
+	const bool valid = frequency->quality == Quality::Valid;
+	const bool invalid_quality = frequency->quality == Quality::Invalid ||
+		frequency->quality == Quality::OutOfRange ||
+		frequency->quality == Quality::ArithmeticError;
+	const bool result_valid =
+		(audit.status & meter_frequency_10s_status_result_valid) != 0u;
+	if ((!valid && !invalid_quality) || valid != result_valid ||
+	    valid != (audit.reasons == 0u) ||
+	    (valid && frequency->value == 0) ||
+	    (!valid && frequency->value != 0))
+		throw std::invalid_argument(
+			"ten-second frequency quality disagrees with its audit status");
+
+	const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	const auto age_ns = std::max<std::int64_t>(
+		0, now - snapshot.updated_at_nanoseconds);
+	const auto age_ms = static_cast<std::uint32_t>(
+		std::min<std::int64_t>(age_ns / 1'000'000,
+			std::numeric_limits<std::uint32_t>::max()));
+	const auto millihz = static_cast<std::uint32_t>(frequency->value);
+	return MeterFrequency10sDto{
+		.available = true,
+		.sequence = static_cast<std::uint32_t>(snapshot.sequence),
+		.configuration_generation = snapshot.configuration_generation,
+		.valid = valid,
+		.quality = reading_quality_name(frequency->quality),
+		.frequency_hz = valid
+			? std::optional<double>{static_cast<double>(millihz) / 1000.0}
+			: std::nullopt,
+		.frequency_millihz = valid
+			? std::optional<std::uint32_t>{millihz} : std::nullopt,
+		.time_quality = time_quality_name(timing.quality),
+		.age_ms = age_ms,
+		.first_sample_index = std::to_string(*timing.first_sample_index),
+		.interval_end_sample_index =
+			std::to_string(audit.interval_end_sample_index),
+		.sample_count = *timing.sample_count,
+		.sample_rate_hz = *timing.sample_rate_hz,
+		.measured_sample_rate_millihz =
+			audit.measured_sample_rate_millihz,
+		.cycle_count = *timing.cycle_count,
+		.utc_start_nanoseconds =
+			std::to_string(audit.utc_start_nanoseconds),
+		.utc_end_nanoseconds = std::to_string(audit.utc_end_nanoseconds),
+		.utc_uncertainty_nanoseconds =
+			std::to_string(audit.utc_uncertainty_nanoseconds),
+		.source_sequence = audit.source_sequence,
+		.boundary_generation = audit.boundary_generation,
+		.source_status = audit.source_status,
+		.source_status_flags = frequency_10s_flag_names(
+			audit.source_status, frequency_10s_source_status_catalog),
+		.status = audit.status,
+		.status_flags = frequency_10s_flag_names(
+			audit.status, frequency_10s_status_catalog),
+		.reasons = audit.reasons,
+		.rejection_reasons = frequency_10s_flag_names(
+			audit.reasons, frequency_10s_reason_catalog),
+		.observer_drop_count = audit.observer_drop_count,
+		.guard_flags = audit.guard_flags,
+		.guard_flag_names = frequency_10s_flag_names(
+			audit.guard_flags, frequency_10s_guard_catalog),
+		.observed_crossings = audit.observed_crossings,
+		.included_crossings = audit.included_crossings,
+		.rejected_cycles = audit.rejected_cycles,
+		.duration_q16_samples = std::to_string(audit.duration_q16_samples),
+		.first_crossing_q16_samples =
+			std::to_string(audit.first_crossing_q16_samples),
+		.last_crossing_q16_samples =
+			std::to_string(audit.last_crossing_q16_samples),
+		.nominal_frequency_hz = audit.nominal_frequency_hz,
+		.reference_channel = audit.reference_channel,
+		.filter_profile = audit.filter_profile,
+		.calibration_profile = audit.calibration_profile,
+	};
+}
+
 /** One channel of GET /api/v1/meter/aggregate. */
 struct MeterAggregateChannelDto {
 	std::uint32_t index;
@@ -226,10 +554,9 @@ struct MeterAggregateChannelDto {
  * Aggregate frequency, INFORMATIVE ONLY.
  *
  * IEC 61000-4-30:2025 defines the standardized frequency product over its
- * own (10 s) interval, which is not implemented; the decoder therefore
- * publishes the Cycles150_180 frequency reading with quality `unavailable`.
- * This object deliberately carries no `valid` flag so no consumer can
- * mistake the mean of the 15 basic estimates for a Class A measurement.
+ * own 10 s interval, exposed separately by `/api/v1/meter/frequency-10s`.
+ * This object deliberately carries no `valid` flag so no consumer can mistake
+ * the mean of the 15 basic estimates for the standardized measurement.
  */
 struct MeterAggregateFrequencyDto {
 	std::uint32_t millihz;

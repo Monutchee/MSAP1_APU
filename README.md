@@ -305,16 +305,27 @@ legacy sessions match only `origin=all`.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
-folded from 15 basic blocks; `GET /api/v1/meter/minutes-10` reports the
-independently aligned 10-minute aggregate; and `GET /api/v1/meter/hours-2`
-reports twelve consecutive clean ten-minute intervals. Each finalized
-aggregate endpoint exposes the typed RMS, line-line, power, phasor, and
-unbalance values produced for that period. The periods never inherit from one
-another. The 150/180-cycle aggregate's `frequency` object is
-**informative only** — the standardized Class A frequency product is defined
-over its own 10 s interval, which is not implemented — so it carries
-`"informative": true` and deliberately no validity flag, and consumers must
-never present it as a Class A frequency measurement. The aggregate's
+folded from 15 basic blocks; `GET /api/v1/meter/frequency-10s` reports the
+independent UTC-aligned IEC 61000-4-30 ten-second frequency result;
+`GET /api/v1/meter/minutes-10` reports the independently aligned 10-minute
+aggregate; and `GET /api/v1/meter/hours-2` reports twelve consecutive clean
+ten-minute intervals. Each finalized aggregate endpoint exposes the typed RMS,
+line-line, power, phasor, and unbalance values produced for that period. The
+periods never inherit from one another.
+
+The ten-second frequency endpoint exposes `frequency_hz` and
+`frequency_millihz` only when `valid` is true. Invalid completed intervals
+retain their exact `quality`, raw and named status flags, named rejection
+reasons, observer counters, profile identity, and crossing geometry, but the
+two numeric frequency fields are omitted so zero cannot be mistaken for a
+measurement. UTC nanoseconds, sample anchors, and Q16 crossing positions are
+decimal strings so audit values remain exact in JavaScript. A stopped or
+not-yet-complete stream returns `{"available":false}` with HTTP 200.
+
+The 150/180-cycle aggregate's `frequency` object remains **informative only**:
+it carries `"informative":true` and deliberately no validity flag, and
+consumers must never present it as the standardized ten-second frequency
+measurement. The aggregate's
 `time_quality` (`"unsynchronized"`, `"synchronized"`, or `"holdover"`) is the
 UTC synchronization state captured when that aggregate was measured, not the
 daemon's state when the request arrived: an aggregate measured while

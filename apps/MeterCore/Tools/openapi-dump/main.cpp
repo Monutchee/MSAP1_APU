@@ -30,6 +30,7 @@ void check_contract()
 		"/api/v1/documentation/msap1_api.yaml");
 	require_fragment(first,
 		"/api/v1/documentation/msap1_modbus_registers.xlsx");
+	require_fragment(first, "/api/v1/meter/frequency-10s");
 	require_fragment(first, "/protected/waveforms/view/{filename}");
 }
 

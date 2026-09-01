@@ -563,10 +563,9 @@ webengine::Response get_meter_readings(AppContext &app,
  * or whenever basic blocks were ineligible, so that case is a 200 with
  * `{"available": false}` — not an error.
  *
- * The embedded frequency is INFORMATIVE ONLY: the standardized Class A
- * frequency product is defined over its own 10 s interval, which is not
- * implemented, so the object carries `informative` and deliberately no
- * validity flag.
+ * The embedded frequency is INFORMATIVE ONLY. The standardized result is
+ * published independently by GET /api/v1/meter/frequency-10s, so this object
+ * carries `informative` and deliberately no validity flag.
  *
  * @return 200 with the aggregate document, or 503 when the daemon is
  *         unreachable, reports a failure status, or cached a malformed
@@ -834,6 +833,25 @@ webengine::Response get_meter_aggregate(AppContext &app,
 	}
 }
 
+webengine::Response get_meter_frequency_10s(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.meter_snapshot(
+			meter_frequency_10s_snapshot_selection());
+		require_acquisition_ok(response.status);
+		const auto frequency = meter_frequency_10s_dto(response);
+		if (!frequency)
+			return json_response(webengine::http::status::ok,
+				MeterFrequency10sUnavailableDto{});
+		return json_response(webengine::http::status::ok, *frequency);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/frequency-10s", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
 webengine::Response get_meter_ten_minute(AppContext &app,
 					 const webengine::RequestContext &)
 {
@@ -1029,6 +1047,16 @@ void document_meter_routes(DocumentedApiRegistry &registry)
 		"Newest 150/180-cycle aggregate or an unavailable marker");
 	registry.add_error_response(V::get, "/api/v1/meter/aggregate", 503,
 		"The aggregate snapshot is malformed or unavailable");
+
+	using Frequency10sResult =
+		std::variant<MeterFrequency10sDto, MeterFrequency10sUnavailableDto>;
+	registry.add_json_response<Frequency10sResult>(V::get,
+		"/api/v1/meter/frequency-10s", 200, "MeterFrequency10sResult",
+		"Newest UTC-aligned IEC 61000-4-30 ten-second frequency result, "
+		"including exact audit provenance, or an unavailable marker");
+	registry.add_error_response(V::get,
+		"/api/v1/meter/frequency-10s", 503,
+		"The ten-second frequency snapshot is malformed or unavailable");
 
 	using LongIntervalResult =
 		std::variant<MeterTenMinuteDto, MeterTenMinuteUnavailableDto>;

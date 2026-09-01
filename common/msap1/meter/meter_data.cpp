@@ -420,12 +420,11 @@ FundamentalValues decode_aggregate_fundamental_values(const MeterRecord &record,
 	 * The aggregate frequency field is informational only: it is the mean of
 	 * the 15 basic frequency estimates, not a standardized measurement.
 	 * IEC 61000-4-30 defines the frequency product over its own (10 s)
-	 * interval, which will be implemented with that interval in a later
-	 * milestone. The informative value is carried through for
-	 * diagnostics, but it must never be advertised as a valid Class A
-	 * frequency result, so its quality stays unavailable regardless of
-	 * the record's frequency-valid flag. That flag remains visible to
-	 * diagnostics through AggregateTiming::frequency_valid.
+	 * interval, now decoded through the independent FREQUENCY-10S path. The
+	 * informative aggregate value is still carried for diagnostics, but it
+	 * must never be advertised as that standardized result, so its quality
+	 * stays unavailable regardless of the record's frequency-valid flag.
+	 * That flag remains visible through AggregateTiming::frequency_valid.
 	 */
 	fundamental.frequency = {
 		static_cast<std::int64_t>(record.aggregate_frequency_millihz()),
