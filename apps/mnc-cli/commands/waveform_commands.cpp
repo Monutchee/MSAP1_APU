@@ -72,6 +72,18 @@ std::string state_name(WaveformSessionState state)
 	return "unknown";
 }
 
+std::string archive_state_name(WaveformArchiveDiscoveryState state)
+{
+	switch (state) {
+	case WaveformArchiveDiscoveryState::not_started: return "not started";
+	case WaveformArchiveDiscoveryState::scanning: return "scanning";
+	case WaveformArchiveDiscoveryState::complete: return "complete";
+	case WaveformArchiveDiscoveryState::cancelled: return "cancelled";
+	case WaveformArchiveDiscoveryState::failed: return "failed";
+	}
+	return "unknown";
+}
+
 WaveformResult collect(WaveformResponse response)
 {
 	return {response.waveform, std::move(response.sessions), {"mncwf"}};
@@ -111,6 +123,12 @@ public:
 		       << "  Completed sessions:   " << status.completed_sessions
 		       << '\n'
 		       << "  Incomplete sessions:  " << status.incomplete_sessions
+		       << '\n'
+		       << "  Archive discovery:    "
+		       << archive_state_name(status.archive_discovery.state) << " ("
+		       << status.archive_discovery.scanned_files << "/"
+		       << status.archive_discovery.total_files << " scanned, "
+		       << status.archive_discovery.rejected_files << " rejected)"
 		       << "\n  Export formats:       mncwf\n";
 		if (!result.sessions.empty()) {
 			output << "\nRecent sessions\n";

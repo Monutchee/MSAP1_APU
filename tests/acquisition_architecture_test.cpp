@@ -415,8 +415,8 @@ void typed_commands_round_trip_through_the_registry()
 			mains_response.snapshot.detected_phase_mask == 0x5u,
 		"typed mains-signalling observation did not round trip");
 
-	/* IPC v38 carries private storage authority plus public v4 capture,
-	 * lineage, and trigger-origin identities used by catalogue projection. */
+	/* IPC v40 carries private storage authority, public v4 capture lineage,
+	 * trigger origins, and persisted-archive discovery progress. */
 	registry.on<msap1::WaveformListRequest>(
 		msap1::AcquisitionStatus::dma_error,
 		[](const msap1::WaveformListRequest &request) {
@@ -424,6 +424,9 @@ void typed_commands_round_trip_through_the_registry()
 				"wrong decoded waveform request version");
 			msap1::WaveformResponse response{};
 			response.waveform.completed_sessions = 1u;
+			response.waveform.archive_discovery = {
+				msap1::WaveformArchiveDiscoveryState::scanning,
+				7u, 11u, 2u};
 			response.waveform_directory = "/data/mnc/waveform";
 			msap1::WaveformSessionIpc session{};
 			session.id = 17u;
@@ -444,6 +447,11 @@ void typed_commands_round_trip_through_the_registry()
 		msap1::decode_acquisition_payload<msap1::WaveformResponse>(
 			waveform_reply);
 	require(waveform_response.waveform.completed_sessions == 1u &&
+			waveform_response.waveform.archive_discovery.state ==
+				msap1::WaveformArchiveDiscoveryState::scanning &&
+			waveform_response.waveform.archive_discovery.scanned_files == 7u &&
+			waveform_response.waveform.archive_discovery.total_files == 11u &&
+			waveform_response.waveform.archive_discovery.rejected_files == 2u &&
 			waveform_response.waveform_directory == "/data/mnc/waveform" &&
 			waveform_response.sessions.size() == 1u &&
 			waveform_response.sessions[0].continuation_of_session_id == 16u &&

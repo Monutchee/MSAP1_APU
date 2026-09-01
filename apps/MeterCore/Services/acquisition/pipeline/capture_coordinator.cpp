@@ -200,7 +200,6 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  ipc_(options.socket_path)
 {
 	register_acquisition_commands(registry_, *this);
-	ipc_.start();
 }
 
 CaptureCoordinator::~CaptureCoordinator()
@@ -209,9 +208,23 @@ CaptureCoordinator::~CaptureCoordinator()
 	ipc_.shutdown();
 }
 
-void CaptureCoordinator::run()
+void CaptureCoordinator::initialize()
 {
 	start();
+	try {
+		ipc_.start();
+	} catch (...) {
+		ipc_.shutdown();
+		stop();
+		throw;
+	}
+}
+
+void CaptureCoordinator::run()
+{
+	if (!running_)
+		throw std::logic_error(
+			"capture coordinator run before initialization");
 	try {
 		(void)aggregation_health_.configure_demand(
 			demand_configuration(product_settings_.metering.demand));

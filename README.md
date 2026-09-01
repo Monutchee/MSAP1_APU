@@ -132,8 +132,9 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 20 adds typed meter
-snapshot selection by period and attribute set. `MeterDataProvider` publishes
+little-endian product payloads. Acquisition IPC version 40 includes waveform
+archive-discovery progress in addition to typed meter snapshot selection by
+period and attribute set. `MeterDataProvider` publishes
 typed latest values for the Basic (10/12-cycle), 150/180-cycle, clock-aligned
 10-minute, and 2-hour measurement periods, plus non-normative live partials
 for the two long periods. Unavailable values are never represented as valid
@@ -266,6 +267,12 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+
+While acquisition is still starting or recovering, `GET /api/v1/health`
+returns HTTP 503 with `code: "system_not_ready"` and `retryable: true`.
+Clients may keep settings and navigation available, but must suppress
+acquisition-dependent polling and clear stale live measurements until health
+IPC is reachable again.
 
 Waveform session summaries classify their contributing triggers as `manual`,
 `power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
@@ -406,6 +413,13 @@ capture. Completed files survive service and system restarts under:
 ```text
 /data/mnc/waveform/
 ```
+
+At daemon startup, filenames are enumerated synchronously to reserve session
+IDs, then file structure and CRCs are validated on a cancellable background
+worker while both DMA streams run. `GET /api/v1/waveforms` exposes the
+additive `archive_discovery` state and counters. A delete-all request is
+rejected until discovery completes so an unseen retained file cannot survive
+an apparently successful clear operation.
 
 New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
 or explicitly identified boxcar-decimated averages and deliberately omit

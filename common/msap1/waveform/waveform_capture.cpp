@@ -472,6 +472,7 @@ WaveformCapture::WaveformCapture(std::string device_path,
 				 WaveformCaptureOptions options)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
+	  archive_discovery_hook_(std::move(options.archive_discovery_hook)),
 	  history_(options.history_capacity_frames),
 	  writer_(std::make_unique<AsyncWriter>())
 {
@@ -504,6 +505,9 @@ void WaveformCapture::set_time_context(MncwfClockSource source,
 WaveformCapture::~WaveformCapture()
 {
 	stop();
+	archive_discovery_worker_.request_stop();
+	if (archive_discovery_worker_.joinable())
+		archive_discovery_worker_.join();
 	writer_.reset();
 }
 
@@ -522,7 +526,7 @@ void WaveformCapture::start()
 	if (fd_ < 0)
 		throw_errno("open " + device_path_);
 	std::filesystem::create_directories(output_directory_);
-	discover_persisted_sessions();
+	begin_persisted_session_discovery();
 	transport_last_overrun_blocks_ = 0;
 	if (const auto current = correlate())
 		correlation_ = *current;
@@ -572,41 +576,85 @@ void WaveformCapture::begin_stream_epoch() noexcept
 	correlation_utc_nanoseconds_ = 0u;
 }
 
-void WaveformCapture::discover_persisted_sessions()
+void WaveformCapture::begin_persisted_session_discovery()
 {
-	if (persisted_sessions_discovered_)
-		return;
-	persisted_sessions_discovered_ = true;
+	{
+		std::scoped_lock lock(archive_discovery_mutex_);
+		if (archive_discovery_.state !=
+		    WaveformArchiveDiscoveryState::not_started)
+			return;
+	}
 
-	std::error_code error;
-	if (!std::filesystem::exists(output_directory_, error))
-		return;
-
+	std::vector<std::filesystem::path> files;
 	for (const auto &entry :
-	     std::filesystem::directory_iterator(output_directory_, error)) {
-		if (error)
-			break;
+	     std::filesystem::directory_iterator(output_directory_)) {
 		if (!entry.is_regular_file() ||
 		    entry.path().extension() != ".mncwf")
 			continue;
+		files.push_back(entry.path());
 
+		/* New files encode the daemon session ID in their name. Reserve every
+		 * such ID before the validation worker starts, including malformed
+		 * files, so a capture created during discovery can never collide. */
+		if (const auto id = session_id_from_filename(entry.path())) {
+			next_session_id_ = std::max(next_session_id_, *id + 1u);
+			continue;
+		}
+
+		/* Legacy files also used the generated name, but cheaply inspect the
+		 * fixed header as a compatibility guard for renamed v1-v3 captures. */
 		std::ifstream input(entry.path(), std::ios::binary);
+		WaveformFileHeaderV2 header{};
+		input.read(reinterpret_cast<char *>(&header), sizeof(header));
+		if (input.gcount() >= 64 &&
+		    header.magic == std::array<char, 8>{
+			'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} &&
+		    header.version >= 1u && header.version <= 3u &&
+		    header.session_id > 0u &&
+		    header.session_id < std::numeric_limits<std::uint64_t>::max())
+			next_session_id_ = std::max(next_session_id_,
+				header.session_id + 1u);
+	}
+	std::sort(files.begin(), files.end());
+
+	{
+		std::scoped_lock lock(archive_discovery_mutex_);
+		archive_discovery_.state = files.empty()
+			? WaveformArchiveDiscoveryState::complete
+			: WaveformArchiveDiscoveryState::scanning;
+		archive_discovery_.total_files = files.size();
+		archive_discovery_result_ready_ = files.empty();
+	}
+	if (files.empty())
+		return;
+
+	archive_discovery_worker_ = std::jthread(
+		[this, files = std::move(files)](std::stop_token stop) mutable {
+			discover_persisted_sessions(stop, std::move(files));
+		});
+}
+
+void WaveformCapture::discover_persisted_sessions(
+	std::stop_token stop, std::vector<std::filesystem::path> files)
+{
+	auto read_session = [](const std::filesystem::path &path)
+		-> std::optional<Session> {
+		std::ifstream input(path, std::ios::binary);
 		std::array<std::byte, 16> prefix{};
 		input.read(reinterpret_cast<char *>(prefix.data()), prefix.size());
 		if (input.gcount() != static_cast<std::streamsize>(prefix.size()) ||
 		    !std::ranges::equal(std::span{prefix}.first(mncwf_magic.size()),
 			mncwf_magic))
-			continue;
+			return std::nullopt;
 		const auto version = read_little_u32(prefix, 8u);
 		if (version == mncwf_v4_version) {
-			const auto session_id = session_id_from_filename(entry.path());
-			const auto file_bytes = entry.file_size(error);
+			const auto session_id = session_id_from_filename(path);
+			std::error_code error;
+			const auto file_bytes = std::filesystem::file_size(path, error);
 			if (!session_id || error ||
 			    file_bytes < mncwf_v4_header_bytes ||
-			    file_bytes > mncwf_v4_max_file_bytes) {
-				error.clear();
-				continue;
-			}
+			    file_bytes > mncwf_v4_max_file_bytes)
+				return std::nullopt;
 			std::vector<std::byte> bytes(
 				static_cast<std::size_t>(file_bytes));
 			input.clear();
@@ -615,114 +663,109 @@ void WaveformCapture::discover_persisted_sessions()
 				static_cast<std::streamsize>(bytes.size()));
 			if (input.gcount() !=
 			    static_cast<std::streamsize>(bytes.size()))
-				continue;
-			try {
-				const MncwfV4Reader reader(bytes);
-				const auto &segments = reader.timebase_segments();
-				const auto &first = segments.front();
-				const auto &last = segments.back();
-				if (first.acquisition_rate_numerator %
-						first.acquisition_rate_denominator != 0u)
-					continue;
-				const auto sample_rate = first.acquisition_rate_numerator /
-					first.acquisition_rate_denominator;
-				if (sample_rate == 0u ||
-				    sample_rate > std::numeric_limits<std::uint32_t>::max() ||
-				    last.source_frame_count - 1u >
-					std::numeric_limits<std::uint64_t>::max() -
-						last.first_sequence ||
-				    !std::ranges::all_of(segments,
-					[&first](const auto &segment) {
-						return segment.acquisition_rate_numerator ==
-								first.acquisition_rate_numerator &&
-						       segment.acquisition_rate_denominator ==
-								first.acquisition_rate_denominator &&
-						       segment.decimation_divisor ==
-								first.decimation_divisor;
-					}))
-					continue;
+				return std::nullopt;
 
-				Session session{};
-				session.summary.id = *session_id;
-				session.summary.capture_uuid =
-					reader.capture_metadata().capture_uuid;
-				session.summary.first_sequence = first.first_sequence;
-				session.summary.last_sequence = last.first_sequence +
-					last.source_frame_count - 1u;
+			const MncwfV4Reader reader(bytes);
+			const auto &segments = reader.timebase_segments();
+			const auto &first = segments.front();
+			const auto &last = segments.back();
+			if (first.acquisition_rate_denominator == 0u ||
+			    first.acquisition_rate_numerator %
+				    first.acquisition_rate_denominator != 0u ||
+			    last.source_frame_count == 0u)
+				return std::nullopt;
+			const auto sample_rate = first.acquisition_rate_numerator /
+				first.acquisition_rate_denominator;
+			if (sample_rate == 0u ||
+			    sample_rate > std::numeric_limits<std::uint32_t>::max() ||
+			    last.source_frame_count - 1u >
+				std::numeric_limits<std::uint64_t>::max() -
+					last.first_sequence ||
+			    !std::ranges::all_of(segments,
+				[&first](const auto &segment) {
+					return segment.acquisition_rate_numerator ==
+							first.acquisition_rate_numerator &&
+					       segment.acquisition_rate_denominator ==
+							first.acquisition_rate_denominator &&
+					       segment.decimation_divisor ==
+							first.decimation_divisor;
+				}))
+				return std::nullopt;
+
+			Session session{};
+			session.summary.id = *session_id;
+			session.summary.capture_uuid =
+				reader.capture_metadata().capture_uuid;
+			session.summary.first_sequence = first.first_sequence;
+			session.summary.last_sequence = last.first_sequence +
+				last.source_frame_count - 1u;
+			session.summary.trigger_sequence =
+				session.summary.first_sequence;
+			session.summary.trigger_tai_nanoseconds =
+				reader.capture_metadata().created_tai_nanoseconds;
+			session.summary.trigger_realtime_nanoseconds =
+				reader.capture_metadata().created_utc_nanoseconds;
+			const auto trigger = std::ranges::find_if(reader.events(),
+				[](const auto &event) {
+					return (event.flags &
+						mncwf_event_trigger_valid) != 0u;
+				});
+			if (trigger != reader.events().end()) {
 				session.summary.trigger_sequence =
-					session.summary.first_sequence;
-				session.summary.trigger_tai_nanoseconds =
-					reader.capture_metadata().created_tai_nanoseconds;
-				session.summary.trigger_realtime_nanoseconds =
-					reader.capture_metadata().created_utc_nanoseconds;
-				const auto trigger = std::ranges::find_if(reader.events(),
-					[](const auto &event) {
-						return (event.flags &
-							mncwf_event_trigger_valid) != 0u;
-					});
-				if (trigger != reader.events().end()) {
-					session.summary.trigger_sequence =
-						trigger->trigger_sequence;
-					if ((trigger->flags & mncwf_event_tai_valid) != 0u)
-						session.summary.trigger_tai_nanoseconds =
-							trigger->trigger_tai_nanoseconds;
-					if ((trigger->flags & mncwf_event_utc_valid) != 0u)
-						session.summary.trigger_realtime_nanoseconds =
-							trigger->trigger_utc_nanoseconds;
-				}
-				session.summary.sample_rate_hz =
-					static_cast<std::uint32_t>(sample_rate);
-				session.summary.event_count = static_cast<std::uint32_t>(
-					reader.events().size());
-				for (const auto &event : reader.events())
-					session.summary.trigger_source_mask |=
-						trigger_source_bit(event.trigger_source);
-				session.summary.decimation = first.decimation_divisor;
-				session.summary.master_session_id = *session_id;
-				session.summary.state = WaveformSessionState::complete;
-				for (const auto &lineage : reader.lineage()) {
-					if (lineage.relation ==
-						MncwfLineageRelation::previous_continuation)
-						session.previous_capture_uuid =
-							lineage.related_capture_uuid;
-					else if (lineage.relation ==
-						MncwfLineageRelation::next_continuation)
-						session.next_capture_uuid =
-							lineage.related_capture_uuid;
-				}
-				const auto filename = entry.path().filename().string();
-				std::copy_n(filename.c_str(),
-					std::min(filename.size(),
-						session.summary.filename.size() - 1u),
-					session.summary.filename.begin());
-				sessions_.push_back(std::move(session));
-				next_session_id_ =
-					std::max(next_session_id_, *session_id + 1u);
-			} catch (const std::exception &) {
-				/* A malformed or unsupported persisted file is not listed. */
+					trigger->trigger_sequence;
+				if ((trigger->flags & mncwf_event_tai_valid) != 0u)
+					session.summary.trigger_tai_nanoseconds =
+						trigger->trigger_tai_nanoseconds;
+				if ((trigger->flags & mncwf_event_utc_valid) != 0u)
+					session.summary.trigger_realtime_nanoseconds =
+						trigger->trigger_utc_nanoseconds;
 			}
-			continue;
+			session.summary.sample_rate_hz =
+				static_cast<std::uint32_t>(sample_rate);
+			session.summary.event_count = static_cast<std::uint32_t>(
+				reader.events().size());
+			for (const auto &event : reader.events())
+				session.summary.trigger_source_mask |=
+					trigger_source_bit(event.trigger_source);
+			session.summary.decimation = first.decimation_divisor;
+			session.summary.master_session_id = *session_id;
+			session.summary.state = WaveformSessionState::complete;
+			for (const auto &lineage : reader.lineage()) {
+				if (lineage.relation ==
+				    MncwfLineageRelation::previous_continuation)
+					session.previous_capture_uuid =
+						lineage.related_capture_uuid;
+				else if (lineage.relation ==
+					 MncwfLineageRelation::next_continuation)
+					session.next_capture_uuid =
+						lineage.related_capture_uuid;
+			}
+			const auto filename = path.filename().string();
+			std::copy_n(filename.c_str(),
+				std::min(filename.size(),
+					session.summary.filename.size() - 1u),
+				session.summary.filename.begin());
+			return session;
 		}
 
 		if (version != 1u && version != 2u && version != 3u)
-			continue;
+			return std::nullopt;
 		input.clear();
 		input.seekg(0, std::ios::beg);
 		WaveformFileHeaderV2 header{};
 		input.read(reinterpret_cast<char *>(&header), sizeof(header));
 		const auto bytes_read = static_cast<std::size_t>(input.gcount());
 		if (input.gcount() < 64 ||
-		    header.magic !=
-			    std::array<char, 8>{
-				    'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} ||
-		    header.version != version)
-			continue;
+		    header.magic != std::array<char, 8>{
+			'M', 'N', 'C', 'W', 'F', '1', '\0', '\0'} ||
+		    header.version != version || header.session_id == 0u ||
+		    header.session_id == std::numeric_limits<std::uint64_t>::max())
+			return std::nullopt;
 
-		/* v2 wrote zeros where v3 keeps the decimation divisor. */
 		const std::uint32_t decimation =
 			header.version >= 3u ? header.decimation : 1u;
 		if (!valid_decimation(decimation))
-			continue;
+			return std::nullopt;
 
 		Session session{};
 		session.summary.id = header.session_id;
@@ -734,6 +777,7 @@ void WaveformCapture::discover_persisted_sessions()
 		session.summary.sample_rate_hz = header.sample_rate_hz;
 		session.summary.event_count = header.event_count;
 		session.summary.decimation = decimation;
+		session.summary.master_session_id = header.session_id;
 		session.summary.state = WaveformSessionState::complete;
 
 		std::uint64_t expected_file_bytes = 0;
@@ -752,17 +796,13 @@ void WaveformCapture::discover_persisted_sessions()
 					    header.channel_descriptor_bytes &&
 		    header.frame_data_offset ==
 			    header.event_table_offset +
-				    static_cast<std::uint64_t>(
-					    header.event_count) *
-					    24u &&
+				    static_cast<std::uint64_t>(header.event_count) * 24u &&
 		    header.last_sequence >= header.first_sequence &&
-		    (header.last_sequence - header.first_sequence) %
-			    decimation == 0u &&
+		    (header.last_sequence - header.first_sequence) % decimation == 0u &&
 		    header.frame_count ==
 			    (header.last_sequence - header.first_sequence) /
-					    decimation + 1u) {
-			expected_file_bytes =
-				header.frame_data_offset +
+				    decimation + 1u) {
+			expected_file_bytes = header.frame_data_offset +
 				header.frame_count * header.frame_bytes;
 			session.summary.trigger_realtime_nanoseconds =
 				header.trigger_realtime_nanoseconds;
@@ -771,20 +811,17 @@ void WaveformCapture::discover_persisted_sessions()
 			   header.last_sequence >= header.first_sequence) {
 			const auto frame_count =
 				header.last_sequence - header.first_sequence + 1u;
-			expected_file_bytes =
-				128u +
-				static_cast<std::uint64_t>(
-					header.event_count) *
-					24u +
+			expected_file_bytes = 128u +
+				static_cast<std::uint64_t>(header.event_count) * 24u +
 				frame_count * waveform_frame_bytes;
+			std::error_code error;
 			const auto modified =
-				entry.last_write_time(error);
+				std::filesystem::last_write_time(path, error);
 			if (!error) {
 				const auto system_time =
 					std::chrono::system_clock::now() +
 					(modified -
-					 std::filesystem::file_time_type::
-						 clock::now());
+					 std::filesystem::file_time_type::clock::now());
 				session.summary.trigger_realtime_nanoseconds =
 					static_cast<std::uint64_t>(
 						std::chrono::duration_cast<
@@ -793,44 +830,138 @@ void WaveformCapture::discover_persisted_sessions()
 							.count());
 			}
 		} else {
-			continue;
+			return std::nullopt;
 		}
-		const auto file_bytes = entry.file_size(error);
-		if (error || file_bytes != expected_file_bytes) {
-			error.clear();
-			continue;
+		std::error_code error;
+		const auto file_bytes = std::filesystem::file_size(path, error);
+		if (error || file_bytes != expected_file_bytes)
+			return std::nullopt;
+
+		const auto filename = path.filename().string();
+		std::copy_n(filename.c_str(),
+			std::min(filename.size(),
+				session.summary.filename.size() - 1u),
+			session.summary.filename.begin());
+		return session;
+	};
+
+	try {
+		std::vector<Session> restored;
+		for (const auto &path : files) {
+			if (stop.stop_requested())
+				break;
+			if (archive_discovery_hook_)
+				archive_discovery_hook_(stop, path);
+			if (stop.stop_requested())
+				break;
+
+			bool accepted = false;
+			try {
+				if (auto session = read_session(path)) {
+					restored.push_back(std::move(*session));
+					accepted = true;
+				}
+			} catch (const std::exception &) {
+				/* Malformed, unsupported, or unreadable files stay hidden. */
+			}
+			std::scoped_lock lock(archive_discovery_mutex_);
+			++archive_discovery_.scanned_files;
+			if (!accepted)
+				++archive_discovery_.rejected_files;
 		}
 
-		const auto filename = entry.path().filename().string();
-		std::copy_n(filename.c_str(),
-			    std::min(filename.size(),
-				     session.summary.filename.size() - 1u),
-			    session.summary.filename.begin());
+		std::scoped_lock lock(archive_discovery_mutex_);
+		if (stop.stop_requested()) {
+			archive_discovery_.state =
+				WaveformArchiveDiscoveryState::cancelled;
+			return;
+		}
+		discovered_sessions_ = std::move(restored);
+		archive_discovery_result_ready_ = true;
+	} catch (const std::exception &error) {
+		std::scoped_lock lock(archive_discovery_mutex_);
+		archive_discovery_error_ = error.what();
+		archive_discovery_.state = WaveformArchiveDiscoveryState::failed;
+	} catch (...) {
+		std::scoped_lock lock(archive_discovery_mutex_);
+		archive_discovery_error_ = "unknown archive discovery failure";
+		archive_discovery_.state = WaveformArchiveDiscoveryState::failed;
+	}
+}
+
+void WaveformCapture::collect_discovery_results()
+{
+	std::vector<Session> restored;
+	std::string failure;
+	bool completed = false;
+	{
+		std::scoped_lock lock(archive_discovery_mutex_);
+		if (!archive_discovery_error_.empty() &&
+		    !archive_discovery_error_reported_) {
+			failure = archive_discovery_error_;
+			archive_discovery_error_reported_ = true;
+		}
+		if (archive_discovery_result_ready_ &&
+		    !archive_discovery_result_collected_) {
+			restored = std::move(discovered_sessions_);
+			archive_discovery_result_collected_ = true;
+			completed = true;
+		}
+	}
+	if (!failure.empty())
+		(void)capture_log.write(mnc::logging::Priority::warning,
+			"waveform archive discovery failed: " + failure,
+			"waveform_archive_discovery_failed");
+	if (!completed)
+		return;
+
+	std::uint64_t merge_rejections = 0u;
+	for (auto &session : restored) {
+		const bool duplicate = std::ranges::any_of(sessions_,
+			[&session](const Session &candidate) {
+				return candidate.summary.id == session.summary.id;
+			});
+		if (duplicate) {
+			++merge_rejections;
+			continue;
+		}
 		sessions_.push_back(std::move(session));
-		next_session_id_ =
-			std::max(next_session_id_, header.session_id + 1u);
+	}
+	if (merge_rejections != 0u) {
+		std::scoped_lock lock(archive_discovery_mutex_);
+		archive_discovery_.rejected_files += merge_rejections;
 	}
 	std::sort(sessions_.begin(), sessions_.end(),
 		[](const Session &left, const Session &right) {
 			return left.summary.id < right.summary.id;
 		});
+	rebuild_session_lineage();
+	{
+		std::scoped_lock lock(archive_discovery_mutex_);
+		archive_discovery_.state = WaveformArchiveDiscoveryState::complete;
+	}
+}
+
+void WaveformCapture::rebuild_session_lineage()
+{
 	/* MNCWF v4 persists UUID lineage rather than daemon-local session IDs.
-	 * Resolve those UUIDs only after every file has been validated and loaded,
-	 * then rebuild the numeric summaries used by IPC/API clients. */
+	 * Resolve those UUIDs only after every validated file has been merged. */
 	for (auto &session : sessions_) {
+		session.summary.master_session_id = session.summary.id;
 		if (uuid_is_zero(session.previous_capture_uuid))
 			continue;
+		session.summary.continuation_of_session_id = 0u;
 		const auto predecessor = std::ranges::find_if(sessions_,
 			[&session](const Session &candidate) {
 				return candidate.summary.capture_uuid ==
-						session.previous_capture_uuid;
+					session.previous_capture_uuid;
 			});
 		if (predecessor == sessions_.end() ||
 		    predecessor->summary.id >= session.summary.id ||
 		    predecessor->summary.last_sequence ==
-				std::numeric_limits<std::uint64_t>::max() ||
+			std::numeric_limits<std::uint64_t>::max() ||
 		    predecessor->summary.last_sequence + 1u !=
-				session.summary.first_sequence ||
+			session.summary.first_sequence ||
 		    predecessor->next_capture_uuid != session.summary.capture_uuid)
 			continue;
 		session.summary.continuation_of_session_id =
@@ -853,6 +984,13 @@ void WaveformCapture::discover_persisted_sessions()
 		}
 		session.summary.master_session_id = master;
 	}
+}
+
+WaveformArchiveDiscoveryStatus
+WaveformCapture::archive_discovery_status() const
+{
+	std::scoped_lock lock(archive_discovery_mutex_);
+	return archive_discovery_;
 }
 
 std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
@@ -1314,6 +1452,7 @@ WaveformSessionSummary WaveformCapture::track_power_quality_event(
 
 void WaveformCapture::erase(std::uint64_t session_id)
 {
+	collect_discovery_results();
 	collect_materialization_results();
 	const auto session = std::find_if(
 		sessions_.begin(), sessions_.end(),
@@ -1650,6 +1789,7 @@ void WaveformCapture::collect_materialization_results()
 
 WaveformStatus WaveformCapture::status()
 {
+	collect_discovery_results();
 	collect_materialization_results();
 	update_transport_status();
 
@@ -1677,6 +1817,7 @@ WaveformStatus WaveformCapture::status()
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
 	result.history_capacity_frames = history_.size();
+	result.archive_discovery = archive_discovery_status();
 	result.correlation = correlation_;
 	for (const auto &session : sessions_) {
 		if (session.summary.state == WaveformSessionState::complete)
@@ -1689,6 +1830,7 @@ WaveformStatus WaveformCapture::status()
 
 std::vector<WaveformSessionSummary> WaveformCapture::sessions()
 {
+	collect_discovery_results();
 	collect_materialization_results();
 	std::vector<WaveformSessionSummary> result;
 	const auto count =

@@ -6,9 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace msap1 {
@@ -100,6 +104,10 @@ struct WaveformCaptureContext {
  * the runtime policy or allocating a production-sized test fixture. */
 struct WaveformCaptureOptions {
 	std::size_t history_capacity_frames = waveform_history_frames;
+	/** Optional deterministic test seam invoked immediately before each
+	 * persisted file is validated. Production leaves it empty. */
+	std::function<void(std::stop_token, const std::filesystem::path &)>
+		archive_discovery_hook;
 };
 
 /*
@@ -145,6 +153,23 @@ struct WaveformSessionSummary {
 	MncwfUuid capture_uuid{};
 };
 
+enum class WaveformArchiveDiscoveryState : std::uint32_t {
+	not_started = 0,
+	scanning = 1,
+	complete = 2,
+	cancelled = 3,
+	failed = 4,
+};
+
+/** Progress of the one-shot persisted MNCWF validation pass. */
+struct WaveformArchiveDiscoveryStatus {
+	WaveformArchiveDiscoveryState state =
+		WaveformArchiveDiscoveryState::not_started;
+	std::uint64_t scanned_files = 0;
+	std::uint64_t total_files = 0;
+	std::uint64_t rejected_files = 0;
+};
+
 struct WaveformStatus {
 	std::uint32_t running = 0;
 	std::uint32_t active_session = 0;
@@ -175,6 +200,7 @@ struct WaveformStatus {
 	std::uint64_t history_capacity_frames = waveform_history_frames;
 	std::uint64_t completed_sessions = 0;
 	std::uint64_t incomplete_sessions = 0;
+	WaveformArchiveDiscoveryStatus archive_discovery{};
 	WaveformCorrelation correlation{};
 };
 
@@ -322,7 +348,13 @@ private:
 	void finish_sessions();
 	void enqueue_materialization(Session &session);
 	void collect_materialization_results();
-	void discover_persisted_sessions();
+	void begin_persisted_session_discovery();
+	void discover_persisted_sessions(
+		std::stop_token stop, std::vector<std::filesystem::path> files);
+	void collect_discovery_results();
+	void rebuild_session_lineage();
+	[[nodiscard]] WaveformArchiveDiscoveryStatus
+	archive_discovery_status() const;
 	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
 	std::uint64_t max_capture_frames() const noexcept;
 	void update_transport_status() noexcept;
@@ -331,7 +363,15 @@ private:
 	std::string device_path_;
 	std::filesystem::path output_directory_;
 	WaveformCaptureContext context_{};
-	bool persisted_sessions_discovered_ = false;
+	std::function<void(std::stop_token, const std::filesystem::path &)>
+		archive_discovery_hook_;
+	mutable std::mutex archive_discovery_mutex_;
+	WaveformArchiveDiscoveryStatus archive_discovery_{};
+	std::string archive_discovery_error_;
+	bool archive_discovery_result_ready_ = false;
+	bool archive_discovery_result_collected_ = false;
+	bool archive_discovery_error_reported_ = false;
+	std::jthread archive_discovery_worker_;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
 	bool have_history_ = false;
@@ -351,6 +391,7 @@ private:
 	std::optional<std::uint32_t> configuration_generation_;
 	std::uint64_t next_session_id_ = 1;
 	std::vector<Session> sessions_;
+	std::vector<Session> discovered_sessions_;
 	std::vector<GapRange> gaps_;
 	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};

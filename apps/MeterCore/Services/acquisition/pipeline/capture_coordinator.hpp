@@ -59,7 +59,15 @@ public:
 	CaptureCoordinator &operator=(const CaptureCoordinator &) = delete;
 
 	/**
-	 * @brief Serve the pipeline until request_stop().
+	 * @brief Complete the capture-critical startup sequence.
+	 *
+	 * Arms both DMA paths, starts RPU capture, and only then binds the IPC
+	 * socket. Returning from this method is the daemon's readiness boundary.
+	 */
+	void initialize();
+
+	/**
+	 * @brief Serve an initialized pipeline until request_stop().
 	 *
 	 * One poll() multiplexes the meter DMA, the waveform DMA, and the IPC
 	 * eventfd; the periodic RPU health audit runs between wakeups.

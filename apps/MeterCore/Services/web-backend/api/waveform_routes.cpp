@@ -64,6 +64,13 @@ struct WaveformSessionDto {
 	std::string capture_uuid;
 };
 
+struct WaveformArchiveDiscoveryDto {
+	std::string state;
+	std::uint64_t scanned_files;
+	std::uint64_t total_files;
+	std::uint64_t rejected_files;
+};
+
 /** Body of GET /api/v1/waveforms (also returned by trigger/delete). */
 struct WaveformDto {
 	bool running;
@@ -84,6 +91,7 @@ struct WaveformDto {
 	std::uint64_t history_capacity_frames;
 	std::uint64_t completed_sessions;
 	std::uint64_t incomplete_sessions;
+	WaveformArchiveDiscoveryDto archive_discovery;
 	std::vector<std::string> export_formats;
 	std::vector<WaveformSessionDto> sessions;
 };
@@ -96,6 +104,24 @@ std::string waveform_state_name(msap1::WaveformSessionState state)
 	case msap1::WaveformSessionState::incomplete: return "incomplete";
 	}
 	return "unknown";
+}
+
+std::string archive_discovery_state_name(
+	msap1::WaveformArchiveDiscoveryState state)
+{
+	switch (state) {
+	case msap1::WaveformArchiveDiscoveryState::not_started:
+		return "not_started";
+	case msap1::WaveformArchiveDiscoveryState::scanning:
+		return "scanning";
+	case msap1::WaveformArchiveDiscoveryState::complete:
+		return "complete";
+	case msap1::WaveformArchiveDiscoveryState::cancelled:
+		return "cancelled";
+	case msap1::WaveformArchiveDiscoveryState::failed:
+		return "failed";
+	}
+	return "failed";
 }
 
 std::string waveform_origin(std::uint32_t mask)
@@ -134,6 +160,10 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 		status.history_capacity_frames,
 		status.completed_sessions,
 		status.incomplete_sessions,
+		{archive_discovery_state_name(status.archive_discovery.state),
+		 status.archive_discovery.scanned_files,
+		 status.archive_discovery.total_files,
+		 status.archive_discovery.rejected_files},
 		{"mncwf"},
 		{},
 	};
@@ -321,23 +351,36 @@ delete_waveform_session(AppContext &app,
 		auto response = app.acquisition.waveform_status();
 		require_acquisition_ok(response.status);
 		std::vector<std::uint64_t> targets;
+		std::uint64_t deleted = 0u;
 		if (deletion.all) {
-			if (std::ranges::any_of(response.sessions,
-					[](const auto &session) {
-						return session.state ==
-							WaveformSessionState::capturing;
-					}))
+			if (response.waveform.archive_discovery.state !=
+			    WaveformArchiveDiscoveryState::complete)
+				return error_response(webengine::http::status::conflict,
+					"waveform archive indexing must complete before all data can be cleared");
+			if (response.waveform.active_session != 0u ||
+			    std::ranges::any_of(response.sessions,
+				    [](const auto &session) {
+					    return session.state ==
+						    WaveformSessionState::capturing;
+				    }))
 				return error_response(webengine::http::status::conflict,
 					"all waveform data cannot be cleared while a capture is active");
-			for (const auto &session : response.sessions)
-				targets.push_back(session.id);
 		} else {
 			targets.push_back(deletion.session_id);
 		}
-		for (const auto session_id : targets) {
-			response = app.acquisition.delete_waveform(session_id);
-			require_acquisition_ok(response.status);
-		}
+		do {
+			if (deletion.all) {
+				targets.clear();
+				for (const auto &session : response.sessions)
+					targets.push_back(session.id);
+			}
+			for (const auto session_id : targets) {
+				response = app.acquisition.delete_waveform(session_id);
+				require_acquisition_ok(response.status);
+				++deleted;
+			}
+		} while (deletion.all && !targets.empty() &&
+			 !response.sessions.empty());
 		log_api_event(mnc::logging::Priority::notice,
 			deletion.all ? "all waveform captures deleted"
 				: "waveform capture deleted",
@@ -345,7 +388,7 @@ delete_waveform_session(AppContext &app,
 			{{"MNC_REQUEST_ID", correlation},
 			 {deletion.all ? "MNC_WAVEFORMS_DELETED"
 				: "MNC_WAVEFORM_SESSION",
-			  std::to_string(deletion.all ? targets.size()
+			  std::to_string(deletion.all ? deleted
 				: deletion.session_id)}});
 		return json_response(webengine::http::status::ok,
 			waveform_status(response));

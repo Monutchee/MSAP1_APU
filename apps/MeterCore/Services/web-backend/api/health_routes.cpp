@@ -117,9 +117,22 @@ webengine::Response get_health(AppContext &app,
 {
 	try {
 		const auto response = app.acquisition.information();
+		if (app.acquisition_unavailable.exchange(false))
+			log_api_event(mnc::logging::Priority::notice,
+				"metering service recovered and health IPC is available",
+				"system_ready");
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
 			system_health(response, app.nginx));
+	} catch (const msap1::AcquisitionUnavailable &) {
+		if (!app.acquisition_unavailable.exchange(true))
+			log_api_event(mnc::logging::Priority::notice,
+				"metering service is starting or recovering",
+				"system_not_ready");
+		return error_response(
+			webengine::http::status::service_unavailable,
+			"Metering service is starting or recovering.",
+			"system_not_ready", true);
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/health", error);
 		return error_response(

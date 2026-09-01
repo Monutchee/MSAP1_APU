@@ -71,8 +71,11 @@ inline constexpr const char *acquisition_socket_path =
  * 38: R5C1 aggregation health exposes control/input/output/validator runtime
  * stack high-water headroom in bytes.
  * 39: R5C0 health and InfoResponse expose requested/active physical-ADC
- * current wiring and application diagnostics. */
-inline constexpr std::uint16_t acquisition_ipc_version = 39;
+ * current wiring and application diagnostics.
+ * 40: WaveformStatus exposes cancellable persisted-archive discovery
+ * progress so clients cannot mistake an in-progress index for an empty
+ * archive. */
+inline constexpr std::uint16_t acquisition_ipc_version = 40;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
