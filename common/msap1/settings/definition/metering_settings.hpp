@@ -93,6 +93,7 @@ struct MeteringSettings {
 	FlickerSettings flicker;
 	MainsSignallingSettings mains_signalling;
 	DemandSettings demand;
+	CurrentWiringConfig current_wiring;
 	MeterConversionSettings conversion;
 
 	void validate() const
@@ -122,6 +123,7 @@ struct MeteringSettings {
 			throw std::runtime_error(
 				"mains-signalling requires a positive voltage reference");
 		demand.validate();
+		validate_current_wiring(current_wiring);
 	}
 };
 

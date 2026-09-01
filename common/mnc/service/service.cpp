@@ -89,6 +89,12 @@ int Service::execute()
 		while (!stop_requested()) {
 			timespec timeout{1, 0};
 			const int signal = ::sigtimedwait(&signals, nullptr, &timeout);
+			const int signal_error = signal < 0 ? errno : 0;
+			if (signal < 0 && signal_error != EAGAIN &&
+			    signal_error != EINTR) {
+				throw std::runtime_error("sigtimedwait failed: " +
+					std::string(std::strerror(signal_error)));
+			}
 			if (signal == SIGINT || signal == SIGTERM) {
 				request_stop();
 			} else if (signal == SIGHUP) {
@@ -98,10 +104,6 @@ int Service::execute()
 				on_reload();
 				logger_.write(logging::Priority::notice,
 					name_ + " reloaded", "service_reloaded");
-			}
-			if (signal < 0 && errno != EAGAIN && errno != EINTR) {
-				throw std::runtime_error("sigtimedwait failed: " +
-					std::string(std::strerror(errno)));
 			}
 			const auto current = health();
 			if (!current.healthy) {

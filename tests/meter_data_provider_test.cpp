@@ -57,7 +57,7 @@ void describes_protocol_independent_attributes()
 
 	const auto defined = mnc::meter::attributes_in(
 		mnc::meter::MeterAttributeGroup::AllDefined);
-	require(defined.size() == 87 &&
+	require(defined.size() == 125 &&
 			defined.front().id == MeterAttributeId::Frequency,
 		"AllDefined no longer describes the canonical catalog");
 	const auto quadrant = mnc::meter::describe(MeterAttributeKey{
@@ -65,6 +65,28 @@ void describes_protocol_independent_attributes()
 	require(quadrant.key == "energy.reactive.quadrant_iii.total" &&
 			quadrant.unit == MeterUnit::MicroVarHours,
 		"quadrant-III energy descriptor changed");
+	const auto angle = mnc::meter::describe(MeterAttributeKey{
+		MeterAttributeId::VoltagePositiveSequenceAngle, std::nullopt});
+	require(!angle.label.empty() && !angle.search_aliases.empty() &&
+			angle.value_kind ==
+				mnc::meter::MeterAttributeValueKind::CircularAngle &&
+			angle.calculations.size() == 2,
+		"M19 scalar angle metadata is incomplete");
+	const auto energy = mnc::meter::describe(MeterAttributeKey{
+		MeterAttributeId::ActiveImportEnergyTotal, std::nullopt});
+	require(energy.value_kind ==
+			mnc::meter::MeterAttributeValueKind::CumulativeCounter &&
+			energy.calculations.size() == 3,
+		"energy calculation capabilities changed");
+	require(mnc::meter::supports_attribute(
+			{MeterAttributeId::ActiveImportEnergyTotal, std::nullopt},
+			mnc::meter::MeasurementPeriod::Min10,
+			mnc::meter::MeterAttributeUsage::Historian) &&
+		!mnc::meter::supports_attribute(
+			{MeterAttributeId::ActiveImportEnergyTotal, std::nullopt},
+			mnc::meter::MeasurementPeriod::Basic,
+			mnc::meter::MeterAttributeUsage::Historian),
+		"energy historian period capability changed");
 }
 
 void capabilities_advertise_only_supported_periods()
@@ -229,10 +251,9 @@ void empty_selection_means_all_supported_values()
 	mnc::meter::MeterSnapshotRequest request{};
 	request.period = mnc::meter::MeasurementPeriod::Cycles150_180;
 	const auto snapshot = provider.latest(request);
-	/* M11: the aggregate period carries the full quantity set (7 RMS
-	 * lanes + VLL + power + phasor + unbalance = 46; frequency stays
-	 * basic-only). */
-	require(snapshot.has_value() && snapshot->values.size() == 46,
+	/* M19: every useful decoded scalar is catalogued; frequency, energy and
+	 * demand remain on their own period views. */
+	require(snapshot.has_value() && snapshot->values.size() == 84,
 		"empty selection did not expand to period capabilities");
 }
 

@@ -36,6 +36,23 @@ struct CurrentChannelConfig {
 	double frontend_gain = 1.0;
 };
 
+struct CurrentWiringChannelConfig {
+	std::string phase;
+	std::string direction = "normal";
+};
+
+struct CurrentWiringChannelsConfig {
+	CurrentWiringChannelConfig ch0{"A", "normal"};
+	CurrentWiringChannelConfig ch1{"B", "normal"};
+	CurrentWiringChannelConfig ch2{"C", "normal"};
+	CurrentWiringChannelConfig ch3{"N", "normal"};
+};
+
+struct CurrentWiringConfig {
+	std::string input_order = "ABC";
+	CurrentWiringChannelsConfig channels;
+};
+
 struct FrequencyConfig {
 	bool enabled = true;
 	std::uint32_t reference_channel = 6;
@@ -137,7 +154,7 @@ struct SimulatorConfig {
 };
 
 struct MeterConversionFile {
-	std::uint32_t schema_version = 4;
+	std::uint32_t schema_version = 5;
 	std::string profile_id;
 	std::string adc_source = "physical";
 	/* Superseded: kept for schema compatibility; the PL window is now
@@ -151,6 +168,7 @@ struct MeterConversionFile {
 	double adc_reference_volts = 1.0;
 	std::vector<CurrentChannelConfig> current_channels;
 	std::vector<VoltageChannelConfig> voltage_channels;
+	CurrentWiringConfig current_wiring;
 	// Kept optional-by-default for compatible schema-v2 profiles created
 	// before frequency measurement was introduced.
 	FrequencyConfig frequency;
@@ -167,6 +185,13 @@ struct PreparedMeterConfiguration {
 };
 
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz);
+void validate_current_wiring(const CurrentWiringConfig &configuration);
+[[nodiscard]] std::uint32_t current_adc_phase_map(
+	const CurrentWiringConfig &configuration);
+[[nodiscard]] std::uint32_t current_adc_invert_mask(
+	const CurrentWiringConfig &configuration);
+[[nodiscard]] std::uint32_t physical_current_channel_for_logical(
+	const CurrentWiringConfig &configuration, std::uint32_t logical_channel);
 PreparedMeterConfiguration load_meter_configuration(
 	const std::filesystem::path &path,
 	std::uint32_t sample_rate_hz = 128000);

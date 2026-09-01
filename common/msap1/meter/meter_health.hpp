@@ -32,6 +32,7 @@ struct MeterHealth {
 	bool headers_valid = false;
 	bool meter_configured = false;
 	bool meter_generation_match = false;
+	bool current_wiring_match = false;
 	bool dc_offset_removal = false;
 	bool frequency_arithmetic_ok = false;
 	/* R5C1 aggregation offload is independent from R5C0 ADC health. During
@@ -47,6 +48,14 @@ struct MeterHealth {
 	bool aggregation_output_active = false;
 	bool aggregation_healthy = false;
 	std::uint32_t adc_source = MSAP1_ADC_SOURCE_PHYSICAL;
+	std::uint32_t requested_current_adc_phase_map = 0xe4u;
+	std::uint32_t requested_current_adc_invert_mask = 0u;
+	std::string requested_current_input_order = "ABC";
+	std::uint32_t active_current_adc_phase_map = 0xe4u;
+	std::uint32_t active_current_adc_invert_mask = 0u;
+	std::uint32_t current_wiring_apply_status =
+		MSAP1_METER_WIRING_APPLY_NONE;
+	std::uint32_t current_wiring_readback_mismatch_count = 0u;
 	std::vector<HealthReason> adc_degraded_reasons;
 	std::vector<HealthReason> aggregation_degraded_reasons;
 };

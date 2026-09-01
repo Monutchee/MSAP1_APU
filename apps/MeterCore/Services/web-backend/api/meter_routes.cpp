@@ -248,6 +248,47 @@ FrequencyConfigurationDto frequency_configuration(
 	};
 }
 
+std::string current_input_order(std::uint32_t phase_map)
+{
+	if (phase_map == 0xe4u)
+		return "ABC";
+	if (phase_map == 0xd8u)
+		return "ACB";
+	return "CUSTOM";
+}
+
+CurrentWiringConfigurationDto current_wiring_configuration(
+	std::uint32_t phase_map, std::uint32_t invert_mask,
+	std::string input_order = {})
+{
+	const auto channel = [phase_map, invert_mask](std::uint32_t index) {
+		static constexpr std::array phase_names{"A", "B", "C", "N"};
+		const auto phase = (phase_map >> (index * 2u)) & 0x3u;
+		return CurrentWiringChannelDto{
+			phase_names[phase],
+			(invert_mask & (1u << index)) != 0u ?
+				"reversed" : "normal"};
+	};
+	if (input_order.empty())
+		input_order = current_input_order(phase_map);
+	return {std::move(input_order),
+		{channel(0u), channel(1u), channel(2u), channel(3u)},
+		phase_map, invert_mask};
+}
+
+std::string current_wiring_apply_result(std::uint32_t status)
+{
+	switch (status) {
+	case MSAP1_METER_WIRING_APPLY_NONE: return "none";
+	case MSAP1_METER_WIRING_APPLY_SUCCESS: return "success";
+	case MSAP1_METER_WIRING_APPLY_FAILED: return "failed";
+	case MSAP1_METER_WIRING_APPLY_ROLLED_BACK: return "rolled_back";
+	case MSAP1_METER_WIRING_APPLY_ROLLBACK_FAILED:
+		return "rollback_failed";
+	default: return "unknown";
+	}
+}
+
 /**
  * Validate a requested frequency configuration and convert it to the wire
  * representation.  This is the single range-validation authority.
@@ -357,7 +398,22 @@ MeterHealthDto meter_health_dto(const msap1::InfoResponse &response)
 		 status.configuration_match, status.rate_match,
 		 status.capture_active, status.fifo_ok, status.headers_valid,
 		 status.meter_configured,
-		 status.meter_generation_match, status.dc_offset_removal,
+		 status.meter_generation_match,
+		 {current_wiring_configuration(
+			  status.requested_current_adc_phase_map,
+			  status.requested_current_adc_invert_mask,
+			  status.requested_current_input_order),
+		  current_wiring_configuration(
+			  status.active_current_adc_phase_map,
+			  status.active_current_adc_invert_mask,
+			  status.current_wiring_match
+				  ? status.requested_current_input_order
+				  : std::string{}),
+		  adc.meter_generation,
+		  status.current_wiring_match,
+		  current_wiring_apply_result(status.current_wiring_apply_status),
+		  status.current_wiring_readback_mismatch_count},
+		 status.dc_offset_removal,
 		 adc.sample_rate_hz, adc.frame_count, adc.packet_count,
 		 adc.dclk_frequency_hz,
 		 adc.drdy_frequency_hz,

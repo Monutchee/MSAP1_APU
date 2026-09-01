@@ -427,6 +427,10 @@ void CaptureCoordinator::configure_meter()
 	    acknowledgement.processing_active_generation !=
 		configuration_.wire.generation ||
 	    acknowledgement.adc_source != configuration_.wire.adc_source ||
+	    acknowledgement.active_current_adc_phase_map !=
+		configuration_.wire.current_adc_phase_map ||
+	    acknowledgement.active_current_adc_invert_mask !=
+		configuration_.wire.current_adc_invert_mask ||
 	    (configuration_.wire.adc_source == MSAP1_ADC_SOURCE_SIMULATOR &&
 	     acknowledgement.simulator_active_generation !=
 		     configuration_.wire.generation) ||
@@ -434,6 +438,8 @@ void CaptureCoordinator::configure_meter()
 	    (acknowledgement.processing_status & 1u) == 0u)
 		throw std::runtime_error(
 			"RPU meter configuration readback does not match");
+	health_.on_meter_configuration_applied(configuration_.wire,
+		acknowledgement);
 	log_message(config_log, mnc::logging::Priority::notice,
 		"coordinated ADC and PL meter configuration applied",
 		"configuration_applied",
@@ -571,11 +577,13 @@ void CaptureCoordinator::apply_complete_configuration(
 			stop();
 		configuration_ = previous;
 		ingest_.clear_latest();
+		bool rollback_succeeded = false;
 		try {
 			if (restart)
 				start();
 			else
 				configure_meter();
+			rollback_succeeded = true;
 		} catch (const std::exception &rollback_error) {
 			log_message(config_log,
 				mnc::logging::Priority::critical,
@@ -583,6 +591,7 @@ void CaptureCoordinator::apply_complete_configuration(
 					std::string(rollback_error.what()),
 				"adc_configuration_rollback_failed");
 		}
+		health_.on_meter_configuration_failed(rollback_succeeded);
 		throw;
 	}
 }
@@ -760,6 +769,12 @@ msap1::InfoResponse CaptureCoordinator::info_response()
 	response.health_probe_pending = health_.probe_pending();
 	response.sample_rate_hz = configuration_.wire.sample_rate_hz;
 	response.configuration_generation = configuration_.wire.generation;
+	response.requested_current_adc_phase_map =
+		configuration_.wire.current_adc_phase_map;
+	response.requested_current_adc_invert_mask =
+		configuration_.wire.current_adc_invert_mask;
+	response.requested_current_input_order =
+		configuration_.source.current_wiring.input_order;
 	response.meter_record_age_ms = ingest_.record_age_ms();
 	response.aggregate_record_age_ms = ingest_.aggregate_record_age_ms();
 	response.rpu_health_age_ms = health_.health_age_ms();

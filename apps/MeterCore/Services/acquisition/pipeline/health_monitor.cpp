@@ -149,6 +149,50 @@ void RpuHealthMonitor::on_capture_stopped()
 	stabilizing_ = false;
 }
 
+void RpuHealthMonitor::on_meter_configuration_applied(
+	const msap1_meter_config_payload &configuration,
+	const msap1_meter_config_ack_payload &acknowledgement)
+{
+	cached_health_.meter_generation = acknowledgement.generation;
+	cached_health_.conversion_status = acknowledgement.conversion_status;
+	cached_health_.processing_status = acknowledgement.processing_status;
+	cached_health_.meter_requested_current_adc_phase_map =
+		configuration.current_adc_phase_map;
+	cached_health_.meter_requested_current_adc_invert_mask =
+		configuration.current_adc_invert_mask;
+	cached_health_.meter_active_current_adc_phase_map =
+		acknowledgement.active_current_adc_phase_map;
+	cached_health_.meter_active_current_adc_invert_mask =
+		acknowledgement.active_current_adc_invert_mask;
+	cached_health_.meter_wiring_apply_status =
+		MSAP1_METER_WIRING_APPLY_SUCCESS;
+	cached_health_.meter_health_flags &= ~(
+		MSAP1_METER_HEALTH_CORES_PRESENT |
+		MSAP1_METER_HEALTH_CONFIGURED |
+		MSAP1_METER_HEALTH_GENERATION_MATCH |
+		MSAP1_METER_HEALTH_ENABLED |
+		MSAP1_METER_HEALTH_REMOVE_DC |
+		MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH);
+	cached_health_.meter_health_flags |=
+		MSAP1_METER_HEALTH_CORES_PRESENT |
+		MSAP1_METER_HEALTH_CONFIGURED |
+		MSAP1_METER_HEALTH_GENERATION_MATCH |
+		MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH;
+	if ((configuration.flags & MSAP1_METER_CONFIG_ENABLE) != 0u)
+		cached_health_.meter_health_flags |= MSAP1_METER_HEALTH_ENABLED;
+	if ((configuration.flags & MSAP1_METER_CONFIG_REMOVE_DC) != 0u)
+		cached_health_.meter_health_flags |= MSAP1_METER_HEALTH_REMOVE_DC;
+	last_health_time_ = Clock::now();
+}
+
+void RpuHealthMonitor::on_meter_configuration_failed(bool rollback_succeeded)
+{
+	cached_health_.meter_wiring_apply_status = rollback_succeeded ?
+		MSAP1_METER_WIRING_APPLY_ROLLED_BACK :
+		MSAP1_METER_WIRING_APPLY_ROLLBACK_FAILED;
+	last_health_time_ = Clock::now();
+}
+
 void RpuHealthMonitor::merge_operational_fields(
 	const msap1_adc_health_payload &health)
 {
@@ -168,6 +212,18 @@ void RpuHealthMonitor::merge_operational_fields(
 	cached_health_.meter_generation = health.meter_generation;
 	cached_health_.conversion_status = health.conversion_status;
 	cached_health_.processing_status = health.processing_status;
+	cached_health_.meter_requested_current_adc_phase_map =
+		health.meter_requested_current_adc_phase_map;
+	cached_health_.meter_requested_current_adc_invert_mask =
+		health.meter_requested_current_adc_invert_mask;
+	cached_health_.meter_active_current_adc_phase_map =
+		health.meter_active_current_adc_phase_map;
+	cached_health_.meter_active_current_adc_invert_mask =
+		health.meter_active_current_adc_invert_mask;
+	cached_health_.meter_wiring_apply_status =
+		health.meter_wiring_apply_status;
+	cached_health_.meter_wiring_readback_mismatch_count =
+		health.meter_wiring_readback_mismatch_count;
 	cached_health_.sample_rate_hz = health.sample_rate_hz;
 	cached_health_.capture_flags = health.capture_flags;
 	cached_health_.frame_count = health.frame_count;

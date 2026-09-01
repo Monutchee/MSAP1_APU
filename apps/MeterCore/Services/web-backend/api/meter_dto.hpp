@@ -141,6 +141,14 @@ reading_quality_name(mnc::meter::ReadingQuality quality)
 		value = static_cast<double>(reading.value);
 		unit = "uW";
 		break;
+	case mnc::meter::MeterUnit::CrestTenThousandths:
+		value = static_cast<double>(reading.value) / 10000.0;
+		unit = "crest";
+		break;
+	case mnc::meter::MeterUnit::CategoricalCode:
+		value = static_cast<double>(reading.value);
+		unit = "code";
+		break;
 	}
 	return {std::string(descriptor.key), unit,
 		reading.quality == mnc::meter::ReadingQuality::Valid, value,
@@ -449,20 +457,27 @@ meter_two_hour_live_dto(const msap1::MeterSnapshotResponse &response)
 }
 
 /**
- * Select every scalar catalog value for the 150/180-cycle endpoint.
+ * Select the supported scalar values for the 150/180-cycle endpoint.
  *
  * Frequency is not advertised as a standardized aggregate capability, but
  * this endpoint has always carried the R5C1 mean as an explicitly informative
- * diagnostic. An explicit all-catalog selection preserves that field while
- * also retrieving the POWER/PHASOR/UNBAL sibling values for the same period.
+ * diagnostic. Request it explicitly beside the period-capable values. Asking
+ * the provider for unrelated energy or demand values would return explicit
+ * unavailable readings whose absent provenance must not make an otherwise
+ * coherent aggregate family appear incomplete.
  */
 [[nodiscard]] inline mnc::meter::MeterSnapshotRequest
 meter_aggregate_snapshot_selection()
 {
 	mnc::meter::MeterSnapshotRequest result{};
 	result.period = mnc::meter::MeasurementPeriod::Cycles150_180;
-	const auto attributes = mnc::meter::defined_attributes();
-	result.attributes.assign(attributes.begin(), attributes.end());
+	const auto attributes = mnc::meter::attributes_for(result.period,
+		mnc::meter::MeterAttributeUsage::Snapshot);
+	result.attributes.reserve(attributes.size() + 1u);
+	result.attributes.push_back({mnc::meter::MeterAttributeId::Frequency,
+		std::nullopt});
+	result.attributes.insert(result.attributes.end(), attributes.begin(),
+		attributes.end());
 	return result;
 }
 

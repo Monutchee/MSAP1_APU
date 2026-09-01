@@ -180,29 +180,6 @@ void validate_historian_policies(
 	}
 }
 
-bool supported_attribute(MeterAttributeId attribute)
-{
-	if (attribute >= MeterAttributeId::ActiveImportEnergyA &&
-	    attribute <= MeterAttributeId::ExportDemandPeakTotal)
-		return true;
-	switch (attribute) {
-	case MeterAttributeId::Frequency:
-	case MeterAttributeId::VanRms:
-	case MeterAttributeId::VbnRms:
-	case MeterAttributeId::VcnRms:
-	case MeterAttributeId::IaRms:
-	case MeterAttributeId::IbRms:
-	case MeterAttributeId::IcRms:
-	case MeterAttributeId::InRms:
-		return true;
-	case MeterAttributeId::VabRms:
-	case MeterAttributeId::VbcRms:
-	case MeterAttributeId::VcaRms:
-	default:
-		return false;
-	}
-}
-
 std::optional<std::uint64_t> parse_reset_epoch(std::string_view text)
 {
 	if (text.empty())
@@ -431,7 +408,7 @@ void initialize(Database &database, bool persistent)
 	database.execute(R"SQL(
 CREATE TABLE IF NOT EXISTS measurement_blocks(
  id INTEGER PRIMARY KEY,
- stream_cursor INTEGER NOT NULL UNIQUE,
+ stream_cursor INTEGER NOT NULL,
  period INTEGER NOT NULL,
  record_kind INTEGER NOT NULL,
  source_sequence INTEGER NOT NULL,
@@ -439,7 +416,8 @@ CREATE TABLE IF NOT EXISTS measurement_blocks(
  measured_at_ns INTEGER NOT NULL,
  window_start INTEGER NOT NULL,
  window_end INTEGER NOT NULL,
- quality INTEGER NOT NULL
+ quality INTEGER NOT NULL,
+ UNIQUE(stream_cursor,period)
 );
 CREATE INDEX IF NOT EXISTS measurement_blocks_time
  ON measurement_blocks(period, measured_at_ns);
@@ -524,6 +502,85 @@ CREATE TABLE IF NOT EXISTS power_quality_event_waveforms(
 		database.execute(
 			"ALTER TABLE measurement_values ADD COLUMN "
 			"reset_epoch TEXT NOT NULL DEFAULT ''");
+
+	/* M19 samples sliding demand at the final ten-minute sibling, so the same
+	 * durable stream cursor legitimately identifies one Min10 block and one
+	 * Demand block. Earlier schemas made stream_cursor globally UNIQUE and
+	 * therefore had to discard the Min10 unbalance sibling. Migrate in one
+	 * SQLite transaction while preserving block IDs and every value row. */
+	auto block_schema = database.prepare(
+		"SELECT sql FROM sqlite_master WHERE type='table' "
+		"AND name='measurement_blocks'");
+	const bool legacy_cursor_unique = block_schema.step() &&
+		block_schema.text(0).find("stream_cursor INTEGER NOT NULL UNIQUE") !=
+			std::string::npos;
+	block_schema.reset();
+	if (legacy_cursor_unique) {
+		database.execute("PRAGMA foreign_keys=OFF");
+		try {
+			database.execute("BEGIN IMMEDIATE");
+			database.execute(
+				"ALTER TABLE measurement_values RENAME TO measurement_values_m18");
+			database.execute(
+				"ALTER TABLE measurement_blocks RENAME TO measurement_blocks_m18");
+			database.execute("DROP INDEX IF EXISTS measurement_blocks_time");
+			database.execute(R"SQL(
+CREATE TABLE measurement_blocks(
+ id INTEGER PRIMARY KEY,
+ stream_cursor INTEGER NOT NULL,
+ period INTEGER NOT NULL,
+ record_kind INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ configuration_generation INTEGER NOT NULL,
+ measured_at_ns INTEGER NOT NULL,
+ window_start INTEGER NOT NULL,
+ window_end INTEGER NOT NULL,
+ quality INTEGER NOT NULL,
+ UNIQUE(stream_cursor,period)
+)
+)SQL");
+			database.execute(R"SQL(
+INSERT INTO measurement_blocks(id,stream_cursor,period,record_kind,
+ source_sequence,configuration_generation,measured_at_ns,window_start,
+ window_end,quality)
+SELECT id,stream_cursor,period,record_kind,source_sequence,
+ configuration_generation,measured_at_ns,window_start,window_end,quality
+FROM measurement_blocks_m18
+)SQL");
+			database.execute(R"SQL(
+CREATE TABLE measurement_values(
+ block_id INTEGER NOT NULL REFERENCES measurement_blocks(id) ON DELETE CASCADE,
+ attribute_id INTEGER NOT NULL,
+ signed_value INTEGER NOT NULL,
+ quality INTEGER NOT NULL,
+ source_sequence INTEGER NOT NULL,
+ reset_epoch TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(block_id,attribute_id)
+)
+)SQL");
+			database.execute(R"SQL(
+INSERT INTO measurement_values(block_id,attribute_id,signed_value,quality,
+ source_sequence,reset_epoch)
+SELECT block_id,attribute_id,signed_value,quality,source_sequence,reset_epoch
+FROM measurement_values_m18
+)SQL");
+			database.execute("DROP TABLE measurement_values_m18");
+			database.execute("DROP TABLE measurement_blocks_m18");
+			database.execute(R"SQL(
+CREATE INDEX measurement_blocks_time
+ ON measurement_blocks(period, measured_at_ns)
+)SQL");
+			database.execute("COMMIT");
+		} catch (...) {
+			try {
+				database.execute("ROLLBACK");
+			} catch (...) {
+			}
+			database.execute("PRAGMA foreign_keys=ON");
+			throw;
+		}
+		database.execute("PRAGMA foreign_keys=ON");
+	}
 
 	/* M18 initially keyed the catalogue only by the private R5 identity.
 	 * Add and backfill the canonical UUID used by MNCWF/API callers without
@@ -1003,8 +1060,11 @@ VALUES(?,?,?,?,?,?,?,?,?)
 	block.bind(7, first); block.bind(8, last); block.bind(9, std::int32_t{1});
 	block.execute();
 	const bool inserted = database.changes() == 1;
-	auto find = database.prepare("SELECT id FROM measurement_blocks WHERE stream_cursor=?");
-	find.bind(1, stream_cursor); if (!find.step()) throw std::runtime_error("historian block missing");
+	auto find = database.prepare(
+		"SELECT id FROM measurement_blocks WHERE stream_cursor=? AND period=?");
+	find.bind(1, stream_cursor);
+	find.bind(2, period_value(update.period));
+	if (!find.step()) throw std::runtime_error("historian block missing");
 	const auto block_id = find.integer(0);
 	/*
 	 * The statement must not stay in its row-available state across the
@@ -1042,6 +1102,203 @@ VALUES(?,?,?,?,?)
 		put(MeterAttributeId::IbRms, f.current.phase_b);
 		put(MeterAttributeId::IcRms, f.current.phase_c);
 		put(MeterAttributeId::InRms, f.current.neutral);
+		put(MeterAttributeId::VabRms, f.voltage_ll.phase_a);
+		put(MeterAttributeId::VbcRms, f.voltage_ll.phase_b);
+		put(MeterAttributeId::VcaRms, f.voltage_ll.phase_c);
+	}
+	if (inserted && update.power) {
+		const auto &power = *update.power;
+		auto statement = database.prepare(R"SQL(
+INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence)
+VALUES(?,?,?,?,?)
+)SQL");
+		auto put = [&](MeterAttributeId id, const auto &reading) {
+			statement.bind(1, block_id);
+			statement.bind(2, static_cast<std::int32_t>(id));
+			statement.bind(3, reading.value);
+			statement.bind(4, static_cast<std::int32_t>(reading.quality));
+			statement.bind(5, reading.source_sequence);
+			statement.execute();
+			statement.reset();
+			++appended_values;
+		};
+		put(MeterAttributeId::ActivePowerA, power.active_power.phase_a);
+		put(MeterAttributeId::ActivePowerB, power.active_power.phase_b);
+		put(MeterAttributeId::ActivePowerC, power.active_power.phase_c);
+		put(MeterAttributeId::ActivePowerTotal, power.total_active_power);
+		put(MeterAttributeId::ApparentPowerA, power.apparent_power.phase_a);
+		put(MeterAttributeId::ApparentPowerB, power.apparent_power.phase_b);
+		put(MeterAttributeId::ApparentPowerC, power.apparent_power.phase_c);
+		put(MeterAttributeId::ApparentPowerTotal,
+			power.total_apparent_power);
+		put(MeterAttributeId::PowerFactorA, power.power_factor.phase_a);
+		put(MeterAttributeId::PowerFactorB, power.power_factor.phase_b);
+		put(MeterAttributeId::PowerFactorC, power.power_factor.phase_c);
+		put(MeterAttributeId::PowerFactorTotal, power.total_power_factor);
+		put(MeterAttributeId::VoltageCrestA, power.voltage_crest.phase_a);
+		put(MeterAttributeId::VoltageCrestB, power.voltage_crest.phase_b);
+		put(MeterAttributeId::VoltageCrestC, power.voltage_crest.phase_c);
+		put(MeterAttributeId::CurrentCrestA, power.current_crest.phase_a);
+		put(MeterAttributeId::CurrentCrestB, power.current_crest.phase_b);
+		put(MeterAttributeId::CurrentCrestC, power.current_crest.phase_c);
+		put(MeterAttributeId::CurrentCrestN, power.current_crest.neutral);
+	}
+	if (inserted && update.phasor) {
+		const auto &phasor = *update.phasor;
+		auto statement = database.prepare(R"SQL(
+INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence)
+VALUES(?,?,?,?,?)
+)SQL");
+		auto put_fields = [&](MeterAttributeId id, std::int64_t value,
+			MeasurementQuality quality, std::uint64_t source_sequence) {
+			statement.bind(1, block_id);
+			statement.bind(2, static_cast<std::int32_t>(id));
+			statement.bind(3, value);
+			statement.bind(4, static_cast<std::int32_t>(quality));
+			statement.bind(5, source_sequence);
+			statement.execute();
+			statement.reset();
+			++appended_values;
+		};
+		auto put = [&](MeterAttributeId id, const auto &reading) {
+			put_fields(id, reading.value, reading.quality,
+				reading.source_sequence);
+		};
+		put(MeterAttributeId::FundamentalVoltageA,
+			phasor.fundamental_voltage.phase_a);
+		put(MeterAttributeId::FundamentalVoltageB,
+			phasor.fundamental_voltage.phase_b);
+		put(MeterAttributeId::FundamentalVoltageC,
+			phasor.fundamental_voltage.phase_c);
+		put(MeterAttributeId::FundamentalVoltageLlAB,
+			phasor.fundamental_voltage_ll.phase_a);
+		put(MeterAttributeId::FundamentalVoltageLlBC,
+			phasor.fundamental_voltage_ll.phase_b);
+		put(MeterAttributeId::FundamentalVoltageLlCA,
+			phasor.fundamental_voltage_ll.phase_c);
+		put(MeterAttributeId::FundamentalCurrentA,
+			phasor.fundamental_current.phase_a);
+		put(MeterAttributeId::FundamentalCurrentB,
+			phasor.fundamental_current.phase_b);
+		put(MeterAttributeId::FundamentalCurrentC,
+			phasor.fundamental_current.phase_c);
+		put(MeterAttributeId::FundamentalCurrentN,
+			phasor.fundamental_current.neutral);
+		put(MeterAttributeId::VoltagePhaseAngleA,
+			phasor.voltage_angle.phase_a);
+		put(MeterAttributeId::VoltagePhaseAngleB,
+			phasor.voltage_angle.phase_b);
+		put(MeterAttributeId::VoltagePhaseAngleC,
+			phasor.voltage_angle.phase_c);
+		put(MeterAttributeId::CurrentPhaseAngleA,
+			phasor.current_angle.phase_a);
+		put(MeterAttributeId::CurrentPhaseAngleB,
+			phasor.current_angle.phase_b);
+		put(MeterAttributeId::CurrentPhaseAngleC,
+			phasor.current_angle.phase_c);
+		put(MeterAttributeId::CurrentPhaseAngleN,
+			phasor.current_angle.neutral);
+		put(MeterAttributeId::VoltageLlPhaseAngleAB,
+			phasor.voltage_ll_angle.phase_a);
+		put(MeterAttributeId::VoltageLlPhaseAngleBC,
+			phasor.voltage_ll_angle.phase_b);
+		put(MeterAttributeId::VoltageLlPhaseAngleCA,
+			phasor.voltage_ll_angle.phase_c);
+		put(MeterAttributeId::DisplacementAngleA,
+			phasor.displacement_angle.phase_a);
+		put(MeterAttributeId::DisplacementAngleB,
+			phasor.displacement_angle.phase_b);
+		put(MeterAttributeId::DisplacementAngleC,
+			phasor.displacement_angle.phase_c);
+		put(MeterAttributeId::ReactivePowerA,
+			phasor.reactive_power.phase_a);
+		put(MeterAttributeId::ReactivePowerB,
+			phasor.reactive_power.phase_b);
+		put(MeterAttributeId::ReactivePowerC,
+			phasor.reactive_power.phase_c);
+		put(MeterAttributeId::ReactivePowerTotal,
+			phasor.total_reactive_power);
+		put(MeterAttributeId::FundamentalActivePowerA,
+			phasor.fundamental_active_power.phase_a);
+		put(MeterAttributeId::FundamentalActivePowerB,
+			phasor.fundamental_active_power.phase_b);
+		put(MeterAttributeId::FundamentalActivePowerC,
+			phasor.fundamental_active_power.phase_c);
+		put(MeterAttributeId::FundamentalActivePowerTotal,
+			phasor.total_fundamental_active_power);
+		put(MeterAttributeId::DisplacementPowerFactorA,
+			phasor.displacement_power_factor.phase_a);
+		put(MeterAttributeId::DisplacementPowerFactorB,
+			phasor.displacement_power_factor.phase_b);
+		put(MeterAttributeId::DisplacementPowerFactorC,
+			phasor.displacement_power_factor.phase_c);
+		put(MeterAttributeId::DisplacementPowerFactorTotal,
+			phasor.total_displacement_power_factor);
+		put_fields(MeterAttributeId::LoadNatureA,
+			static_cast<std::int64_t>(phasor.load_nature.phase_a),
+			phasor.displacement_power_factor.phase_a.quality,
+			phasor.displacement_power_factor.phase_a.source_sequence);
+		put_fields(MeterAttributeId::LoadNatureB,
+			static_cast<std::int64_t>(phasor.load_nature.phase_b),
+			phasor.displacement_power_factor.phase_b.quality,
+			phasor.displacement_power_factor.phase_b.source_sequence);
+		put_fields(MeterAttributeId::LoadNatureC,
+			static_cast<std::int64_t>(phasor.load_nature.phase_c),
+			phasor.displacement_power_factor.phase_c.quality,
+			phasor.displacement_power_factor.phase_c.source_sequence);
+		put_fields(MeterAttributeId::LoadNatureTotal,
+			static_cast<std::int64_t>(phasor.total_load_nature),
+			phasor.total_displacement_power_factor.quality,
+			phasor.total_displacement_power_factor.source_sequence);
+	}
+	if (inserted && update.unbalance) {
+		const auto &unbalance = *update.unbalance;
+		auto statement = database.prepare(R"SQL(
+INSERT OR REPLACE INTO measurement_values(block_id,attribute_id,signed_value,quality,source_sequence)
+VALUES(?,?,?,?,?)
+)SQL");
+		auto put = [&](MeterAttributeId id, const auto &reading) {
+			statement.bind(1, block_id);
+			statement.bind(2, static_cast<std::int32_t>(id));
+			statement.bind(3, reading.value);
+			statement.bind(4, static_cast<std::int32_t>(reading.quality));
+			statement.bind(5, reading.source_sequence);
+			statement.execute();
+			statement.reset();
+			++appended_values;
+		};
+		put(MeterAttributeId::ZeroSequenceVoltage,
+			unbalance.voltage_zero_sequence);
+		put(MeterAttributeId::PositiveSequenceVoltage,
+			unbalance.voltage_positive_sequence);
+		put(MeterAttributeId::NegativeSequenceVoltage,
+			unbalance.voltage_negative_sequence);
+		put(MeterAttributeId::VoltageZeroSequenceAngle,
+			unbalance.voltage_zero_angle);
+		put(MeterAttributeId::VoltagePositiveSequenceAngle,
+			unbalance.voltage_positive_angle);
+		put(MeterAttributeId::VoltageNegativeSequenceAngle,
+			unbalance.voltage_negative_angle);
+		put(MeterAttributeId::ZeroSequenceCurrent,
+			unbalance.current_zero_sequence);
+		put(MeterAttributeId::PositiveSequenceCurrent,
+			unbalance.current_positive_sequence);
+		put(MeterAttributeId::NegativeSequenceCurrent,
+			unbalance.current_negative_sequence);
+		put(MeterAttributeId::CurrentZeroSequenceAngle,
+			unbalance.current_zero_angle);
+		put(MeterAttributeId::CurrentPositiveSequenceAngle,
+			unbalance.current_positive_angle);
+		put(MeterAttributeId::CurrentNegativeSequenceAngle,
+			unbalance.current_negative_angle);
+		put(MeterAttributeId::VoltageZeroSequenceRatio,
+			unbalance.voltage_zero_ratio);
+		put(MeterAttributeId::VoltageUnbalance,
+			unbalance.voltage_unbalance);
+		put(MeterAttributeId::CurrentZeroSequenceRatio,
+			unbalance.current_zero_ratio);
+		put(MeterAttributeId::CurrentUnbalance,
+			unbalance.current_unbalance);
 	}
 	/* At each completed UTC ten-minute boundary the service attaches one
 	 * authoritative ledger snapshot. Store all 28 energy counters in the
@@ -1311,16 +1568,23 @@ std::vector<HistoryPoint> MeterHistoryStore::query(const HistoryQuery &query) co
 	if (query.start_nanoseconds > query.end_nanoseconds)
 		throw std::invalid_argument("history query start is after its end");
 	for (const auto attribute : query.attributes) {
-		if (!supported_attribute(attribute))
+		if (!mnc::meter::supports_attribute(
+				{attribute, std::nullopt}, query.period,
+				mnc::meter::MeterAttributeUsage::Historian))
 			throw std::invalid_argument("unsupported history attribute");
 	}
 	std::scoped_lock lock(impl_->mutex);
 	auto &database = impl_->database(query.period);
 	std::string sql = R"SQL(
 	SELECT b.measured_at_ns,v.source_sequence,v.attribute_id,v.signed_value,
-	 v.quality,v.reset_epoch
+	 v.quality,v.reset_epoch,b.source_sequence,b.record_kind,b.id
 FROM measurement_blocks b JOIN measurement_values v ON v.block_id=b.id
-WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
+WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<?
+)SQL";
+	if (query.after)
+		sql += R"SQL(
+ AND (b.measured_at_ns,b.source_sequence,b.record_kind,b.id,v.attribute_id)
+     > (?,?,?,?,?)
 )SQL";
 	if (!query.attributes.empty()) {
 		sql += " AND v.attribute_id IN (";
@@ -1328,12 +1592,22 @@ WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
 			sql += index == 0 ? "?" : ",?";
 		sql += ")";
 	}
-	sql += " ORDER BY b.measured_at_ns,v.attribute_id LIMIT ?";
+	sql += " ORDER BY b.measured_at_ns,b.source_sequence,b.record_kind,b.id,"
+		"v.attribute_id LIMIT ?";
 	auto statement = database.prepare(sql);
 	int parameter = 1;
 	statement.bind(parameter++, period_value(query.period));
 	statement.bind(parameter++, query.start_nanoseconds);
 	statement.bind(parameter++, query.end_nanoseconds);
+	if (query.after) {
+		statement.bind(parameter++, query.after->measured_at_nanoseconds);
+		statement.bind(parameter++, query.after->block_source_sequence);
+		statement.bind(parameter++,
+			static_cast<std::int32_t>(query.after->record_kind));
+		statement.bind(parameter++, query.after->block_id);
+		statement.bind(parameter++,
+			static_cast<std::uint16_t>(query.after->attribute));
+	}
 	for (const auto attribute : query.attributes)
 		statement.bind(parameter++, static_cast<std::int32_t>(attribute));
 	statement.bind(parameter, static_cast<std::int64_t>(query.limit));
@@ -1347,6 +1621,14 @@ WHERE b.period=? AND b.measured_at_ns>=? AND b.measured_at_ns<=?
 			.value = statement.integer(3),
 			.quality = static_cast<MeasurementQuality>(statement.integer(4)),
 			.reset_epoch = parse_reset_epoch(statement.text(5)),
+			.cursor = {
+				.measured_at_nanoseconds = statement.integer(0),
+				.block_source_sequence = static_cast<std::uint64_t>(
+					statement.integer(6)),
+				.record_kind = static_cast<std::uint32_t>(statement.integer(7)),
+				.block_id = static_cast<std::uint64_t>(statement.integer(8)),
+				.attribute = id,
+			},
 		});
 	}
 	return result;

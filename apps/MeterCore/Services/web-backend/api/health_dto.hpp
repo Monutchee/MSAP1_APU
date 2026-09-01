@@ -66,6 +66,34 @@ struct AcquisitionHealthDto {
 	std::uint32_t configuration_generation;
 };
 
+struct CurrentWiringChannelDto {
+	std::string phase;
+	std::string direction;
+};
+
+struct CurrentWiringChannelsDto {
+	CurrentWiringChannelDto ch0;
+	CurrentWiringChannelDto ch1;
+	CurrentWiringChannelDto ch2;
+	CurrentWiringChannelDto ch3;
+};
+
+struct CurrentWiringConfigurationDto {
+	std::string input_order;
+	CurrentWiringChannelsDto channels;
+	std::uint32_t phase_map;
+	std::uint32_t invert_mask;
+};
+
+struct CurrentWiringHealthDto {
+	CurrentWiringConfigurationDto requested;
+	CurrentWiringConfigurationDto active;
+	std::uint32_t generation;
+	bool match;
+	std::string last_apply_result;
+	std::uint32_t readback_mismatch_count;
+};
+
 /** ADC front-end health as audited by the RPU and measured in PL. */
 struct AdcHealthDto {
 	bool healthy;
@@ -79,6 +107,7 @@ struct AdcHealthDto {
 	bool headers_valid;
 	bool meter_configured;
 	bool meter_generation_match;
+	CurrentWiringHealthDto current_wiring;
 	bool dc_offset_removal;
 	std::uint32_t sample_rate_hz;
 	std::uint32_t frames;

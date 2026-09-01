@@ -58,9 +58,17 @@ mnc::meter_stream::DatabaseStoragePolicy decode_policy(ByteReader &reader)
 std::vector<std::byte> encode_query(const HistoryQuery &query)
 {
 	ByteWriter writer; writer.u8(static_cast<std::uint8_t>(query.period));
-	writer.u8(0); writer.u16(static_cast<std::uint16_t>(query.attributes.size()));
+	writer.u8(query.after ? 1u : 0u);
+	writer.u16(static_cast<std::uint16_t>(query.attributes.size()));
 	writer.i64(query.start_nanoseconds); writer.i64(query.end_nanoseconds);
 	writer.u32(query.limit);
+	if (query.after) {
+		writer.i64(query.after->measured_at_nanoseconds);
+		writer.u64(query.after->block_source_sequence);
+		writer.u32(query.after->record_kind);
+		writer.u64(query.after->block_id);
+		writer.u16(static_cast<std::uint16_t>(query.after->attribute));
+	}
 	for (auto id : query.attributes) writer.u16(static_cast<std::uint16_t>(id));
 	return writer.take();
 }
@@ -68,8 +76,20 @@ std::vector<std::byte> encode_query(const HistoryQuery &query)
 HistoryQuery decode_query(ByteReader &reader)
 {
 	HistoryQuery result; result.period = static_cast<MeasurementPeriod>(reader.u8());
-	(void)reader.u8(); const auto count = reader.u16(); result.start_nanoseconds = reader.i64();
+	const auto flags = reader.u8();
+	if ((flags & ~1u) != 0)
+		throw std::invalid_argument("invalid history query flags");
+	const auto count = reader.u16(); result.start_nanoseconds = reader.i64();
 	result.end_nanoseconds = reader.i64(); result.limit = reader.u32();
+	if ((flags & 1u) != 0) {
+		HistoryCursor cursor;
+		cursor.measured_at_nanoseconds = reader.i64();
+		cursor.block_source_sequence = reader.u64();
+		cursor.record_kind = reader.u32();
+		cursor.block_id = reader.u64();
+		cursor.attribute = static_cast<mnc::meter::MeterAttributeId>(reader.u16());
+		result.after = cursor;
+	}
 	for (std::uint16_t i = 0; i < count; ++i)
 		result.attributes.push_back(static_cast<mnc::meter::MeterAttributeId>(reader.u16()));
 	return result;
@@ -286,6 +306,12 @@ std::vector<HistoryPoint> HistorianClient::query(const HistoryQuery &query) cons
 		const auto reset_epoch = reader.u64();
 		if (has_reset_epoch)
 			point.reset_epoch = reset_epoch;
+		point.cursor.measured_at_nanoseconds = reader.i64();
+		point.cursor.block_source_sequence = reader.u64();
+		point.cursor.record_kind = reader.u32();
+		point.cursor.block_id = reader.u64();
+		point.cursor.attribute = static_cast<mnc::meter::MeterAttributeId>(
+			reader.u16());
 		points.push_back(point);
 	}
 	reader.require_finished();

@@ -150,6 +150,15 @@ MeterAttributeValue value(MeterAttributeKey attribute, MeterUnit unit,
 	};
 }
 
+template<typename Unit>
+MeterAttributeValue categorical_value(MeterAttributeKey attribute,
+	std::int64_t categorical, const msap1::Reading<Unit> &provenance)
+{
+	auto result = value(attribute, MeterUnit::CategoricalCode, provenance);
+	result.value = categorical;
+	return result;
+}
+
 MeterAttributeValue unavailable(MeterAttributeKey attribute)
 {
 	const auto descriptor = mnc::meter::describe(attribute);
@@ -191,68 +200,8 @@ void replace_group(std::vector<MeterAttributeValue> &output,
 
 std::vector<MeterAttributeKey> supported(msap1::MeasurementPeriod period)
 {
-	using Id = MeterAttributeId;
-	if (period == msap1::MeasurementPeriod::Demand) {
-		std::vector<MeterAttributeKey> result;
-		for (const auto &group : demand_attribute_groups)
-			for (const auto id : group)
-				result.push_back({id, std::nullopt});
-		return result;
-	}
-	std::vector<MeterAttributeKey> result{
-		{Id::VanRms, std::nullopt}, {Id::VbnRms, std::nullopt},
-		{Id::VcnRms, std::nullopt}, {Id::IaRms, std::nullopt},
-		{Id::IbRms, std::nullopt}, {Id::IcRms, std::nullopt},
-		{Id::InRms, std::nullopt},
-	};
-	if (period == msap1::MeasurementPeriod::Basic) {
-		result.insert(result.begin(), MeterAttributeKey{Id::Frequency,
-							       std::nullopt});
-	}
-	{
-		/* All implemented tiers carry line-line RMS, the finalized power
-		 * quantities, the fundamental phasors, and the symmetrical
-		 * components since M11 (the basic tier since M7..M10; the
-		 * aggregate tier's AGG record quad). Frequency stays
-		 * basic-only: the aggregate's mean frequency is informative,
-		 * not a Class A product. */
-		for (const auto id : {Id::VabRms, Id::VbcRms, Id::VcaRms,
-				      Id::ActivePowerA, Id::ActivePowerB,
-				      Id::ActivePowerC, Id::ActivePowerTotal,
-				      Id::ApparentPowerA, Id::ApparentPowerB,
-				      Id::ApparentPowerC,
-				      Id::ApparentPowerTotal,
-				      Id::PowerFactorA, Id::PowerFactorB,
-				      Id::PowerFactorC, Id::PowerFactorTotal,
-				      Id::ReactivePowerA, Id::ReactivePowerB,
-				      Id::ReactivePowerC,
-				      Id::ReactivePowerTotal,
-				      Id::DisplacementPowerFactorA,
-				      Id::DisplacementPowerFactorB,
-				      Id::DisplacementPowerFactorC,
-				      Id::DisplacementPowerFactorTotal,
-				      Id::VoltagePhaseAngleA,
-				      Id::VoltagePhaseAngleB,
-				      Id::VoltagePhaseAngleC,
-				      Id::CurrentPhaseAngleA,
-				      Id::CurrentPhaseAngleB,
-				      Id::CurrentPhaseAngleC,
-				      Id::VoltageUnbalance, Id::CurrentUnbalance,
-				      Id::VoltageZeroSequenceRatio,
-				      Id::CurrentZeroSequenceRatio,
-				      Id::ZeroSequenceVoltage,
-				      Id::PositiveSequenceVoltage,
-				      Id::NegativeSequenceVoltage,
-				      Id::ZeroSequenceCurrent,
-				      Id::PositiveSequenceCurrent,
-				      Id::NegativeSequenceCurrent})
-			result.push_back({id, std::nullopt});
-	}
-	if (period == msap1::MeasurementPeriod::Basic)
-		for (const auto &group : energy_attribute_groups)
-			for (const auto id : group)
-				result.push_back({id, std::nullopt});
-	return result;
+	return mnc::meter::attributes_for(period,
+		mnc::meter::MeterAttributeUsage::Snapshot);
 }
 
 } // namespace
@@ -644,6 +593,169 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 			result.values.push_back(value(attribute,
 				MeterUnit::MicroAmperes,
 				view.values.unbalance.current_negative_sequence));
+			break;
+		case MeterAttributeId::FundamentalVoltageA:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage.phase_a));
+			break;
+		case MeterAttributeId::FundamentalVoltageB:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage.phase_b));
+			break;
+		case MeterAttributeId::FundamentalVoltageC:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage.phase_c));
+			break;
+		case MeterAttributeId::FundamentalVoltageLlAB:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage_ll.phase_a));
+			break;
+		case MeterAttributeId::FundamentalVoltageLlBC:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage_ll.phase_b));
+			break;
+		case MeterAttributeId::FundamentalVoltageLlCA:
+			result.values.push_back(value(attribute, MeterUnit::MicroVolts,
+				view.values.phasor.fundamental_voltage_ll.phase_c));
+			break;
+		case MeterAttributeId::FundamentalCurrentA:
+			result.values.push_back(value(attribute, MeterUnit::MicroAmperes,
+				view.values.phasor.fundamental_current.phase_a));
+			break;
+		case MeterAttributeId::FundamentalCurrentB:
+			result.values.push_back(value(attribute, MeterUnit::MicroAmperes,
+				view.values.phasor.fundamental_current.phase_b));
+			break;
+		case MeterAttributeId::FundamentalCurrentC:
+			result.values.push_back(value(attribute, MeterUnit::MicroAmperes,
+				view.values.phasor.fundamental_current.phase_c));
+			break;
+		case MeterAttributeId::FundamentalCurrentN:
+			result.values.push_back(value(attribute, MeterUnit::MicroAmperes,
+				view.values.phasor.fundamental_current.neutral));
+			break;
+		case MeterAttributeId::VoltageCrestA:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.voltage_crest.phase_a));
+			break;
+		case MeterAttributeId::VoltageCrestB:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.voltage_crest.phase_b));
+			break;
+		case MeterAttributeId::VoltageCrestC:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.voltage_crest.phase_c));
+			break;
+		case MeterAttributeId::CurrentCrestA:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.current_crest.phase_a));
+			break;
+		case MeterAttributeId::CurrentCrestB:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.current_crest.phase_b));
+			break;
+		case MeterAttributeId::CurrentCrestC:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.current_crest.phase_c));
+			break;
+		case MeterAttributeId::CurrentCrestN:
+			result.values.push_back(value(attribute,
+				MeterUnit::CrestTenThousandths,
+				view.values.power.current_crest.neutral));
+			break;
+		case MeterAttributeId::FundamentalActivePowerA:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.phasor.fundamental_active_power.phase_a));
+			break;
+		case MeterAttributeId::FundamentalActivePowerB:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.phasor.fundamental_active_power.phase_b));
+			break;
+		case MeterAttributeId::FundamentalActivePowerC:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.phasor.fundamental_active_power.phase_c));
+			break;
+		case MeterAttributeId::FundamentalActivePowerTotal:
+			result.values.push_back(value(attribute, MeterUnit::Picowatts,
+				view.values.phasor.total_fundamental_active_power));
+			break;
+		case MeterAttributeId::CurrentPhaseAngleN:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.current_angle.neutral));
+			break;
+		case MeterAttributeId::VoltageLlPhaseAngleAB:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.voltage_ll_angle.phase_a));
+			break;
+		case MeterAttributeId::VoltageLlPhaseAngleBC:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.voltage_ll_angle.phase_b));
+			break;
+		case MeterAttributeId::VoltageLlPhaseAngleCA:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.voltage_ll_angle.phase_c));
+			break;
+		case MeterAttributeId::DisplacementAngleA:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.displacement_angle.phase_a));
+			break;
+		case MeterAttributeId::DisplacementAngleB:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.displacement_angle.phase_b));
+			break;
+		case MeterAttributeId::DisplacementAngleC:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.phasor.displacement_angle.phase_c));
+			break;
+		case MeterAttributeId::VoltageZeroSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.voltage_zero_angle));
+			break;
+		case MeterAttributeId::VoltagePositiveSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.voltage_positive_angle));
+			break;
+		case MeterAttributeId::VoltageNegativeSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.voltage_negative_angle));
+			break;
+		case MeterAttributeId::CurrentZeroSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.current_zero_angle));
+			break;
+		case MeterAttributeId::CurrentPositiveSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.current_positive_angle));
+			break;
+		case MeterAttributeId::CurrentNegativeSequenceAngle:
+			result.values.push_back(value(attribute, MeterUnit::Millidegrees,
+				view.values.unbalance.current_negative_angle));
+			break;
+		case MeterAttributeId::LoadNatureA:
+			result.values.push_back(categorical_value(attribute,
+				static_cast<std::int64_t>(view.values.phasor.load_nature.phase_a),
+				view.values.phasor.displacement_power_factor.phase_a));
+			break;
+		case MeterAttributeId::LoadNatureB:
+			result.values.push_back(categorical_value(attribute,
+				static_cast<std::int64_t>(view.values.phasor.load_nature.phase_b),
+				view.values.phasor.displacement_power_factor.phase_b));
+			break;
+		case MeterAttributeId::LoadNatureC:
+			result.values.push_back(categorical_value(attribute,
+				static_cast<std::int64_t>(view.values.phasor.load_nature.phase_c),
+				view.values.phasor.displacement_power_factor.phase_c));
+			break;
+		case MeterAttributeId::LoadNatureTotal:
+			result.values.push_back(categorical_value(attribute,
+				static_cast<std::int64_t>(view.values.phasor.total_load_nature),
+				view.values.phasor.total_displacement_power_factor));
 			break;
 		default:
 			/* Known M17 groups were projected above. */

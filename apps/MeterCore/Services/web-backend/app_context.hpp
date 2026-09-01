@@ -7,6 +7,7 @@
 
 #include "gateway/acquisition_gateway.hpp"
 #include "gateway/database_gateway.hpp"
+#include "gateway/data_sender_gateway.hpp"
 #include "gateway/mqtt_gateway.hpp"
 #include "gateway/settings_gateway.hpp"
 
@@ -34,6 +35,8 @@ struct AppContext {
 	DatabaseGateway &database;
 	/** Typed boundary to MQTT runtime state and protected assets. */
 	MqttGateway &mqtt;
+	/** Typed boundary to generated artifacts, delivery, and channel assets. */
+	DataSenderGateway &data_sender;
 	/** Supervised nginx front end; consulted by the system health API. */
 	webengine::NginxController &nginx;
 };

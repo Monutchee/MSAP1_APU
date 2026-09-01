@@ -52,6 +52,8 @@ void meter_ack_round_trip()
 	acknowledgement.processing_active_generation = 0x12345678;
 	acknowledgement.conversion_status = 1;
 	acknowledgement.processing_status = 5;
+	acknowledgement.active_current_adc_phase_map = 0x72u;
+	acknowledgement.active_current_adc_invert_mask = 0xau;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_ACK, 17,
 		&acknowledgement, sizeof(acknowledgement));
 	const auto message = msap1::decode_message(wire.data(), wire.size());
@@ -60,6 +62,9 @@ void meter_ack_round_trip()
 		"wrong meter acknowledgement generation");
 	require(decoded.processing_status == 5,
 		"wrong meter processing status");
+	require(decoded.active_current_adc_phase_map == 0x72u &&
+		decoded.active_current_adc_invert_mask == 0xau,
+		"wrong active current wiring acknowledgement");
 }
 
 void adc_health_round_trip()
@@ -254,9 +259,9 @@ void m18_configuration_round_trip()
 		93u, &configuration, sizeof(configuration));
 	const auto decoded_request =
 		msap1::decode_message(request.data(), request.size());
-	require(decoded_request.header.version == 10u &&
+	require(decoded_request.header.version == 11u &&
 			decoded_request.payload.size() == sizeof(configuration),
-		"M18 configuration did not preserve its v10 frame geometry");
+		"M18 configuration did not preserve its v11 frame geometry");
 
 	msap1_m18_config_ack_payload acknowledgement{77u, 0u};
 	const auto response = msap1::encode_request(MSAP1_RPU_MSG_M18_CONFIG,
@@ -308,11 +313,10 @@ void adc_diagnostic_round_trip()
 
 void meter_config_wire_layout()
 {
-	/* Wire v9 introduced simulator-v1.5 AM and absolute carrier controls; v10
-	 * retains that meter payload, extends aggregation health, and keeps the
-	 * complete frame below the 384-byte RPMsg cap. */
-	static_assert(sizeof(msap1_meter_config_payload) == 352,
-		      "meter config payload must be 352 packed bytes");
+	/* Wire v11 appends the physical-ADC current map and direction mask while
+	 * keeping the complete frame below the 384-byte RPMsg cap. */
+	static_assert(sizeof(msap1_meter_config_payload) == 360,
+		      "meter config payload must be 360 packed bytes");
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_dc_offset_counts) == 172,
 		      "DC offsets must follow the simulator phase step");
@@ -337,6 +341,12 @@ void meter_config_wire_layout()
 	static_assert(offsetof(msap1_meter_config_payload,
 			       simulator_am_frequency_millihz) == 312,
 		      "simulator v1.5 fields must be append-only");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       current_adc_phase_map) == 352,
+		      "current phase map must be append-only");
+	static_assert(offsetof(msap1_meter_config_payload,
+			       current_adc_invert_mask) == 356,
+		      "current direction mask must follow the phase map");
 
 	msap1_meter_config_payload payload{};
 	payload.nominal_frequency_hz = 50;
@@ -351,6 +361,8 @@ void meter_config_wire_layout()
 	payload.pq_hysteresis_e4 = 200u;
 	payload.simulator_am_frequency_millihz = 8800u;
 	payload.simulator_carrier_frequency_millihz = 1000000u;
+	payload.current_adc_phase_map = 0x72u;
+	payload.current_adc_invert_mask = 0xau;
 	const auto wire = msap1::encode_request(MSAP1_RPU_MSG_METER_CONFIG_SET,
 		7, &payload, sizeof(payload));
 	const auto decoded = msap1::decode_message(wire.data(), wire.size());
@@ -395,6 +407,13 @@ void meter_config_wire_layout()
 		    sizeof(am_frequency));
 	require(am_frequency == 8800u,
 		"the AM frequency was not encoded at its normative offset");
+	std::uint32_t phase_map = 0;
+	std::uint32_t invert_mask = 0;
+	std::memcpy(&phase_map, decoded.payload.data() + 352, sizeof(phase_map));
+	std::memcpy(&invert_mask, decoded.payload.data() + 356,
+		sizeof(invert_mask));
+	require(phase_map == 0x72u && invert_mask == 0xau,
+		"current wiring was not encoded at the append-only offsets");
 }
 
 void simulator_event_wire_layout()
@@ -422,8 +441,8 @@ void simulator_event_wire_layout()
 	require(decoded.payload.size() == sizeof(payload),
 		"simulator event payload size changed on the wire");
 	require(decoded.header.version == MSAP1_RPU_VERSION &&
-			MSAP1_RPU_VERSION == 10u,
-		"the simulator event message belongs to wire version 10");
+			MSAP1_RPU_VERSION == 11u,
+		"the simulator event message belongs to wire version 11");
 	msap1_simulator_event_payload round_trip{};
 	std::memcpy(&round_trip, decoded.payload.data(), sizeof(round_trip));
 	require(round_trip.channel_mask == 0x70u &&
@@ -555,6 +574,26 @@ void meter_configuration()
 		"default nominal frequency was not encoded on the wire");
 	require(configuration.wire.valid_mask == 0x7f,
 		"wrong meter valid mask");
+	require(configuration.source.schema_version == 5u &&
+		configuration.wire.current_adc_phase_map == 0xe4u &&
+		configuration.wire.current_adc_invert_mask == 0u,
+		"legacy profile did not migrate to default current wiring");
+	for (const auto schema_version : {2u, 3u, 4u}) {
+		auto legacy = configuration.source;
+		legacy.schema_version = schema_version;
+		legacy.current_wiring.input_order = "CUSTOM";
+		legacy.current_wiring.channels.ch0 = {"C", "normal"};
+		legacy.current_wiring.channels.ch1 = {"A", "reversed"};
+		legacy.current_wiring.channels.ch2 = {"N", "normal"};
+		legacy.current_wiring.channels.ch3 = {"B", "reversed"};
+		const auto migrated =
+			msap1::prepare_meter_configuration(legacy, 32000);
+		require(migrated.source.schema_version == 5u &&
+			migrated.source.current_wiring.input_order == "ABC" &&
+			migrated.wire.current_adc_phase_map == 0xe4u &&
+			migrated.wire.current_adc_invert_mask == 0u,
+			"legacy meter-profile wiring did not migrate to ABC/all-normal");
+	}
 	require((configuration.wire.flags & MSAP1_METER_CONFIG_ENABLE) != 0u,
 		"meter configuration is not enabled");
 	require((configuration.wire.flags & MSAP1_METER_CONFIG_REMOVE_DC) == 0u,
@@ -588,6 +627,18 @@ void meter_configuration()
 		"frequency configuration is incorrect");
 	require(configuration.wire.generation != 0,
 		"configuration generation must be non-zero");
+	auto mixed_source = configuration.source;
+	mixed_source.current_wiring.input_order = "CUSTOM";
+	mixed_source.current_wiring.channels.ch0 = {"C", "normal"};
+	mixed_source.current_wiring.channels.ch1 = {"A", "reversed"};
+	mixed_source.current_wiring.channels.ch2 = {"N", "normal"};
+	mixed_source.current_wiring.channels.ch3 = {"B", "reversed"};
+	const auto mixed = msap1::prepare_meter_configuration(mixed_source, 32000);
+	require(mixed.wire.current_adc_phase_map == 0x72u &&
+		mixed.wire.current_adc_invert_mask == 0xau,
+		"mixed current wiring did not reach the meter protocol");
+	require(mixed.wire.generation != configuration.wire.generation,
+		"current wiring was omitted from the configuration fingerprint");
 	/*
 	 * Nominal frequency drives the wire field, the fallback window, and
 	 * the generation fingerprint. At 32 kSPS both nominals produce 6400
@@ -797,6 +848,8 @@ void meter_health_evaluation()
 	response.has_meter_record = true;
 	response.meter_record_age_ms = 0;
 	response.configuration_generation = 0x1234;
+	response.requested_current_adc_phase_map = 0xe4u;
+	response.requested_current_adc_invert_mask = 0u;
 	/* Historical rejections remain observable but must not poison a clean
 	 * capture epoch forever. */
 	response.lifetime_invalid_records = 58;
@@ -808,8 +861,13 @@ void meter_health_evaluation()
 	rpu_health.meter_health_flags =
 		MSAP1_METER_HEALTH_CORES_PRESENT | MSAP1_METER_HEALTH_CONFIGURED |
 		MSAP1_METER_HEALTH_GENERATION_MATCH | MSAP1_METER_HEALTH_ENABLED |
-		MSAP1_METER_HEALTH_REMOVE_DC;
+		MSAP1_METER_HEALTH_REMOVE_DC |
+		MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH;
 	rpu_health.meter_generation = response.configuration_generation;
+	rpu_health.meter_requested_current_adc_phase_map = 0xe4u;
+	rpu_health.meter_active_current_adc_phase_map = 0xe4u;
+	rpu_health.meter_wiring_apply_status =
+		MSAP1_METER_WIRING_APPLY_SUCCESS;
 	response.rpu_health = rpu_health;
 	const auto healthy = msap1::evaluate_meter_health(response);
 	require(healthy.healthy && healthy.acquisition_healthy && healthy.adc_healthy,
@@ -822,6 +880,35 @@ void meter_health_evaluation()
 		"ADC rate-match health flag was not exposed");
 	require(healthy.adc_degraded_reasons.empty(),
 		"healthy ADC response reported degradation reasons");
+
+	rpu_health.meter_health_flags &=
+		~MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH;
+	rpu_health.meter_active_current_adc_phase_map = 0xd8u;
+	rpu_health.meter_wiring_apply_status = MSAP1_METER_WIRING_APPLY_FAILED;
+	rpu_health.meter_wiring_readback_mismatch_count = 3u;
+	response.rpu_health = rpu_health;
+	const auto wiring_mismatch = msap1::evaluate_meter_health(response);
+	auto has_adc_reason = [&](const char *code) {
+		for (const auto &reason : wiring_mismatch.adc_degraded_reasons)
+			if (reason.code == code)
+				return true;
+		return false;
+	};
+	require(!wiring_mismatch.healthy && !wiring_mismatch.adc_healthy &&
+		!wiring_mismatch.current_wiring_match &&
+		wiring_mismatch.requested_current_adc_phase_map == 0xe4u &&
+		wiring_mismatch.active_current_adc_phase_map == 0xd8u &&
+		wiring_mismatch.current_wiring_readback_mismatch_count == 3u,
+		"current-wiring readback mismatch was not exposed");
+	require(has_adc_reason("current_wiring_mismatch") &&
+		has_adc_reason("current_wiring_apply_failed"),
+		"current-wiring failure did not expose its degradation reasons");
+	rpu_health.meter_health_flags |=
+		MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH;
+	rpu_health.meter_active_current_adc_phase_map = 0xe4u;
+	rpu_health.meter_wiring_apply_status = MSAP1_METER_WIRING_APPLY_SUCCESS;
+	rpu_health.meter_wiring_readback_mismatch_count = 0u;
+	response.rpu_health = rpu_health;
 
 	response.invalid_records = 1;
 	const auto current_rejection = msap1::evaluate_meter_health(response);

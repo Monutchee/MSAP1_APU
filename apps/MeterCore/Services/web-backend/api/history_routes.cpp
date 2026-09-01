@@ -6,7 +6,9 @@
 #include "mnc/MeterDataProvider/attributes/meter_attribute.hpp"
 #include "mnc/MeterDataProvider/attributes/meter_attribute_set.hpp"
 
+#include <algorithm>
 #include <array>
+#include <charconv>
 #include <exception>
 #include <optional>
 #include <stdexcept>
@@ -27,6 +29,7 @@ struct HistoryQueryDto {
 	std::int64_t start_nanoseconds = 0;
 	std::int64_t end_nanoseconds = 0;
 	std::uint32_t limit = 10000;
+	std::optional<std::string> after;
 };
 
 struct HistoryPointDto {
@@ -42,6 +45,7 @@ struct HistoryResponseDto {
 	std::string period;
 	std::vector<HistoryPointDto> points;
 	bool truncated = false;
+	std::optional<std::string> next_cursor;
 };
 
 struct AttributeCapabilityDto {
@@ -56,36 +60,11 @@ struct HistoryCapabilitiesDto {
 };
 
 const std::vector<Attribute> historical_attributes = [] {
-	std::vector<Attribute> result{
-		Attribute::Frequency, Attribute::VanRms, Attribute::VbnRms,
-		Attribute::VcnRms, Attribute::IaRms, Attribute::IbRms,
-		Attribute::IcRms, Attribute::InRms};
-	for (const auto group : {mnc::meter::MeterAttributeGroup::Energy,
-		mnc::meter::MeterAttributeGroup::Demand})
-		for (const auto key : mnc::meter::attributes_in(group))
-			result.push_back(key.id);
+	std::vector<Attribute> result;
+	for (const auto key : mnc::meter::defined_attributes())
+		result.push_back(key.id);
 	return result;
 }();
-
-std::string unit_name(mnc::meter::MeterUnit unit)
-{
-	switch (unit) {
-	case mnc::meter::MeterUnit::MilliHertz: return "mHz";
-	case mnc::meter::MeterUnit::MicroVolts: return "uV";
-	case mnc::meter::MeterUnit::MicroAmperes: return "uA";
-	case mnc::meter::MeterUnit::Picowatts: return "pW";
-	case mnc::meter::MeterUnit::PicoVoltAmperes: return "pVA";
-	case mnc::meter::MeterUnit::PowerFactorMillionths: return "pf_e6";
-	case mnc::meter::MeterUnit::Picovars: return "pvar";
-	case mnc::meter::MeterUnit::Millidegrees: return "mdeg";
-	case mnc::meter::MeterUnit::RatioMillionths: return "ratio_e6";
-	case mnc::meter::MeterUnit::MicroWattHours: return "uWh";
-	case mnc::meter::MeterUnit::MicroVarHours: return "uvarh";
-	case mnc::meter::MeterUnit::MicroVoltAmpereHours: return "uVAh";
-	case mnc::meter::MeterUnit::MicroWatts: return "uW";
-	}
-	return "unknown";
-}
 
 std::string quality_name(MeasurementQuality quality)
 {
@@ -135,6 +114,57 @@ std::string period_name(MeasurementPeriod period)
 	throw std::invalid_argument("unsupported historian period capability");
 }
 
+std::string cursor_token(const history::HistoryCursor &cursor)
+{
+	return std::to_string(cursor.measured_at_nanoseconds) + ":" +
+		std::to_string(cursor.block_source_sequence) + ":" +
+		std::to_string(cursor.record_kind) + ":" +
+		std::to_string(cursor.block_id) + ":" +
+		std::to_string(static_cast<std::uint16_t>(cursor.attribute));
+}
+
+template<class Integer>
+Integer cursor_integer(std::string_view value)
+{
+	Integer result{};
+	const auto [end, error] = std::from_chars(value.data(),
+		value.data() + value.size(), result);
+	if (error != std::errc{} || end != value.data() + value.size())
+		throw std::invalid_argument("invalid history continuation cursor");
+	return result;
+}
+
+history::HistoryCursor parse_cursor(std::string_view token)
+{
+	std::array<std::string_view, 5> fields;
+	for (auto &field : fields) {
+		const auto separator = token.find(':');
+		field = token.substr(0, separator);
+		if (field.empty())
+			throw std::invalid_argument("invalid history continuation cursor");
+		if (separator == std::string_view::npos) {
+			token = {};
+			continue;
+		}
+		token.remove_prefix(separator + 1u);
+	}
+	if (!token.empty())
+		throw std::invalid_argument("invalid history continuation cursor");
+	const auto attribute = cursor_integer<std::uint16_t>(fields[4]);
+	if (!std::ranges::any_of(mnc::meter::defined_attributes(),
+		[attribute](const auto &candidate) {
+			return static_cast<std::uint16_t>(candidate.id) == attribute;
+		}))
+		throw std::invalid_argument("invalid history continuation cursor");
+	return {
+		.measured_at_nanoseconds = cursor_integer<std::int64_t>(fields[0]),
+		.block_source_sequence = cursor_integer<std::uint64_t>(fields[1]),
+		.record_kind = cursor_integer<std::uint32_t>(fields[2]),
+		.block_id = cursor_integer<std::uint64_t>(fields[3]),
+		.attribute = static_cast<Attribute>(attribute),
+	};
+}
+
 HistoryCapabilitiesDto capabilities(
 	const history::HistorianCapabilities &source)
 {
@@ -146,7 +176,8 @@ HistoryCapabilitiesDto capabilities(
 		const auto descriptor = mnc::meter::describe(
 			{attribute, std::nullopt});
 		result.attributes.push_back(
-			{std::string(descriptor.key), unit_name(descriptor.unit)});
+			{std::string(descriptor.key),
+			 std::string(mnc::meter::unit_name(descriptor.unit))});
 	}
 	return result;
 }
@@ -198,6 +229,8 @@ webengine::Response post_history_query(
 		query.start_nanoseconds = request.start_nanoseconds;
 		query.end_nanoseconds = request.end_nanoseconds;
 		query.limit = request.limit;
+		if (request.after)
+			query.after = parse_cursor(*request.after);
 		for (const auto &attribute : request.attributes)
 			query.attributes.push_back(parse_attribute(attribute));
 		if (query.attributes.empty())
@@ -208,6 +241,8 @@ webengine::Response post_history_query(
 		HistoryResponseDto response;
 		response.period = request.period;
 		response.truncated = points.size() == request.limit;
+		if (response.truncated && !points.empty())
+			response.next_cursor = cursor_token(points.back().cursor);
 		response.points.reserve(points.size());
 		for (const auto &point : points) {
 			response.points.push_back({point.measured_at_nanoseconds,

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iterator>
 #include <map>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -31,15 +32,30 @@ bool is_blank_document(std::string_view document)
 	});
 }
 
-void validate_pem_asset(std::string_view name, std::string_view contents)
+std::string_view asset_kind(std::string_view name)
+{
+	const auto separator = name.rfind('.');
+	return separator == std::string_view::npos ? name : name.substr(separator + 1);
+}
+
+void validate_asset_contents(std::string_view name, std::string_view contents)
 {
 	if (contents.find('\0') != std::string_view::npos)
-		throw std::invalid_argument("MQTT TLS assets must be PEM text");
-	if (name == "ca" || name == "client-certificate") {
+		throw std::invalid_argument("credential assets must be text");
+	const auto kind = asset_kind(name);
+	if (kind == "known-hosts") {
+		if (!contents.contains("ssh-ed25519") &&
+		    !contents.contains("ecdsa-sha2-") &&
+		    !contents.contains("ssh-rsa"))
+			throw std::invalid_argument(
+				"SFTP known-host asset has no supported host key");
+		return;
+	}
+	if (kind == "ca" || kind == "client-certificate") {
 		if (!contents.contains("-----BEGIN CERTIFICATE-----") ||
 		    !contents.contains("-----END CERTIFICATE-----"))
 			throw std::invalid_argument(
-				"MQTT certificate asset is not PEM encoded");
+				"certificate asset is not PEM encoded");
 		return;
 	}
 	static constexpr std::array key_labels{
@@ -52,7 +68,22 @@ void validate_pem_asset(std::string_view name, std::string_view contents)
 		if (contents.contains("-----BEGIN " + std::string(label) + "-----") &&
 		    contents.contains("-----END " + std::string(label) + "-----"))
 			return;
-	throw std::invalid_argument("MQTT client key is not PEM encoded");
+	throw std::invalid_argument("private-key asset is not PEM encoded");
+}
+
+bool channel_scoped_name(std::string_view name,
+	std::span<const std::string_view> allowed_suffixes)
+{
+	static constexpr auto prefix = std::string_view{"data-channel."};
+	if (!name.starts_with(prefix))
+		return false;
+	const auto remainder = name.substr(prefix.size());
+	if (remainder.size() <= 37 || remainder[36] != '.' ||
+	    !valid_data_channel_id(remainder.substr(0, 36)))
+		return false;
+	const auto suffix = remainder.substr(37);
+	return std::ranges::find(allowed_suffixes, suffix) !=
+		allowed_suffixes.end();
 }
 
 std::string read_file(const std::filesystem::path &path)
@@ -92,10 +123,13 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 {
 	auto settings = decode_document<ProductSettings>(json, "product settings");
 	// Schema 1 predates MQTT, schema 3 adds presentation-only measurement
-	// topology, and schema 4 adds M18 event/flicker/mains policy plus neutral
-	// waveform identity. Missing members receive typed defaults; advancing old
-	// documents here provides a lossless in-memory migration and the next
-	// successful save persists the current schema.
+	// topology, schema 4 adds M18 event/flicker/mains policy plus neutral
+	// waveform identity, schema 5 adds M19 data logging, and schema 6 adds
+	// physical-ADC current wiring. Missing members
+	// receive typed defaults; advancing old documents here provides a lossless
+	// in-memory migration and the next successful save persists the current
+	// schema. The M19 default contains no jobs, so migration cannot initiate
+	// outbound traffic.
 	if (settings.schema_version >= 1 && settings.schema_version <= 3) {
 		/* Schema 1-3 had only the M12 voltage-event thresholds. Carry those
 		 * exact operator values into the corresponding M18 profiles; the new
@@ -110,6 +144,9 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 			legacy.interruption_percent;
 		events.voltage_interruption.hysteresis_percent =
 			legacy.hysteresis_percent;
+	}
+	if (settings.schema_version >= 1 && settings.schema_version <= 5) {
+		settings.metering.current_wiring = CurrentWiringConfig{};
 		settings.schema_version = ProductSettings::supported_schema_version;
 	}
 	return settings;
@@ -141,6 +178,7 @@ void ProductSettings::validate() const
 	database.validate();
 	modbus.validate();
 	mqtt.validate();
+	data_logging.validate(metering.demand.window_seconds);
 	(void)prepare_meter_configuration(to_meter_configuration(*this),
 		metering.sample_rate_hz);
 }
@@ -153,7 +191,7 @@ void SettingsValidator::validate(const ProductSettings &settings)
 MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 {
 	MeterConversionFile result;
-	result.schema_version = 4;
+	result.schema_version = 5;
 	result.profile_id = settings.metering.conversion.profile_id;
 	result.adc_source = settings.adc.source;
 	result.rms_window_ms = settings.metering.rms.window_ms;
@@ -163,6 +201,7 @@ MeterConversionFile to_meter_configuration(const ProductSettings &settings)
 		settings.metering.conversion.adc_reference_volts;
 	result.current_channels = settings.metering.conversion.current_channels;
 	result.voltage_channels = settings.metering.conversion.voltage_channels;
+	result.current_wiring = settings.metering.current_wiring;
 	result.frequency = settings.metering.frequency;
 	result.power_quality = settings.metering.power_quality;
 	result.simulator = settings.adc.simulator;
@@ -418,25 +457,27 @@ ActiveSnapshot SettingsHandler::factory_reset(bool confirmed)
 	auto defaults = load_factory_locked();
 	SettingsValidator::validate(defaults);
 	const auto previous_secrets = secrets_.read_document();
-	std::map<std::string, std::string> previous_assets;
-	for (const auto name : {"ca", "client-certificate", "client-key"}) {
-		const auto path = asset_path(name);
-		if (std::filesystem::is_regular_file(path))
-			previous_assets.emplace(name, read_file(path));
-	}
+	std::map<std::filesystem::path, std::string> previous_assets;
+	const auto assets_root = repository_.root() / "assets";
+	std::error_code scan_error;
+	if (std::filesystem::is_directory(assets_root, scan_error))
+		for (const auto &entry :
+		     std::filesystem::recursive_directory_iterator(assets_root))
+			if (entry.is_regular_file())
+				previous_assets.emplace(
+					std::filesystem::relative(entry.path(), assets_root),
+					read_file(entry.path()));
 	secrets_.clear();
-	for (const auto name : {"ca", "client-certificate", "client-key"}) {
-		std::error_code ignored;
-		std::filesystem::remove(asset_path(name), ignored);
-	}
+	std::error_code ignored;
+	std::filesystem::remove_all(assets_root, ignored);
 	try {
 		return save_locked(defaults, true);
 	} catch (...) {
 		if (previous_secrets)
 			secrets_.replace(*previous_secrets);
-		for (const auto &[name, contents] : previous_assets)
+		for (const auto &[relative, contents] : previous_assets)
 			mnc::settings::AtomicFileWriter::write(
-				asset_path(name), contents, 0600);
+				assets_root / relative, contents, 0600);
 		throw;
 	}
 }
@@ -453,16 +494,26 @@ void SettingsHandler::set_secret_document(std::string_view canonical_json)
 
 std::string SettingsHandler::validate_secret_name(std::string_view name)
 {
-	if (name != "mqtt.password" && name != "mqtt.private_key_passphrase")
+	static constexpr std::array suffixes{
+		std::string_view{"password"}, std::string_view{"bearer-token"},
+		std::string_view{"private-key-passphrase"}};
+	if (name != "mqtt.password" && name != "mqtt.private_key_passphrase" &&
+	    !channel_scoped_name(name, suffixes))
 		throw std::invalid_argument("unknown settings secret");
 	return std::string(name);
 }
 
 std::string SettingsHandler::validate_asset_name(std::string_view name)
 {
+	static constexpr std::array suffixes{
+		std::string_view{"ca"},
+		std::string_view{"client-certificate"},
+		std::string_view{"client-key"},
+		std::string_view{"sftp-private-key"},
+		std::string_view{"known-hosts"}};
 	if (name != "ca" && name != "client-certificate" &&
-	    name != "client-key")
-		throw std::invalid_argument("unknown MQTT TLS asset");
+	    name != "client-key" && !channel_scoped_name(name, suffixes))
+		throw std::invalid_argument("unknown credential asset");
 	return std::string(name);
 }
 
@@ -517,19 +568,26 @@ std::string SettingsHandler::runtime_secret(std::string_view name) const
 std::filesystem::path SettingsHandler::asset_path(std::string_view name) const
 {
 	const auto validated = validate_asset_name(name);
-	const auto filename = validated == "ca" ? "ca.pem" :
-		validated == "client-certificate" ? "client-certificate.pem" :
-		"client-key.pem";
-	return repository_.root() / "assets" / "mqtt" / filename;
+	if (!validated.starts_with("data-channel.")) {
+		const auto filename = validated == "ca" ? "ca.pem" :
+			validated == "client-certificate" ?
+				"client-certificate.pem" : "client-key.pem";
+		return repository_.root() / "assets" / "mqtt" / filename;
+	}
+	const auto id = validated.substr(std::string_view{"data-channel."}.size(), 36);
+	const auto kind = asset_kind(validated);
+	const auto extension = kind == "known-hosts" ? ".txt" : ".pem";
+	return repository_.root() / "assets" / "data-channels" / id /
+		(std::string(kind) + extension);
 }
 
 void SettingsHandler::put_asset(std::string_view name,
 	std::string_view contents)
 {
 	if (contents.empty() || contents.size() > 1024u * 1024u)
-		throw std::invalid_argument("invalid MQTT TLS asset size");
+		throw std::invalid_argument("invalid credential asset size");
 	const auto validated = validate_asset_name(name);
-	validate_pem_asset(validated, contents);
+	validate_asset_contents(validated, contents);
 	std::scoped_lock lock(mutex_);
 	mnc::settings::AtomicFileWriter::write(asset_path(validated), contents, 0600);
 }
@@ -539,7 +597,7 @@ void SettingsHandler::delete_asset(std::string_view name)
 	std::scoped_lock lock(mutex_);
 	std::error_code error;
 	if (!std::filesystem::remove(asset_path(name), error) && error)
-		throw std::runtime_error("cannot delete MQTT TLS asset: " +
+		throw std::runtime_error("cannot delete credential asset: " +
 			error.message());
 }
 

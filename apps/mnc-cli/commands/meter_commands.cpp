@@ -5,11 +5,14 @@
 #include "msap1/meter/MeterDataProvider/stream/meter_stream_ipc.hpp"
 #include "msap1/meter/history/historian_ipc.hpp"
 #include "msap1/meter/meter_health.hpp"
+#include "msap1/settings/settings_ipc.hpp"
 #include "msap1/waveform/mncwf_v4.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <csignal>
 #include <cstdint>
 #include <iomanip>
@@ -77,6 +80,214 @@ double parse_duration(const std::string &value)
 	if (end != value.size() || !std::isfinite(result) || result <= 0.0)
 		throw std::invalid_argument("--duration requires a positive number");
 	return result;
+}
+
+std::array<CurrentWiringChannelConfig *, 4> wiring_channels(
+	CurrentWiringConfig &configuration)
+{
+	return {&configuration.channels.ch0, &configuration.channels.ch1,
+		&configuration.channels.ch2, &configuration.channels.ch3};
+}
+
+std::array<const CurrentWiringChannelConfig *, 4> wiring_channels(
+	const CurrentWiringConfig &configuration)
+{
+	return {&configuration.channels.ch0, &configuration.channels.ch1,
+		&configuration.channels.ch2, &configuration.channels.ch3};
+}
+
+void require_daemon_ok(AcquisitionStatus status);
+
+CurrentWiringConfig unpack_current_wiring(
+	std::uint32_t phase_map, std::uint32_t invert_mask,
+	std::string input_order = {})
+{
+	static constexpr std::array phases{"A", "B", "C", "N"};
+	CurrentWiringConfig result;
+	if (input_order.empty())
+		input_order = phase_map == 0xe4u ? "ABC" :
+			phase_map == 0xd8u ? "ACB" : "CUSTOM";
+	result.input_order = std::move(input_order);
+	const auto channels = wiring_channels(result);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel) {
+		channels[channel]->phase =
+			phases[(phase_map >> (channel * 2u)) & 0x3u];
+		channels[channel]->direction =
+			(invert_mask & (1u << channel)) != 0u ?
+				"reversed" : "normal";
+	}
+	return result;
+}
+
+std::string wiring_apply_result(std::uint32_t value)
+{
+	switch (value) {
+	case MSAP1_METER_WIRING_APPLY_NONE: return "none";
+	case MSAP1_METER_WIRING_APPLY_SUCCESS: return "success";
+	case MSAP1_METER_WIRING_APPLY_FAILED: return "failed";
+	case MSAP1_METER_WIRING_APPLY_ROLLED_BACK: return "rolled_back";
+	case MSAP1_METER_WIRING_APPLY_ROLLBACK_FAILED:
+		return "rollback_failed";
+	default: return "unknown";
+	}
+}
+
+struct CurrentWiringStatus {
+	CurrentWiringConfig requested;
+	CurrentWiringConfig active;
+	std::uint32_t generation = 0;
+	bool match = false;
+	std::string last_apply_result;
+	std::uint32_t readback_mismatch_count = 0;
+};
+
+CurrentWiringStatus current_wiring_status(const Options &options)
+{
+	settings::ipc::SettingsClient settings_client;
+	const auto settings = settings_client.active(options.timeout_ms);
+	AcquisitionClient acquisition(options.socket_path);
+	const auto response = acquisition.request(HealthRequest{}, options.timeout_ms);
+	require_daemon_ok(response.status);
+	const auto health = response.rpu_health.value();
+	const auto match =
+		(health.meter_health_flags &
+		 MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH) != 0u &&
+		health.meter_active_current_adc_phase_map ==
+			current_adc_phase_map(settings.metering.current_wiring) &&
+		health.meter_active_current_adc_invert_mask ==
+			current_adc_invert_mask(settings.metering.current_wiring);
+	return {
+		settings.metering.current_wiring,
+		unpack_current_wiring(
+			health.meter_active_current_adc_phase_map,
+			health.meter_active_current_adc_invert_mask,
+			match ? settings.metering.current_wiring.input_order :
+				std::string{}),
+		health.meter_generation,
+		match,
+		wiring_apply_result(health.meter_wiring_apply_status),
+		health.meter_wiring_readback_mismatch_count,
+	};
+}
+
+void write_current_wiring_text(const CurrentWiringStatus &status,
+	std::ostream &output)
+{
+	const auto requested = wiring_channels(status.requested);
+	const auto active = wiring_channels(status.active);
+	output << "ADC current wiring\n"
+	       << "  Requested preset:  " << status.requested.input_order << '\n'
+	       << "  Active preset:     " << status.active.input_order << '\n'
+	       << "  Generation:        " << status.generation << '\n'
+	       << "  Match:             " << (status.match ? "yes" : "NO") << '\n'
+	       << "  Last apply:        " << status.last_apply_result << '\n'
+	       << "  Readback mismatches: " << status.readback_mismatch_count << '\n';
+	for (std::size_t channel = 0; channel < requested.size(); ++channel)
+		output << "  CH" << channel << ": requested "
+		       << requested[channel]->phase << "/"
+		       << requested[channel]->direction << ", active "
+		       << active[channel]->phase << "/"
+		       << active[channel]->direction << '\n';
+}
+
+int run_meter_wiring_show(const Options &options, std::ostream &output)
+{
+	const auto status = current_wiring_status(options);
+	if (options.output_format == OutputFormat::json)
+		write_json_success(output, status);
+	else
+		write_current_wiring_text(status, output);
+	return 0;
+}
+
+int run_meter_wiring_set(const Options &options, std::ostream &output)
+{
+	const bool has_explicit_phase = std::ranges::any_of(
+		options.current_channel_phase,
+		[](const auto &value) { return value.has_value(); });
+	const bool has_direction = std::ranges::any_of(
+		options.current_channel_direction,
+		[](const auto &value) { return value.has_value(); });
+	if (options.current_wiring_preset && has_explicit_phase)
+		throw std::invalid_argument(
+			"--preset cannot be combined with explicit phase assignments");
+	if (!options.current_wiring_preset && !has_explicit_phase && !has_direction)
+		throw std::invalid_argument(
+			"wiring set requires a preset, phase, or direction option");
+
+	settings::ipc::SettingsClient client;
+	auto settings = client.active(options.timeout_ms);
+	auto &wiring = settings.metering.current_wiring;
+	if (options.current_wiring_preset) {
+		if (*options.current_wiring_preset == "abc") {
+			wiring.input_order = "ABC";
+			wiring.channels.ch0.phase = "A";
+			wiring.channels.ch1.phase = "B";
+			wiring.channels.ch2.phase = "C";
+			wiring.channels.ch3.phase = "N";
+		} else if (*options.current_wiring_preset == "acb") {
+			wiring.input_order = "ACB";
+			wiring.channels.ch0.phase = "A";
+			wiring.channels.ch1.phase = "C";
+			wiring.channels.ch2.phase = "B";
+			wiring.channels.ch3.phase = "N";
+		} else {
+			throw std::invalid_argument("--preset must be abc or acb");
+		}
+	}
+	const auto channels = wiring_channels(wiring);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel) {
+		if (options.current_channel_phase[channel]) {
+			const auto &phase = *options.current_channel_phase[channel];
+			if (phase != "a" && phase != "b" && phase != "c" &&
+			    phase != "n")
+				throw std::invalid_argument(
+					"channel phase must be a, b, c, or n");
+			channels[channel]->phase = std::string(1,
+				static_cast<char>(std::toupper(
+					static_cast<unsigned char>(phase.front()))));
+			wiring.input_order = "CUSTOM";
+		}
+		if (options.current_channel_direction[channel]) {
+			const auto &direction =
+				*options.current_channel_direction[channel];
+			if (direction != "normal" && direction != "reversed")
+				throw std::invalid_argument(
+					"channel direction must be normal or reversed");
+			channels[channel]->direction = direction;
+		}
+	}
+	validate_current_wiring(wiring);
+	settings::ipc::Request request;
+	request.command = settings::ipc::Command::save_active;
+	request.json = settings::SettingsCodec::encode(settings, false);
+	const auto response = client.request(
+		std::move(request), options.timeout_overridden ? options.timeout_ms : 35000);
+	if (response.status != settings::ipc::Status::ok)
+		throw std::runtime_error(response.message.empty()
+			? "settings service rejected current wiring" : response.message);
+	return run_meter_wiring_show(options, output);
+}
+
+OptionSpec current_wiring_option(std::string name, std::string summary,
+	std::size_t channel, bool direction)
+{
+	return {std::move(name), direction ? "normal|reversed" : "a|b|c|n",
+		std::move(summary), CompletionKind::none,
+		[channel, direction](Options &options, const std::string &value) {
+			if (direction) {
+				if (value != "normal" && value != "reversed")
+					throw std::invalid_argument(
+						"channel direction must be normal or reversed");
+				options.current_channel_direction[channel] = value;
+			} else {
+				if (value != "a" && value != "b" && value != "c" &&
+				    value != "n")
+					throw std::invalid_argument(
+						"channel phase must be a, b, c, or n");
+				options.current_channel_phase[channel] = value;
+			}
+		}};
 }
 
 const char *yes_no(bool value) { return value ? "yes" : "no"; }
@@ -1257,6 +1468,14 @@ MeterSnapshot meter_snapshot(const msap1::MeterSnapshotResponse &response)
 		case mnc::meter::MeterUnit::MicroWatts:
 			value = static_cast<double>(reading.value);
 			unit = "uW";
+			break;
+		case mnc::meter::MeterUnit::CrestTenThousandths:
+			value = static_cast<double>(reading.value) / 10000.0;
+			unit = "crest";
+			break;
+		case mnc::meter::MeterUnit::CategoricalCode:
+			value = static_cast<double>(reading.value);
+			unit = "code";
 			break;
 		}
 		result.readings.push_back({std::string(descriptor.key),
@@ -2475,6 +2694,48 @@ void register_meter_commands(Application &application)
 		false,
 	});
 	meter.add_subcommand(std::move(health));
+	Command wiring("wiring", "Inspect or configure ADC current-channel wiring");
+	wiring.add_subcommand(Command(
+		"show", "Show requested and active ADC current wiring",
+		run_meter_wiring_show,
+		{
+			.access = AccessLevel::diagnostic,
+			.side_effect = SideEffect::none,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		}));
+	Command wiring_set(
+		"set", "Apply and persist ADC current-channel wiring",
+		run_meter_wiring_set,
+		{
+			.access = AccessLevel::operator_control,
+			.side_effect = SideEffect::control,
+			.supports_text = true,
+			.supports_json = true,
+			.variants = {},
+		});
+	wiring_set.add_option({
+		"preset", "abc|acb", "Set the phase-order preset (directions retained)",
+		CompletionKind::none,
+		[](Options &options, const std::string &value) {
+			if (value != "abc" && value != "acb")
+				throw std::invalid_argument("--preset must be abc or acb");
+			options.current_wiring_preset = value;
+		},
+	});
+	for (std::size_t channel = 0; channel < 4u; ++channel) {
+		wiring_set.add_option(current_wiring_option(
+			"ch" + std::to_string(channel) + "-phase",
+			"Logical phase connected to ADC CH" + std::to_string(channel),
+			channel, false));
+		wiring_set.add_option(current_wiring_option(
+			"ch" + std::to_string(channel) + "-direction",
+			"Polarity of ADC CH" + std::to_string(channel),
+			channel, true));
+	}
+	wiring.add_subcommand(std::move(wiring_set));
+	meter.add_subcommand(std::move(wiring));
 	meter.add_subcommand(Command(
 		"single-cycle", "Show the latest single-cycle diagnostic",
 		run_meter_single_cycle,

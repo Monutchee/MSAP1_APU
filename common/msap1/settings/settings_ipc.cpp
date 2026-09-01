@@ -13,7 +13,7 @@ constexpr std::size_t maximum_string = 1024u * 1024u;
 bool valid_command(Command command)
 {
 	return command >= Command::get_active &&
-		command <= Command::resolve_mqtt_assets;
+		command <= Command::resolve_data_channel_assets;
 }
 
 void write_string(mnc::ipc::ByteWriter &writer, std::string_view value)
@@ -158,21 +158,22 @@ void SettingsClient::set_secret(std::string name, std::string value,
 	int timeout_ms) const
 {
 	auto response = request({.command = Command::set_named_secret,
-		.name = std::move(name), .json = std::move(value)}, timeout_ms);
+		.confirmed = false, .name = std::move(name),
+		.json = std::move(value)}, timeout_ms);
 	require_ok(response, "set secret");
 }
 
 void SettingsClient::clear_secret(std::string name, int timeout_ms) const
 {
 	auto response = request({.command = Command::clear_named_secret,
-		.name = std::move(name)}, timeout_ms);
+		.confirmed = false, .name = std::move(name), .json = {}}, timeout_ms);
 	require_ok(response, "clear secret");
 }
 
 bool SettingsClient::secret_present(std::string name, int timeout_ms) const
 {
 	auto response = request({.command = Command::get_named_secret_status,
-		.name = std::move(name)}, timeout_ms);
+		.confirmed = false, .name = std::move(name), .json = {}}, timeout_ms);
 	require_ok(response, "get secret status");
 	return response.message == "present";
 }
@@ -180,7 +181,8 @@ bool SettingsClient::secret_present(std::string name, int timeout_ms) const
 std::map<std::string, std::string> SettingsClient::runtime_mqtt_credentials(
 	int timeout_ms) const
 {
-	auto response = request({.command = Command::resolve_mqtt_credentials},
+	auto response = request({.command = Command::resolve_mqtt_credentials,
+		.confirmed = false, .name = {}, .json = {}},
 		timeout_ms);
 	require_ok(response, "resolve MQTT credentials");
 	std::map<std::string, std::string> values;
@@ -192,7 +194,8 @@ std::map<std::string, std::string> SettingsClient::runtime_mqtt_credentials(
 std::map<std::string, std::string> SettingsClient::runtime_mqtt_assets(
 	int timeout_ms) const
 {
-	auto response = request({.command = Command::resolve_mqtt_assets},
+	auto response = request({.command = Command::resolve_mqtt_assets,
+		.confirmed = false, .name = {}, .json = {}},
 		timeout_ms);
 	require_ok(response, "resolve MQTT TLS assets");
 	std::map<std::string, std::string> values;
@@ -201,25 +204,56 @@ std::map<std::string, std::string> SettingsClient::runtime_mqtt_assets(
 	return values;
 }
 
+std::map<std::string, std::string>
+SettingsClient::runtime_data_channel_credentials(std::string channel_id,
+	int timeout_ms) const
+{
+	auto response = request({
+		.command = Command::resolve_data_channel_credentials,
+		.confirmed = false, .name = std::move(channel_id), .json = {}},
+		timeout_ms);
+	require_ok(response, "resolve data channel credentials");
+	std::map<std::string, std::string> values;
+	if (const auto error = glz::read_json(values, response.json))
+		throw std::runtime_error("invalid data channel credentials response");
+	return values;
+}
+
+std::map<std::string, std::string>
+SettingsClient::runtime_data_channel_assets(std::string channel_id,
+	int timeout_ms) const
+{
+	auto response = request({
+		.command = Command::resolve_data_channel_assets,
+		.confirmed = false, .name = std::move(channel_id), .json = {}},
+		timeout_ms);
+	require_ok(response, "resolve data channel assets");
+	std::map<std::string, std::string> values;
+	if (const auto error = glz::read_json(values, response.json))
+		throw std::runtime_error("invalid data channel assets response");
+	return values;
+}
+
 void SettingsClient::put_asset(std::string name, std::string contents,
 	int timeout_ms) const
 {
 	auto response = request({.command = Command::put_asset,
-		.name = std::move(name), .json = std::move(contents)}, timeout_ms);
+		.confirmed = false, .name = std::move(name),
+		.json = std::move(contents)}, timeout_ms);
 	require_ok(response, "upload MQTT TLS asset");
 }
 
 void SettingsClient::delete_asset(std::string name, int timeout_ms) const
 {
 	auto response = request({.command = Command::delete_asset,
-		.name = std::move(name)}, timeout_ms);
+		.confirmed = false, .name = std::move(name), .json = {}}, timeout_ms);
 	require_ok(response, "delete MQTT TLS asset");
 }
 
 bool SettingsClient::asset_present(std::string name, int timeout_ms) const
 {
 	auto response = request({.command = Command::get_asset_status,
-		.name = std::move(name)}, timeout_ms);
+		.confirmed = false, .name = std::move(name), .json = {}}, timeout_ms);
 	require_ok(response, "get MQTT TLS asset status");
 	return response.message == "present";
 }
@@ -228,7 +262,7 @@ std::string SettingsClient::download_asset(std::string name,
 	int timeout_ms) const
 {
 	auto response = request({.command = Command::download_asset,
-		.name = std::move(name)}, timeout_ms);
+		.confirmed = false, .name = std::move(name), .json = {}}, timeout_ms);
 	require_ok(response, "download MQTT TLS asset");
 	return response.json;
 }

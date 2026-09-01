@@ -144,6 +144,37 @@
   use the typed settings IPC API rather than reading or writing product
   configuration files. Do not add drafts or revision history, reintroduce
   legacy `/etc` ADC profiles, or duplicate factory values in packaging recipes.
+- The canonical meter attribute identity and capability catalog lives under
+  `common/mnc/MeterDataProvider/attributes`. Snapshot and historian are
+  filtered views of one stable ID/key table. MQTT, historian, REST, CSV, and
+  Web adapters must consume that catalog and must not introduce another
+  attribute identity list. Period support and allowed calculations are catalog
+  capabilities, not UI-only policy.
+- Keep reusable historical artifact generation under `common/mnc/datalogger`.
+  Its abstract history source, Datalogger, content writer, outbox, transfer,
+  channel, scheduler, and clock contracts must remain product-neutral and free
+  of WebEngine/service/process dependencies. MSAP1 historian/settings/IPC
+  adapters belong under `common/msap1/datalogger`; runtime orchestration belongs
+  only in `apps/MeterCore/Services/data-sender`.
+- `msap1-data-sender` reads history through typed historian IPC and never opens
+  historian SQLite, the raw spool, acquisition snapshots, DMA, RPMsg, or device
+  nodes. Its `/data/mnc/data-sender` outbox is authoritative for generated
+  payload and per-channel delivery state. Delivery is at least once and
+  independently acknowledged; never delete an unsent payload, resend an
+  acknowledged sibling channel, or implement implicit drop-oldest behavior.
+- M19 generated content is `mnc.meter.datalog.v1`. JSON and CSV writers are
+  injected strategies over one ordered typed dataset. Keep UTC windows
+  half-open, filenames deterministic/safe, 64-bit counters exact, quality and
+  coverage explicit, and publication crash-safe through fsync plus atomic
+  rename.
+- Data-channel credentials and assets are scoped by validated channel ID and
+  owned by `msap1-settings`. Only the dedicated Data Sender identity may use
+  the runtime resolution command. Web/API responses expose presence status,
+  never passwords, tokens, passphrases, private keys, client assets, runtime
+  paths, or generated secret-bearing configuration.
+- Generated-file view/download must remain authenticated and manifest-
+  authorized through the backend streaming route. Do not add an unauthenticated
+  nginx alias or raw listing for `/data/mnc/data-sender`.
 - The ADC capture rate defaults to 128,000 frames/s. Persistent changes to the
   ADC PGA/frontend conversion, RMS, frequency, ADC source/simulator, or
   waveform defaults must be saved through the settings authority and
@@ -189,10 +220,13 @@
 - Keep message numbers, status values, packed structure layout, field widths,
   and maximum frame size compatible on both sides. Update both repositories in
   the same feature and extend `tests/protocol_test.cpp` for protocol changes.
-- The prototype wire version is 6 (`MSAP1_RPU_VERSION`). Keep the coordinated
+- The prototype wire version is 11 (`MSAP1_RPU_VERSION`). Keep the coordinated
   APU/RPU copies byte-identical when adding configuration fields or
   acknowledgements.
-- `msap1_meter_config_payload` is 296 packed bytes. `nominal_frequency_hz`
+- `msap1_meter_config_payload` is 360 packed bytes. Its trailing current-wiring
+  fields carry the physical CH0–CH3 phase permutation and direction mask;
+  validate them at every boundary and include them in the configuration
+  generation. `nominal_frequency_hz`
   (50 or 60) selects the cycles-per-block rule (50→10, 60→12) and the derived
   PL free-run fallback window; it is configuration, never inferred from
   measured frequency. The five trailing `pq_*` fields are the IEC 61000-4-30

@@ -6,7 +6,6 @@
 
 #include <boost/asio/io_context.hpp>
 
-#include <cassert>
 #include <array>
 #include <chrono>
 #include <optional>
@@ -17,6 +16,12 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+void require(bool condition)
+{
+	if (!condition)
+		throw std::runtime_error("MQTT test assertion failed");
+}
 
 class FakeSnapshotProvider final : public mnc::meter::MeterSnapshotProvider {
 public:
@@ -34,10 +39,12 @@ public:
 		snapshot.period = request.period;
 		snapshot.sequence = ++sequence_;
 		snapshot.configuration_generation = 0x12345678;
-		snapshot.timing = mnc::meter::MeterSnapshotTiming{
-			.quality = mnc::meter::TimeQuality::Synchronized,
-			.utc_start_nanoseconds = 1'786'646'400'000'000'000LL,
-			.sample_count = 6'400};
+		mnc::meter::MeterSnapshotTiming timing;
+		timing.quality = mnc::meter::TimeQuality::Synchronized;
+		timing.utc_start_nanoseconds =
+			1'786'646'400'000'000'000LL;
+		timing.sample_count = 6'400;
+		snapshot.timing = timing;
 		for (const auto attribute : request.attributes) {
 			const auto descriptor = mnc::meter::describe(attribute);
 			snapshot.values.push_back({
@@ -77,9 +84,10 @@ public:
 	}
 	mnc::mqtt::ConnectionStatus status() const override
 	{
-		return {.state = connected
-			? mnc::mqtt::ConnectionState::connected
-			: mnc::mqtt::ConnectionState::disconnected};
+		mnc::mqtt::ConnectionStatus result;
+		result.state = connected ? mnc::mqtt::ConnectionState::connected
+			: mnc::mqtt::ConnectionState::disconnected;
+		return result;
 	}
 
 	bool connected = false;
@@ -88,19 +96,21 @@ public:
 
 void test_server_uris()
 {
-	mnc::mqtt::ConnectionOptions options{.host = "broker.local", .port = 1883};
-	assert(mnc::mqtt::server_uri(options) == "mqtt://broker.local:1883");
+	mnc::mqtt::ConnectionOptions options;
+	options.host = "broker.local";
+	options.port = 1883;
+	require(mnc::mqtt::server_uri(options) == "mqtt://broker.local:1883");
 	options.transport = mnc::mqtt::Transport::mqtts;
 	options.port = 8883;
-	assert(mnc::mqtt::server_uri(options) == "mqtts://broker.local:8883");
+	require(mnc::mqtt::server_uri(options) == "mqtts://broker.local:8883");
 	options.transport = mnc::mqtt::Transport::ws;
 	options.port = 80;
 	options.websocket_path = "/mqtt";
-	assert(mnc::mqtt::server_uri(options) == "ws://broker.local:80/mqtt");
+	require(mnc::mqtt::server_uri(options) == "ws://broker.local:80/mqtt");
 	options.transport = mnc::mqtt::Transport::wss;
 	options.port = 443;
 	options.host = "2001:db8::1";
-	assert(mnc::mqtt::server_uri(options) == "wss://[2001:db8::1]:443/mqtt");
+	require(mnc::mqtt::server_uri(options) == "wss://[2001:db8::1]:443/mqtt");
 }
 
 void test_payload_quality_and_units()
@@ -111,17 +121,17 @@ void test_payload_quality_and_units()
 		{mnc::meter::MeterAttributeId::VanRms, std::nullopt}};
 	const auto snapshot = provider.latest(
 		{mnc::meter::MeasurementPeriod::Basic, attributes});
-	assert(snapshot);
+	require(snapshot.has_value());
 	const auto json = msap1::mqtt::MeterSnapshotPayloadEncoder{}.encode(
 		*snapshot, "fundamental", attributes);
-	assert(json.find("\"schema\":\"mnc.meter.snapshot.v1\"") !=
+	require(json.find("\"schema\":\"mnc.meter.snapshot.v1\"") !=
 		std::string::npos);
-	assert(json.find("\"frequency\":{\"value\":60.001") !=
+	require(json.find("\"frequency\":{\"value\":60.001") !=
 		std::string::npos);
-	assert(json.find("\"unit\":\"Hz\"") != std::string::npos);
-	assert(json.find("\"voltage.ln.a.rms\":{\"value\":null") !=
+	require(json.find("\"unit\":\"Hz\"") != std::string::npos);
+	require(json.find("\"voltage.ln.a.rms\":{\"value\":null") !=
 		std::string::npos);
-	assert(json.find("\"quality\":\"unavailable\"") !=
+	require(json.find("\"quality\":\"unavailable\"") !=
 		std::string::npos);
 }
 
@@ -153,13 +163,13 @@ void test_exact_energy_payload_and_metadata()
 	const std::array selected{attribute};
 	const auto json = msap1::mqtt::MeterSnapshotPayloadEncoder{}.encode(
 		snapshot, "energy", selected);
-	assert(json.find("\"value\":\"9007199254740993\"") !=
+	require(json.find("\"value\":\"9007199254740993\"") !=
 		std::string::npos);
-	assert(json.find("\"session_id\":\"18364758544493064720\"") !=
+	require(json.find("\"session_id\":\"18364758544493064720\"") !=
 		std::string::npos);
-	assert(json.find("\"reset_epoch\":\"9\"") != std::string::npos);
-	assert(json.find("\"discontinuity\":true") != std::string::npos);
-	assert(json.find("energy.reactive.quadrant_iv.total") !=
+	require(json.find("\"reset_epoch\":\"9\"") != std::string::npos);
+	require(json.find("\"discontinuity\":true") != std::string::npos);
+	require(json.find("energy.reactive.quadrant_iv.total") !=
 		std::string::npos);
 }
 
@@ -170,8 +180,8 @@ void test_catalog_and_newest_pending_payload()
 	FakeMqttClient client;
 	const auto catalog = msap1::mqtt::MeterPublicationCatalog::capabilities(
 		provider);
-	assert(catalog.size() == 1);
-	assert(catalog.front().attributes.size() == 2);
+	require(catalog.size() == 1);
+	require(catalog.front().attributes.size() == 2);
 
 	msap1::mqtt::MeterPublicationScheduler scheduler{
 		context.get_executor(), provider, client};
@@ -182,18 +192,18 @@ void test_catalog_and_newest_pending_payload()
 	scheduler.configure({publication});
 	scheduler.start();
 	context.run_for(240ms);
-	assert(client.published.empty());
+	require(client.published.empty());
 	const auto before = scheduler.statistics().at("frequency");
-	assert(before.attempts >= 2);
-	assert(before.failures >= 2);
+	require(before.attempts >= 2);
+	require(before.failures >= 2);
 
 	client.connect();
 	scheduler.flush_pending();
-	assert(client.published.size() == 1);
-	assert(client.published.front().qos == 1);
-	assert(!client.published.front().retain);
+	require(client.published.size() == 1);
+	require(client.published.front().qos == 1);
+	require(!client.published.front().retain);
 	/* Only the newest offline snapshot is replayed, not every missed tick. */
-	assert(client.published.front().payload.find(
+	require(client.published.front().payload.find(
 		"\"sequence\":" + std::to_string(before.last_source_sequence)) !=
 		std::string::npos);
 	scheduler.stop();
@@ -219,7 +229,7 @@ void test_settings_validation()
 	} catch (const std::runtime_error &) {
 		rejected = true;
 	}
-	assert(rejected);
+	require(rejected);
 
 	invalid = settings;
 	invalid.connection.transport = msap1::settings::MqttTransport::wss;
@@ -230,7 +240,7 @@ void test_settings_validation()
 	} catch (const std::runtime_error &) {
 		rejected = true;
 	}
-	assert(rejected);
+	require(rejected);
 
 	invalid = settings;
 	invalid.connection.transport = msap1::settings::MqttTransport::mqtts;
@@ -242,7 +252,7 @@ void test_settings_validation()
 	} catch (const std::runtime_error &) {
 		rejected = true;
 	}
-	assert(rejected);
+	require(rejected);
 
 	/* TLS preferences are deliberately retained while plain MQTT is active. */
 	settings.tls.use_client_certificate = true;

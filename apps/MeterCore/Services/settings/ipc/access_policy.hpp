@@ -15,7 +15,9 @@
 #include "msap1/settings/settings_ipc.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <pwd.h>
+#include <string>
 #include <string_view>
 
 #include <unistd.h>
@@ -42,6 +44,13 @@ using msap1::settings::ipc::Status;
 {
 	return command == Command::resolve_mqtt_credentials ||
 	       command == Command::resolve_mqtt_assets;
+}
+
+/** Commands that expose one channel's credentials to the Data Sender only. */
+[[nodiscard]] inline bool data_sender_runtime_only(Command command)
+{
+	return command == Command::resolve_data_channel_credentials ||
+	       command == Command::resolve_data_channel_assets;
 }
 
 /** @brief Commands that change persistent state. */
@@ -101,13 +110,33 @@ evaluate_peer(const mnc::ipc::PeerCredentials &credentials)
  * never receive broker passwords or private-key material.
  */
 [[nodiscard]] inline bool
+may_resolve_runtime_for_uids(std::uint32_t peer_uid,
+	std::optional<std::uint32_t> service_uid) noexcept
+{
+	return peer_uid == 0u || (service_uid && peer_uid == *service_uid);
+}
+
+[[nodiscard]] inline std::optional<std::uint32_t> account_uid(
+	std::string_view name)
+{
+	const auto *account = ::getpwnam(std::string(name).c_str());
+	if (!account)
+		return std::nullopt;
+	return static_cast<std::uint32_t>(account->pw_uid);
+}
+
+[[nodiscard]] inline bool
 may_resolve_mqtt_runtime(const mnc::ipc::PeerCredentials &credentials)
 {
-	if (credentials.uid == 0u)
-		return true;
-	const auto *account = ::getpwnam("mnc-mqtt");
-	return account != nullptr &&
-	       credentials.uid == static_cast<std::uint32_t>(account->pw_uid);
+	return may_resolve_runtime_for_uids(credentials.uid,
+		account_uid("mnc-mqtt"));
+}
+
+[[nodiscard]] inline bool may_resolve_data_sender_runtime(
+	const mnc::ipc::PeerCredentials &credentials)
+{
+	return may_resolve_runtime_for_uids(credentials.uid,
+		account_uid("mnc-data-sender"));
 }
 
 /**

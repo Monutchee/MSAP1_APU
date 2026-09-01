@@ -47,6 +47,9 @@ struct Options {
 	std::optional<std::string> simulator_harmonics;
 	/* Harmonic output period: 3s (default), 10m, 2h, or base. */
 	std::optional<std::string> harmonic_period;
+	std::optional<std::string> current_wiring_preset;
+	std::array<std::optional<std::string>, 4> current_channel_phase{};
+	std::array<std::optional<std::string>, 4> current_channel_direction{};
 	std::optional<std::string> meter_event_id;
 	std::optional<std::int64_t> meter_event_start_utc_ns;
 	std::optional<std::int64_t> meter_event_end_utc_ns;

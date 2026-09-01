@@ -10,6 +10,7 @@ target_link_libraries(msap1-settings PRIVATE
     msap1::settings
     msap1::acquisition
     msap1::meter-data-provider-stream
+	msap1::datalogger
 	msap1::service-protocol
     mnc::logging
     mnc::service

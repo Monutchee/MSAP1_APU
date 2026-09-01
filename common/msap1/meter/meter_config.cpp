@@ -4,6 +4,7 @@
 
 #include <glaze/glaze.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -22,6 +23,22 @@ constexpr double square_root_two = 1.4142135623730950488;
 /* A uniform distribution in +/- L has RMS L/sqrt(3), so an engineering
  * noise RMS converts to the PL's amplitude register via sqrt(3). */
 constexpr double square_root_three = 1.7320508075688772935;
+
+std::array<const CurrentWiringChannelConfig *, 4> current_wiring_channels(
+	const CurrentWiringConfig &configuration)
+{
+	return {&configuration.channels.ch0, &configuration.channels.ch1,
+		&configuration.channels.ch2, &configuration.channels.ch3};
+}
+
+std::uint32_t current_phase_code(std::string_view phase)
+{
+	if (phase == "A") return MSAP1_CURRENT_PHASE_A;
+	if (phase == "B") return MSAP1_CURRENT_PHASE_B;
+	if (phase == "C") return MSAP1_CURRENT_PHASE_C;
+	if (phase == "N") return MSAP1_CURRENT_PHASE_N;
+	throw std::runtime_error("current channel phase must be A, B, C, or N");
+}
 
 bool valid_pga_gain(std::uint32_t gain)
 {
@@ -100,6 +117,74 @@ std::uint32_t phase_q32(double phase_degrees)
 
 } // namespace
 
+void validate_current_wiring(const CurrentWiringConfig &configuration)
+{
+	if (configuration.input_order != "ABC" &&
+	    configuration.input_order != "ACB" &&
+	    configuration.input_order != "CUSTOM")
+		throw std::runtime_error(
+			"current wiring input_order must be ABC, ACB, or CUSTOM");
+
+	std::array<bool, 4> seen{};
+	std::uint32_t map = 0u;
+	const auto channels = current_wiring_channels(configuration);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel) {
+		const auto code = current_phase_code(channels[channel]->phase);
+		if (seen[code])
+			throw std::runtime_error(
+				"current wiring must assign A, B, C, and N exactly once");
+		seen[code] = true;
+		map |= code << (channel * 2u);
+		if (channels[channel]->direction != "normal" &&
+		    channels[channel]->direction != "reversed")
+			throw std::runtime_error(
+				"current channel direction must be normal or reversed");
+	}
+	if (configuration.input_order == "ABC" && map != 0xe4u)
+		throw std::runtime_error(
+			"ABC current wiring preset does not match its channel assignments");
+	if (configuration.input_order == "ACB" && map != 0xd8u)
+		throw std::runtime_error(
+			"ACB current wiring preset does not match its channel assignments");
+}
+
+std::uint32_t current_adc_phase_map(
+	const CurrentWiringConfig &configuration)
+{
+	validate_current_wiring(configuration);
+	std::uint32_t result = 0u;
+	const auto channels = current_wiring_channels(configuration);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel)
+		result |= current_phase_code(channels[channel]->phase) <<
+			(channel * 2u);
+	return result;
+}
+
+std::uint32_t current_adc_invert_mask(
+	const CurrentWiringConfig &configuration)
+{
+	validate_current_wiring(configuration);
+	std::uint32_t result = 0u;
+	const auto channels = current_wiring_channels(configuration);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel)
+		if (channels[channel]->direction == "reversed")
+			result |= 1u << channel;
+	return result;
+}
+
+std::uint32_t physical_current_channel_for_logical(
+	const CurrentWiringConfig &configuration, std::uint32_t logical_channel)
+{
+	if (logical_channel >= 4u)
+		throw std::runtime_error("logical current channel is out of range");
+	validate_current_wiring(configuration);
+	const auto channels = current_wiring_channels(configuration);
+	for (std::size_t channel = 0; channel < channels.size(); ++channel)
+		if (current_phase_code(channels[channel]->phase) == logical_channel)
+			return static_cast<std::uint32_t>(channel);
+	throw std::runtime_error("logical current channel is not assigned");
+}
+
 bool supported_adc_sample_rate(std::uint32_t sample_rate_hz)
 {
 	switch (sample_rate_hz) {
@@ -175,7 +260,8 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	result.source = std::move(source);
 	if (result.source.schema_version != 2u &&
 	    result.source.schema_version != 3u &&
-	    result.source.schema_version != 4u)
+	    result.source.schema_version != 4u &&
+	    result.source.schema_version != 5u)
 		throw std::runtime_error("unsupported meter configuration schema");
 	/*
 	 * Schema-v2 profiles predate the simulator object. Give those physical
@@ -189,6 +275,10 @@ PreparedMeterConfiguration prepare_meter_configuration(
 				channel.rms = 1.0;
 		}
 	}
+	if (result.source.schema_version < 5u)
+		result.source.current_wiring = CurrentWiringConfig{};
+	result.source.schema_version = 5u;
+	validate_current_wiring(result.source.current_wiring);
 	if (result.source.adc_source != "physical" &&
 	    result.source.adc_source != "simulator")
 		throw std::runtime_error("unsupported ADC source");
@@ -235,6 +325,10 @@ PreparedMeterConfiguration prepare_meter_configuration(
 	result.wire.flags = MSAP1_METER_CONFIG_ENABLE;
 	if (result.source.remove_dc)
 		result.wire.flags |= MSAP1_METER_CONFIG_REMOVE_DC;
+	result.wire.current_adc_phase_map =
+		current_adc_phase_map(result.source.current_wiring);
+	result.wire.current_adc_invert_mask =
+		current_adc_invert_mask(result.source.current_wiring);
 
 	std::uint32_t configured_mask = 0u;
 	for (const auto &channel : result.source.current_channels) {
@@ -290,7 +384,10 @@ PreparedMeterConfiguration prepare_meter_configuration(
 			continue;
 		result.wire.scale_micro_units_q16[channel.channel] =
 			checked_coefficient(coefficient, "current");
-		result.wire.valid_mask |= 1u << channel.channel;
+		const auto logical_channel =
+			(result.wire.current_adc_phase_map >> (channel.channel * 2u)) &
+			0x3u;
+		result.wire.valid_mask |= 1u << logical_channel;
 	}
 
 	for (const auto &channel : result.source.voltage_channels) {

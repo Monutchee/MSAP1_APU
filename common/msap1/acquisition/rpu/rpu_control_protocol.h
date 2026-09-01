@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define MSAP1_RPU_MAGIC 0x4d525055u
-#define MSAP1_RPU_VERSION 10u
+#define MSAP1_RPU_VERSION 11u
 /*
  * Stack-buffer bound for one protocol frame on both sides. Must stay
  * under the OpenAMP RPMsg buffer payload (496 bytes on this platform).
@@ -159,6 +159,21 @@ enum msap1_meter_config_flag {
 	MSAP1_METER_CONFIG_REMOVE_DC = 1u << 1,
 };
 
+enum msap1_current_phase {
+	MSAP1_CURRENT_PHASE_A = 0,
+	MSAP1_CURRENT_PHASE_B = 1,
+	MSAP1_CURRENT_PHASE_C = 2,
+	MSAP1_CURRENT_PHASE_N = 3,
+};
+
+enum msap1_meter_wiring_apply_status {
+	MSAP1_METER_WIRING_APPLY_NONE = 0,
+	MSAP1_METER_WIRING_APPLY_SUCCESS = 1,
+	MSAP1_METER_WIRING_APPLY_FAILED = 2,
+	MSAP1_METER_WIRING_APPLY_ROLLED_BACK = 3,
+	MSAP1_METER_WIRING_APPLY_ROLLBACK_FAILED = 4,
+};
+
 enum msap1_frequency_config_flag {
 	MSAP1_FREQUENCY_CONFIG_ENABLE = 1u << 0,
 };
@@ -237,6 +252,7 @@ enum msap1_meter_health_flag {
 	MSAP1_METER_HEALTH_GENERATION_MATCH = 1u << 2,
 	MSAP1_METER_HEALTH_ENABLED = 1u << 3,
 	MSAP1_METER_HEALTH_REMOVE_DC = 1u << 4,
+	MSAP1_METER_HEALTH_CURRENT_WIRING_MATCH = 1u << 5,
 };
 
 struct msap1_rpu_msg_header {
@@ -339,6 +355,9 @@ struct msap1_meter_config_payload {
 	uint32_t simulator_adjacent_frequency_millihz;
 	uint32_t simulator_adjacent_fraction_q16;
 	uint32_t simulator_adjacent_phase_q32;
+	/* Four 2-bit physical-ADC -> logical-phase codes and CH0..3 polarity. */
+	uint32_t current_adc_phase_map;
+	uint32_t current_adc_invert_mask;
 } __attribute__((packed));
 
 /*
@@ -381,6 +400,8 @@ struct msap1_meter_config_ack_payload {
 	uint32_t processing_status;
 	uint32_t adc_source;
 	uint32_t simulator_active_generation;
+	uint32_t active_current_adc_phase_map;
+	uint32_t active_current_adc_invert_mask;
 } __attribute__((packed));
 
 /*
@@ -463,6 +484,12 @@ struct msap1_adc_health_payload {
 	uint32_t simulator_frame_count;
 	uint32_t simulator_saturation_count;
 	uint32_t simulator_missed_sample_count;
+	uint32_t meter_requested_current_adc_phase_map;
+	uint32_t meter_requested_current_adc_invert_mask;
+	uint32_t meter_active_current_adc_phase_map;
+	uint32_t meter_active_current_adc_invert_mask;
+	uint32_t meter_wiring_apply_status;
+	uint32_t meter_wiring_readback_mismatch_count;
 } __attribute__((packed));
 
 struct msap1_adc_diagnostic_request {

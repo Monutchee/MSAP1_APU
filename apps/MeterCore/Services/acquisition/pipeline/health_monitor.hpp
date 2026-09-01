@@ -62,6 +62,14 @@ public:
 	/** @brief Leave the startup-settle state when capture stops. */
 	void on_capture_stopped();
 
+	/** Publish the exact meter readback immediately after a successful apply. */
+	void on_meter_configuration_applied(
+		const msap1_meter_config_payload &configuration,
+		const msap1_meter_config_ack_payload &acknowledgement);
+
+	/** Preserve a failed apply outcome after the prior snapshot is restored. */
+	void on_meter_configuration_failed(bool rollback_succeeded);
+
 	/** @brief Last published health snapshot (never a transient failure). */
 	[[nodiscard]] const msap1_adc_health_payload &cached() const
 	{
