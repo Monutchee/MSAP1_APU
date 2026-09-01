@@ -136,8 +136,36 @@ struct WaveformCaptureOptions {
  */
 struct WaveformTimeSync {
 	std::uint64_t sample_counter = 0;
+	/** Midpoint of the kernel's CLOCK_TAI bracket; used only for rate. */
+	std::uint64_t tai_nanoseconds = 0;
 	std::uint64_t realtime_nanoseconds = 0;
 	std::uint64_t bracket_nanoseconds = 0;
+};
+
+/** One Linux-owned UTC interval handed coherently to the PL frequency observer. */
+struct WaveformFrequency10sBoundary {
+	std::uint64_t start_sample_index = 0;
+	std::uint64_t end_sample_index = 0;
+	std::uint64_t utc_start_nanoseconds = 0;
+	std::uint64_t utc_end_nanoseconds = 0;
+	std::uint64_t utc_uncertainty_nanoseconds = 0;
+	std::uint32_t measured_sample_rate_millihz = 0;
+	std::uint32_t boundary_generation = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t reference_channel = 0;
+	std::uint8_t filter_profile = 0;
+	std::uint8_t calibration_profile = 0;
+	bool valid = false;
+	bool time_synchronized = false;
+};
+
+/** PL observer state sampled immediately after a boundary commit. */
+struct WaveformFrequency10sObserverStatus {
+	std::uint32_t status = 0;
+	std::uint32_t completed_count = 0;
+	std::uint32_t dropped_count = 0;
+	std::uint32_t overflow_count = 0;
+	std::uint32_t discontinuity_count = 0;
 };
 
 struct WaveformSessionSummary {
@@ -302,6 +330,24 @@ struct WaveformTenMinuteBoundaryIoctl {
 	std::uint32_t valid;
 	std::uint32_t reserved;
 };
+
+struct WaveformFrequency10sBoundaryIoctl {
+	std::uint64_t start_sample_index;
+	std::uint64_t end_sample_index;
+	std::uint64_t utc_start_nanoseconds;
+	std::uint64_t utc_end_nanoseconds;
+	std::uint64_t utc_uncertainty_nanoseconds;
+	std::uint32_t measured_sample_rate_millihz;
+	std::uint32_t boundary_generation;
+	std::uint32_t profile;
+	std::uint32_t flags;
+	std::uint32_t observer_status;
+	std::uint32_t completed_count;
+	std::uint32_t dropped_count;
+	std::uint32_t overflow_count;
+	std::uint32_t discontinuity_count;
+	std::uint32_t reserved;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WaveformBlockHeader) == waveform_block_header_bytes);
@@ -309,6 +355,7 @@ static_assert(sizeof(WaveformBlock) == waveform_block_bytes);
 static_assert(sizeof(WaveformCorrelationIoctl) == 32);
 static_assert(sizeof(WaveformTransportStatusIoctl) == 32);
 static_assert(sizeof(WaveformTenMinuteBoundaryIoctl) == 16);
+static_assert(sizeof(WaveformFrequency10sBoundaryIoctl) == 80);
 
 class WaveformCapture {
 public:
@@ -371,6 +418,13 @@ public:
 	 */
 	void program_ten_minute_boundary(std::uint64_t target_sample_index,
 					 bool valid);
+
+	/** Commit the next Class-A ten-second interval and return observer health. */
+	[[nodiscard]] WaveformFrequency10sObserverStatus
+	program_frequency_10s_boundary(
+		const WaveformFrequency10sBoundary &boundary);
+	/** Drop active/queued boundaries without producing a measurement record. */
+	void cancel_frequency_10s_boundary();
 
 private:
 	struct Event;

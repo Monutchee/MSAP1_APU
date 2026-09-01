@@ -195,6 +195,11 @@ private:
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
+	/* Consecutive TAI/sample correlations provide the measured conversion rate
+	 * used by the Class-A ten-second UTC boundary mapper. */
+	std::optional<msap1::WaveformTimeSync> previous_frequency_time_sync_;
+	std::uint32_t frequency_10s_boundary_generation_ = 0;
+	msap1::WaveformFrequency10sObserverStatus frequency_10s_observer_status_{};
 	/* True after the next UTC ten-minute boundary has been mapped into the
 	 * active PL sample-counter epoch. Capture/configuration restarts clear it
 	 * and force a fresh mapping. */

@@ -25,6 +25,103 @@ namespace msap1::acquisition::daemon {
 
 using namespace std::chrono_literals;
 
+namespace {
+
+constexpr std::uint64_t frequency_10s_interval_nanoseconds =
+	10ull * 1'000'000'000ull;
+constexpr std::uint64_t sample_rate_millihz_time_scale =
+	1'000'000'000'000ull;
+constexpr std::uint32_t maximum_frequency_10s_sample_rate_millihz =
+	200'000'000u;
+
+std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept
+{
+	return right > std::numeric_limits<std::uint64_t>::max() - left
+		? std::numeric_limits<std::uint64_t>::max()
+		: left + right;
+}
+
+std::optional<std::uint32_t> measured_sample_rate_millihz(
+	const msap1::WaveformTimeSync &previous,
+	const msap1::WaveformTimeSync &current) noexcept
+{
+	if (current.sample_counter <= previous.sample_counter ||
+	    current.tai_nanoseconds <= previous.tai_nanoseconds)
+		return std::nullopt;
+	const auto samples = current.sample_counter - previous.sample_counter;
+	const auto nanoseconds = current.tai_nanoseconds - previous.tai_nanoseconds;
+	if (samples > std::numeric_limits<std::uint64_t>::max() /
+			      sample_rate_millihz_time_scale)
+		return std::nullopt;
+	const auto numerator = samples * sample_rate_millihz_time_scale;
+	const auto half_nanoseconds =
+		nanoseconds / 2u + nanoseconds % 2u;
+	const auto rounded = numerator / nanoseconds +
+		(numerator % nanoseconds >= half_nanoseconds ? 1u : 0u);
+	if (rounded == 0u ||
+	    rounded > maximum_frequency_10s_sample_rate_millihz)
+		return std::nullopt;
+	return static_cast<std::uint32_t>(rounded);
+}
+
+std::optional<std::uint64_t> frames_at_or_after(
+	std::uint64_t nanoseconds, std::uint32_t sample_rate_millihz) noexcept
+{
+	if (sample_rate_millihz == 0u ||
+	    nanoseconds > std::numeric_limits<std::uint64_t>::max() /
+			  sample_rate_millihz)
+		return std::nullopt;
+	const auto product = nanoseconds * sample_rate_millihz;
+	return product / sample_rate_millihz_time_scale +
+		(product % sample_rate_millihz_time_scale != 0u ? 1u : 0u);
+}
+
+std::optional<msap1::WaveformFrequency10sBoundary>
+next_frequency_10s_boundary(const msap1::WaveformTimeSync &sync,
+	std::uint32_t sample_rate_millihz, std::uint64_t uncertainty_nanoseconds,
+	std::uint32_t generation, std::uint8_t nominal_frequency_hz,
+	std::uint8_t reference_channel, bool mapping_valid,
+	bool time_synchronized) noexcept
+{
+	const auto remainder =
+		sync.realtime_nanoseconds % frequency_10s_interval_nanoseconds;
+	const auto until_start = frequency_10s_interval_nanoseconds - remainder;
+	if (sync.realtime_nanoseconds >
+		    std::numeric_limits<std::uint64_t>::max() - until_start)
+		return std::nullopt;
+	const auto utc_start = sync.realtime_nanoseconds + until_start;
+	if (utc_start > std::numeric_limits<std::uint64_t>::max() -
+				frequency_10s_interval_nanoseconds)
+		return std::nullopt;
+	const auto utc_end = utc_start + frequency_10s_interval_nanoseconds;
+	const auto start_offset =
+		frames_at_or_after(until_start, sample_rate_millihz);
+	const auto end_offset = frames_at_or_after(
+		until_start + frequency_10s_interval_nanoseconds,
+		sample_rate_millihz);
+	if (!start_offset || !end_offset || *end_offset <= *start_offset ||
+	    sync.sample_counter > std::numeric_limits<std::uint64_t>::max() -
+				      *end_offset)
+		return std::nullopt;
+	return msap1::WaveformFrequency10sBoundary{
+		.start_sample_index = sync.sample_counter + *start_offset,
+		.end_sample_index = sync.sample_counter + *end_offset,
+		.utc_start_nanoseconds = utc_start,
+		.utc_end_nanoseconds = utc_end,
+		.utc_uncertainty_nanoseconds = uncertainty_nanoseconds,
+		.measured_sample_rate_millihz = sample_rate_millihz,
+		.boundary_generation = generation,
+		.nominal_frequency_hz = nominal_frequency_hz,
+		.reference_channel = reference_channel,
+		.filter_profile = 1u,
+		.calibration_profile = 1u,
+		.valid = mapping_valid,
+		.time_synchronized = time_synchronized,
+	};
+}
+
+} // namespace
+
 msap1::PreparedMeterConfiguration prepare_product_configuration(
 	const msap1::settings::ProductSettings &settings)
 {
@@ -330,6 +427,9 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		? 0u
 		: 16ull * 1'000'000'000ull / sample_rate;
 	const auto clock_status = read_utc_clock_status();
+	const auto frequency_uncertainty = saturating_add(
+		saturating_add(sync->bracket_nanoseconds, elasticity_ns),
+		clock_status.estimated_uncertainty_ns);
 	std::uint16_t leap_flags = 0u;
 	if (clock_status.positive_leap_pending)
 		leap_flags |= mncwf_time_positive_leap_pending;
@@ -342,14 +442,56 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 	timebase_.record_sync(
 		{.sample_counter = sync->sample_counter,
 		 .utc_ns = static_cast<std::int64_t>(sync->realtime_nanoseconds),
-		 .uncertainty_ns = sync->bracket_nanoseconds + elasticity_ns +
-			 clock_status.estimated_uncertainty_ns,
+		 .uncertainty_ns = frequency_uncertainty,
 		 /* Bind the sync to the ACTIVE configuration so the timebase
 		  * can refuse to extrapolate across a rate change. */
 		 .sample_rate_hz = sample_rate,
 		 .configuration_generation = configuration_.wire.generation,
 			 .utc_synchronized = clock_status.synchronized},
-		now);
+			now);
+
+	std::optional<std::uint32_t> measured_rate;
+	if (previous_frequency_time_sync_)
+		measured_rate = measured_sample_rate_millihz(
+			*previous_frequency_time_sync_, *sync);
+	previous_frequency_time_sync_ = *sync;
+	std::uint32_t boundary_rate = 0u;
+	if (measured_rate) {
+		boundary_rate = *measured_rate;
+	} else if (sample_rate <=
+		   maximum_frequency_10s_sample_rate_millihz / 1000u) {
+		/* The first post-start interval is deliberately invalid, but a
+		 * geometrically sound tuple makes that warm-up visible as a record. */
+		boundary_rate = sample_rate * 1000u;
+	}
+	if (boundary_rate != 0u) {
+		++frequency_10s_boundary_generation_;
+		if (frequency_10s_boundary_generation_ == 0u)
+			++frequency_10s_boundary_generation_;
+		const auto boundary = next_frequency_10s_boundary(
+			*sync, boundary_rate, frequency_uncertainty,
+			frequency_10s_boundary_generation_,
+			static_cast<std::uint8_t>(
+				configuration_.source.nominal_frequency_hz),
+			static_cast<std::uint8_t>(
+				configuration_.source.frequency.reference_channel),
+			measured_rate.has_value(), clock_status.synchronized);
+		if (!boundary) {
+			log_message(config_log, mnc::logging::Priority::error,
+				"frequency ten-second UTC boundary mapping overflowed",
+				"frequency_10s_boundary_overflow");
+		} else {
+			try {
+				frequency_10s_observer_status_ =
+					waveform_.program_frequency_10s_boundary(*boundary);
+			} catch (const std::exception &error) {
+				log_message(config_log, mnc::logging::Priority::error,
+					"failed to program frequency ten-second boundary: " +
+						std::string(error.what()),
+					"frequency_10s_boundary_program_failed");
+			}
+		}
+	}
 
 	/*
 	 * M13 maps the NEXT wall-clock ten-minute boundary into the same
@@ -474,6 +616,7 @@ void CaptureCoordinator::start(bool apply_configuration)
 	 */
 	ingest_.begin_epoch();
 	ten_minute_boundary_programmed_ = false;
+	previous_frequency_time_sync_.reset();
 	try {
 		/*
 		 * Both DMA consumers must own their S2MM channels before the
@@ -554,7 +697,16 @@ void CaptureCoordinator::stop() noexcept
 				std::string(error.what()),
 			"ten_minute_boundary_invalidate_failed");
 	}
+	try {
+		waveform_.cancel_frequency_10s_boundary();
+	} catch (const std::exception &error) {
+		log_message(config_log, mnc::logging::Priority::warning,
+			"failed to cancel frequency ten-second boundary: " +
+				std::string(error.what()),
+			"frequency_10s_boundary_cancel_failed");
+	}
 	ten_minute_boundary_programmed_ = false;
+	previous_frequency_time_sync_.reset();
 	waveform_.stop();
 	running_ = false;
 	health_.on_capture_stopped();

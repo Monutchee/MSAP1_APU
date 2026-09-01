@@ -33,6 +33,12 @@ constexpr unsigned long waveform_transport_status_ioctl =
 	_IOR('W', 0x02, WaveformTransportStatusIoctl);
 constexpr unsigned long waveform_ten_minute_boundary_ioctl =
 	_IOW('W', 0x03, WaveformTenMinuteBoundaryIoctl);
+constexpr unsigned long waveform_frequency_10s_boundary_ioctl =
+	_IOWR('W', 0x04, WaveformFrequency10sBoundaryIoctl);
+
+constexpr std::uint32_t frequency_10s_boundary_valid = 1u << 0u;
+constexpr std::uint32_t frequency_10s_time_synchronized = 1u << 1u;
+constexpr std::uint32_t frequency_10s_cancel = 1u << 2u;
 
 /*
  * Session outcomes are journaled here, where the state transitions happen:
@@ -1093,10 +1099,18 @@ std::optional<WaveformTimeSync> WaveformCapture::time_sync() const noexcept
 	} catch (...) {
 		return std::nullopt;
 	}
+	if (sample.tai_after_nanoseconds < sample.tai_before_nanoseconds ||
+	    realtime_after < realtime_before)
+		return std::nullopt;
 	return WaveformTimeSync{
-		sample.frame_sequence,
-		realtime_before + (realtime_after - realtime_before) / 2u,
-		realtime_after - realtime_before,
+		.sample_counter = sample.frame_sequence,
+		.tai_nanoseconds = sample.tai_before_nanoseconds +
+			(sample.tai_after_nanoseconds -
+			 sample.tai_before_nanoseconds) /
+				2u,
+		.realtime_nanoseconds = realtime_before +
+			(realtime_after - realtime_before) / 2u,
+		.bracket_nanoseconds = realtime_after - realtime_before,
 	};
 }
 
@@ -1113,6 +1127,60 @@ void WaveformCapture::program_ten_minute_boundary(
 	};
 	if (::ioctl(fd_, waveform_ten_minute_boundary_ioctl, &request) != 0)
 		throw_errno("program ten-minute boundary");
+}
+
+WaveformFrequency10sObserverStatus
+WaveformCapture::program_frequency_10s_boundary(
+	const WaveformFrequency10sBoundary &boundary)
+{
+	if (fd_ < 0)
+		throw std::runtime_error(
+			"program frequency ten-second boundary: waveform device is closed");
+	const auto profile = static_cast<std::uint32_t>(
+		boundary.nominal_frequency_hz) |
+		(static_cast<std::uint32_t>(boundary.reference_channel) << 8u) |
+		(static_cast<std::uint32_t>(boundary.filter_profile) << 16u) |
+		(static_cast<std::uint32_t>(boundary.calibration_profile) << 24u);
+	WaveformFrequency10sBoundaryIoctl request{
+		boundary.start_sample_index,
+		boundary.end_sample_index,
+		boundary.utc_start_nanoseconds,
+		boundary.utc_end_nanoseconds,
+		boundary.utc_uncertainty_nanoseconds,
+		boundary.measured_sample_rate_millihz,
+		boundary.boundary_generation,
+		profile,
+		(boundary.valid ? frequency_10s_boundary_valid : 0u) |
+			(boundary.time_synchronized
+				 ? frequency_10s_time_synchronized
+				 : 0u),
+		0u,
+		0u,
+		0u,
+		0u,
+		0u,
+		0u,
+	};
+	if (::ioctl(fd_, waveform_frequency_10s_boundary_ioctl, &request) != 0)
+		throw_errno("program frequency ten-second boundary");
+	return {
+		request.observer_status,
+		request.completed_count,
+		request.dropped_count,
+		request.overflow_count,
+		request.discontinuity_count,
+	};
+}
+
+void WaveformCapture::cancel_frequency_10s_boundary()
+{
+	if (fd_ < 0)
+		throw std::runtime_error(
+			"cancel frequency ten-second boundary: waveform device is closed");
+	WaveformFrequency10sBoundaryIoctl request{};
+	request.flags = frequency_10s_cancel;
+	if (::ioctl(fd_, waveform_frequency_10s_boundary_ioctl, &request) != 0)
+		throw_errno("cancel frequency ten-second boundary");
 }
 
 void WaveformCapture::update_transport_status() noexcept
