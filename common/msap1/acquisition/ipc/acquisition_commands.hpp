@@ -74,8 +74,10 @@ inline constexpr const char *acquisition_socket_path =
  * current wiring and application diagnostics.
  * 40: WaveformStatus exposes cancellable persisted-archive discovery
  * progress so clients cannot mistake an in-progress index for an empty
- * archive. */
-inline constexpr std::uint16_t acquisition_ipc_version = 40;
+ * archive.
+ * 41: waveform-list carries bounded origin-filtered pagination, and
+ * waveform-lookup resolves one retained session outside the recent page. */
+inline constexpr std::uint16_t acquisition_ipc_version = 41;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -232,6 +234,18 @@ struct WaveformSessionIpc {
 	std::uint64_t master_session_id = 0;
 	/** Canonical MNCWF capture UUID; empty for retained pre-v4 files. */
 	std::string capture_uuid;
+};
+
+struct WaveformPageIpc {
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	std::uint64_t total_sessions = 0;
+	std::uint64_t completed_sessions = 0;
+	std::uint64_t incomplete_sessions = 0;
+	std::uint64_t active_sessions = 0;
+	std::uint64_t returned_sessions = 0;
+	/** Exclusive cursor for the next page; zero means the page is final. */
+	std::uint64_t next_before_session_id = 0;
 };
 
 /* ---- responses ------------------------------------------------------- */
@@ -398,7 +412,17 @@ struct DiagnosticResponse {
 struct WaveformResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	WaveformStatus waveform{};
+	WaveformPageIpc page{};
 	std::vector<WaveformSessionIpc> sessions;
+	/** Local trusted path authority; API responses must not expose it. */
+	std::string waveform_directory;
+};
+
+struct WaveformLookupResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	WaveformStatus waveform{};
+	bool found = false;
+	WaveformSessionIpc session{};
 	/** Local trusted path authority; API responses must not expose it. */
 	std::string waveform_directory;
 };
@@ -578,6 +602,18 @@ struct WaveformListRequest {
 	static constexpr std::string_view command = "waveform-list";
 	using Response = WaveformResponse;
 	std::uint16_t version = acquisition_ipc_version;
+	std::uint64_t before_session_id = 0;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
+};
+
+struct WaveformLookupRequest {
+	static constexpr std::string_view command = "waveform-lookup";
+	using Response = WaveformLookupResponse;
+	std::uint16_t version = acquisition_ipc_version;
+	/** Exactly one selector must be supplied. */
+	std::uint64_t session_id = 0;
+	std::string capture_uuid;
 };
 
 struct WaveformTriggerRequest {
@@ -684,7 +720,7 @@ using AcquisitionCommandList = std::tuple<
 	InfoRequest, MeterSnapshotRequest, HealthRequest, HealthRefreshRequest, StartRequest,
 	StopRequest, FrequencyGetRequest, SampleRateSetRequest,
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
-	WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
+	WaveformLookupRequest, WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
 	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
 	FlickerRequest, MainsSignalRequest, HarmonicRequest,
 	SimulatorEventRequest, ConfigurationApplyRequest>;

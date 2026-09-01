@@ -1123,25 +1123,77 @@ msap1::SimulatorEventResponse CaptureCoordinator::simulator_event_response(
 	return response;
 }
 
-msap1::WaveformResponse CaptureCoordinator::waveform_response()
+static msap1::WaveformSessionIpc waveform_session_ipc(
+	const msap1::WaveformSessionSummary &session)
+{
+	msap1::WaveformSessionIpc result{};
+	result.id = session.id;
+	result.trigger_sequence = session.trigger_sequence;
+	result.first_sequence = session.first_sequence;
+	result.last_sequence = session.last_sequence;
+	result.trigger_tai_nanoseconds = session.trigger_tai_nanoseconds;
+	result.trigger_realtime_nanoseconds = session.trigger_realtime_nanoseconds;
+	result.sample_rate_hz = session.sample_rate_hz;
+	result.event_count = session.event_count;
+	result.trigger_source_mask = session.trigger_source_mask;
+	result.state = session.state;
+	result.decimation = session.decimation;
+	result.filename = std::string(session.filename.data());
+	result.continuation_of_session_id = session.continuation_of_session_id;
+	result.master_session_id = session.master_session_id;
+	result.capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
+		? std::string{} : mncwf_uuid_string(session.capture_uuid);
+	return result;
+}
+
+msap1::WaveformResponse CaptureCoordinator::waveform_response(
+	const msap1::WaveformSessionQuery &query)
 {
 	msap1::WaveformResponse response{};
 	response.waveform = waveform_.status();
-	for (const auto &session : waveform_.sessions()) {
-		const auto capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
-			? std::string{} : mncwf_uuid_string(session.capture_uuid);
-		response.sessions.push_back(
-			{session.id, session.trigger_sequence,
-			 session.first_sequence, session.last_sequence,
-			 session.trigger_tai_nanoseconds,
-			 session.trigger_realtime_nanoseconds,
-			 session.sample_rate_hz, session.event_count,
-			 session.trigger_source_mask,
-			 session.state, session.decimation,
-			 std::string(session.filename.data()),
-			 session.continuation_of_session_id,
-			 session.master_session_id, capture_uuid});
+	const auto page = waveform_.session_page(query);
+	response.page = {
+		page.origin,
+		page.limit,
+		page.total_sessions,
+		page.completed_sessions,
+		page.incomplete_sessions,
+		page.active_sessions,
+		page.sessions.size(),
+		page.next_before_session_id,
+	};
+	response.sessions.reserve(page.sessions.size());
+	for (const auto &session : page.sessions)
+		response.sessions.push_back(waveform_session_ipc(session));
+	response.waveform_directory = options_.waveform_directory;
+	return response;
+}
+
+msap1::WaveformLookupResponse CaptureCoordinator::waveform_lookup_response(
+	const msap1::WaveformLookupRequest &request)
+{
+	const bool by_id = request.session_id != 0u;
+	const bool by_capture = !request.capture_uuid.empty();
+	if (by_id == by_capture)
+		throw std::invalid_argument(
+			"select exactly one waveform session ID or capture UUID");
+
+	std::optional<msap1::WaveformSessionSummary> session;
+	if (by_id) {
+		session = waveform_.find_session(request.session_id);
+	} else {
+		const auto uuid = mncwf_uuid_from_string(request.capture_uuid);
+		if (!uuid || mncwf_uuid_is_zero(*uuid))
+			throw std::invalid_argument(
+				"capture UUID must be a nonzero canonical UUID");
+		session = waveform_.find_session(*uuid);
 	}
+
+	msap1::WaveformLookupResponse response{};
+	response.waveform = waveform_.status();
+	response.found = session.has_value();
+	if (session)
+		response.session = waveform_session_ipc(*session);
 	response.waveform_directory = options_.waveform_directory;
 	return response;
 }

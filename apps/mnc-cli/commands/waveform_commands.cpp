@@ -292,16 +292,15 @@ int run_export(const Options &options, std::ostream &output)
 			"--event must be a nonzero canonical UUID");
 
 	AcquisitionClient client(options.socket_path);
-	auto response = client.request(WaveformListRequest{}, options.timeout_ms);
+	WaveformLookupRequest lookup;
+	lookup.session_id = *options.waveform_session_id;
+	auto response = client.request(lookup, options.timeout_ms);
 	require_ok(response.status);
-	const auto session = std::ranges::find_if(response.sessions,
-		[&options](const auto &candidate) {
-			return candidate.id == *options.waveform_session_id;
-		});
-	if (session == response.sessions.end())
+	if (!response.found)
 		throw std::invalid_argument("waveform session was not found");
-	if (session->state != WaveformSessionState::complete ||
-	    session->filename.empty())
+	const auto &session = response.session;
+	if (session.state != WaveformSessionState::complete ||
+	    session.filename.empty())
 		throw std::invalid_argument(
 			"waveform session is not a completed capture");
 	if (response.waveform_directory.empty())
@@ -316,7 +315,7 @@ int run_export(const Options &options, std::ostream &output)
 		? std::filesystem::path(*options.waveform_export_file)
 		: std::filesystem::path(default_name);
 	const auto export_file = MncwfV4ExportFile::open(
-		response.waveform_directory, session->filename, *event_uuid);
+		response.waveform_directory, session.filename, *event_uuid);
 	write_export_file(destination, *export_file);
 
 	const WaveformExportResult result{

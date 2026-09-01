@@ -23,6 +23,10 @@ public:
 		mnc::meter::MeterSnapshotRequest selection = {},
 		int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse waveform_status(int timeout_ms = 1000);
+	[[nodiscard]] WaveformResponse waveform_list(
+		const WaveformListRequest &request, int timeout_ms = 1000);
+	[[nodiscard]] WaveformLookupResponse waveform_lookup(
+		const WaveformLookupRequest &request, int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse trigger_waveform(
 		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
 		std::uint32_t decimation, WaveformTriggerSource source,

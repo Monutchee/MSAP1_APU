@@ -415,19 +415,32 @@ void typed_commands_round_trip_through_the_registry()
 			mains_response.snapshot.detected_phase_mask == 0x5u,
 		"typed mains-signalling observation did not round trip");
 
-	/* IPC v40 carries private storage authority, public v4 capture lineage,
-	 * trigger origins, and persisted-archive discovery progress. */
+	/* IPC v41 carries private storage authority, public v4 capture lineage,
+	 * trigger origins, paged archive queries, and exact archive lookup. */
 	registry.on<msap1::WaveformListRequest>(
 		msap1::AcquisitionStatus::dma_error,
 		[](const msap1::WaveformListRequest &request) {
 			require(request.version == msap1::acquisition_ipc_version,
 				"wrong decoded waveform request version");
+			require(request.before_session_id == 18u &&
+					request.limit == 7u &&
+					request.origin ==
+						msap1::WaveformOriginFilter::power_quality,
+				"wrong decoded waveform page query");
 			msap1::WaveformResponse response{};
 			response.waveform.completed_sessions = 1u;
 			response.waveform.archive_discovery = {
 				msap1::WaveformArchiveDiscoveryState::scanning,
 				7u, 11u, 2u};
 			response.waveform_directory = "/data/mnc/waveform";
+			response.page.origin = request.origin;
+			response.page.limit = request.limit;
+			response.page.total_sessions = 19u;
+			response.page.completed_sessions = 17u;
+			response.page.incomplete_sessions = 1u;
+			response.page.active_sessions = 1u;
+			response.page.returned_sessions = 1u;
+			response.page.next_before_session_id = 17u;
 			msap1::WaveformSessionIpc session{};
 			session.id = 17u;
 			session.state = msap1::WaveformSessionState::complete;
@@ -441,8 +454,12 @@ void typed_commands_round_trip_through_the_registry()
 			response.sessions.push_back(std::move(session));
 			return response;
 		});
+	msap1::WaveformListRequest waveform_request{};
+	waveform_request.before_session_id = 18u;
+	waveform_request.limit = 7u;
+	waveform_request.origin = msap1::WaveformOriginFilter::power_quality;
 	const auto waveform_reply = registry.dispatch(
-		msap1::encode_acquisition_request(msap1::WaveformListRequest{}));
+		msap1::encode_acquisition_request(waveform_request));
 	const auto waveform_response =
 		msap1::decode_acquisition_payload<msap1::WaveformResponse>(
 			waveform_reply);
@@ -453,6 +470,12 @@ void typed_commands_round_trip_through_the_registry()
 			waveform_response.waveform.archive_discovery.total_files == 11u &&
 			waveform_response.waveform.archive_discovery.rejected_files == 2u &&
 			waveform_response.waveform_directory == "/data/mnc/waveform" &&
+			waveform_response.page.origin ==
+				msap1::WaveformOriginFilter::power_quality &&
+			waveform_response.page.limit == 7u &&
+			waveform_response.page.total_sessions == 19u &&
+			waveform_response.page.returned_sessions == 1u &&
+			waveform_response.page.next_before_session_id == 17u &&
 			waveform_response.sessions.size() == 1u &&
 			waveform_response.sessions[0].continuation_of_session_id == 16u &&
 			waveform_response.sessions[0].master_session_id == 15u &&
@@ -461,7 +484,55 @@ void typed_commands_round_trip_through_the_registry()
 					msap1::WaveformTriggerSource::pq_event)) &&
 			waveform_response.sessions[0].capture_uuid ==
 				"01234567-89ab-4def-8123-456789abcdef",
-		"typed waveform export authority did not round trip");
+		"typed waveform page authority did not round trip");
+
+	registry.on<msap1::WaveformLookupRequest>(
+		msap1::AcquisitionStatus::bad_request,
+		[](const msap1::WaveformLookupRequest &request) {
+			const bool by_uuid = request.session_id == 0u &&
+				request.capture_uuid ==
+					"01234567-89ab-4def-8123-456789abcdef";
+			const bool by_id = request.session_id == 59u &&
+				request.capture_uuid.empty();
+			require(request.version == msap1::acquisition_ipc_version &&
+					(by_uuid || by_id),
+				"wrong decoded waveform lookup request");
+			msap1::WaveformLookupResponse response{};
+			response.found = true;
+			response.waveform.archive_discovery.state =
+				msap1::WaveformArchiveDiscoveryState::complete;
+			response.session.id = by_id ? 59u : 3u;
+			response.session.capture_uuid =
+				"01234567-89ab-4def-8123-456789abcdef";
+			response.waveform_directory = "/data/mnc/waveform";
+			return response;
+		});
+	msap1::WaveformLookupRequest lookup_request{};
+	lookup_request.capture_uuid =
+		"01234567-89ab-4def-8123-456789abcdef";
+	const auto lookup_response =
+		msap1::decode_acquisition_payload<msap1::WaveformLookupResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				lookup_request)));
+	require(lookup_response.found && lookup_response.session.id == 3u &&
+			lookup_response.session.capture_uuid ==
+				lookup_request.capture_uuid &&
+			lookup_response.waveform.archive_discovery.state ==
+				msap1::WaveformArchiveDiscoveryState::complete &&
+			lookup_response.waveform_directory == "/data/mnc/waveform",
+		"typed waveform UUID lookup did not round trip");
+
+	lookup_request = {};
+	lookup_request.session_id = 59u;
+	const auto id_lookup_response =
+		msap1::decode_acquisition_payload<msap1::WaveformLookupResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				lookup_request)));
+	require(id_lookup_response.found &&
+			id_lookup_response.session.id == 59u &&
+			id_lookup_response.session.capture_uuid ==
+				"01234567-89ab-4def-8123-456789abcdef",
+		"typed waveform session-ID lookup did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */

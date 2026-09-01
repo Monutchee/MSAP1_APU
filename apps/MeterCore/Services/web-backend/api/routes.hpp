@@ -172,6 +172,9 @@ webengine::Response delete_adc_capture(AppContext &,
 /** @brief GET /api/v1/waveforms — waveform engine status and sessions. */
 webengine::Response get_waveforms(AppContext &,
 				  const webengine::RequestContext &);
+/** @brief GET /api/v1/waveforms/session — exact capture UUID lookup. */
+webengine::Response get_waveform_session(AppContext &,
+	const webengine::RequestContext &);
 /** @brief POST /api/v1/waveforms/trigger — start a manual capture. */
 webengine::Response post_waveform_trigger(AppContext &,
 					  const webengine::RequestContext &);
@@ -405,7 +408,10 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	/* Waveforms (waveform_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/waveforms",
 	 webengine::Role::Viewer, &get_waveforms,
-	 "Waveform engine status and capture sessions"},
+	 "Waveform engine status and paged capture sessions"},
+	{webengine::http::verb::get, "/api/v1/waveforms/session",
+	 webengine::Role::Viewer, &get_waveform_session,
+	 "Resolve one capture UUID across the waveform archive"},
 	{webengine::http::verb::post, "/api/v1/waveforms/trigger",
 	 webengine::Role::Admin, &post_waveform_trigger,
 	 "Trigger a manual waveform capture"},

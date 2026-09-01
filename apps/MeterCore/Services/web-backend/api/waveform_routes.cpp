@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -71,6 +72,17 @@ struct WaveformArchiveDiscoveryDto {
 	std::uint64_t rejected_files;
 };
 
+struct WaveformPageDto {
+	std::string origin;
+	std::uint32_t limit;
+	std::uint64_t total_sessions;
+	std::uint64_t completed_sessions;
+	std::uint64_t incomplete_sessions;
+	std::uint64_t active_sessions;
+	std::uint64_t returned_sessions;
+	std::optional<std::uint64_t> next_before_session_id;
+};
+
 /** Body of GET /api/v1/waveforms (also returned by trigger/delete). */
 struct WaveformDto {
 	bool running;
@@ -92,8 +104,15 @@ struct WaveformDto {
 	std::uint64_t completed_sessions;
 	std::uint64_t incomplete_sessions;
 	WaveformArchiveDiscoveryDto archive_discovery;
+	WaveformPageDto page;
 	std::vector<std::string> export_formats;
 	std::vector<WaveformSessionDto> sessions;
+};
+
+struct WaveformSessionLookupDto {
+	std::string capture_uuid;
+	WaveformArchiveDiscoveryDto archive_discovery;
+	std::optional<WaveformSessionDto> session;
 };
 
 std::string waveform_state_name(msap1::WaveformSessionState state)
@@ -137,6 +156,112 @@ std::string waveform_origin(std::uint32_t mask)
 	return "legacy";
 }
 
+std::string origin_filter_name(WaveformOriginFilter origin)
+{
+	switch (origin) {
+	case WaveformOriginFilter::all: return "all";
+	case WaveformOriginFilter::manual: return "manual";
+	case WaveformOriginFilter::power_quality: return "power_quality";
+	}
+	return "all";
+}
+
+WaveformArchiveDiscoveryDto archive_discovery_status(
+	const WaveformArchiveDiscoveryStatus &status)
+{
+	return {
+		archive_discovery_state_name(status.state),
+		status.scanned_files,
+		status.total_files,
+		status.rejected_files,
+	};
+}
+
+WaveformSessionDto waveform_session(const WaveformSessionIpc &session)
+{
+	return {
+		session.id,
+		waveform_state_name(session.state),
+		session.trigger_sequence,
+		session.first_sequence,
+		session.last_sequence,
+		session.trigger_tai_nanoseconds,
+		session.trigger_realtime_nanoseconds,
+		session.sample_rate_hz,
+		session.event_count,
+		waveform_origin(session.trigger_source_mask),
+		session.decimation,
+		session.filename,
+		session.continuation_of_session_id,
+		session.master_session_id,
+		session.capture_uuid,
+	};
+}
+
+std::uint64_t parse_positive_u64(std::string_view text,
+	std::string_view name)
+{
+	std::uint64_t value = 0u;
+	const auto parsed = std::from_chars(
+		text.data(), text.data() + text.size(), value);
+	if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+	    value == 0u)
+		throw std::invalid_argument(
+			std::string(name) + " must be a positive integer");
+	return value;
+}
+
+WaveformListRequest waveform_list_request(std::string_view target)
+{
+	const auto parameters = query_parameters(target);
+	for (const auto &[name, unused] : parameters) {
+		(void)unused;
+		if (name != "origin" && name != "before_session_id" &&
+		    name != "limit")
+			throw std::invalid_argument(
+				"unsupported waveform query parameter: " + name);
+	}
+
+	WaveformListRequest result{};
+	if (const auto found = parameters.find("origin");
+	    found != parameters.end()) {
+		if (found->second == "all")
+			result.origin = WaveformOriginFilter::all;
+		else if (found->second == "manual")
+			result.origin = WaveformOriginFilter::manual;
+		else if (found->second == "power_quality")
+			result.origin = WaveformOriginFilter::power_quality;
+		else
+			throw std::invalid_argument(
+				"origin must be all, manual, or power_quality");
+	}
+	if (const auto found = parameters.find("before_session_id");
+	    found != parameters.end())
+		result.before_session_id = parse_positive_u64(
+			found->second, "before_session_id");
+	if (const auto found = parameters.find("limit");
+	    found != parameters.end()) {
+		const auto limit = parse_positive_u64(found->second, "limit");
+		if (limit > waveform_max_page_sessions)
+			throw std::invalid_argument("limit must be 1..100");
+		result.limit = static_cast<std::uint32_t>(limit);
+	}
+	return result;
+}
+
+MncwfUuid waveform_capture_lookup(std::string_view target)
+{
+	const auto parameters = query_parameters(target);
+	if (parameters.size() != 1u || !parameters.contains("capture_uuid"))
+		throw std::invalid_argument(
+			"required query: capture_uuid=<canonical UUID>");
+	const auto uuid = mncwf_uuid_from_string(parameters.at("capture_uuid"));
+	if (!uuid || mncwf_uuid_is_zero(*uuid))
+		throw std::invalid_argument(
+			"capture_uuid must be a nonzero canonical UUID");
+	return *uuid;
+}
+
 /** Project a daemon waveform response onto the JSON status document. */
 WaveformDto waveform_status(const msap1::WaveformResponse &response)
 {
@@ -160,33 +285,24 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 		status.history_capacity_frames,
 		status.completed_sessions,
 		status.incomplete_sessions,
-		{archive_discovery_state_name(status.archive_discovery.state),
-		 status.archive_discovery.scanned_files,
-		 status.archive_discovery.total_files,
-		 status.archive_discovery.rejected_files},
+		archive_discovery_status(status.archive_discovery),
+		{origin_filter_name(response.page.origin),
+		 response.page.limit,
+		 response.page.total_sessions,
+		 response.page.completed_sessions,
+		 response.page.incomplete_sessions,
+		 response.page.active_sessions,
+		 response.page.returned_sessions,
+		 response.page.next_before_session_id == 0u
+			 ? std::nullopt
+			 : std::optional<std::uint64_t>{
+				response.page.next_before_session_id}},
 		{"mncwf"},
 		{},
 	};
 	result.sessions.reserve(response.sessions.size());
-	for (const auto &session : response.sessions) {
-		result.sessions.push_back({
-			session.id,
-			waveform_state_name(session.state),
-			session.trigger_sequence,
-			session.first_sequence,
-			session.last_sequence,
-			session.trigger_tai_nanoseconds,
-			session.trigger_realtime_nanoseconds,
-			session.sample_rate_hz,
-			session.event_count,
-			waveform_origin(session.trigger_source_mask),
-			session.decimation,
-			session.filename,
-			session.continuation_of_session_id,
-			session.master_session_id,
-			session.capture_uuid,
-		});
-	}
+	for (const auto &session : response.sessions)
+		result.sessions.push_back(waveform_session(session));
 	return result;
 }
 
@@ -226,21 +342,67 @@ WaveformExportSelection export_selection(std::string_view target)
  * @brief GET /api/v1/waveforms (Viewer)
  *
  * Reports the waveform engine status (transport counters, raw-history
- * bounds) and every known capture session with its state and file name.
+ * bounds) and one bounded page of capture sessions with their state and file
+ * name. The exclusive session cursor remains stable while newer captures are
+ * added.
  *
  * @return 200 with the status document, or 503 when the acquisition daemon
  *         is unreachable.
  */
 webengine::Response get_waveforms(AppContext &app,
-				  const webengine::RequestContext &)
+				  const webengine::RequestContext &context)
 {
 	try {
-		const auto response = app.acquisition.waveform_status();
+		const auto target = context.request.target();
+		const auto request = waveform_list_request(
+			std::string_view(target.data(), target.size()));
+		const auto response = app.acquisition.waveform_list(request);
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
 			waveform_status(response));
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/waveforms", error);
+		return error_response(
+			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+/**
+ * @brief GET /api/v1/waveforms/session?capture_uuid=... (Viewer)
+ *
+ * Resolves one canonical capture UUID against the full discovered archive,
+ * independently of the current waveform-list page.
+ */
+webengine::Response get_waveform_session(AppContext &app,
+					 const webengine::RequestContext &context)
+{
+	try {
+		const auto target = context.request.target();
+		const auto capture_uuid = waveform_capture_lookup(
+			std::string_view(target.data(), target.size()));
+		WaveformLookupRequest request{};
+		request.capture_uuid = mncwf_uuid_string(capture_uuid);
+		const auto response = app.acquisition.waveform_lookup(request);
+		require_acquisition_ok(response.status);
+
+		WaveformSessionLookupDto result{
+			request.capture_uuid,
+			archive_discovery_status(
+				response.waveform.archive_discovery),
+			std::nullopt,
+		};
+		if (response.found != 0u)
+			result.session = waveform_session(response.session);
+		return json_response(webengine::http::status::ok, result);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveforms/session", error);
 		return error_response(
 			webengine::http::status::service_unavailable,
 			error.what());
@@ -348,7 +510,10 @@ delete_waveform_session(AppContext &app,
 				webengine::http::status::bad_request,
 				"waveform session ID is required");
 
-		auto response = app.acquisition.waveform_status();
+		WaveformListRequest list_request{};
+		list_request.origin = WaveformOriginFilter::all;
+		list_request.limit = waveform_max_page_sessions;
+		auto response = app.acquisition.waveform_list(list_request);
 		require_acquisition_ok(response.status);
 		std::vector<std::uint64_t> targets;
 		std::uint64_t deleted = 0u;
@@ -413,17 +578,15 @@ webengine::HandlerResult export_waveform_event(
 	}
 
 	try {
-		const auto response = app.acquisition.waveform_status();
+		WaveformLookupRequest request{};
+		request.session_id = selection.session_id;
+		const auto response = app.acquisition.waveform_lookup(request);
 		require_acquisition_ok(response.status);
-		const auto session = std::ranges::find_if(response.sessions,
-			[&selection](const auto &candidate) {
-				return candidate.id == selection.session_id;
-			});
-		if (session == response.sessions.end())
+		if (response.found == 0u)
 			return error_response(webengine::http::status::not_found,
 				"waveform session was not found");
-		if (session->state != WaveformSessionState::complete ||
-		    session->filename.empty())
+		if (response.session.state != WaveformSessionState::complete ||
+		    response.session.filename.empty())
 			return error_response(webengine::http::status::conflict,
 				"waveform session is not a completed capture");
 		if (response.waveform_directory.empty())
@@ -431,7 +594,7 @@ webengine::HandlerResult export_waveform_event(
 				"acquisition daemon returned no waveform directory");
 
 		auto file = MncwfV4ExportFile::open(response.waveform_directory,
-			session->filename, selection.event_uuid);
+			response.session.filename, selection.event_uuid);
 		const auto event_text = mncwf_uuid_string(selection.event_uuid);
 		const auto download_name = "waveform-" +
 			std::to_string(selection.session_id) + "-event-" +

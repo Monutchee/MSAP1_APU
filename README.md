@@ -132,9 +132,10 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 40 includes waveform
-archive-discovery progress in addition to typed meter snapshot selection by
-period and attribute set. `MeterDataProvider` publishes
+little-endian product payloads. Acquisition IPC version 41 includes bounded
+waveform archive pagination, trigger-origin filtering, exact retained-session
+lookup, and archive-discovery progress in addition to typed meter snapshot
+selection by period and attribute set. `MeterDataProvider` publishes
 typed latest values for the Basic (10/12-cycle), 150/180-cycle, clock-aligned
 10-minute, and 2-hour measurement periods, plus non-normative live partials
 for the two long periods. Unavailable values are never represented as valid
@@ -244,7 +245,11 @@ The authenticated external API is:
   selected historian projections while preserving the raw-record spool)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
-- `GET /api/v1/waveforms`
+- `GET /api/v1/waveforms?origin=all|manual|power_quality&before_session_id=<id>&limit=<1..100>`
+  (authenticated viewer; defaults to the newest 16 sessions across all
+  origins)
+- `GET /api/v1/waveforms/session?capture_uuid=<uuid>` (authenticated viewer;
+  exact full-archive lookup for linked evidence)
 - `POST /api/v1/waveforms/trigger` (administrator only)
 - `DELETE /api/v1/waveforms` (administrator only; deletes one session or, with
   explicit confirmation, all inactive sessions and their MNCWF files)
@@ -277,7 +282,8 @@ IPC is reachable again.
 Waveform session summaries classify their contributing triggers as `manual`,
 `power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
 manual and PQ capture still share the same capture coordinator, MNCWF-v4
-storage, parser, and export path.
+storage, parser, and export path. Mixed sessions match both filtered views;
+legacy sessions match only `origin=all`.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
@@ -417,9 +423,12 @@ capture. Completed files survive service and system restarts under:
 At daemon startup, filenames are enumerated synchronously to reserve session
 IDs, then file structure and CRCs are validated on a cancellable background
 worker while both DMA streams run. `GET /api/v1/waveforms` exposes the
-additive `archive_discovery` state and counters. A delete-all request is
-rejected until discovery completes so an unseen retained file cannot survive
-an apparently successful clear operation.
+additive `archive_discovery` state and counters plus full matching totals and
+an exclusive descending-session cursor. Exact session/capture-UUID lookup and
+event export search the entire discovered archive rather than only the newest
+page. A delete-all request is rejected until discovery completes and walks
+unfiltered pages, so an unseen retained file cannot survive an apparently
+successful clear operation.
 
 New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
 or explicitly identified boxcar-decimated averages and deliberately omit

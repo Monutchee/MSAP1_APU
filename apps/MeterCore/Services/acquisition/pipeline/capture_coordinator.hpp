@@ -118,7 +118,10 @@ public:
 	[[nodiscard]] msap1::CaptureResponse capture_response() const;
 	[[nodiscard]] msap1::FrequencyResponse frequency_response() const;
 	[[nodiscard]] msap1::DiagnosticResponse diagnostic_response() const;
-	[[nodiscard]] msap1::WaveformResponse waveform_response();
+	[[nodiscard]] msap1::WaveformResponse waveform_response(
+		const msap1::WaveformSessionQuery &query = {});
+	[[nodiscard]] msap1::WaveformLookupResponse waveform_lookup_response(
+		const msap1::WaveformLookupRequest &request);
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
 	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;

@@ -246,6 +246,66 @@ static_assert(sizeof(WaveformFileHeaderV2) == 256);
 
 } // namespace
 
+WaveformSessionPage waveform_session_page(
+	std::span<const WaveformSessionSummary> sessions,
+	const WaveformSessionQuery &query)
+{
+	if (query.limit == 0u || query.limit > waveform_max_page_sessions)
+		throw std::invalid_argument("waveform page limit must be 1..100");
+	if (query.origin != WaveformOriginFilter::all &&
+	    query.origin != WaveformOriginFilter::manual &&
+	    query.origin != WaveformOriginFilter::power_quality)
+		throw std::invalid_argument("unknown waveform origin filter");
+
+	const auto manual_mask =
+		trigger_source_bit(WaveformTriggerSource::manual_cli) |
+		trigger_source_bit(WaveformTriggerSource::manual_web);
+	const auto power_quality_mask =
+		trigger_source_bit(WaveformTriggerSource::pq_event);
+	const auto matches_origin = [&](const WaveformSessionSummary &session) {
+		switch (query.origin) {
+		case WaveformOriginFilter::all: return true;
+		case WaveformOriginFilter::manual:
+			return (session.trigger_source_mask & manual_mask) != 0u;
+		case WaveformOriginFilter::power_quality:
+			return (session.trigger_source_mask & power_quality_mask) != 0u;
+		}
+		return false;
+	};
+
+	WaveformSessionPage result{};
+	result.origin = query.origin;
+	result.limit = query.limit;
+	std::vector<WaveformSessionSummary> candidates;
+	candidates.reserve(sessions.size());
+	for (const auto &session : sessions) {
+		if (!matches_origin(session))
+			continue;
+		++result.total_sessions;
+		switch (session.state) {
+		case WaveformSessionState::capturing:
+			++result.active_sessions;
+			break;
+		case WaveformSessionState::complete:
+			++result.completed_sessions;
+			break;
+		case WaveformSessionState::incomplete:
+			++result.incomplete_sessions;
+			break;
+		}
+		if (query.before_session_id == 0u ||
+		    session.id < query.before_session_id)
+			candidates.push_back(session);
+	}
+	std::ranges::sort(candidates, std::greater{},
+		&WaveformSessionSummary::id);
+	const auto count = std::min<std::size_t>(query.limit, candidates.size());
+	result.sessions.assign(candidates.begin(), candidates.begin() + count);
+	if (candidates.size() > count && !result.sessions.empty())
+		result.next_before_session_id = result.sessions.back().id;
+	return result;
+}
+
 struct WaveformCapture::Event {
 	WaveformEventIdentity identity{};
 	bool stable_identity = false;
@@ -1830,15 +1890,49 @@ WaveformStatus WaveformCapture::status()
 
 std::vector<WaveformSessionSummary> WaveformCapture::sessions()
 {
+	return session_page().sessions;
+}
+
+WaveformSessionPage WaveformCapture::session_page(
+	const WaveformSessionQuery &query)
+{
 	collect_discovery_results();
 	collect_materialization_results();
-	std::vector<WaveformSessionSummary> result;
-	const auto count =
-		std::min(sessions_.size(), waveform_max_ipc_sessions);
-	result.reserve(count);
-	for (std::size_t offset = 0; offset < count; ++offset)
-		result.push_back(sessions_[sessions_.size() - 1u - offset].summary);
-	return result;
+	std::vector<WaveformSessionSummary> summaries;
+	summaries.reserve(sessions_.size());
+	for (const auto &session : sessions_)
+		summaries.push_back(session.summary);
+	return waveform_session_page(summaries, query);
+}
+
+std::optional<WaveformSessionSummary>
+WaveformCapture::find_session(std::uint64_t session_id)
+{
+	collect_discovery_results();
+	collect_materialization_results();
+	const auto session = std::ranges::find_if(sessions_,
+		[session_id](const Session &candidate) {
+			return candidate.summary.id == session_id;
+		});
+	if (session == sessions_.end())
+		return std::nullopt;
+	return session->summary;
+}
+
+std::optional<WaveformSessionSummary>
+WaveformCapture::find_session(const MncwfUuid &capture_uuid)
+{
+	collect_discovery_results();
+	collect_materialization_results();
+	if (uuid_is_zero(capture_uuid))
+		return std::nullopt;
+	const auto session = std::ranges::find_if(sessions_,
+		[&capture_uuid](const Session &candidate) {
+			return candidate.summary.capture_uuid == capture_uuid;
+		});
+	if (session == sessions_.end())
+		return std::nullopt;
+	return session->summary;
 }
 
 } // namespace msap1

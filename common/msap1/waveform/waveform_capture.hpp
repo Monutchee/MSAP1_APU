@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -30,6 +31,7 @@ inline constexpr std::size_t waveform_history_bytes = 128u * 1024u * 1024u;
 inline constexpr std::size_t waveform_history_frames =
 	waveform_history_bytes / waveform_frame_bytes;
 inline constexpr std::size_t waveform_max_ipc_sessions = 16;
+inline constexpr std::size_t waveform_max_page_sessions = 100;
 inline constexpr std::size_t waveform_session_name_size = 96;
 inline constexpr std::size_t waveform_persisted_channels = 7;
 
@@ -67,6 +69,19 @@ enum class WaveformSessionState : std::uint32_t {
 	capturing = 1,
 	complete = 2,
 	incomplete = 3,
+};
+
+enum class WaveformOriginFilter : std::uint32_t {
+	all = 0,
+	manual = 1,
+	power_quality = 2,
+};
+
+struct WaveformSessionQuery {
+	/** Exclusive descending cursor; zero starts at the newest session. */
+	std::uint64_t before_session_id = 0;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
 };
 
 struct WaveformEventIdentity {
@@ -152,6 +167,23 @@ struct WaveformSessionSummary {
 	std::array<char, waveform_session_name_size> filename{};
 	MncwfUuid capture_uuid{};
 };
+
+struct WaveformSessionPage {
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	std::uint64_t total_sessions = 0;
+	std::uint64_t completed_sessions = 0;
+	std::uint64_t incomplete_sessions = 0;
+	std::uint64_t active_sessions = 0;
+	/** Zero means there is no older matching page. */
+	std::uint64_t next_before_session_id = 0;
+	std::vector<WaveformSessionSummary> sessions;
+};
+
+/** Apply the public descending cursor and trigger-origin filter to summaries. */
+[[nodiscard]] WaveformSessionPage waveform_session_page(
+	std::span<const WaveformSessionSummary> sessions,
+	const WaveformSessionQuery &query = {});
 
 enum class WaveformArchiveDiscoveryState : std::uint32_t {
 	not_started = 0,
@@ -314,7 +346,13 @@ public:
 		std::uint16_t leap_flags = 0u) noexcept;
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
+	/** Compatibility view used by status/trigger replies: newest 16 sessions. */
 	std::vector<WaveformSessionSummary> sessions();
+	WaveformSessionPage session_page(const WaveformSessionQuery &query = {});
+	[[nodiscard]] std::optional<WaveformSessionSummary>
+	find_session(std::uint64_t session_id);
+	[[nodiscard]] std::optional<WaveformSessionSummary>
+	find_session(const MncwfUuid &capture_uuid);
 
 	/**
 	 * Sample one PL-counter/CLOCK_REALTIME correlation for the UTC

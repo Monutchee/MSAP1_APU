@@ -22,6 +22,18 @@ WaveformResponse AcquisitionGateway::waveform_status(int timeout_ms)
 	return client_.request(WaveformStatusRequest{}, timeout_ms);
 }
 
+WaveformResponse AcquisitionGateway::waveform_list(
+	const WaveformListRequest &request, int timeout_ms)
+{
+	return client_.request(request, timeout_ms);
+}
+
+WaveformLookupResponse AcquisitionGateway::waveform_lookup(
+	const WaveformLookupRequest &request, int timeout_ms)
+{
+	return client_.request(request, timeout_ms);
+}
+
 WaveformResponse AcquisitionGateway::trigger_waveform(
 	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
 	std::uint32_t decimation, WaveformTriggerSource source, int timeout_ms)

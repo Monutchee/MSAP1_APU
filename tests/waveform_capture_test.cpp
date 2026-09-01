@@ -291,6 +291,111 @@ bool has_capture_lineage(const msap1::MncwfV4Reader &reader,
 		});
 }
 
+void test_session_pagination_and_origin_filters()
+{
+	const auto source_bit = [](msap1::WaveformTriggerSource source) {
+		return 1u << static_cast<unsigned>(source);
+	};
+	const auto manual = source_bit(
+		msap1::WaveformTriggerSource::manual_web);
+	const auto power_quality = source_bit(
+		msap1::WaveformTriggerSource::pq_event);
+
+	std::vector<msap1::WaveformSessionSummary> sessions;
+	for (std::uint64_t id = 1u; id <= 25u; ++id) {
+		msap1::WaveformSessionSummary session{};
+		session.id = id;
+		session.state = id == 25u
+			? msap1::WaveformSessionState::capturing
+			: id == 24u
+				? msap1::WaveformSessionState::incomplete
+				: msap1::WaveformSessionState::complete;
+		if (id == 20u)
+			session.trigger_source_mask = manual | power_quality;
+		else if ((id % 3u) == 0u)
+			session.trigger_source_mask = power_quality;
+		else if ((id % 2u) == 0u)
+			session.trigger_source_mask = manual;
+		/* Odd, non-PQ sessions deliberately model legacy/unknown files. */
+		sessions.push_back(session);
+	}
+
+	msap1::WaveformSessionQuery query{};
+	query.limit = 16u;
+	const auto newest = msap1::waveform_session_page(sessions, query);
+	require(newest.total_sessions == 25u &&
+			newest.completed_sessions == 23u &&
+			newest.incomplete_sessions == 1u &&
+			newest.active_sessions == 1u &&
+			newest.sessions.size() == 16u &&
+			newest.sessions.front().id == 25u &&
+			newest.sessions.back().id == 10u &&
+			newest.next_before_session_id == 10u,
+		"newest waveform page metadata is wrong");
+
+	query.before_session_id = newest.next_before_session_id;
+	const auto older = msap1::waveform_session_page(sessions, query);
+	require(older.sessions.size() == 9u &&
+			older.sessions.front().id == 9u &&
+			older.sessions.back().id == 1u &&
+			older.next_before_session_id == 0u,
+		"exclusive waveform cursor skipped or duplicated a session");
+
+	/* A newer capture cannot perturb an already-issued exclusive cursor. */
+	msap1::WaveformSessionSummary added{};
+	added.id = 26u;
+	sessions.push_back(added);
+	const auto stable = msap1::waveform_session_page(sessions, query);
+	require(stable.sessions.size() == older.sessions.size() &&
+			std::ranges::equal(stable.sessions, older.sessions,
+				{}, &msap1::WaveformSessionSummary::id,
+				&msap1::WaveformSessionSummary::id),
+		"new capture changed an older waveform page");
+
+	query.before_session_id = 0u;
+	query.limit = 100u;
+	query.origin = msap1::WaveformOriginFilter::manual;
+	const auto manual_page = msap1::waveform_session_page(sessions, query);
+	query.origin = msap1::WaveformOriginFilter::power_quality;
+	const auto pq_page = msap1::waveform_session_page(sessions, query);
+	const auto contains = [](const auto &page, std::uint64_t id) {
+		return std::ranges::any_of(page.sessions,
+			[id](const auto &session) { return session.id == id; });
+	};
+	require(contains(manual_page, 20u) && contains(pq_page, 20u),
+		"mixed waveform session is not in both origin filters");
+	require(!contains(manual_page, 1u) && !contains(pq_page, 1u),
+		"legacy waveform session leaked into an origin filter");
+	require(std::ranges::all_of(manual_page.sessions,
+			[manual](const auto &session) {
+				return (session.trigger_source_mask & manual) != 0u;
+			}) &&
+			std::ranges::all_of(pq_page.sessions,
+				[power_quality](const auto &session) {
+					return (session.trigger_source_mask &
+						power_quality) != 0u;
+				}),
+		"waveform origin filtering returned a nonmatching session");
+
+	bool rejected = false;
+	try {
+		query.limit = 0u;
+		(void)msap1::waveform_session_page(sessions, query);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "zero waveform page limit was accepted");
+	query.limit = 1u;
+	query.origin = static_cast<msap1::WaveformOriginFilter>(99u);
+	rejected = false;
+	try {
+		(void)msap1::waveform_session_page(sessions, query);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "unknown waveform origin filter was accepted");
+}
+
 void test_async_archive_discovery_and_cancellation()
 {
 	const auto device = unique_path(".archive-device");
@@ -606,6 +711,7 @@ int main()
 	const auto device = unique_path(".device");
 	const auto output = unique_path(".captures");
 	try {
+		test_session_pagination_and_origin_filters();
 		test_async_archive_discovery_and_cancellation();
 		test_materialized_continuation_and_restart_recovery();
 		write_test_block(device);
@@ -932,6 +1038,13 @@ int main()
 				restored.front()
 						.trigger_realtime_nanoseconds != 0,
 			"persisted waveform history was not restored");
+		const auto found_by_id = restarted.find_session(triggered.id);
+		const auto found_by_uuid =
+			restarted.find_session(restored.front().capture_uuid);
+		require(found_by_id && found_by_uuid &&
+				found_by_id->capture_uuid == restored.front().capture_uuid &&
+				found_by_uuid->id == triggered.id,
+			"exact waveform archive lookup did not find an old capture");
 		restarted.erase(triggered.id);
 		require(restarted.sessions().empty(),
 			"deleted waveform session was retained");
