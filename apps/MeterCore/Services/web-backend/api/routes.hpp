@@ -14,9 +14,13 @@
  *   1. implement a handler with the RouteHandler signature in the matching
  *      *_routes.cpp (or a new module),
  *   2. declare it below next to its module,
- *   3. append one RouteEntry to route_table.
+ *   3. append one RouteEntry to route_table, and
+ *   4. attach its typed schemas, parameters, statuses, content types, and
+ *      examples in that module's document_*_routes() decorator.
  *
- * register_routes() wires the whole table into the WebEngine at startup.
+ * register_routes() wires the whole table into WebEngine at startup, while
+ * the build-only OpenAPI adapter imports that same table and rejects missing
+ * documentation metadata.
  */
 
 #include "app_context.hpp"
@@ -289,6 +293,12 @@ webengine::Response delete_data_logging_asset(AppContext &,
 webengine::Response upload_data_logging_asset(AppContext &,
 	const webengine::RequestContext &, const webengine::FileUpload &);
 webengine::HandlerResult download_data_logging_artifact(AppContext &,
+	const webengine::RequestContext &);
+
+/* ── documentation_routes.cpp — immutable build documentation ───────── */
+std::optional<webengine::FileDownload> download_openapi_document(AppContext &,
+	const webengine::RequestContext &);
+std::optional<webengine::FileDownload> download_modbus_document(AppContext &,
 	const webengine::RequestContext &);
 
 /**
@@ -674,6 +684,16 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 			return upload_data_logging_asset(context, request, file);
 		}, data_logging_asset_upload_role, certificate_limit,
 		data_channel_asset_types);
+
+	engine.add_file_download("/api/v1/documentation/msap1_api.yaml",
+		[&context](const auto &request) {
+			return download_openapi_document(context, request);
+		}, webengine::Role::Viewer);
+	engine.add_file_download(
+		"/api/v1/documentation/msap1_modbus_registers.xlsx",
+		[&context](const auto &request) {
+			return download_modbus_document(context, request);
+		}, webengine::Role::Viewer);
 }
 
 } // namespace msap1::web::api

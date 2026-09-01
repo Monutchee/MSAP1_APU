@@ -6,6 +6,7 @@
 
 #include "health_dto.hpp"
 #include "meter_dto.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -1142,6 +1144,82 @@ put_frequency_configuration(AppContext &app,
 			webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_meter_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	registry.add_json_response<MeterHealthDto>(V::get,
+		"/api/v1/meter/health", 200, "MeterHealth",
+		"Metering pipeline, acquisition, ADC, and aggregation health");
+	registry.add_error_response(V::get, "/api/v1/meter/health", 503,
+		"Acquisition health is unavailable");
+
+	registry.add_json_response<MeterReadingsDto>(V::get,
+		"/api/v1/meter/readings", 200, "MeterReadings",
+		"Newest basic-block meter readings");
+	registry.add_error_response(V::get, "/api/v1/meter/readings", 503,
+		"No current meter result is available");
+
+	using AggregateResult =
+		std::variant<MeterAggregateDto, MeterAggregateUnavailableDto>;
+	registry.add_json_response<AggregateResult>(V::get,
+		"/api/v1/meter/aggregate", 200, "MeterAggregateResult",
+		"Newest 150/180-cycle aggregate or an unavailable marker");
+	registry.add_error_response(V::get, "/api/v1/meter/aggregate", 503,
+		"The aggregate snapshot is malformed or unavailable");
+
+	using LongIntervalResult =
+		std::variant<MeterTenMinuteDto, MeterTenMinuteUnavailableDto>;
+	for (const auto path : {"/api/v1/meter/minutes-10",
+		"/api/v1/meter/hours-2", "/api/v1/meter/minutes-10/live",
+		"/api/v1/meter/hours-2/live"}) {
+		registry.add_json_response<LongIntervalResult>(V::get, path, 200,
+			"MeterLongIntervalResult",
+			"Finalized or live long-interval result, or unavailable marker");
+		registry.add_error_response(V::get, path, 503,
+			"The requested interval snapshot is malformed or unavailable");
+	}
+
+	registry.add_json_response<SingleCycleDto>(V::get,
+		"/api/v1/meter/single-cycle", 200, "MeterSingleCycle",
+		"Latest SCYC diagnostic snapshot");
+	registry.add_error_response(V::get, "/api/v1/meter/single-cycle", 503,
+		"Single-cycle diagnostics are unavailable");
+
+	registry.add_json_response<PowerQualityDto>(V::get,
+		"/api/v1/meter/power-quality", 200, "MeterPowerQuality",
+		"Latest Urms(1/2) record and newest event edge");
+	registry.add_error_response(V::get,
+		"/api/v1/meter/power-quality", 503,
+		"Power-quality live state is unavailable");
+
+	constexpr auto harmonics = "/api/v1/meter/harmonics";
+	registry.add_query_parameter(V::get, harmonics, "period", "string", false,
+		"Harmonic measurement period",
+		{"basic", "cycles_150_180", "3s", "minutes_10", "10m",
+		 "hours_2", "2h"}, "cycles_150_180");
+	registry.add_json_response<HarmonicDto>(V::get, harmonics, 200,
+		"MeterHarmonics", "Latest complete harmonic family for the period");
+	registry.add_error_response(V::get, harmonics, 400,
+		"The requested harmonic period is invalid");
+	registry.add_error_response(V::get, harmonics, 503,
+		"Harmonic state is unavailable");
+
+	constexpr auto frequency =
+		"/api/v1/meter/configuration/frequency";
+	registry.add_json_response<FrequencyConfigurationDto>(V::get, frequency,
+		200, "FrequencyConfiguration", "Active frequency configuration");
+	registry.add_error_response(V::get, frequency, 503,
+		"The active frequency configuration is unavailable");
+	registry.add_json_request<FrequencyConfigurationDto>(V::put, frequency,
+		"FrequencyConfiguration", "Complete frequency configuration");
+	registry.add_json_response<FrequencyConfigurationDto>(V::put, frequency,
+		200, "FrequencyConfiguration", "Applied frequency configuration");
+	registry.add_error_response(V::put, frequency, 400,
+		"Frequency JSON or values are invalid");
+	registry.add_error_response(V::put, frequency, 503,
+		"The frequency configuration could not be applied or read back");
 }
 
 } // namespace msap1::web::api

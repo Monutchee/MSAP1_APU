@@ -4,6 +4,7 @@
  *        the active product settings document.
  */
 
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -129,6 +130,35 @@ webengine::Response post_factory_reset(AppContext &app,
 		return error_response(webengine::http::status::conflict,
 			error.what());
 	}
+}
+
+void document_settings_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto active = "/api/v1/settings/active";
+	registry.add_json_response<SettingsDocumentDto>(V::get, active, 200,
+		"SettingsDocument", "Active settings and authority state");
+	registry.add_error_response(V::get, active, 503,
+		"The settings authority is unavailable");
+	registry.add_json_request<msap1::settings::ProductSettings>(V::put, active,
+		"ProductSettings", "Complete replacement settings document");
+	registry.add_json_response<SettingsDocumentDto>(V::put, active, 200,
+		"SettingsDocument", "Validated, applied, and saved settings");
+	registry.add_error_response(V::put, active, 400,
+		"The settings JSON or values are invalid");
+	registry.add_error_response(V::put, active, 409,
+		"The settings authority rejected the save");
+
+	constexpr auto reset = "/api/v1/settings/factory-reset";
+	registry.add_json_request<SettingsFactoryResetDto>(V::post, reset,
+		"FactoryResetRequest", "Explicit factory-reset confirmation", true,
+		R"({"confirmed":true})");
+	registry.add_json_response<SettingsDocumentDto>(V::post, reset, 200,
+		"SettingsDocument", "Restored factory settings document");
+	registry.add_error_response(V::post, reset, 400,
+		"Explicit confirmation was not supplied");
+	registry.add_error_response(V::post, reset, 409,
+		"The settings authority rejected the reset");
 }
 
 } // namespace msap1::web::api

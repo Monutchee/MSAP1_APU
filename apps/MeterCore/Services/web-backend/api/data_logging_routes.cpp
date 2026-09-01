@@ -1,5 +1,6 @@
 /** @file data_logging_routes.cpp M19 configuration and artifact APIs. */
 
+#include "openapi.hpp"
 #include "query.hpp"
 #include "response.hpp"
 #include "routes.hpp"
@@ -527,6 +528,187 @@ webengine::HandlerResult download_data_logging_artifact(
 		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_data_logging_routes(DocumentedApiRegistry &registry)
+{
+	using Verb = webengine::http::verb;
+	constexpr std::string_view configuration_path =
+		"/api/v1/data-logging/configuration";
+	registry.add_json_response<DataLoggingConfigurationDto>(Verb::get,
+		configuration_path, 200, "DataLoggingConfiguration",
+		"Active jobs, channels, policy, and material presence");
+	registry.add_error_response(Verb::get, configuration_path, 503,
+		"Data Logging configuration is unavailable");
+	registry.add_json_request<DataLoggingSettings>(Verb::put,
+		configuration_path, "DataLoggingSettings",
+		"Complete replacement Data Logging settings");
+	registry.add_json_response<DataLoggingConfigurationDto>(Verb::put,
+		configuration_path, 200, "DataLoggingConfiguration",
+		"Validated active configuration");
+	registry.add_error_response(Verb::put, configuration_path, 400,
+		"The settings document is invalid");
+	registry.add_error_response(Verb::put, configuration_path, 409,
+		"The settings could not be applied or persisted");
+
+	constexpr std::string_view status_path = "/api/v1/data-logging/status";
+	registry.add_json_response<datalogger::ipc::ServiceStatus>(Verb::get,
+		status_path, 200, "DataLoggingStatus",
+		"Generator, sender, queue, archive, and channel status");
+	registry.add_error_response(Verb::get, status_path, 503,
+		"The Data Sender is unavailable");
+
+	constexpr std::string_view artifacts =
+		"/api/v1/data-logging/artifacts";
+	registry.add_query_parameter(Verb::get, artifacts, "offset", "integer",
+		false, "Zero-based artifact offset", {}, "0");
+	registry.add_query_parameter(Verb::get, artifacts, "limit", "integer",
+		false, "Maximum artifacts in this page", {}, "100");
+	registry.add_query_parameter(Verb::get, artifacts, "job_id", "string",
+		false, "Restrict results to one configured job ID");
+	registry.add_query_parameter(Verb::get, artifacts, "state", "string",
+		false, "Restrict results to one artifact state");
+	registry.add_query_parameter(Verb::get, artifacts, "start_nanoseconds",
+		"integer", false, "Inclusive generated-time range start");
+	registry.add_query_parameter(Verb::get, artifacts, "end_nanoseconds",
+		"integer", false, "Exclusive generated-time range end");
+	registry.add_json_response<datalogger::ipc::ArtifactList>(Verb::get,
+		artifacts, 200, "DataLoggingArtifactList",
+		"Bounded page of generated-file manifests");
+	registry.add_error_response(Verb::get, artifacts, 400,
+		"The artifact filter or page is invalid");
+	registry.add_error_response(Verb::get, artifacts, 503,
+		"The Data Sender is unavailable");
+	registry.add_json_request<ArtifactMutationDto>(Verb::delete_, artifacts,
+		"DataLoggingArtifactMutation",
+		"Artifact selection, confirmation, and unsent-data policy");
+	registry.add_json_response<datalogger::ipc::DeletionResult>(Verb::delete_,
+		artifacts, 200, "DataLoggingDeletionResult",
+		"Deleted artifact and discarded-delivery counts");
+	registry.add_error_response(Verb::delete_, artifacts, 400,
+		"The deletion selection is invalid or unconfirmed");
+	registry.add_error_response(Verb::delete_, artifacts, 409,
+		"Unsent artifacts require explicit discard confirmation");
+
+	constexpr std::string_view artifact = "/api/v1/data-logging/artifact";
+	registry.add_query_parameter(Verb::get, artifact, "id", "string", true,
+		"Generated-file artifact ID");
+	registry.add_json_response<datalogger::ipc::ArtifactDetail>(Verb::get,
+		artifact, 200, "DataLoggingArtifactDetail",
+		"Manifest and per-channel delivery details");
+	registry.add_error_response(Verb::get, artifact, 400,
+		"The artifact ID is absent");
+	registry.add_error_response(Verb::get, artifact, 404,
+		"The artifact does not exist");
+
+	constexpr std::string_view preview =
+		"/api/v1/data-logging/artifacts/preview";
+	registry.add_query_parameter(Verb::get, preview, "id", "string", true,
+		"Generated-file artifact ID");
+	registry.add_query_parameter(Verb::get, preview, "limit", "integer",
+		false, "Maximum preview bytes, from 1 through 65536", {}, "16384");
+	registry.add_binary_response(Verb::get, preview, 200,
+		"text/plain; charset=utf-8", "Bounded text preview", {}, false);
+	registry.add_error_response(Verb::get, preview, 400,
+		"The preview request is invalid");
+	registry.add_error_response(Verb::get, preview, 404,
+		"The artifact does not exist");
+
+	constexpr std::string_view retry =
+		"/api/v1/data-logging/artifacts/retry";
+	registry.add_json_request<ArtifactMutationDto>(Verb::post, retry,
+		"DataLoggingArtifactMutation", "One through 500 artifact IDs");
+	registry.add_json_response<datalogger::ipc::ServiceStatus>(Verb::post,
+		retry, 200, "DataLoggingStatus", "Updated Data Sender status");
+	registry.add_error_response(Verb::post, retry, 400,
+		"The retry selection is invalid");
+	registry.add_error_response(Verb::post, retry, 409,
+		"The retry could not be scheduled");
+
+	constexpr std::string_view test_path =
+		"/api/v1/data-logging/channels/test";
+	registry.add_json_request<ChannelRequestDto>(Verb::post, test_path,
+		"DataLoggingChannelRequest", "Channel selected for the probe");
+	registry.add_json_response<datalogger::ipc::ChannelTestResult>(Verb::post,
+		test_path, 200, "DataLoggingChannelTestResult", "Probe result");
+	registry.add_error_response(Verb::post, test_path, 400,
+		"The channel selection is invalid");
+	registry.add_error_response(Verb::post, test_path, 404,
+		"The channel does not exist");
+	registry.add_error_response(Verb::post, test_path, 409,
+		"The channel probe failed");
+
+	constexpr std::string_view materials =
+		"/api/v1/data-logging/channel-materials";
+	registry.add_query_parameter(Verb::get, materials, "channel_id", "string",
+		true, "Configured Data Channel ID");
+	registry.add_json_response<DataChannelMaterialStatus>(Verb::get, materials,
+		200, "DataChannelMaterialStatus",
+		"Presence flags for channel-scoped secrets and assets");
+	registry.add_error_response(Verb::get, materials, 404,
+		"The channel does not exist");
+
+	constexpr std::string_view credential =
+		"/api/v1/data-logging/channel-credential";
+	for (const auto method : {Verb::put, Verb::delete_}) {
+		registry.add_json_request<ChannelMaterialRequestDto>(method, credential,
+			"DataLoggingChannelMaterialRequest",
+			method == Verb::put ? "Channel secret replacement"
+				: "Channel secret selection");
+		registry.add_json_response<DataChannelMaterialStatus>(method, credential,
+			200, "DataChannelMaterialStatus", "Updated material presence");
+		registry.add_error_response(method, credential, 400,
+			"The material request is invalid");
+		registry.add_error_response(method, credential, 404,
+			"The channel does not exist");
+		registry.add_error_response(method, credential, 409,
+			"The channel secret could not be updated");
+	}
+
+	constexpr std::string_view asset =
+		"/api/v1/data-logging/channel-asset";
+	registry.add_query_parameter(Verb::put, asset, "channel_id", "string",
+		true, "Configured Data Channel ID");
+	registry.add_query_parameter(Verb::put, asset, "kind", "string", true,
+		"Certificate, identity key, or known-host asset kind");
+	registry.add_binary_request(Verb::put, asset,
+		{"application/octet-stream", "application/x-pem-file",
+		 "application/pkix-cert", "application/x-x509-ca-cert",
+		 "text/plain"}, "Raw channel verification or identity asset");
+	registry.add_json_response<DataChannelMaterialStatus>(Verb::put, asset, 200,
+		"DataChannelMaterialStatus", "Updated material presence");
+	registry.add_error_response(Verb::put, asset, 400,
+		"The asset request is invalid");
+	registry.add_error_response(Verb::put, asset, 404,
+		"The channel does not exist");
+	registry.add_error_response(Verb::put, asset, 409,
+		"The asset could not be installed");
+	registry.add_json_request<ChannelMaterialRequestDto>(Verb::delete_, asset,
+		"DataLoggingChannelMaterialRequest", "Channel asset selection");
+	registry.add_json_response<DataChannelMaterialStatus>(Verb::delete_, asset,
+		200, "DataChannelMaterialStatus", "Updated material presence");
+	registry.add_error_response(Verb::delete_, asset, 400,
+		"The asset selection is invalid");
+	registry.add_error_response(Verb::delete_, asset, 404,
+		"The channel does not exist");
+	registry.add_error_response(Verb::delete_, asset, 409,
+		"The asset could not be removed");
+
+	constexpr std::string_view download =
+		"/api/v1/data-logging/artifacts/download";
+	registry.add_query_parameter(Verb::get, download, "id", "string", true,
+		"Generated-file artifact ID");
+	registry.add_binary_response(Verb::get, download, 200,
+		"application/octet-stream",
+		"Generated artifact using its manifest media type and filename");
+	registry.add_error_response(Verb::get, download, 400,
+		"The artifact ID is absent");
+	registry.add_error_response(Verb::get, download, 404,
+		"The artifact does not exist");
+	registry.add_error_response(Verb::get, download, 409,
+		"The artifact payload is no longer retained");
+	registry.add_error_response(Verb::get, download, 503,
+		"The Data Sender is unavailable");
 }
 
 } // namespace msap1::web::api

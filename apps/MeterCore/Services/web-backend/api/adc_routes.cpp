@@ -5,6 +5,7 @@
  */
 
 #include "health_dto.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -665,6 +666,63 @@ webengine::Response delete_adc_capture(AppContext &app,
 				       const webengine::RequestContext &)
 {
 	return capture_command(app, false);
+}
+
+void document_adc_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto source = "/api/v1/adc/source";
+	registry.add_json_response<AdcSourceDto>(V::get, source, 200,
+		"AdcSource", "Active ADC source and health");
+	registry.add_error_response(V::get, source, 503,
+		"Acquisition source state is unavailable");
+	registry.add_json_request<AdcSourceDto>(V::put, source,
+		"AdcSource", "Requested physical or simulator source", true,
+		R"({"source":"simulator"})");
+	registry.add_json_response<AdcSourceDto>(V::put, source, 200,
+		"AdcSource", "Applied ADC source and health");
+	registry.add_error_response(V::put, source, 400,
+		"The source JSON or source name is invalid");
+	registry.add_error_response(V::put, source, 503,
+		"The source could not be applied or read back");
+
+	constexpr auto simulator = "/api/v1/adc/simulator";
+	registry.add_json_response<AdcSimulatorDto>(V::get, simulator, 200,
+		"AdcSimulator", "Simulator configuration, counters, and health");
+	registry.add_error_response(V::get, simulator, 503,
+		"Simulator state is unavailable");
+	registry.add_json_request<AdcSimulatorDto>(V::put, simulator,
+		"AdcSimulator", "Complete simulator configuration");
+	registry.add_json_response<AdcSimulatorDto>(V::put, simulator, 200,
+		"AdcSimulator", "Applied simulator configuration and health");
+	registry.add_error_response(V::put, simulator, 400,
+		"Simulator values or JSON are invalid");
+	registry.add_error_response(V::put, simulator, 503,
+		"The simulator configuration could not be applied or read back");
+
+	constexpr auto event = "/api/v1/adc/simulator/event";
+	registry.add_json_response<AdcSimulatorEventDto>(V::get, event, 200,
+		"AdcSimulatorEvent", "Current amplitude-event sequencer state");
+	registry.add_error_response(V::get, event, 503,
+		"The sequencer state is unavailable");
+	registry.add_json_request<AdcSimulatorEventDto>(V::post, event,
+		"AdcSimulatorEvent", "Arm, cancel, or clear request", true,
+		R"({"action":"arm","channels":"voltage","scale_percent":80,"duration_half_cycles":10,"period_half_cycles":0,"repeat":false})");
+	registry.add_json_response<AdcSimulatorEventDto>(V::post, event, 200,
+		"AdcSimulatorEvent", "Committed sequencer state");
+	registry.add_error_response(V::post, event, 400,
+		"The event request is invalid");
+	registry.add_error_response(V::post, event, 503,
+		"The sequencer request failed");
+
+	constexpr auto capture = "/api/v1/adc/capture";
+	for (const auto method : {V::get, V::put, V::delete_}) {
+		registry.add_json_response<AdcCaptureDto>(method, capture, 200,
+			"AdcCapture", "Resulting capture state",
+			R"({"active":true})");
+		registry.add_error_response(method, capture, 503,
+			"The acquisition daemon is unavailable or rejected the command");
+	}
 }
 
 } // namespace msap1::web::api

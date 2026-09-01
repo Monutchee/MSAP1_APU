@@ -272,6 +272,24 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+- `GET /api/v1/documentation/msap1_api.yaml` (authenticated viewer; exact
+  build-time OpenAPI contract as an attachment)
+- `GET /api/v1/documentation/msap1_modbus_registers.xlsx` (authenticated
+  viewer; exact build-time Modbus register workbook as an attachment)
+
+`msap1-openapi-dump` validates and emits the comprehensive OpenAPI 3.1 YAML
+for this surface. It uses the pinned Glaze library for named DTO JSON schemas
+and deterministic YAML serialization. Yocto runs the target executable under
+QEMU at build time and installs only `msap1_api.yaml`; neither the Web backend
+nor any HTTP request generates documentation at runtime.
+
+To add an endpoint, declare its method, exact path, minimum role, handler, and
+summary once in `api/routes.hpp`, then attach the named Glaze request/response
+DTOs, parameters, statuses, media types, and examples in the matching route
+module's `document_*_routes()` function. WebEngine registration and OpenAPI
+generation both import the same route table. The exporter fails on duplicate
+routes or operation IDs, missing success metadata, conflicting schemas, and
+unresolved schema references.
 
 While acquisition is still starting or recovering, `GET /api/v1/health`
 returns HTTP 503 with `code: "system_not_ready"` and `retryable: true`.

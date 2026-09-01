@@ -1,5 +1,6 @@
 /** @file mqtt_routes.cpp MQTT configuration, capabilities, and credential APIs. */
 
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -10,6 +11,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <glaze/glaze.hpp>
 
@@ -297,6 +299,86 @@ std::optional<webengine::FileDownload> download_mqtt_client_certificate(
 	AppContext &app, const webengine::RequestContext &)
 {
 	return download(app, "client-certificate", "mqtt-client-certificate.pem");
+}
+
+void document_mqtt_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto capabilities = "/api/v1/mqtt/capabilities";
+	registry.add_json_response<std::vector<mqtt::PublicationPeriodCapability>>(
+		V::get, capabilities, 200, "MqttCapabilities",
+		"MQTT-selectable periods and canonical attributes");
+	registry.add_error_response(V::get, capabilities, 503,
+		"Meter publication capabilities are unavailable");
+
+	constexpr auto configuration_path = "/api/v1/mqtt/configuration";
+	registry.add_json_response<MqttConfigurationDto>(V::get,
+		configuration_path, 200, "MqttConfiguration",
+		"Active MQTT policy and credential-presence flags");
+	registry.add_error_response(V::get, configuration_path, 503,
+		"MQTT settings are unavailable");
+	registry.add_json_request<settings::MqttSettings>(V::put,
+		configuration_path, "MqttSettings", "Complete MQTT policy");
+	registry.add_json_response<MqttConfigurationDto>(V::put,
+		configuration_path, 200, "MqttConfiguration",
+		"Saved MQTT policy and credential-presence flags");
+	registry.add_error_response(V::put, configuration_path, 400,
+		"The MQTT policy is invalid or required credentials are absent");
+	registry.add_error_response(V::put, configuration_path, 409,
+		"The settings authority rejected the MQTT policy");
+
+	constexpr auto status_path = "/api/v1/mqtt/status";
+	registry.add_json_response<mqtt::MqttServiceStatus>(V::get, status_path,
+		200, "MqttStatus", "Publisher connection and publication status");
+	registry.add_error_response(V::get, status_path, 503,
+		"MQTT policy or publisher status is unavailable");
+
+	for (const auto path : {"/api/v1/mqtt/credentials/password",
+		"/api/v1/mqtt/credentials/private-key-passphrase"}) {
+		registry.add_json_request<PasswordUpdateDto>(V::put, path,
+			"SecretUpdate", "Replacement secret value");
+		registry.add_json_response<CredentialStatusDto>(V::put, path, 200,
+			"MqttCredentialStatus", "Updated credential-presence flags");
+		registry.add_error_response(V::put, path, 400,
+			"A nonempty secret is required");
+		registry.add_json_response<CredentialStatusDto>(V::delete_, path,
+			200, "MqttCredentialStatus", "Updated credential-presence flags");
+		registry.add_error_response(V::delete_, path, 409,
+			"The settings authority could not remove the secret");
+	}
+
+	const std::vector<std::string> certificate_types{
+		"application/octet-stream", "application/x-pem-file",
+		"application/pkix-cert", "application/x-x509-ca-cert"};
+	for (const std::string_view path : {"/api/v1/mqtt/tls/ca",
+		"/api/v1/mqtt/tls/client-certificate",
+		"/api/v1/mqtt/tls/client-key"}) {
+		registry.add_header_parameter(V::put, path, "X-File-Name", "string",
+			true, "Safe source filename", "credential.pem");
+		registry.add_binary_request(V::put, path, certificate_types,
+			"PEM or certificate payload, limited to 1 MiB");
+		registry.add_json_response<CredentialStatusDto>(V::put, path, 200,
+			"MqttCredentialStatus", "Updated credential-presence flags");
+		registry.add_error_response(V::put, path, 400,
+			"The credential asset could not be installed");
+		registry.add_error_response(V::put, path, 413,
+			"The upload exceeds 1 MiB");
+		registry.add_error_response(V::put, path, 415,
+			"The upload content type is unsupported");
+		registry.add_json_response<CredentialStatusDto>(V::delete_, path,
+			200, "MqttCredentialStatus", "Updated credential-presence flags");
+		registry.add_error_response(V::delete_, path, 409,
+			"The settings authority could not remove the asset");
+	}
+	for (const std::string_view path : {"/api/v1/mqtt/tls/ca",
+		"/api/v1/mqtt/tls/client-certificate"}) {
+		registry.add_binary_response(V::get, path, 200,
+			"application/x-pem-file", "Installed public credential asset",
+			path.ends_with("/ca") ? "mqtt-ca.pem" :
+				"mqtt-client-certificate.pem");
+		registry.add_error_response(V::get, path, 404,
+			"The credential asset is not configured");
+	}
 }
 
 } // namespace msap1::web::api

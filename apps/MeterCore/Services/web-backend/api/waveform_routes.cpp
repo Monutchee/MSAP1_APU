@@ -5,6 +5,7 @@
  */
 
 #include "health_dto.hpp"
+#include "openapi.hpp"
 #include "query.hpp"
 #include "response.hpp"
 #include "routes.hpp"
@@ -627,6 +628,90 @@ webengine::HandlerResult export_waveform_event(
 		return error_response(webengine::http::status::unprocessable_entity,
 			"waveform master cannot produce this event export: " +
 				std::string(error.what()));
+	}
+}
+
+void document_waveform_routes(DocumentedApiRegistry &registry)
+{
+	using Verb = webengine::http::verb;
+	constexpr std::string_view waveforms = "/api/v1/waveforms";
+	registry.add_query_parameter(Verb::get, waveforms, "origin", "string",
+		false, "Capture origin filter", {"all", "manual", "power_quality"},
+		"all");
+	registry.add_query_parameter(Verb::get, waveforms, "before_session_id",
+		"integer", false, "Exclusive session pagination cursor");
+	registry.add_query_parameter(Verb::get, waveforms, "limit", "integer",
+		false, "Maximum sessions to return, from 1 through 100", {}, "100");
+	registry.add_json_response<WaveformDto>(Verb::get, waveforms, 200,
+		"WaveformStatus", "Waveform engine status and capture page");
+	registry.add_error_response(Verb::get, waveforms, 400,
+		"The pagination or origin query is invalid");
+	registry.add_error_response(Verb::get, waveforms, 503,
+		"Waveform acquisition is unavailable");
+
+	constexpr std::string_view lookup = "/api/v1/waveforms/session";
+	registry.add_query_parameter(Verb::get, lookup, "capture_uuid", "string",
+		true, "Canonical nonzero capture UUID", {},
+		"d2f78547-4d73-46c2-bc69-c9cc763cc15a");
+	registry.add_json_response<WaveformSessionLookupDto>(Verb::get, lookup, 200,
+		"WaveformSessionLookup", "Archive lookup result");
+	registry.add_error_response(Verb::get, lookup, 400,
+		"The capture UUID is absent or malformed");
+	registry.add_error_response(Verb::get, lookup, 503,
+		"Waveform acquisition is unavailable");
+
+	constexpr std::string_view trigger = "/api/v1/waveforms/trigger";
+	registry.add_json_request<WaveformTriggerDto>(Verb::post, trigger,
+		"WaveformTrigger", "Manual capture durations and decimation", true,
+		R"({"pretrigger_ms":500,"posttrigger_ms":1000,"decimation":1})");
+	registry.add_json_response<WaveformDto>(Verb::post, trigger, 200,
+		"WaveformStatus", "Updated waveform status");
+	registry.add_error_response(Verb::post, trigger, 400,
+		"The request or capture duration is invalid");
+	registry.add_error_response(Verb::post, trigger, 503,
+		"The capture could not be started");
+
+	registry.add_json_request<WaveformDeleteDto>(Verb::delete_, waveforms,
+		"WaveformDelete", "Session selection and bulk-delete confirmation",
+		true, R"({"session_id":42,"all":false,"confirmed":false})");
+	registry.add_json_response<WaveformDto>(Verb::delete_, waveforms, 200,
+		"WaveformStatus", "Updated waveform status");
+	registry.add_error_response(Verb::delete_, waveforms, 400,
+		"The deletion selection is invalid");
+	registry.add_error_response(Verb::delete_, waveforms, 409,
+		"The selected waveform cannot be deleted");
+
+	constexpr std::string_view export_path = "/api/v1/waveforms/export";
+	registry.add_query_parameter(Verb::get, export_path, "session_id",
+		"integer", true, "Completed waveform session ID", {}, "42");
+	registry.add_query_parameter(Verb::get, export_path, "event_id", "string",
+		true, "Canonical event UUID within the waveform", {},
+		"d2f78547-4d73-46c2-bc69-c9cc763cc15a");
+	registry.add_query_parameter(Verb::get, export_path, "format", "string",
+		true, "Requested virtual export format", {"mncwf"}, "mncwf");
+	registry.add_binary_response(Verb::get, export_path, 200,
+		"application/x-mncwf", "Virtual event-specific waveform capture");
+	registry.add_error_response(Verb::get, export_path, 400,
+		"The export query is invalid");
+	registry.add_error_response(Verb::get, export_path, 404,
+		"The waveform session does not exist");
+	registry.add_error_response(Verb::get, export_path, 409,
+		"The waveform is incomplete or unavailable");
+	registry.add_error_response(Verb::get, export_path, 422,
+		"The event cannot be projected from the waveform");
+	registry.add_error_response(Verb::get, export_path, 503,
+		"Waveform acquisition is unavailable");
+
+	for (const auto &[path, attachment] : {
+		std::pair<std::string_view, bool>{
+			"/protected/waveforms/view/{filename}", false},
+		std::pair<std::string_view, bool>{
+			"/protected/waveforms/download/{filename}", true}}) {
+		registry.add_binary_response(Verb::get, path, 200,
+			"application/x-mncwf", "Retained waveform capture", {},
+			attachment);
+		registry.add_error_response(Verb::get, path, 404,
+			"The retained capture does not exist");
 	}
 }
 

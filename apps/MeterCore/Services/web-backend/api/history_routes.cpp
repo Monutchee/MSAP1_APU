@@ -1,5 +1,6 @@
 /** @file history_routes.cpp Bounded typed historian query endpoints. */
 
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -264,6 +265,34 @@ webengine::Response post_history_query(
 		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_history_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto capabilities_path =
+		"/api/v1/meter/history/capabilities";
+	registry.add_json_response<HistoryCapabilitiesDto>(V::get,
+		capabilities_path, 200, "HistoryCapabilities",
+		"Supported historian periods, attributes, and point limit");
+	registry.add_error_response(V::get, capabilities_path, 503,
+		"The historian is unavailable");
+
+	constexpr auto health_path = "/api/v1/meter/history/health";
+	registry.add_json_response<history::HistorianStatus>(V::get, health_path,
+		200, "HistorianHealth", "Historian durability and migration health");
+	registry.add_error_response(V::get, health_path, 503,
+		"The historian is unavailable");
+
+	constexpr auto query_path = "/api/v1/meter/history/query";
+	registry.add_json_request<HistoryQueryDto>(V::post, query_path,
+		"HistoryQuery", "Bounded half-open historian query");
+	registry.add_json_response<HistoryResponseDto>(V::post, query_path, 200,
+		"HistoryResponse", "Ordered historian points and continuation cursor");
+	registry.add_error_response(V::post, query_path, 400,
+		"The period, range, attributes, limit, or cursor is invalid");
+	registry.add_error_response(V::post, query_path, 503,
+		"The historian is unavailable");
 }
 
 } // namespace msap1::web::api
