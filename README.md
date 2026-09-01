@@ -343,8 +343,14 @@ positive is inductive/lagging and negative is capacitive/leading. Backend
 apparent power S is an independent authoritative quantity and need not equal
 the conventional P–Q₁ resultant `sqrt(P² + Q₁²)` in distorted or unbalanced
 conditions. Clients must not sum phase values to construct totals or label the
-difference as distortion power. The API does not currently publish THD,
-fundamental P₁/S₁ or power algorithm profile/version;
+difference as distortion power. Each channel returned by
+`GET /api/v1/meter/harmonics` includes a product-defined H₂–H₅₀ THD result,
+calculated as `100 * sqrt(sum(Hn², n=2..50)) / H1` from one complete atomic
+harmonic family. The result remains unavailable when the interval, channel,
+fundamental, qualified order range, or any included magnitude is invalid; it
+is never inferred from power factor or RMS values. This product metric does
+not assert IEC compliance or certification. The scalar power record still
+does not publish an authoritative S₁ or a complete P₁–Q₁–S₁ decomposition;
 those fields must remain unavailable rather than inferred.
 
 Energy quadrant selection uses simultaneous active power P and fundamental

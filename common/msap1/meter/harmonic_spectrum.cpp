@@ -1,6 +1,7 @@
 #include "msap1/meter/harmonic_spectrum.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
@@ -96,6 +97,54 @@ bool forward_of(std::uint32_t candidate, std::uint32_t baseline)
 }
 
 } // namespace
+
+HarmonicDistortion harmonic_distortion(
+	const HarmonicSpectrumSnapshot &snapshot, std::size_t channel)
+{
+	HarmonicDistortion result{};
+	if (!snapshot.interval_valid() ||
+	    (snapshot.aggregate_family() &&
+	     (!snapshot.aligned || snapshot.contaminated))) {
+		result.status = HarmonicDistortionStatus::interval_invalid;
+		return result;
+	}
+	if (channel >= snapshot.channels.size() ||
+	    (snapshot.valid_mask & (std::uint8_t{1} << channel)) == 0u) {
+		result.status = HarmonicDistortionStatus::channel_unavailable;
+		return result;
+	}
+
+	const auto &points = snapshot.channels[channel];
+	const auto &fundamental = points[0];
+	if (!fundamental.magnitude_valid ||
+	    fundamental.magnitude_micro_units == 0u) {
+		result.status = HarmonicDistortionStatus::fundamental_unavailable;
+		return result;
+	}
+	if (snapshot.qualified_max_order < result.last_order) {
+		result.status = HarmonicDistortionStatus::insufficient_order_range;
+		return result;
+	}
+
+	long double root_sum_square = 0.0L;
+	for (std::size_t order = result.first_order;
+	     order <= result.last_order; ++order) {
+		const auto &point = points[order - 1u];
+		if (!point.magnitude_valid) {
+			result.status = HarmonicDistortionStatus::harmonic_unavailable;
+			return result;
+		}
+		root_sum_square = std::hypot(
+			root_sum_square,
+			static_cast<long double>(point.magnitude_micro_units));
+	}
+
+	result.percent = static_cast<double>(
+		100.0L * root_sum_square /
+		static_cast<long double>(fundamental.magnitude_micro_units));
+	result.status = HarmonicDistortionStatus::valid;
+	return result;
+}
 
 HarmonicRecordChunk decode_harmonic_record(const MeterRecord &record)
 {
