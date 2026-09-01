@@ -31,7 +31,6 @@ using mnc::storage::sqlite::Database;
 using mnc::storage::sqlite::Statement;
 using mnc::storage::sqlite::Transaction;
 
-constexpr std::size_t maximum_list_page = 200;
 constexpr std::size_t maximum_preview = 1024u * 1024u;
 
 std::int32_t integer(DeliveryState state)
@@ -463,7 +462,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 std::vector<QueuedDelivery> SqliteOutboxRepository::due(
 	UtcNanoseconds now, std::size_t limit) const
 {
-	if (limit == 0 || limit > maximum_list_page)
+	if (limit == 0 || limit > maximum_artifact_list_page)
 		throw std::invalid_argument("outbox due limit is invalid");
 	auto &self = *implementation_;
 	std::scoped_lock lock(self.mutex);
@@ -491,7 +490,7 @@ ORDER BY d.next_attempt_ns,d.artifact_id,d.channel_id LIMIT ?
 std::vector<QueuedDelivery> SqliteOutboxRepository::claim_due(
 	UtcNanoseconds now, UtcNanoseconds lease_until, std::size_t limit)
 {
-	if (limit == 0 || limit > maximum_list_page || lease_until <= now)
+	if (limit == 0 || limit > maximum_artifact_list_page || lease_until <= now)
 		throw std::invalid_argument("outbox delivery lease is invalid");
 	auto &self = *implementation_;
 	std::scoped_lock lock(self.mutex);
@@ -642,7 +641,8 @@ ArtifactSummary SqliteOutboxRepository::Implementation::summary(
 std::vector<ArtifactSummary> SqliteOutboxRepository::list(
 	const ArtifactListFilter &filter) const
 {
-	if (filter.limit == 0 || filter.limit > maximum_list_page ||
+	if (filter.limit == 0 ||
+	    filter.limit > maximum_artifact_list_page ||
 	    filter.offset > 100000)
 		throw std::invalid_argument("artifact list page is invalid");
 	auto &self = *implementation_;

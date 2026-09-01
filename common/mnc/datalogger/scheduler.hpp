@@ -30,6 +30,7 @@ struct ScheduledJobStatus {
 
 struct GenerationRunResult {
 	std::size_t generated = 0;
+	std::size_t skipped_expired = 0;
 	bool storage_blocked = false;
 	bool source_deferred = false;
 };

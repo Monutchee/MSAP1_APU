@@ -461,6 +461,13 @@ if(BUILD_TESTING)
 		-Wall -Wextra -Wpedantic)
 	add_test(NAME data_sender_ipc_test COMMAND data_sender_ipc_test)
 
+	add_executable(msap1_datalogger_test
+		${PROJECT_SOURCE_DIR}/tests/msap1_datalogger_test.cpp)
+	target_link_libraries(msap1_datalogger_test PRIVATE msap1::datalogger)
+	target_compile_options(msap1_datalogger_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME msap1_datalogger_test COMMAND msap1_datalogger_test)
+
 	add_executable(data_sender_access_policy_test
 		${PROJECT_SOURCE_DIR}/tests/data_sender_access_policy_test.cpp)
 	target_include_directories(data_sender_access_policy_test PRIVATE
@@ -666,6 +673,13 @@ if(BUILD_TESTING)
     target_compile_options(service_manager_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME service_manager_test COMMAND service_manager_test)
+
+    add_executable(service_test
+        ${PROJECT_SOURCE_DIR}/tests/service_test.cpp)
+    target_link_libraries(service_test PRIVATE mnc::service)
+    target_compile_options(service_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME service_test COMMAND service_test)
 
     add_executable(logging_test ${PROJECT_SOURCE_DIR}/tests/logging_test.cpp)
     target_link_libraries(logging_test PRIVATE mnc::logging)

@@ -4,6 +4,7 @@
 #include "response.hpp"
 #include "routes.hpp"
 
+#include "mnc/datalogger/outbox_repository.hpp"
 #include "msap1/settings/definition/data_logging_settings.hpp"
 
 #include <algorithm>
@@ -168,7 +169,8 @@ void require_channel(const DataLoggingSettings &configuration,
 std::vector<std::string> all_artifact_ids(AppContext &app)
 {
 	std::vector<std::string> result;
-	constexpr std::uint32_t page_size = 500;
+	constexpr auto page_size = static_cast<std::uint32_t>(
+		mnc::datalogger::maximum_artifact_list_page);
 	for (std::uint64_t offset = 0;; offset += page_size) {
 		const auto page = app.data_sender.artifacts(offset, page_size);
 		for (const auto &artifact : page.artifacts)
@@ -258,7 +260,9 @@ webengine::Response get_data_logging_artifacts(
 			"offset", 0);
 		const auto limit = integer_parameter<std::uint32_t>(values,
 			"limit", 100);
-		if (limit == 0 || limit > 500 || offset > 100000)
+		if (limit == 0 ||
+		    limit > mnc::datalogger::maximum_artifact_list_page ||
+		    offset > 100000)
 			throw std::invalid_argument("artifact page is outside its bounds");
 		std::optional<std::int64_t> start;
 		std::optional<std::int64_t> end;

@@ -63,6 +63,8 @@ struct ArtifactDetail {
 	std::vector<QueuedDelivery> deliveries;
 };
 
+inline constexpr std::size_t maximum_artifact_list_page = 500;
+
 struct ArtifactListFilter {
 	std::optional<std::string> job_id;
 	std::optional<ArtifactState> state;

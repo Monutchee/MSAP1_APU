@@ -328,6 +328,26 @@ void retry_rejects_an_unknown_artifact()
 	require(rejected, "retry silently accepted an unknown artifact ID");
 }
 
+void artifact_list_bound_matches_the_external_api()
+{
+	TestTree tree("list-bound");
+	SqliteOutboxRepository repository(tree.root,
+		{16u * 1024u * 1024u, 0});
+	repository.initialize();
+	ArtifactListFilter filter;
+	filter.limit = maximum_artifact_list_page;
+	require(repository.list(filter).empty(),
+		"the documented maximum artifact page was rejected");
+	filter.limit = maximum_artifact_list_page + 1;
+	bool rejected = false;
+	try {
+		(void)repository.list(filter);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "an oversized artifact list page was accepted");
+}
+
 void completed_metadata_retention_never_prunes_local_archives()
 {
 	TestTree tree("metadata-retention");
@@ -392,6 +412,7 @@ int main()
 	automatic_channel_retry_preserves_durable_backoff();
 	queued_channel_references_protect_configuration();
 	retry_rejects_an_unknown_artifact();
+	artifact_list_bound_matches_the_external_api();
 	completed_metadata_retention_never_prunes_local_archives();
 	watermark_is_durable();
 }

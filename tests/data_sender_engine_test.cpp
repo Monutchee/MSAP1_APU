@@ -45,6 +45,7 @@ class FakeDatalogger final : public Datalogger {
 public:
 	mutable std::vector<UtcWindow> windows;
 	mutable bool unavailable = false;
+	std::optional<UtcNanoseconds> retained_from;
 
 	GeneratedDataset generate(const DatalogJobSnapshot &job,
 		UtcWindow window, UtcNanoseconds generated_at) const override
@@ -52,6 +53,9 @@ public:
 		if (unavailable)
 			throw DatalogError(DatalogErrorCode::SourceUnavailable,
 				"historian unavailable");
+		if (retained_from && window.start < *retained_from)
+			throw DatalogError(DatalogErrorCode::SourceRetentionGap,
+				"source window predates retained historian data");
 		windows.push_back(window);
 		GeneratedDataset result;
 		result.artifact_id = job.job_id + "-r" +
@@ -143,6 +147,36 @@ void source_failure_does_not_advance_the_watermark()
 	datalogger.unavailable = false;
 	require(engine.generate_due().generated == 1,
 		"pending generation window did not resume after historian recovery");
+}
+
+void expired_source_windows_are_skipped_without_fabricated_artifacts()
+{
+	TestTree tree("retention");
+	FakeClock clock;
+	FakeDatalogger datalogger;
+	DefaultMeterDataContentWriterFactory writers;
+	SqliteOutboxRepository outbox(tree.root,
+		{16u * 1024u * 1024u, 0});
+	outbox.initialize();
+	DataSenderEngine engine(datalogger, writers, outbox, clock);
+	engine.apply_jobs({job()});
+	datalogger.retained_from = 600 * second;
+	clock.value = 930 * second;
+	const auto catch_up = engine.generate_due(3);
+	require(catch_up.skipped_expired == 2 && catch_up.generated == 1 &&
+		!catch_up.source_deferred &&
+		outbox.watermark("job-1")->completed_through == 900 * second,
+		"expired source windows permanently blocked scheduler catch-up");
+	require(datalogger.windows ==
+		std::vector<UtcWindow>{{600 * second, 900 * second}},
+		"scheduler queried or fabricated an expired source window");
+	ArtifactListFilter filter;
+	filter.limit = 10;
+	const auto artifacts = outbox.list(filter);
+	require(artifacts.size() == 1 &&
+		artifacts.front().source_window ==
+			UtcWindow{600 * second, 900 * second},
+		"retention catch-up did not emit exactly the first retained window");
 }
 
 void configuration_revision_switches_at_a_future_boundary()
@@ -261,6 +295,7 @@ int main()
 {
 	new_jobs_start_at_next_boundary_and_catch_up_in_order();
 	source_failure_does_not_advance_the_watermark();
+	expired_source_windows_are_skipped_without_fabricated_artifacts();
 	configuration_revision_switches_at_a_future_boundary();
 	successful_channels_are_not_resent_when_a_sibling_retries();
 	local_only_never_calls_the_delivery_executor();

@@ -89,8 +89,11 @@ Msap1HistorianDataSource::query(mnc::meter::MeasurementPeriod period,
 		throw std::invalid_argument("historian query window is invalid");
 	try {
 		const auto status = historian_.status();
-		if (!status.healthy || status.migration_in_progress ||
-		    status.backfill_incomplete)
+		/* backfill_incomplete records a truthful gap before the retained
+		 * dataset boundary. It must not disable generation forever: the
+		 * per-dataset oldest timestamp below rejects only windows that
+		 * actually intersect that gap. */
+		if (!status.healthy || status.migration_in_progress)
 			throw mnc::datalogger::DatalogError(
 				mnc::datalogger::DatalogErrorCode::SourceUnavailable,
 				"historian is not ready for Data Sender generation");

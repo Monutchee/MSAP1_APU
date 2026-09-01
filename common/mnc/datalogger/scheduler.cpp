@@ -109,11 +109,12 @@ GenerationRunResult DataSenderEngine::generate_due(
 		jobs = jobs_;
 	}
 	GenerationRunResult result;
+	std::size_t processed_windows = 0;
 	const auto now = clock_.now();
 	for (const auto &job : jobs) {
 		if (!job.enabled)
 			continue;
-		while (result.generated < maximum_windows) {
+		while (processed_windows < maximum_windows) {
 			auto watermark = outbox_.watermark(job.snapshot.job_id);
 			if (!watermark || watermark->job_revision != job.snapshot.revision)
 				break;
@@ -131,6 +132,7 @@ GenerationRunResult DataSenderEngine::generate_due(
 				outbox_.store_watermark({job.snapshot.job_id,
 					job.snapshot.revision, window.end}, now);
 				++result.generated;
+				++processed_windows;
 				std::scoped_lock lock(jobs_mutex_);
 				const auto status = std::ranges::find(statuses_,
 					job.snapshot.job_id, &ScheduledJobStatus::job_id);
@@ -142,11 +144,31 @@ GenerationRunResult DataSenderEngine::generate_due(
 						window.end + job.snapshot.generation_interval_nanoseconds};
 				}
 			} catch (const DatalogError &error) {
-				std::scoped_lock lock(jobs_mutex_);
-				const auto status = std::ranges::find(statuses_,
-					job.snapshot.job_id, &ScheduledJobStatus::job_id);
-				if (status != statuses_.end())
-					status->last_error = error.what();
+				if (error.code() == DatalogErrorCode::SourceRetentionGap) {
+					outbox_.store_watermark({job.snapshot.job_id,
+						job.snapshot.revision, window.end}, now);
+					++result.skipped_expired;
+					++processed_windows;
+					std::scoped_lock lock(jobs_mutex_);
+					const auto status = std::ranges::find(statuses_,
+						job.snapshot.job_id,
+						&ScheduledJobStatus::job_id);
+					if (status != statuses_.end()) {
+						status->last_error = error.what();
+						status->next_window = UtcWindow{window.end,
+							window.end +
+							job.snapshot.generation_interval_nanoseconds};
+					}
+					continue;
+				}
+				{
+					std::scoped_lock lock(jobs_mutex_);
+					const auto status = std::ranges::find(statuses_,
+						job.snapshot.job_id,
+						&ScheduledJobStatus::job_id);
+					if (status != statuses_.end())
+						status->last_error = error.what();
+				}
 				if (error.code() == DatalogErrorCode::StorageFailure)
 					result.storage_blocked = true;
 				else
