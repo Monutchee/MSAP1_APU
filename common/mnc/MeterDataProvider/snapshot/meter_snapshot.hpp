@@ -98,6 +98,32 @@ struct DemandSnapshotMetadata {
 	bool incomplete_input = false;
 };
 
+/** Exact audit provenance of an IEC 61000-4-30 ten-second frequency result. */
+struct Frequency10sSnapshotMetadata {
+	std::uint64_t interval_end_sample_index = 0;
+	std::uint64_t utc_start_nanoseconds = 0;
+	std::uint64_t utc_end_nanoseconds = 0;
+	std::uint64_t utc_uncertainty_nanoseconds = 0;
+	std::uint32_t measured_sample_rate_millihz = 0;
+	std::uint32_t source_sequence = 0;
+	std::uint32_t boundary_generation = 0;
+	std::uint32_t source_status = 0;
+	std::uint32_t status = 0;
+	std::uint32_t reasons = 0;
+	std::uint32_t observer_drop_count = 0;
+	std::uint8_t guard_flags = 0;
+	std::uint32_t observed_crossings = 0;
+	std::uint32_t included_crossings = 0;
+	std::uint32_t rejected_cycles = 0;
+	std::uint64_t duration_q16_samples = 0;
+	std::int64_t first_crossing_q16_samples = 0;
+	std::int64_t last_crossing_q16_samples = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t reference_channel = 0;
+	std::uint8_t filter_profile = 0;
+	std::uint8_t calibration_profile = 0;
+};
+
 struct MeterSnapshot {
 	MeasurementPeriod period = MeasurementPeriod::Basic;
 	std::uint64_t sequence = 0;
@@ -106,6 +132,7 @@ struct MeterSnapshot {
 	std::optional<MeterSnapshotTiming> timing;
 	std::optional<EnergySnapshotMetadata> energy;
 	std::optional<DemandSnapshotMetadata> demand;
+	std::optional<Frequency10sSnapshotMetadata> frequency_10s;
 	std::vector<MeterAttributeValue> values;
 };
 

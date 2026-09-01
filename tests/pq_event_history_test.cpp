@@ -50,6 +50,7 @@ std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 }
 

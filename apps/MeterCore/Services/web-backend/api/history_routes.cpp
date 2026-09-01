@@ -83,6 +83,7 @@ std::string quality_name(MeasurementQuality quality)
 MeasurementPeriod parse_period(std::string_view value)
 {
 	if (value == "basic") return MeasurementPeriod::Basic;
+	if (value == "seconds_10") return MeasurementPeriod::Seconds10;
 	if (value == "cycles_150_180") return MeasurementPeriod::Cycles150_180;
 	if (value == "minutes_10") return MeasurementPeriod::Min10;
 	if (value == "hours_2") return MeasurementPeriod::Hour2;
@@ -103,6 +104,7 @@ std::string period_name(MeasurementPeriod period)
 {
 	switch (period) {
 	case MeasurementPeriod::Basic: return "basic";
+	case MeasurementPeriod::Seconds10: return "seconds_10";
 	case MeasurementPeriod::Cycles150_180: return "cycles_150_180";
 	case MeasurementPeriod::Min10: return "minutes_10";
 	case MeasurementPeriod::Hour2: return "hours_2";

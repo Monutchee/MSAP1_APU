@@ -76,8 +76,9 @@ inline constexpr const char *acquisition_socket_path =
  * progress so clients cannot mistake an in-progress index for an empty
  * archive.
  * 41: waveform-list carries bounded origin-filtered pagination, and
- * waveform-lookup resolves one retained session outside the recent page. */
-inline constexpr std::uint16_t acquisition_ipc_version = 41;
+ * waveform-lookup resolves one retained session outside the recent page.
+ * 42: typed meter snapshots add the FREQUENCY-10S audit metadata block. */
+inline constexpr std::uint16_t acquisition_ipc_version = 42;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();

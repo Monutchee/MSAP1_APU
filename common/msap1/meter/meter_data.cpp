@@ -17,7 +17,7 @@ namespace {
 std::size_t period_index(MeasurementPeriod period)
 {
 	const auto index = static_cast<std::size_t>(period);
-	if (index >= 7)
+	if (index >= 8)
 		throw std::invalid_argument("invalid measurement period");
 	return index;
 }
@@ -133,6 +133,8 @@ void MeterLatestStore::apply(const MeterUpdate &update)
 		slot->values.demand = *update.demand;
 	if (update.power_quality)
 		slot->values.power_quality = *update.power_quality;
+	if (update.frequency_10s)
+		slot->frequency_10s = update.frequency_10s;
 	if (update.timing)
 		slot->timing = update.timing;
 	if (update.aggregate_timing)
@@ -1490,6 +1492,317 @@ MeterUpdate decode_two_hour_meter_record(const MeterRecord &record,
 	return update;
 }
 
+namespace {
+
+std::uint64_t rounded_divide_ties_to_even(std::uint64_t numerator,
+	std::uint64_t denominator)
+{
+	if (denominator == 0u)
+		throw std::invalid_argument(
+			"frequency 10-second result has a zero duration");
+	const auto quotient = numerator / denominator;
+	const auto remainder = numerator % denominator;
+	const auto complement = denominator - remainder;
+	return quotient + static_cast<std::uint64_t>(
+		remainder > complement ||
+		(remainder == complement && (quotient & 1u) != 0u));
+}
+
+std::uint32_t expected_frequency_10s_status(const MeterRecord &record,
+	std::uint32_t reasons)
+{
+	const auto source = record.word(meter_frequency_10s_source_status_word);
+	std::uint32_t status = 0u;
+	if ((reasons & meter_frequency_10s_reason_arithmetic) != 0u)
+		status |= meter_frequency_10s_status_arithmetic_error;
+	if (reasons == 0u)
+		status |= meter_frequency_10s_status_result_valid;
+	if ((source & (1u << 0u)) != 0u)
+		status |= meter_frequency_10s_status_time_aligned;
+	if ((source & (1u << 10u)) != 0u)
+		status |= meter_frequency_10s_status_profile_supported;
+	if ((source & (1u << 1u)) != 0u)
+		status |= meter_frequency_10s_status_time_synchronized;
+	if ((source & (1u << 3u)) != 0u)
+		status |= meter_frequency_10s_status_filter_ready;
+	if ((source & (1u << 4u)) != 0u)
+		status |= meter_frequency_10s_status_reference_valid;
+	if ((source & ((1u << 5u) | (1u << 8u))) != 0u)
+		status |= meter_frequency_10s_status_discontinuity;
+	if ((source & (1u << 6u)) != 0u)
+		status |= meter_frequency_10s_status_crossing_overflow;
+	if ((source & (1u << 7u)) != 0u ||
+	    record.word(meter_frequency_10s_observer_drop_word) != 0u)
+		status |= meter_frequency_10s_status_observer_drop;
+	if ((reasons & meter_frequency_10s_reason_insufficient_crossings) != 0u)
+		status |= meter_frequency_10s_status_insufficient_crossings;
+	if ((reasons & (meter_frequency_10s_reason_out_of_range |
+			meter_frequency_10s_reason_cycle_geometry)) != 0u)
+		status |= meter_frequency_10s_status_out_of_range;
+	if ((reasons & meter_frequency_10s_reason_transport_gap) != 0u)
+		status |= meter_frequency_10s_status_transport_gap;
+	if ((source & (1u << 9u)) != 0u)
+		status |= meter_frequency_10s_status_calibration_valid;
+	if ((source & (1u << 2u)) != 0u)
+		status |= meter_frequency_10s_status_sample_rate_valid;
+	if ((source & (1u << 8u)) != 0u)
+		status |= meter_frequency_10s_status_resynchronized;
+	return status;
+}
+
+} // namespace
+
+MeterUpdate decode_frequency_10s_meter_record(const MeterRecord &record,
+	SystemTime received_at)
+{
+	(void)received_at;
+	if (!record.header_valid() ||
+	    record.record_format() != meter_frequency_10s_format)
+		throw std::invalid_argument("invalid frequency 10-second record");
+	if (record.word(12) != 0u)
+		throw std::invalid_argument(
+			"frequency 10-second reserved envelope word is nonzero");
+	for (std::size_t word = 42u; word < meter_record_word_count; ++word)
+		if (record.word(word) != 0u)
+			throw std::invalid_argument(
+				"frequency 10-second reserved tail is nonzero");
+
+	const auto nominal_hz = record.frequency_10s_nominal_hz();
+	if (nominal_hz != 50u && nominal_hz != 60u)
+		throw std::invalid_argument(
+			"frequency 10-second nominal frequency is invalid");
+	if (record.sample_rate_hz() == 0u)
+		throw std::invalid_argument(
+			"frequency 10-second sample rate is zero");
+	const auto first_sample = record.first_sample_index();
+	const auto end_sample = record.frequency_10s_end_sample_index();
+	if (end_sample <= first_sample)
+		throw std::invalid_argument(
+			"frequency 10-second sample interval is empty or reversed");
+	const auto sample_span = end_sample - first_sample;
+	if (sample_span > std::numeric_limits<std::uint32_t>::max() ||
+	    record.block_sample_count() != sample_span ||
+	    record.frequency_10s_last_sample_index() != end_sample - 1u)
+		throw std::invalid_argument(
+			"frequency 10-second sample anchors disagree");
+
+	const auto utc_start = record.frequency_10s_utc_start_nanoseconds();
+	const auto utc_end = record.frequency_10s_utc_end_nanoseconds();
+	if (utc_end <= utc_start || utc_end - utc_start != 10'000'000'000ull ||
+	    utc_end > static_cast<std::uint64_t>(
+		std::numeric_limits<std::int64_t>::max()))
+		throw std::invalid_argument(
+			"frequency 10-second UTC interval is not exactly ten seconds");
+	if (record.word(meter_frequency_10s_source_sequence_word) !=
+	    record.sequence())
+		throw std::invalid_argument(
+			"frequency 10-second source sequence disagrees");
+	if (record.emit_drops() !=
+	    record.word(meter_frequency_10s_observer_drop_word))
+		throw std::invalid_argument(
+			"frequency 10-second observer drop counters disagree");
+
+	const auto source_status =
+		record.word(meter_frequency_10s_source_status_word);
+	const auto reasons = record.word(meter_frequency_10s_reason_word);
+	const auto status = record.status();
+	if ((source_status & ~meter_frequency_10s_source_status_mask) != 0u ||
+	    (reasons & ~meter_frequency_10s_reason_mask) != 0u ||
+	    (status & ~meter_frequency_10s_status_mask) != 0u ||
+	    (record.word(meter_frequency_10s_guard_flags_word) &
+	     ~meter_frequency_10s_guard_flags_mask) != 0u)
+		throw std::invalid_argument(
+			"frequency 10-second flags use reserved bits");
+	if (status != expected_frequency_10s_status(record, reasons))
+		throw std::invalid_argument(
+			"frequency 10-second status and reasons disagree");
+
+	std::uint32_t mandatory_reasons = 0u;
+	if (record.sample_rate_hz() != 128000u ||
+	    record.frequency_10s_reference_channel() != 6u ||
+	    record.frequency_10s_filter_profile() != 1u ||
+	    record.frequency_10s_calibration_profile() != 1u ||
+	    (source_status & (1u << 10u)) == 0u)
+		mandatory_reasons |=
+			meter_frequency_10s_reason_unsupported_profile;
+	if ((source_status & (1u << 0u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_boundary_invalid;
+	if ((source_status & (1u << 1u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_time_unsynchronized;
+	if ((source_status & (1u << 2u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_sample_rate_invalid;
+	if ((source_status & (1u << 3u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_filter_warmup;
+	if ((source_status & (1u << 4u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_reference_invalid;
+	if ((source_status & (1u << 9u)) == 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_calibration_invalid;
+	if ((source_status & ((1u << 5u) | (1u << 8u))) != 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_discontinuity;
+	if ((source_status & (1u << 6u)) != 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_crossing_overflow;
+	if ((source_status & (1u << 7u)) != 0u || record.emit_drops() != 0u)
+		mandatory_reasons |= meter_frequency_10s_reason_observer_drop;
+	if (record.frequency_10s_utc_uncertainty_nanoseconds() > 1'000'000ull)
+		mandatory_reasons |= meter_frequency_10s_reason_time_uncertainty;
+	const auto measured_rate =
+		record.word(meter_frequency_10s_measured_rate_word);
+	const auto expected_millisamples =
+		static_cast<std::uint64_t>(measured_rate) * 10u;
+	const auto actual_millisamples = sample_span * 1000u;
+	const auto span_error = expected_millisamples > actual_millisamples
+		? expected_millisamples - actual_millisamples
+		: actual_millisamples - expected_millisamples;
+	if (span_error > 2000u)
+		mandatory_reasons |= meter_frequency_10s_reason_time_geometry;
+	if ((reasons & mandatory_reasons) != mandatory_reasons)
+		throw std::invalid_argument(
+			"frequency 10-second record omits a mandatory rejection reason");
+
+	const auto observed =
+		record.word(meter_frequency_10s_observed_crossings_word);
+	const auto included =
+		record.word(meter_frequency_10s_included_crossings_word);
+	const auto cycles = record.word(meter_frequency_10s_cycle_count_word);
+	const auto rejected =
+		record.word(meter_frequency_10s_rejected_cycles_word);
+	const auto duration =
+		record.unsigned64(meter_frequency_10s_duration_q16_word);
+	const auto first_crossing =
+		record.signed64(meter_frequency_10s_first_crossing_q16_word);
+	const auto last_crossing =
+		record.signed64(meter_frequency_10s_last_crossing_q16_word);
+	const auto interval_q16 = sample_span << 16u;
+	if (observed > meter_frequency_10s_max_observed_crossings ||
+	    included > observed || cycles != (included == 0u ? 0u : included - 1u) ||
+	    rejected > cycles)
+		throw std::invalid_argument(
+			"frequency 10-second crossing counts disagree");
+	if (included == 0u) {
+		if (first_crossing != 0 || last_crossing != 0 || duration != 0u)
+			throw std::invalid_argument(
+				"frequency 10-second empty crossing geometry is nonzero");
+	} else if (first_crossing < 0 || last_crossing < first_crossing ||
+		   static_cast<std::uint64_t>(last_crossing) > interval_q16 ||
+		   duration != (included >= 2u
+			? static_cast<std::uint64_t>(last_crossing - first_crossing)
+			: 0u)) {
+		throw std::invalid_argument(
+			"frequency 10-second crossing geometry is invalid");
+	}
+	const bool insufficient = cycles == 0u || duration == 0u;
+	if (((reasons & meter_frequency_10s_reason_insufficient_crossings) != 0u) !=
+	    insufficient ||
+	    ((reasons & meter_frequency_10s_reason_cycle_geometry) != 0u) !=
+		(rejected != 0u))
+		throw std::invalid_argument(
+			"frequency 10-second geometry reasons disagree");
+
+	std::uint64_t calculated_frequency = 0u;
+	if (!insufficient) {
+		const auto scaled_rate = static_cast<std::uint64_t>(measured_rate)
+			<< 16u;
+		if (scaled_rate > std::numeric_limits<std::uint64_t>::max() /
+				cycles)
+			throw std::invalid_argument(
+				"frequency 10-second arithmetic overflows");
+		calculated_frequency = rounded_divide_ties_to_even(
+			scaled_rate * cycles, duration);
+	}
+	const auto minimum = nominal_hz == 50u ? 42500u : 51000u;
+	const auto maximum = nominal_hz == 50u ? 57500u : 69000u;
+	const bool out_of_range = calculated_frequency != 0u &&
+		(calculated_frequency < minimum || calculated_frequency > maximum);
+	if (((reasons & meter_frequency_10s_reason_out_of_range) != 0u) !=
+	    out_of_range)
+		throw std::invalid_argument(
+			"frequency 10-second range reason disagrees");
+	if ((reasons & meter_frequency_10s_reason_arithmetic) != 0u)
+		throw std::invalid_argument(
+			"frequency 10-second impossible arithmetic reason");
+
+	const bool valid = reasons == 0u;
+	const auto published_frequency =
+		record.word(meter_frequency_10s_value_word);
+	if (record.valid_mask() != (valid ? (1u << 6u) : 0u) ||
+	    (valid && published_frequency != calculated_frequency) ||
+	    (!valid && published_frequency != 0u))
+		throw std::invalid_argument(
+			"frequency 10-second result validity disagrees");
+
+	const auto quality = valid
+		? MeasurementQuality::valid
+		: (reasons & meter_frequency_10s_reason_arithmetic) != 0u
+			? MeasurementQuality::arithmetic_error
+		: (reasons & (meter_frequency_10s_reason_out_of_range |
+				meter_frequency_10s_reason_cycle_geometry)) != 0u
+			? MeasurementQuality::out_of_range
+			: MeasurementQuality::invalid;
+	const auto measured_at = SystemTime{
+		std::chrono::nanoseconds{static_cast<std::int64_t>(utc_end)}};
+	const SampleWindow window{record.block_sample_count(),
+		std::chrono::seconds{10}};
+	FundamentalValues values{};
+	values.frequency = {static_cast<std::int64_t>(published_frequency),
+		quality, record.sequence(), measured_at, window};
+
+	MeterUpdate update{};
+	update.period = MeasurementPeriod::Seconds10;
+	update.kind = RecordKind::frequency_10s;
+	update.sequence = record.sequence();
+	update.configuration_generation = record.configuration_generation();
+	update.fundamental = values;
+	meter::BlockTiming timing{};
+	timing.sequence = record.sequence();
+	timing.configuration_generation = record.configuration_generation();
+	timing.first_sample_index = first_sample;
+	timing.sample_count = record.block_sample_count();
+	timing.sample_rate_hz = record.sample_rate_hz();
+	timing.cycle_count = static_cast<std::uint16_t>(cycles);
+	timing.nominal_frequency = nominal_hz == 50u
+		? NominalFrequency::Hz50 : NominalFrequency::Hz60;
+	timing.time_quality =
+		(status & meter_frequency_10s_status_time_synchronized) != 0u &&
+		record.frequency_10s_utc_uncertainty_nanoseconds() <= 1'000'000ull
+			? TimeQuality::Synchronized : TimeQuality::Unsynchronized;
+	timing.utc_start = SystemTime{
+		std::chrono::nanoseconds{static_cast<std::int64_t>(utc_start)}};
+	timing.utc_uncertainty_ns =
+		record.frequency_10s_utc_uncertainty_nanoseconds();
+	update.timing = timing;
+	update.frequency_10s = Frequency10sMetadata{
+		.interval_end_sample_index = end_sample,
+		.utc_start_nanoseconds = utc_start,
+		.utc_end_nanoseconds = utc_end,
+		.utc_uncertainty_nanoseconds =
+			record.frequency_10s_utc_uncertainty_nanoseconds(),
+		.measured_sample_rate_millihz = measured_rate,
+		.source_sequence =
+			record.word(meter_frequency_10s_source_sequence_word),
+		.boundary_generation =
+			record.word(meter_frequency_10s_boundary_generation_word),
+		.source_status = source_status,
+		.status = status,
+		.reasons = reasons,
+		.observer_drop_count =
+			record.word(meter_frequency_10s_observer_drop_word),
+		.guard_flags = static_cast<std::uint8_t>(
+			record.word(meter_frequency_10s_guard_flags_word)),
+		.observed_crossings = observed,
+		.included_crossings = included,
+		.rejected_cycles = rejected,
+		.duration_q16_samples = duration,
+		.first_crossing_q16_samples = first_crossing,
+		.last_crossing_q16_samples = last_crossing,
+		.nominal_frequency_hz = nominal_hz,
+		.reference_channel = record.frequency_10s_reference_channel(),
+		.filter_profile = record.frequency_10s_filter_profile(),
+		.calibration_profile =
+			record.frequency_10s_calibration_profile(),
+	};
+	return update;
+}
+
 void MeterDecoderRegistry::register_decoder(std::uint32_t record_format,
 					      Decoder decoder)
 {
@@ -1511,6 +1824,10 @@ MeterUpdate MeterDecoderRegistry::decode(const MeterRecord &record,
 MeterDecoderRegistry MeterDecoderRegistry::with_builtin_decoders()
 {
 	MeterDecoderRegistry result;
+	result.register_decoder(meter_frequency_10s_format,
+		[](const MeterRecord &record, SystemTime received_at) {
+			return decode_frequency_10s_meter_record(record, received_at);
+		});
 	result.register_decoder(meter_demand_format,
 		[](const MeterRecord &record, SystemTime received_at) {
 			return decode_demand_meter_record(record, received_at);

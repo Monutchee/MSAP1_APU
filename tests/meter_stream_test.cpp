@@ -639,6 +639,7 @@ void historian_persists_atomic_m17_boundary_snapshots()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	const msap1::history::HistoryQuery energy_query{
 		.period = msap1::MeasurementPeriod::Min10,
@@ -693,6 +694,60 @@ void historian_persists_atomic_m17_boundary_snapshots()
 	remove_database(path);
 }
 
+void historian_persists_typed_frequency_10s_result()
+{
+	using D = mnc::meter_stream::DatabaseDataset;
+	using B = mnc::meter_stream::StorageBackend;
+	const auto path = temporary_database("history-frequency-10s-test");
+	remove_database(path);
+	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> policies{
+		{D::basic, B::memory, {}},
+		{D::cycles_150_180, B::persistent, {}},
+		{D::minutes_10, B::persistent, {}},
+		{D::hours_2, B::persistent, {}},
+		{D::harmonic_cycles_150_180, B::memory, {}},
+		{D::harmonic_minutes_10, B::persistent, {}},
+		{D::harmonic_hours_2, B::persistent, {}},
+		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
+	};
+	constexpr std::int64_t utc_end = 610'000'000'000ll;
+	const msap1::history::HistoryQuery query{
+		.period = msap1::MeasurementPeriod::Seconds10,
+		.attributes = {mnc::meter::MeterAttributeId::Frequency},
+		.start_nanoseconds = utc_end - 1,
+		.end_nanoseconds = utc_end + 1,
+		.limit = 4,
+		.after = std::nullopt,
+	};
+	{
+		msap1::history::MeterHistoryStore history(path, policies);
+		msap1::MeterUpdate update{};
+		update.period = msap1::MeasurementPeriod::Seconds10;
+		update.kind = msap1::RecordKind::frequency_10s;
+		update.sequence = 700;
+		update.configuration_generation = 12;
+		update.fundamental.emplace();
+		update.fundamental->frequency = {
+			50'001, msap1::MeasurementQuality::valid, 700,
+			std::chrono::system_clock::time_point{
+				std::chrono::nanoseconds{utc_end}},
+			{1'280'000, std::chrono::seconds{10}}};
+		history.append(update, 800, utc_end);
+		const auto points = history.query(query);
+		require(points.size() == 1 && points.front().value == 50'001 &&
+			points.front().quality == msap1::MeasurementQuality::valid &&
+			points.front().source_sequence == 700,
+			"ten-second frequency did not route to its typed historian tier");
+	}
+	{
+		msap1::history::MeterHistoryStore reopened(path, policies);
+		require(reopened.query(query).size() == 1,
+			"ten-second frequency did not survive historian restart");
+	}
+	remove_database(path);
+}
+
 void historian_persists_complete_m19_scalar_projection()
 {
 	using D = mnc::meter_stream::DatabaseDataset;
@@ -709,6 +764,7 @@ void historian_persists_complete_m19_scalar_projection()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	{
 	msap1::history::MeterHistoryStore history(path, policies);
@@ -841,6 +897,7 @@ void historian_wal_stays_bounded_under_sustained_appends()
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
 			{D::demand, B::persistent, {}},
+			{D::seconds_10, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		/* Enough commits that SQLite's 1000-page auto-checkpoint must fire
@@ -883,6 +940,7 @@ void historian_preserves_quality_and_storage_routing()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -931,6 +989,7 @@ void historian_status_reports_incremental_storage_and_indexed_range()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	auto verify = [](const msap1::history::HistorianStatus &status) {
 		const auto basic = std::ranges::find_if(status.datasets,
@@ -983,6 +1042,7 @@ void historian_commits_harmonics_as_one_durable_family()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	auto family_count = [](const msap1::history::HistorianStatus &status) {
 		const auto dataset = std::ranges::find_if(status.datasets,
@@ -1056,6 +1116,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
 			{D::demand, B::persistent, {}},
+			{D::seconds_10, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 12; ++cursor)
@@ -1090,6 +1151,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
 			{D::demand, B::persistent, {}},
+			{D::seconds_10, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 5; ++cursor)
@@ -1116,6 +1178,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
 			{D::demand, B::persistent, {}},
+			{D::seconds_10, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 20; ++cursor)
@@ -1142,6 +1205,7 @@ void historian_enforces_retention_without_rescanning()
 			{D::harmonic_minutes_10, B::persistent, {}},
 			{D::harmonic_hours_2, B::persistent, {}},
 			{D::demand, B::persistent, {}},
+			{D::seconds_10, B::persistent, {}},
 		};
 		msap1::history::MeterHistoryStore history(path, policies);
 		for (std::uint64_t cursor = 1; cursor <= 6; ++cursor)
@@ -1170,6 +1234,7 @@ void historian_maintenance_preserves_explicit_clear_boundary()
 		{D::harmonic_minutes_10, B::persistent, {}},
 		{D::harmonic_hours_2, B::persistent, {}},
 		{D::demand, B::persistent, {}},
+		{D::seconds_10, B::persistent, {}},
 	};
 	{
 		msap1::history::MeterHistoryStore history(path, policies);
@@ -1251,6 +1316,7 @@ int main()
 	malformed_policies_are_rejected();
 	historian_preserves_quality_and_storage_routing();
 	historian_persists_atomic_m17_boundary_snapshots();
+	historian_persists_typed_frequency_10s_result();
 	historian_persists_complete_m19_scalar_projection();
 	historian_status_reports_incremental_storage_and_indexed_range();
 	historian_commits_harmonics_as_one_durable_family();

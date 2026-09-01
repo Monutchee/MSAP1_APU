@@ -132,6 +132,7 @@ void MeterRecordIngestor::begin_epoch()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_frequency_10s_sequence_.reset();
 	last_pq_lifecycle_sequence_.reset();
 	latest_pq_lifecycle_.reset();
 	last_flicker_sequence_.reset();
@@ -148,6 +149,7 @@ void MeterRecordIngestor::begin_epoch()
 	aggregate_sequence_gaps_ = 0;
 	ten_minute_sequence_gaps_ = 0;
 	two_hour_sequence_gaps_ = 0;
+	frequency_10s_sequence_gaps_ = 0;
 	pq_lifecycle_sequence_gaps_ = 0;
 	flicker_sequence_gaps_ = 0;
 	mains_signal_sequence_gaps_ = 0;
@@ -173,6 +175,7 @@ void MeterRecordIngestor::clear_latest()
 	last_aggregate_sequence_.reset();
 	last_ten_minute_sequence_.reset();
 	last_two_hour_sequence_.reset();
+	last_frequency_10s_sequence_.reset();
 	last_pq_lifecycle_sequence_.reset();
 	latest_pq_lifecycle_.reset();
 	last_flicker_sequence_.reset();
@@ -464,6 +467,39 @@ bool MeterRecordIngestor::track_two_hour_continuity(
 	note_invalid_record();
 	log_rejected_record(
 		"stale or out-of-order two-hour sequence (expected " +
+			std::to_string(expected) + ", received " +
+			std::to_string(received) + ")",
+		"meter_record_stale_rejected", record);
+	return false;
+}
+
+/* R5C1 owns the authoritative ten-second frequency sequence. It is wholly
+ * independent of Basic and every aggregate tier; valid and explicitly
+ * invalid placeholders both advance this baseline. */
+bool MeterRecordIngestor::track_frequency_10s_continuity(
+	const msap1::MeterRecord &record)
+{
+	if (!last_frequency_10s_sequence_)
+		return true;
+	const auto expected = *last_frequency_10s_sequence_ + 1u;
+	const auto received = record.sequence();
+	const auto forward_distance = received - expected;
+	if (forward_distance == 0u)
+		return true;
+	if (forward_distance < (std::uint32_t{1} << 31u)) {
+		frequency_10s_sequence_gaps_ += forward_distance;
+		log_message(dma_log, mnc::logging::Priority::warning,
+			"frequency 10-second record sequence gap: expected " +
+				std::to_string(expected) + ", got " +
+				std::to_string(received),
+			"meter_frequency_10s_sequence_gap",
+			{{"MNC_EXPECTED_SEQUENCE", std::to_string(expected)},
+			 {"MNC_SEQUENCE", std::to_string(received)}});
+		return true;
+	}
+	note_invalid_record();
+	log_rejected_record(
+		"stale or out-of-order frequency 10-second sequence (expected " +
 			std::to_string(expected) + ", received " +
 			std::to_string(received) + ")",
 		"meter_record_stale_rejected", record);
@@ -1110,6 +1146,8 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		record.record_format() == msap1::meter_ten_minute_format;
 	const bool two_hour =
 		record.record_format() == msap1::meter_two_hour_format;
+	const bool frequency_10s =
+		record.record_format() == msap1::meter_frequency_10s_format;
 	const bool open_preview =
 		record.record_format() == msap1::meter_ten_minute_open_format ||
 		record.record_format() == msap1::meter_two_hour_open_format;
@@ -1118,7 +1156,8 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 	 * authoritative completed stream lost a result. */
 	if (!sibling && !open_preview) {
 		const auto continuous =
-			aggregate ? track_aggregate_continuity(record)
+			frequency_10s ? track_frequency_10s_continuity(record)
+			: aggregate ? track_aggregate_continuity(record)
 			: ten_minute ? track_ten_minute_continuity(record)
 			: two_hour ? track_two_hour_continuity(record)
 				     : track_basic_continuity(record);
@@ -1162,7 +1201,9 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 			  sample_index_words_hex(record)}});
 		return;
 	}
-	if (update.timing)
+	/* FREQUENCY-10S already carries its normative UTC endpoints. Restamping
+	 * it from the timebase at ingest time would rewrite the measurement. */
+	if (update.timing && !frequency_10s)
 		stamp_time_state(*update.timing, timebase_);
 	if (update.aggregate_timing)
 		stamp_time_state(*update.aggregate_timing, timebase_);
@@ -1264,6 +1305,8 @@ void MeterRecordIngestor::accept(const msap1::MeterRecord &record)
 		 * producer sequence. Its four records must never replace a shorter
 		 * tier's raw-record cache or continuity baseline. */
 		last_two_hour_sequence_ = record.sequence();
+	} else if (frequency_10s) {
+		last_frequency_10s_sequence_ = record.sequence();
 	} else if (!open_preview &&
 		   record.record_format() == msap1::meter_periodic_format) {
 		/* ONLY the BASIC record refreshes the instantaneous-readings

@@ -31,6 +31,8 @@ enum class DatabaseDataset : std::uint8_t {
 	harmonic_hours_2,
 	/* UTC ten-minute M17 demand snapshots; appended for IPC stability. */
 	demand,
+	/* UTC-aligned IEC 61000-4-30 ten-second frequency results. */
+	seconds_10,
 };
 
 struct RetentionPolicy {
@@ -90,6 +92,7 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::harmonic_minutes_10:
 	case DatabaseDataset::harmonic_hours_2:
 	case DatabaseDataset::demand:
+	case DatabaseDataset::seconds_10:
 		break;
 	default:
 		throw std::invalid_argument("unknown database dataset");
@@ -124,6 +127,7 @@ inline void validate_database_policy(const DatabaseStoragePolicy &policy)
 	case DatabaseDataset::harmonic_minutes_10: return "harmonic_minutes_10";
 	case DatabaseDataset::harmonic_hours_2: return "harmonic_hours_2";
 	case DatabaseDataset::demand: return "demand";
+	case DatabaseDataset::seconds_10: return "seconds_10";
 	}
 	return "unknown";
 }

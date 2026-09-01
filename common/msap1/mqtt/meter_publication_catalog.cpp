@@ -52,6 +52,7 @@ mnc::meter::MeasurementPeriod MeterPublicationCatalog::period(std::string_view i
 {
 	using Period = mnc::meter::MeasurementPeriod;
 	if (id == "basic") return Period::Basic;
+	if (id == "seconds10") return Period::Seconds10;
 	if (id == "cycles150_180") return Period::Cycles150_180;
 	if (id == "min10") return Period::Min10;
 	if (id == "hour2") return Period::Hour2;
@@ -66,6 +67,7 @@ std::string MeterPublicationCatalog::period_id(
 {
 	switch (period) {
 	case mnc::meter::MeasurementPeriod::Basic: return "basic";
+	case mnc::meter::MeasurementPeriod::Seconds10: return "seconds10";
 	case mnc::meter::MeasurementPeriod::Cycles150_180:
 		return "cycles150_180";
 	case mnc::meter::MeasurementPeriod::Min10: return "min10";

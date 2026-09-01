@@ -132,7 +132,7 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 41 includes bounded
+little-endian product payloads. Acquisition IPC version 42 includes bounded
 waveform archive pagination, trigger-origin filtering, exact retained-session
 lookup, and archive-discovery progress in addition to typed meter snapshot
 selection by period and attribute set. `MeterDataProvider` publishes

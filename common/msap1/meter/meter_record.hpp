@@ -175,6 +175,113 @@ inline constexpr std::uint32_t meter_pq_event_format = 0x000B0001u;
 inline constexpr std::uint32_t meter_pq_event_lifecycle_format = 0x00060001u;
 inline constexpr std::uint32_t meter_flicker_format = 0x000E0001u;
 inline constexpr std::uint32_t meter_mains_signal_format = 0x000F0001u;
+
+/* FREQUENCY-10S v1 (M20): the R5C1-authoritative IEC 61000-4-30
+ * UTC-aligned ten-second frequency result. The record retains the common
+ * envelope, carries an exclusive sample-domain end and exact UTC endpoints,
+ * and preserves the PL observer provenance needed to audit every invalid
+ * interval. Only reference channel 6 is certified by this product profile. */
+inline constexpr std::uint32_t meter_frequency_10s_format = 0x00280001u;
+inline constexpr std::size_t meter_frequency_10s_last_sample_word = 14u;
+inline constexpr std::size_t meter_frequency_10s_value_word = 16u;
+inline constexpr std::size_t meter_frequency_10s_cycle_count_word = 17u;
+inline constexpr std::size_t meter_frequency_10s_duration_q16_word = 18u;
+inline constexpr std::size_t meter_frequency_10s_first_crossing_q16_word = 20u;
+inline constexpr std::size_t meter_frequency_10s_last_crossing_q16_word = 22u;
+inline constexpr std::size_t meter_frequency_10s_end_sample_word = 24u;
+inline constexpr std::size_t meter_frequency_10s_utc_start_word = 26u;
+inline constexpr std::size_t meter_frequency_10s_utc_end_word = 28u;
+inline constexpr std::size_t meter_frequency_10s_utc_uncertainty_word = 30u;
+inline constexpr std::size_t meter_frequency_10s_measured_rate_word = 32u;
+inline constexpr std::size_t meter_frequency_10s_source_sequence_word = 33u;
+inline constexpr std::size_t meter_frequency_10s_boundary_generation_word = 34u;
+inline constexpr std::size_t meter_frequency_10s_source_status_word = 35u;
+inline constexpr std::size_t meter_frequency_10s_reason_word = 36u;
+inline constexpr std::size_t meter_frequency_10s_observer_drop_word = 37u;
+inline constexpr std::size_t meter_frequency_10s_guard_flags_word = 38u;
+inline constexpr std::size_t meter_frequency_10s_observed_crossings_word = 39u;
+inline constexpr std::size_t meter_frequency_10s_included_crossings_word = 40u;
+inline constexpr std::size_t meter_frequency_10s_rejected_cycles_word = 41u;
+
+inline constexpr std::uint32_t meter_frequency_10s_status_arithmetic_error =
+	1u << 0u;
+inline constexpr std::uint32_t meter_frequency_10s_status_result_valid =
+	1u << 1u;
+inline constexpr std::uint32_t meter_frequency_10s_status_time_aligned =
+	1u << 2u;
+inline constexpr std::uint32_t meter_frequency_10s_status_profile_supported =
+	1u << 3u;
+inline constexpr std::uint32_t meter_frequency_10s_status_time_synchronized =
+	1u << 4u;
+inline constexpr std::uint32_t meter_frequency_10s_status_filter_ready =
+	1u << 5u;
+inline constexpr std::uint32_t meter_frequency_10s_status_reference_valid =
+	1u << 6u;
+inline constexpr std::uint32_t meter_frequency_10s_status_discontinuity =
+	1u << 7u;
+inline constexpr std::uint32_t meter_frequency_10s_status_crossing_overflow =
+	1u << 8u;
+inline constexpr std::uint32_t meter_frequency_10s_status_observer_drop =
+	1u << 9u;
+inline constexpr std::uint32_t meter_frequency_10s_status_insufficient_crossings =
+	1u << 10u;
+inline constexpr std::uint32_t meter_frequency_10s_status_out_of_range =
+	1u << 11u;
+inline constexpr std::uint32_t meter_frequency_10s_status_transport_gap =
+	1u << 12u;
+inline constexpr std::uint32_t meter_frequency_10s_status_calibration_valid =
+	1u << 13u;
+inline constexpr std::uint32_t meter_frequency_10s_status_sample_rate_valid =
+	1u << 14u;
+inline constexpr std::uint32_t meter_frequency_10s_status_resynchronized =
+	1u << 15u;
+inline constexpr std::uint32_t meter_frequency_10s_status_mask = 0x0000ffffu;
+
+/* Bits 0..10 mirror the PL observer reasons; bits 16..21 are R5C1 result
+ * reasons. Bits 11..15 are deliberately unallocated. */
+inline constexpr std::uint32_t meter_frequency_10s_reason_unsupported_profile =
+	1u << 0u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_time_unsynchronized =
+	1u << 1u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_time_uncertainty =
+	1u << 2u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_filter_warmup =
+	1u << 3u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_reference_invalid =
+	1u << 4u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_discontinuity =
+	1u << 5u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_crossing_overflow =
+	1u << 6u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_observer_drop =
+	1u << 7u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_sample_rate_invalid =
+	1u << 8u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_boundary_invalid =
+	1u << 9u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_calibration_invalid =
+	1u << 10u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_insufficient_crossings =
+	1u << 16u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_out_of_range =
+	1u << 17u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_arithmetic =
+	1u << 18u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_transport_gap =
+	1u << 19u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_cycle_geometry =
+	1u << 20u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_time_geometry =
+	1u << 21u;
+inline constexpr std::uint32_t meter_frequency_10s_reason_mask = 0x003f07ffu;
+
+/* The source-status and guard masks mirror the PL-to-R5 FRQ1 contract. */
+inline constexpr std::uint32_t meter_frequency_10s_source_status_mask =
+	0x000007ffu;
+inline constexpr std::uint32_t meter_frequency_10s_guard_flags_mask =
+	0x0000000fu;
+inline constexpr std::uint32_t meter_frequency_10s_max_observed_crossings =
+	1024u;
 inline constexpr std::uint8_t meter_event_lifecycle_start = 0u;
 inline constexpr std::uint8_t meter_event_lifecycle_update = 1u;
 inline constexpr std::uint8_t meter_event_lifecycle_end = 2u;
@@ -378,7 +485,8 @@ struct MeterRecord {
 			record_format() == meter_pq_event_format ||
 			record_format() == meter_pq_event_lifecycle_format ||
 			record_format() == meter_flicker_format ||
-			record_format() == meter_mains_signal_format ||
+				record_format() == meter_mains_signal_format ||
+			record_format() == meter_frequency_10s_format ||
 			record_format() == meter_single_cycle_format) &&
 		       word(2) == meter_record_size;
 	}
@@ -667,6 +775,44 @@ struct MeterRecord {
 	std::uint32_t two_hour_overshoot_samples() const
 	{
 		return ten_minute_overshoot_samples();
+	}
+
+	/* ---- UTC ten-second frequency (M20) ----------------------------- */
+	std::uint8_t frequency_10s_nominal_hz() const
+	{
+		return static_cast<std::uint8_t>(word(13));
+	}
+	std::uint8_t frequency_10s_reference_channel() const
+	{
+		return static_cast<std::uint8_t>(word(13) >> 8u);
+	}
+	std::uint8_t frequency_10s_filter_profile() const
+	{
+		return static_cast<std::uint8_t>(word(13) >> 16u);
+	}
+	std::uint8_t frequency_10s_calibration_profile() const
+	{
+		return static_cast<std::uint8_t>(word(13) >> 24u);
+	}
+	std::uint64_t frequency_10s_last_sample_index() const
+	{
+		return unsigned64(meter_frequency_10s_last_sample_word);
+	}
+	std::uint64_t frequency_10s_end_sample_index() const
+	{
+		return unsigned64(meter_frequency_10s_end_sample_word);
+	}
+	std::uint64_t frequency_10s_utc_start_nanoseconds() const
+	{
+		return unsigned64(meter_frequency_10s_utc_start_word);
+	}
+	std::uint64_t frequency_10s_utc_end_nanoseconds() const
+	{
+		return unsigned64(meter_frequency_10s_utc_end_word);
+	}
+	std::uint64_t frequency_10s_utc_uncertainty_nanoseconds() const
+	{
+		return unsigned64(meter_frequency_10s_utc_uncertainty_word);
 	}
 };
 

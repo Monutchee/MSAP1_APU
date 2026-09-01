@@ -61,6 +61,31 @@ struct DemandMetadata {
 	bool saturated = false;
 };
 
+struct Frequency10sMetadata {
+	std::string interval_end_sample_index;
+	std::string utc_start_nanoseconds;
+	std::string utc_end_nanoseconds;
+	std::string utc_uncertainty_nanoseconds;
+	std::uint32_t measured_sample_rate_millihz = 0;
+	std::uint32_t source_sequence = 0;
+	std::uint32_t boundary_generation = 0;
+	std::uint32_t source_status = 0;
+	std::uint32_t status = 0;
+	std::uint32_t reasons = 0;
+	std::uint32_t observer_drop_count = 0;
+	std::uint8_t guard_flags = 0;
+	std::uint32_t observed_crossings = 0;
+	std::uint32_t included_crossings = 0;
+	std::uint32_t rejected_cycles = 0;
+	std::string duration_q16_samples;
+	std::string first_crossing_q16_samples;
+	std::string last_crossing_q16_samples;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t reference_channel = 0;
+	std::uint8_t filter_profile = 0;
+	std::uint8_t calibration_profile = 0;
+};
+
 struct SnapshotPayload {
 	std::string schema = "mnc.meter.snapshot.v1";
 	std::string device = "msap1";
@@ -72,6 +97,7 @@ struct SnapshotPayload {
 	MeasurementTiming measurement;
 	std::optional<EnergyMetadata> energy;
 	std::optional<DemandMetadata> demand;
+	std::optional<Frequency10sMetadata> frequency_10s;
 	std::map<std::string, PayloadValue> values;
 };
 
@@ -208,6 +234,41 @@ std::string MeterSnapshotPayloadEncoder::encode(
 			.boundary_valid = demand.boundary_valid,
 			.incomplete_accumulation = demand.incomplete_input,
 			.saturated = demand.saturated};
+	}
+	if (snapshot.frequency_10s) {
+		const auto &frequency = *snapshot.frequency_10s;
+		payload.frequency_10s = Frequency10sMetadata{
+			.interval_end_sample_index =
+				std::to_string(frequency.interval_end_sample_index),
+			.utc_start_nanoseconds =
+				std::to_string(frequency.utc_start_nanoseconds),
+			.utc_end_nanoseconds =
+				std::to_string(frequency.utc_end_nanoseconds),
+			.utc_uncertainty_nanoseconds =
+				std::to_string(frequency.utc_uncertainty_nanoseconds),
+			.measured_sample_rate_millihz =
+				frequency.measured_sample_rate_millihz,
+			.source_sequence = frequency.source_sequence,
+			.boundary_generation = frequency.boundary_generation,
+			.source_status = frequency.source_status,
+			.status = frequency.status,
+			.reasons = frequency.reasons,
+			.observer_drop_count = frequency.observer_drop_count,
+			.guard_flags = frequency.guard_flags,
+			.observed_crossings = frequency.observed_crossings,
+			.included_crossings = frequency.included_crossings,
+			.rejected_cycles = frequency.rejected_cycles,
+			.duration_q16_samples =
+				std::to_string(frequency.duration_q16_samples),
+			.first_crossing_q16_samples =
+				std::to_string(frequency.first_crossing_q16_samples),
+			.last_crossing_q16_samples =
+				std::to_string(frequency.last_crossing_q16_samples),
+			.nominal_frequency_hz = frequency.nominal_frequency_hz,
+			.reference_channel = frequency.reference_channel,
+			.filter_profile = frequency.filter_profile,
+			.calibration_profile = frequency.calibration_profile,
+		};
 	}
 
 	for (const auto attribute : selected) {

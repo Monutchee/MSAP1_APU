@@ -269,6 +269,8 @@ constexpr std::array load_nature_aliases{
 constexpr std::array period_catalog{
 	MeasurementPeriodDescriptor{MeasurementPeriod::Basic, "basic",
 		"Basic (10/12 cycles)", true, true},
+	MeasurementPeriodDescriptor{MeasurementPeriod::Seconds10, "seconds_10",
+		"10 seconds", true, true},
 	MeasurementPeriodDescriptor{MeasurementPeriod::Cycles150_180,
 		"cycles_150_180", "150/180 cycles", true, true},
 	MeasurementPeriodDescriptor{MeasurementPeriod::Min10, "minutes_10",
@@ -720,7 +722,8 @@ bool supports_attribute(MeterAttributeKey attribute,
 			: period == MeasurementPeriod::Min10;
 	}
 	if (id == Id::Frequency)
-		return period == MeasurementPeriod::Basic;
+		return period == MeasurementPeriod::Basic ||
+			period == MeasurementPeriod::Seconds10;
 	if (usage == MeterAttributeUsage::Historian &&
 	    (period == MeasurementPeriod::Min10Live ||
 	     period == MeasurementPeriod::Hour2Live))

@@ -22,8 +22,9 @@ namespace {
 using mnc::ipc::ByteReader;
 using mnc::ipc::ByteWriter;
 
-constexpr std::array<MeasurementPeriod, 5> supported_periods = {
+constexpr std::array<MeasurementPeriod, 6> supported_periods = {
 	MeasurementPeriod::Basic,
+	MeasurementPeriod::Seconds10,
 	MeasurementPeriod::Cycles150_180,
 	MeasurementPeriod::Min10,
 	MeasurementPeriod::Hour2,
@@ -234,6 +235,7 @@ bool MeterHistorianService::rebuilds_volatile_period(
 			case MeasurementPeriod::Min10Live:
 			case MeasurementPeriod::Hour2Live:
 			case MeasurementPeriod::Demand:
+			case MeasurementPeriod::Seconds10:
 				return std::nullopt;
 			}
 		}
@@ -243,6 +245,7 @@ bool MeterHistorianService::rebuilds_volatile_period(
 		case MeasurementPeriod::Min10: return Dataset::minutes_10;
 		case MeasurementPeriod::Hour2: return Dataset::hours_2;
 		case MeasurementPeriod::Demand: return Dataset::demand;
+		case MeasurementPeriod::Seconds10: return Dataset::seconds_10;
 		case MeasurementPeriod::Min10Live:
 		case MeasurementPeriod::Hour2Live:
 			return std::nullopt;

@@ -39,6 +39,13 @@ void signed64(msap1::MeterRecord &record, std::size_t word,
 	record.words[word + 1] = static_cast<std::uint32_t>(bits >> 32);
 }
 
+void unsigned64(msap1::MeterRecord &record, std::size_t word,
+	std::uint64_t value)
+{
+	record.words[word] = static_cast<std::uint32_t>(value);
+	record.words[word + 1] = static_cast<std::uint32_t>(value >> 32);
+}
+
 /* Minimal valid Basic record: a locked 12-cycle block at exactly the 60 Hz
  * nominal (6400 samples at 32 kSPS), the 64-bit first-sample index in
  * envelope words 9/10, the timing word at 13, and the transport drop words
@@ -76,6 +83,65 @@ msap1::MeterRecord periodic_record()
 			   (1u << 8) | (6u << 12) | (10u << 16);
 	record.words[58] = 34'952'533;
 	record.words[59] = 11;
+	return record;
+}
+
+msap1::MeterRecord frequency_10s_record(bool valid = true,
+	std::uint32_t sequence = 7)
+{
+	constexpr std::uint64_t first_sample = 10'000;
+	constexpr std::uint64_t sample_span = 1'280'000;
+	constexpr std::uint64_t end_sample = first_sample + sample_span;
+	constexpr std::uint64_t interval_q16 = sample_span << 16u;
+	constexpr std::uint64_t utc_start = 1'700'000'000'000'000'000ull;
+	constexpr std::uint32_t source_status =
+		(1u << 0u) | (1u << 1u) | (1u << 2u) | (1u << 3u) |
+		(1u << 4u) | (1u << 9u) | (1u << 10u);
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_frequency_10s_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = 0x12345678u;
+	record.words[5] = 128'000;
+	record.words[6] = static_cast<std::uint32_t>(sample_span);
+	record.words[7] = valid ? 1u << 6u : 0u;
+	record.words[8] = msap1::meter_frequency_10s_status_time_aligned |
+		msap1::meter_frequency_10s_status_profile_supported |
+		msap1::meter_frequency_10s_status_time_synchronized |
+		msap1::meter_frequency_10s_status_filter_ready |
+		msap1::meter_frequency_10s_status_reference_valid |
+		msap1::meter_frequency_10s_status_calibration_valid;
+	if (valid)
+		record.words[8] |= msap1::meter_frequency_10s_status_result_valid |
+			msap1::meter_frequency_10s_status_sample_rate_valid;
+	unsigned64(record, 9, first_sample);
+	record.words[13] = 50u | (6u << 8u) | (1u << 16u) | (1u << 24u);
+	unsigned64(record, msap1::meter_frequency_10s_last_sample_word,
+		end_sample - 1u);
+	record.words[msap1::meter_frequency_10s_value_word] = valid ? 50'000 : 0;
+	record.words[msap1::meter_frequency_10s_cycle_count_word] = 500;
+	unsigned64(record, msap1::meter_frequency_10s_duration_q16_word,
+		interval_q16);
+	signed64(record, msap1::meter_frequency_10s_first_crossing_q16_word, 0);
+	signed64(record, msap1::meter_frequency_10s_last_crossing_q16_word,
+		static_cast<std::int64_t>(interval_q16));
+	unsigned64(record, msap1::meter_frequency_10s_end_sample_word, end_sample);
+	unsigned64(record, msap1::meter_frequency_10s_utc_start_word, utc_start);
+	unsigned64(record, msap1::meter_frequency_10s_utc_end_word,
+		utc_start + 10'000'000'000ull);
+	unsigned64(record, msap1::meter_frequency_10s_utc_uncertainty_word, 250);
+	record.words[msap1::meter_frequency_10s_measured_rate_word] =
+		128'000'000;
+	record.words[msap1::meter_frequency_10s_source_sequence_word] = sequence;
+	record.words[msap1::meter_frequency_10s_boundary_generation_word] = 9;
+	record.words[msap1::meter_frequency_10s_source_status_word] =
+		valid ? source_status : source_status & ~(1u << 2u);
+	record.words[msap1::meter_frequency_10s_reason_word] =
+		valid ? 0u : msap1::meter_frequency_10s_reason_sample_rate_invalid;
+	record.words[msap1::meter_frequency_10s_guard_flags_word] = 0xcu;
+	record.words[msap1::meter_frequency_10s_observed_crossings_word] = 501;
+	record.words[msap1::meter_frequency_10s_included_crossings_word] = 501;
 	return record;
 }
 
@@ -386,6 +452,74 @@ void decode_and_period_independence()
 		"out-of-order update replaced newer state");
 }
 
+void decode_frequency_10s_contract()
+{
+	auto registry = msap1::MeterDecoderRegistry::with_builtin_decoders();
+	const auto update = registry.decode(frequency_10s_record());
+	require(update.period == msap1::MeasurementPeriod::Seconds10 &&
+		update.kind == msap1::RecordKind::frequency_10s &&
+		update.sequence == 7 && update.fundamental && update.timing &&
+		update.frequency_10s,
+		"FREQUENCY-10S-v1 did not decode into its independent period");
+	const auto &frequency = update.fundamental->frequency;
+	require(frequency.value == 50'000 && frequency.valid() &&
+		frequency.source_sequence == 7 &&
+		frequency.calculation_window.sample_count == 1'280'000 &&
+		frequency.calculation_window.duration == 10s &&
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			frequency.measured_at.time_since_epoch()).count() ==
+			1'700'000'010'000'000'000ll,
+		"ten-second frequency value or interval metadata changed");
+	require(update.timing->time_quality ==
+			msap1::meter::TimeQuality::Synchronized &&
+		update.timing->first_sample_index == 10'000 &&
+		update.timing->sample_count == 1'280'000 &&
+		update.timing->cycle_count == 500 &&
+		update.timing->utc_uncertainty_ns == 250,
+		"ten-second record timing was not decoded from the R5 result");
+	const auto &metadata = *update.frequency_10s;
+	require(metadata.interval_end_sample_index == 1'290'000 &&
+		metadata.utc_end_nanoseconds ==
+			1'700'000'010'000'000'000ull &&
+		metadata.measured_sample_rate_millihz == 128'000'000 &&
+		metadata.boundary_generation == 9 &&
+		metadata.reference_channel == 6 &&
+		metadata.included_crossings == 501 &&
+		metadata.rejected_cycles == 0,
+		"ten-second frequency audit provenance was not preserved");
+
+	const auto invalid = registry.decode(frequency_10s_record(false));
+	require(invalid.fundamental && invalid.frequency_10s &&
+		invalid.fundamental->frequency.value == 0 &&
+		invalid.fundamental->frequency.quality ==
+			msap1::MeasurementQuality::invalid &&
+		invalid.frequency_10s->reasons ==
+			msap1::meter_frequency_10s_reason_sample_rate_invalid,
+		"an explicit invalid ten-second interval was lost or promoted");
+
+	auto malformed = frequency_10s_record();
+	malformed.words[42] = 1;
+	require_throws([&] { (void)registry.decode(malformed); },
+		"nonzero reserved frequency tail decoded");
+	malformed = frequency_10s_record();
+	malformed.words[msap1::meter_frequency_10s_value_word] = 49'999;
+	require_throws([&] { (void)registry.decode(malformed); },
+		"frequency result inconsistent with crossing arithmetic decoded");
+	malformed = frequency_10s_record();
+	malformed.words[msap1::meter_frequency_10s_utc_end_word] += 1;
+	require_throws([&] { (void)registry.decode(malformed); },
+		"non-ten-second UTC interval decoded");
+
+	msap1::MeterLatestStore store;
+	store.apply(msap1::decode_periodic_meter_record(periodic_record()));
+	store.apply(update);
+	require(store.latest(msap1::MeasurementPeriod::Basic)->latest_sequence ==
+			42 &&
+		store.latest(msap1::MeasurementPeriod::Seconds10)
+			->values.fundamental.frequency.value == 50'000,
+		"ten-second frequency overwrote the Basic latest view");
+}
+
 void decode_block_timing()
 {
 	const auto timestamp = std::chrono::system_clock::time_point{123s};
@@ -628,9 +762,10 @@ int main()
 {
 	try {
 		decode_and_period_independence();
-	decode_power_record_pins();
-	decode_phasor_record_pins();
-	decode_unbalance_record_pins();
+		decode_frequency_10s_contract();
+		decode_power_record_pins();
+		decode_phasor_record_pins();
+		decode_unbalance_record_pins();
 		decode_block_timing();
 		decode_rejects_malformed_timing();
 		decode_rejects_retired_formats();
