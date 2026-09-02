@@ -27,5 +27,15 @@ target_link_libraries(msap1-fpga-acquisition PRIVATE
 target_compile_features(msap1-fpga-acquisition PRIVATE cxx_std_23)
 target_compile_options(msap1-fpga-acquisition PRIVATE -Wall -Wextra -Wpedantic)
 
+if(BUILD_TESTING)
+    add_executable(utc_clock_test
+        ${PROJECT_SOURCE_DIR}/tests/utc_clock_test.cpp)
+    target_include_directories(utc_clock_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_features(utc_clock_test PRIVATE cxx_std_23)
+    target_compile_options(utc_clock_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME utc_clock_test COMMAND utc_clock_test)
+endif()
+
 install(TARGETS msap1-fpga-acquisition
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

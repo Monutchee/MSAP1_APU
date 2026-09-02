@@ -322,6 +322,14 @@ measurement. UTC nanoseconds, sample anchors, and Q16 crossing positions are
 decimal strings so audit values remain exact in JavaScript. A stopped or
 not-yet-complete stream returns `{"available":false}` with HTTP 200.
 
+The ten-second Class A clock gate combines the PL correlation-latch bracket,
+the capture-FIFO elasticity bound, and the kernel's live disciplined-clock
+estimate (absolute PLL phase offset, estimated error, and clock precision).
+It deliberately does not use `adjtimex.maxerror`: Linux grows that worst-case
+holdover ceiling at the kernel tolerance between NTP updates, so treating it
+as the current uncertainty would reject a healthy synchronized clock after
+roughly two seconds. `STA_UNSYNC` remains an independent hard rejection gate.
+
 The 150/180-cycle aggregate's `frequency` object remains **informative only**:
 it carries `"informative":true` and deliberately no validity flag, and
 consumers must never present it as the standardized ten-second frequency
