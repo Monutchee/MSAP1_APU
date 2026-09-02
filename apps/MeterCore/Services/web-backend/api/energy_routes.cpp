@@ -1,4 +1,5 @@
 #include "energy_dto.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -142,6 +143,36 @@ webengine::Response post_meter_demand_peaks_reset(AppContext &app,
 		"demand_peaks", [](auto &database, const auto &request) {
 			return database.reset_demand_peaks(request);
 		});
+}
+
+void document_energy_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	registry.add_json_response<EnergyResponseDto>(V::get,
+		"/api/v1/meter/energy", 200, "MeterEnergy",
+		"Authoritative durable energy counters");
+	registry.add_error_response(V::get, "/api/v1/meter/energy", 503,
+		"No durable energy checkpoint is available");
+	registry.add_json_response<DemandResponseDto>(V::get,
+		"/api/v1/meter/demand", 200, "MeterDemand",
+		"Authoritative demand and peak values");
+	registry.add_error_response(V::get, "/api/v1/meter/demand", 503,
+		"No durable demand checkpoint is available");
+
+	for (const auto path : {"/api/v1/meter/energy/reset",
+		"/api/v1/meter/demand/peaks/reset"}) {
+		registry.add_json_request<ResetBodyDto>(V::post, path,
+			"MeterResetRequest", "Expected epoch and idempotency key", true,
+			R"({"expected_epoch":"0","idempotency_key":"commissioning-1"})");
+		registry.add_json_response<ResetResponseDto>(V::post, path, 200,
+			"MeterResetResponse", "Committed or replayed reset result");
+		registry.add_error_response(V::post, path, 400,
+			"The reset request is malformed");
+		registry.add_error_response(V::post, path, 409,
+			"The expected epoch conflicts with current state");
+		registry.add_error_response(V::post, path, 503,
+			"The durable ledger is unavailable");
+	}
 }
 
 } // namespace msap1::web::api

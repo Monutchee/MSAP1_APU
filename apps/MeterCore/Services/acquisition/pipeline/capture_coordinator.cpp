@@ -25,6 +25,113 @@ namespace msap1::acquisition::daemon {
 
 using namespace std::chrono_literals;
 
+namespace {
+
+constexpr std::uint64_t frequency_10s_interval_nanoseconds =
+	10ull * 1'000'000'000ull;
+constexpr std::uint64_t sample_rate_millihz_time_scale =
+	1'000'000'000'000ull;
+constexpr std::uint32_t maximum_frequency_10s_sample_rate_millihz =
+	200'000'000u;
+
+msap1::WaveformCaptureOptions waveform_capture_options(
+	MeterTimeControl &time_control)
+{
+	msap1::WaveformCaptureOptions options{};
+	options.correlation_source = [&time_control] {
+		return time_control.waveform_correlation();
+	};
+	return options;
+}
+
+std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept
+{
+	return right > std::numeric_limits<std::uint64_t>::max() - left
+		? std::numeric_limits<std::uint64_t>::max()
+		: left + right;
+}
+
+std::optional<std::uint32_t> measured_sample_rate_millihz(
+	const MeterTimeSync &previous,
+	const MeterTimeSync &current) noexcept
+{
+	if (current.sample_counter <= previous.sample_counter ||
+	    current.tai_nanoseconds <= previous.tai_nanoseconds)
+		return std::nullopt;
+	const auto samples = current.sample_counter - previous.sample_counter;
+	const auto nanoseconds = current.tai_nanoseconds - previous.tai_nanoseconds;
+	if (samples > std::numeric_limits<std::uint64_t>::max() /
+			      sample_rate_millihz_time_scale)
+		return std::nullopt;
+	const auto numerator = samples * sample_rate_millihz_time_scale;
+	const auto half_nanoseconds =
+		nanoseconds / 2u + nanoseconds % 2u;
+	const auto rounded = numerator / nanoseconds +
+		(numerator % nanoseconds >= half_nanoseconds ? 1u : 0u);
+	if (rounded == 0u ||
+	    rounded > maximum_frequency_10s_sample_rate_millihz)
+		return std::nullopt;
+	return static_cast<std::uint32_t>(rounded);
+}
+
+std::optional<std::uint64_t> frames_at_or_after(
+	std::uint64_t nanoseconds, std::uint32_t sample_rate_millihz) noexcept
+{
+	if (sample_rate_millihz == 0u ||
+	    nanoseconds > std::numeric_limits<std::uint64_t>::max() /
+			  sample_rate_millihz)
+		return std::nullopt;
+	const auto product = nanoseconds * sample_rate_millihz;
+	return product / sample_rate_millihz_time_scale +
+		(product % sample_rate_millihz_time_scale != 0u ? 1u : 0u);
+}
+
+std::optional<Frequency10sBoundary>
+next_frequency_10s_boundary(const MeterTimeSync &sync,
+	std::uint32_t sample_rate_millihz, std::uint64_t uncertainty_nanoseconds,
+	std::uint32_t generation, std::uint8_t nominal_frequency_hz,
+	std::uint8_t reference_channel, bool mapping_valid,
+	bool time_synchronized) noexcept
+{
+	const auto remainder =
+		sync.realtime_nanoseconds % frequency_10s_interval_nanoseconds;
+	const auto until_start = frequency_10s_interval_nanoseconds - remainder;
+	if (sync.realtime_nanoseconds >
+		    std::numeric_limits<std::uint64_t>::max() - until_start)
+		return std::nullopt;
+	const auto utc_start = sync.realtime_nanoseconds + until_start;
+	if (utc_start > std::numeric_limits<std::uint64_t>::max() -
+				frequency_10s_interval_nanoseconds)
+		return std::nullopt;
+	const auto utc_end = utc_start + frequency_10s_interval_nanoseconds;
+	const auto start_offset =
+		frames_at_or_after(until_start, sample_rate_millihz);
+	const auto end_offset = frames_at_or_after(
+		until_start + frequency_10s_interval_nanoseconds,
+		sample_rate_millihz);
+	if (!start_offset || !end_offset || *end_offset <= *start_offset ||
+	    sync.sample_counter > std::numeric_limits<std::uint64_t>::max() -
+				      *end_offset)
+		return std::nullopt;
+	return Frequency10sBoundary{
+		.start_sample_index = sync.sample_counter + *start_offset,
+		.end_sample_index = sync.sample_counter + *end_offset,
+		.utc_start_nanoseconds = utc_start,
+		.utc_end_nanoseconds = utc_end,
+		.utc_uncertainty_nanoseconds = uncertainty_nanoseconds,
+		.measured_sample_rate_millihz = sample_rate_millihz,
+		.boundary_generation = generation,
+		.nominal_frequency_hz = nominal_frequency_hz,
+		.reference_channel = reference_channel,
+		.filter_profile = 1u,
+		.calibration_profile = 1u,
+		.valid = mapping_valid,
+		.time_synchronized = time_synchronized,
+	};
+}
+
+} // namespace
+
 msap1::PreparedMeterConfiguration prepare_product_configuration(
 	const msap1::settings::ProductSettings &settings)
 {
@@ -172,8 +279,10 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  product_settings_(load_runtime_settings()),
 	  configuration_(prepare_product_configuration(product_settings_)),
 	  meter_(options.meter_device),
+	  time_control_(options.meter_time_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
-		    waveform_capture_context(product_settings_, configuration_)),
+		    waveform_capture_context(product_settings_, configuration_),
+		    waveform_capture_options(time_control_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
 	  ingest_(meter_, configuration_, timebase_, meter_stream_,
@@ -200,7 +309,6 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  ipc_(options.socket_path)
 {
 	register_acquisition_commands(registry_, *this);
-	ipc_.start();
 }
 
 CaptureCoordinator::~CaptureCoordinator()
@@ -209,9 +317,23 @@ CaptureCoordinator::~CaptureCoordinator()
 	ipc_.shutdown();
 }
 
-void CaptureCoordinator::run()
+void CaptureCoordinator::initialize()
 {
 	start();
+	try {
+		ipc_.start();
+	} catch (...) {
+		ipc_.shutdown();
+		stop();
+		throw;
+	}
+}
+
+void CaptureCoordinator::run()
+{
+	if (!running_)
+		throw std::logic_error(
+			"capture coordinator run before initialization");
 	try {
 		(void)aggregation_health_.configure_demand(
 			demand_configuration(product_settings_.metering.demand));
@@ -296,12 +418,11 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 	 * exactly what the Holdover state exists to report. */
 	last_time_sync_ = now;
 	/*
-	 * The waveform device stays open for the whole capture lifetime, so
-	 * the correlation latch is readable here without any capture session.
-	 * Its frame_sequence field carries the PL 64-bit conversion-domain
-	 * sample counter (PL change, same ioctl ABI).
+	 * The dedicated meter-time endpoint stays open for the daemon lifetime;
+	 * its latch observes the conversion sample counter without depending on
+	 * either DMA producer.
 	 */
-	const auto sync = waveform_.time_sync();
+	const auto sync = time_control_.time_sync();
 	if (!sync)
 		return;
 	/*
@@ -317,6 +438,9 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		? 0u
 		: 16ull * 1'000'000'000ull / sample_rate;
 	const auto clock_status = read_utc_clock_status();
+	const auto frequency_uncertainty = saturating_add(
+		saturating_add(sync->bracket_nanoseconds, elasticity_ns),
+		clock_status.estimated_uncertainty_ns);
 	std::uint16_t leap_flags = 0u;
 	if (clock_status.positive_leap_pending)
 		leap_flags |= mncwf_time_positive_leap_pending;
@@ -329,14 +453,56 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 	timebase_.record_sync(
 		{.sample_counter = sync->sample_counter,
 		 .utc_ns = static_cast<std::int64_t>(sync->realtime_nanoseconds),
-		 .uncertainty_ns = sync->bracket_nanoseconds + elasticity_ns +
-			 clock_status.estimated_uncertainty_ns,
+		 .uncertainty_ns = frequency_uncertainty,
 		 /* Bind the sync to the ACTIVE configuration so the timebase
 		  * can refuse to extrapolate across a rate change. */
 		 .sample_rate_hz = sample_rate,
 		 .configuration_generation = configuration_.wire.generation,
 			 .utc_synchronized = clock_status.synchronized},
-		now);
+			now);
+
+	std::optional<std::uint32_t> measured_rate;
+	if (previous_frequency_time_sync_)
+		measured_rate = measured_sample_rate_millihz(
+			*previous_frequency_time_sync_, *sync);
+	previous_frequency_time_sync_ = *sync;
+	std::uint32_t boundary_rate = 0u;
+	if (measured_rate) {
+		boundary_rate = *measured_rate;
+	} else if (sample_rate <=
+		   maximum_frequency_10s_sample_rate_millihz / 1000u) {
+		/* The first post-start interval is deliberately invalid, but a
+		 * geometrically sound tuple makes that warm-up visible as a record. */
+		boundary_rate = sample_rate * 1000u;
+	}
+	if (boundary_rate != 0u) {
+		++frequency_10s_boundary_generation_;
+		if (frequency_10s_boundary_generation_ == 0u)
+			++frequency_10s_boundary_generation_;
+		const auto boundary = next_frequency_10s_boundary(
+			*sync, boundary_rate, frequency_uncertainty,
+			frequency_10s_boundary_generation_,
+			static_cast<std::uint8_t>(
+				configuration_.source.nominal_frequency_hz),
+			static_cast<std::uint8_t>(
+				configuration_.source.frequency.reference_channel),
+			measured_rate.has_value(), clock_status.synchronized);
+		if (!boundary) {
+			log_message(config_log, mnc::logging::Priority::error,
+				"frequency ten-second UTC boundary mapping overflowed",
+				"frequency_10s_boundary_overflow");
+		} else {
+			try {
+				frequency_10s_observer_status_ =
+					time_control_.program_frequency_10s_boundary(*boundary);
+			} catch (const std::exception &error) {
+				log_message(config_log, mnc::logging::Priority::error,
+					"failed to program frequency ten-second boundary: " +
+						std::string(error.what()),
+					"frequency_10s_boundary_program_failed");
+			}
+		}
+	}
 
 	/*
 	 * M13 maps the NEXT wall-clock ten-minute boundary into the same
@@ -377,7 +543,7 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		const auto target =
 			sync->sample_counter + frames_until_boundary;
 		try {
-			waveform_.program_ten_minute_boundary(target, true);
+			time_control_.program_ten_minute_boundary(target, true);
 			ten_minute_boundary_programmed_ = true;
 			log_message(config_log, mnc::logging::Priority::notice,
 				"programmed next UTC ten-minute aggregation boundary",
@@ -461,6 +627,7 @@ void CaptureCoordinator::start(bool apply_configuration)
 	 */
 	ingest_.begin_epoch();
 	ten_minute_boundary_programmed_ = false;
+	previous_frequency_time_sync_.reset();
 	try {
 		/*
 		 * Both DMA consumers must own their S2MM channels before the
@@ -534,14 +701,23 @@ void CaptureCoordinator::stop() noexcept
 		"meter DMA device closed: " + std::string(meter_.name()),
 		"dma_closed", {{"MNC_DEVICE", std::string(meter_.name())}});
 	try {
-		waveform_.program_ten_minute_boundary(0u, false);
+		time_control_.program_ten_minute_boundary(0u, false);
 	} catch (const std::exception &error) {
 		log_message(config_log, mnc::logging::Priority::warning,
 			"failed to invalidate ten-minute boundary: " +
 				std::string(error.what()),
 			"ten_minute_boundary_invalidate_failed");
 	}
+	try {
+		time_control_.cancel_frequency_10s_boundary();
+	} catch (const std::exception &error) {
+		log_message(config_log, mnc::logging::Priority::warning,
+			"failed to cancel frequency ten-second boundary: " +
+				std::string(error.what()),
+			"frequency_10s_boundary_cancel_failed");
+	}
 	ten_minute_boundary_programmed_ = false;
+	previous_frequency_time_sync_.reset();
 	waveform_.stop();
 	running_ = false;
 	health_.on_capture_stopped();
@@ -1110,25 +1286,77 @@ msap1::SimulatorEventResponse CaptureCoordinator::simulator_event_response(
 	return response;
 }
 
-msap1::WaveformResponse CaptureCoordinator::waveform_response()
+static msap1::WaveformSessionIpc waveform_session_ipc(
+	const msap1::WaveformSessionSummary &session)
+{
+	msap1::WaveformSessionIpc result{};
+	result.id = session.id;
+	result.trigger_sequence = session.trigger_sequence;
+	result.first_sequence = session.first_sequence;
+	result.last_sequence = session.last_sequence;
+	result.trigger_tai_nanoseconds = session.trigger_tai_nanoseconds;
+	result.trigger_realtime_nanoseconds = session.trigger_realtime_nanoseconds;
+	result.sample_rate_hz = session.sample_rate_hz;
+	result.event_count = session.event_count;
+	result.trigger_source_mask = session.trigger_source_mask;
+	result.state = session.state;
+	result.decimation = session.decimation;
+	result.filename = std::string(session.filename.data());
+	result.continuation_of_session_id = session.continuation_of_session_id;
+	result.master_session_id = session.master_session_id;
+	result.capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
+		? std::string{} : mncwf_uuid_string(session.capture_uuid);
+	return result;
+}
+
+msap1::WaveformResponse CaptureCoordinator::waveform_response(
+	const msap1::WaveformSessionQuery &query)
 {
 	msap1::WaveformResponse response{};
 	response.waveform = waveform_.status();
-	for (const auto &session : waveform_.sessions()) {
-		const auto capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
-			? std::string{} : mncwf_uuid_string(session.capture_uuid);
-		response.sessions.push_back(
-			{session.id, session.trigger_sequence,
-			 session.first_sequence, session.last_sequence,
-			 session.trigger_tai_nanoseconds,
-			 session.trigger_realtime_nanoseconds,
-			 session.sample_rate_hz, session.event_count,
-			 session.trigger_source_mask,
-			 session.state, session.decimation,
-			 std::string(session.filename.data()),
-			 session.continuation_of_session_id,
-			 session.master_session_id, capture_uuid});
+	const auto page = waveform_.session_page(query);
+	response.page = {
+		page.origin,
+		page.limit,
+		page.total_sessions,
+		page.completed_sessions,
+		page.incomplete_sessions,
+		page.active_sessions,
+		page.sessions.size(),
+		page.next_before_session_id,
+	};
+	response.sessions.reserve(page.sessions.size());
+	for (const auto &session : page.sessions)
+		response.sessions.push_back(waveform_session_ipc(session));
+	response.waveform_directory = options_.waveform_directory;
+	return response;
+}
+
+msap1::WaveformLookupResponse CaptureCoordinator::waveform_lookup_response(
+	const msap1::WaveformLookupRequest &request)
+{
+	const bool by_id = request.session_id != 0u;
+	const bool by_capture = !request.capture_uuid.empty();
+	if (by_id == by_capture)
+		throw std::invalid_argument(
+			"select exactly one waveform session ID or capture UUID");
+
+	std::optional<msap1::WaveformSessionSummary> session;
+	if (by_id) {
+		session = waveform_.find_session(request.session_id);
+	} else {
+		const auto uuid = mncwf_uuid_from_string(request.capture_uuid);
+		if (!uuid || mncwf_uuid_is_zero(*uuid))
+			throw std::invalid_argument(
+				"capture UUID must be a nonzero canonical UUID");
+		session = waveform_.find_session(*uuid);
 	}
+
+	msap1::WaveformLookupResponse response{};
+	response.waveform = waveform_.status();
+	response.found = session.has_value();
+	if (session)
+		response.session = waveform_session_ipc(*session);
 	response.waveform_directory = options_.waveform_directory;
 	return response;
 }

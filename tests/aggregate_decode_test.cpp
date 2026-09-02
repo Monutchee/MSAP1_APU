@@ -752,10 +752,9 @@ void decode_reference_built_record_60hz()
 	require(values.current.neutral.valid() &&
 		values.current.neutral.value == 0,
 		"a valid zero aggregate current was confused with unavailable");
-	/* The mean is informative only: the standardized Class A frequency
-	 * product belongs to its own interval and is not implemented yet, so
-	 * this reading must never advertise itself as valid. The value is
-	 * still carried for diagnostics. */
+	/* The mean is informative only: the standardized frequency product is
+	 * decoded on its independent ten-second period, so this aggregate reading
+	 * must never advertise itself as valid. The value remains diagnostic. */
 	require(!values.frequency.valid() &&
 		values.frequency.quality ==
 			msap1::MeasurementQuality::unavailable &&

@@ -1,5 +1,6 @@
 /** @file database_routes.cpp Administrator database policy and health API. */
 
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -80,6 +81,7 @@ std::string database_dataset_name(mnc::meter_stream::DatabaseDataset value)
 	case D::harmonic_minutes_10: return "harmonic_minutes_10";
 	case D::harmonic_hours_2: return "harmonic_hours_2";
 	case D::demand: return "demand";
+	case D::seconds_10: return "seconds_10";
 	}
 	return "unknown";
 }
@@ -103,6 +105,7 @@ mnc::meter_stream::DatabaseDataset historian_dataset(
 	if (value == "harmonic_minutes_10") return D::harmonic_minutes_10;
 	if (value == "harmonic_hours_2") return D::harmonic_hours_2;
 	if (value == "demand") return D::demand;
+	if (value == "seconds_10") return D::seconds_10;
 	throw std::invalid_argument("unknown historian dataset: " +
 		std::string(value));
 }
@@ -233,6 +236,37 @@ webengine::Response post_developer_database_maintenance(
 		return error_response(webengine::http::status::conflict,
 			error.what());
 	}
+}
+
+void document_database_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto database = "/api/v1/developer/database";
+	registry.add_json_response<DatabaseStatusDto>(V::get, database, 200,
+		"DatabaseStatus", "Database policies and runtime health");
+	registry.add_error_response(V::get, database, 503,
+		"Database services are unavailable");
+	registry.add_json_request<settings::DatabaseSettings>(V::put, database,
+		"DatabaseSettings", "Complete database storage policy");
+	registry.add_json_response<DatabaseStatusDto>(V::put, database, 200,
+		"DatabaseStatus", "Saved policies and refreshed runtime health");
+	registry.add_error_response(V::put, database, 400,
+		"Database policy JSON or values are invalid");
+	registry.add_error_response(V::put, database, 409,
+		"The settings authority rejected the policy");
+
+	constexpr auto maintenance =
+		"/api/v1/developer/database/maintenance";
+	registry.add_json_request<DatabaseMaintenanceRequestDto>(V::post,
+		maintenance, "DatabaseMaintenanceRequest",
+		"Explicit bounded historian maintenance request", true,
+		R"({"action":"clear_datasets","datasets":["basic"],"confirmed":true})");
+	registry.add_json_response<DatabaseStatusDto>(V::post, maintenance, 200,
+		"DatabaseStatus", "Database health after maintenance");
+	registry.add_error_response(V::post, maintenance, 400,
+		"The maintenance request is invalid or unconfirmed");
+	registry.add_error_response(V::post, maintenance, 409,
+		"The maintenance operation failed");
 }
 
 } // namespace msap1::web::api

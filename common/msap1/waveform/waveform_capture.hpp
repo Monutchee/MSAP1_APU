@@ -6,9 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <span>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace msap1 {
@@ -26,6 +31,7 @@ inline constexpr std::size_t waveform_history_bytes = 128u * 1024u * 1024u;
 inline constexpr std::size_t waveform_history_frames =
 	waveform_history_bytes / waveform_frame_bytes;
 inline constexpr std::size_t waveform_max_ipc_sessions = 16;
+inline constexpr std::size_t waveform_max_page_sessions = 100;
 inline constexpr std::size_t waveform_session_name_size = 96;
 inline constexpr std::size_t waveform_persisted_channels = 7;
 
@@ -65,6 +71,19 @@ enum class WaveformSessionState : std::uint32_t {
 	incomplete = 3,
 };
 
+enum class WaveformOriginFilter : std::uint32_t {
+	all = 0,
+	manual = 1,
+	power_quality = 2,
+};
+
+struct WaveformSessionQuery {
+	/** Exclusive descending cursor; zero starts at the newest session. */
+	std::uint64_t before_session_id = 0;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
+};
+
 struct WaveformEventIdentity {
 	std::uint64_t session = 0;
 	std::uint64_t counter = 0;
@@ -100,21 +119,13 @@ struct WaveformCaptureContext {
  * the runtime policy or allocating a production-sized test fixture. */
 struct WaveformCaptureOptions {
 	std::size_t history_capacity_frames = waveform_history_frames;
-};
-
-/*
- * One correlation of the PL conversion-domain sample counter with
- * CLOCK_REALTIME, produced for the measurement timebase (UTC mapping).
- * The PL latches the counter atomically inside the correlation ioctl; the
- * CLOCK_REALTIME bracket around that ioctl bounds the latch instant, so the
- * midpoint is the estimate and the bracket width is the uncertainty. The
- * caller adds the PL elasticity-FIFO offset bound, which depends on the
- * active sample rate.
- */
-struct WaveformTimeSync {
-	std::uint64_t sample_counter = 0;
-	std::uint64_t realtime_nanoseconds = 0;
-	std::uint64_t bracket_nanoseconds = 0;
+	/** Independent metrology-time correlation source. Production binds this
+	 * to /dev/meter-time; waveform DMA itself never owns time registers. */
+	std::function<std::optional<WaveformCorrelation>()> correlation_source;
+	/** Optional deterministic test seam invoked immediately before each
+	 * persisted file is validated. Production leaves it empty. */
+	std::function<void(std::stop_token, const std::filesystem::path &)>
+		archive_discovery_hook;
 };
 
 struct WaveformSessionSummary {
@@ -143,6 +154,40 @@ struct WaveformSessionSummary {
 	std::uint32_t decimation = 1;
 	std::array<char, waveform_session_name_size> filename{};
 	MncwfUuid capture_uuid{};
+};
+
+struct WaveformSessionPage {
+	WaveformOriginFilter origin = WaveformOriginFilter::all;
+	std::uint32_t limit = waveform_max_ipc_sessions;
+	std::uint64_t total_sessions = 0;
+	std::uint64_t completed_sessions = 0;
+	std::uint64_t incomplete_sessions = 0;
+	std::uint64_t active_sessions = 0;
+	/** Zero means there is no older matching page. */
+	std::uint64_t next_before_session_id = 0;
+	std::vector<WaveformSessionSummary> sessions;
+};
+
+/** Apply the public descending cursor and trigger-origin filter to summaries. */
+[[nodiscard]] WaveformSessionPage waveform_session_page(
+	std::span<const WaveformSessionSummary> sessions,
+	const WaveformSessionQuery &query = {});
+
+enum class WaveformArchiveDiscoveryState : std::uint32_t {
+	not_started = 0,
+	scanning = 1,
+	complete = 2,
+	cancelled = 3,
+	failed = 4,
+};
+
+/** Progress of the one-shot persisted MNCWF validation pass. */
+struct WaveformArchiveDiscoveryStatus {
+	WaveformArchiveDiscoveryState state =
+		WaveformArchiveDiscoveryState::not_started;
+	std::uint64_t scanned_files = 0;
+	std::uint64_t total_files = 0;
+	std::uint64_t rejected_files = 0;
 };
 
 struct WaveformStatus {
@@ -175,6 +220,7 @@ struct WaveformStatus {
 	std::uint64_t history_capacity_frames = waveform_history_frames;
 	std::uint64_t completed_sessions = 0;
 	std::uint64_t incomplete_sessions = 0;
+	WaveformArchiveDiscoveryStatus archive_discovery{};
 	WaveformCorrelation correlation{};
 };
 
@@ -217,13 +263,6 @@ struct WaveformBlock {
 		frames;
 };
 
-struct WaveformCorrelationIoctl {
-	std::uint64_t tai_before_nanoseconds;
-	std::uint64_t tai_after_nanoseconds;
-	std::uint64_t pl_tick;
-	std::uint64_t frame_sequence;
-};
-
 struct WaveformTransportStatusIoctl {
 	std::uint64_t produced_blocks;
 	std::uint64_t consumed_blocks;
@@ -233,24 +272,11 @@ struct WaveformTransportStatusIoctl {
 	std::uint32_t callbacks;
 };
 
-/**
- * Programs the next UTC-aligned ten-minute boundary in the PL sample-counter
- * domain.  The kernel writes the target and commit bit to the waveform AXI
- * register bank; the metrology datapath consumes the committed value without
- * involving the waveform DMA stream itself.
- */
-struct WaveformTenMinuteBoundaryIoctl {
-	std::uint64_t target_sample_index;
-	std::uint32_t valid;
-	std::uint32_t reserved;
-};
 #pragma pack(pop)
 
 static_assert(sizeof(WaveformBlockHeader) == waveform_block_header_bytes);
 static_assert(sizeof(WaveformBlock) == waveform_block_bytes);
-static_assert(sizeof(WaveformCorrelationIoctl) == 32);
 static_assert(sizeof(WaveformTransportStatusIoctl) == 32);
-static_assert(sizeof(WaveformTenMinuteBoundaryIoctl) == 16);
 
 class WaveformCapture {
 public:
@@ -288,25 +314,13 @@ public:
 		std::uint16_t leap_flags = 0u) noexcept;
 	void erase(std::uint64_t session_id);
 	WaveformStatus status();
+	/** Compatibility view used by status/trigger replies: newest 16 sessions. */
 	std::vector<WaveformSessionSummary> sessions();
-
-	/**
-	 * Sample one PL-counter/CLOCK_REALTIME correlation for the UTC
-	 * measurement timebase. Available whenever the waveform device is
-	 * open (a capture session is not required); nullopt when the device
-	 * is closed or the correlation read fails.
-	 */
-	std::optional<WaveformTimeSync> time_sync() const noexcept;
-
-	/**
-	 * Commit or invalidate the next ten-minute UTC boundary.
-	 *
-	 * The target is expressed in the same free-running PL sample-counter
-	 * domain returned by time_sync().  A disabled target is used during an
-	 * orderly capture stop so stale UTC mappings cannot survive a restart.
-	 */
-	void program_ten_minute_boundary(std::uint64_t target_sample_index,
-					 bool valid);
+	WaveformSessionPage session_page(const WaveformSessionQuery &query = {});
+	[[nodiscard]] std::optional<WaveformSessionSummary>
+	find_session(std::uint64_t session_id);
+	[[nodiscard]] std::optional<WaveformSessionSummary>
+	find_session(const MncwfUuid &capture_uuid);
 
 private:
 	struct Event;
@@ -322,7 +336,13 @@ private:
 	void finish_sessions();
 	void enqueue_materialization(Session &session);
 	void collect_materialization_results();
-	void discover_persisted_sessions();
+	void begin_persisted_session_discovery();
+	void discover_persisted_sessions(
+		std::stop_token stop, std::vector<std::filesystem::path> files);
+	void collect_discovery_results();
+	void rebuild_session_lineage();
+	[[nodiscard]] WaveformArchiveDiscoveryStatus
+	archive_discovery_status() const;
 	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
 	std::uint64_t max_capture_frames() const noexcept;
 	void update_transport_status() noexcept;
@@ -331,7 +351,16 @@ private:
 	std::string device_path_;
 	std::filesystem::path output_directory_;
 	WaveformCaptureContext context_{};
-	bool persisted_sessions_discovered_ = false;
+	std::function<std::optional<WaveformCorrelation>()> correlation_source_;
+	std::function<void(std::stop_token, const std::filesystem::path &)>
+		archive_discovery_hook_;
+	mutable std::mutex archive_discovery_mutex_;
+	WaveformArchiveDiscoveryStatus archive_discovery_{};
+	std::string archive_discovery_error_;
+	bool archive_discovery_result_ready_ = false;
+	bool archive_discovery_result_collected_ = false;
+	bool archive_discovery_error_reported_ = false;
+	std::jthread archive_discovery_worker_;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
 	bool have_history_ = false;
@@ -351,6 +380,7 @@ private:
 	std::optional<std::uint32_t> configuration_generation_;
 	std::uint64_t next_session_id_ = 1;
 	std::vector<Session> sessions_;
+	std::vector<Session> discovered_sessions_;
 	std::vector<GapRange> gaps_;
 	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};

@@ -143,8 +143,9 @@ The two record streams stay separate all the way to the API:
 
 2. **UTC** — a wall-clock label attached to measurement time through
    discrete sync points. The acquisition daemon periodically latches the
-   sample counter together with bracketed CLOCK_REALTIME reads (via the
-   waveform correlation registers) and feeds a `MeasurementTimebase`. UTC
+   sample counter together with kernel-bracketed CLOCK_REALTIME reads through
+   the independent, register-only `/dev/meter-time` endpoint and feeds a
+   `MeasurementTimebase`. UTC
    corrections (NTP steps, manual set) change only this mapping; no
    counter, record, or stored stream is ever rewritten.
 

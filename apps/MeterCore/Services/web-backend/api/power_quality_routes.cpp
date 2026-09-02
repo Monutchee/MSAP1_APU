@@ -2,6 +2,7 @@
 
 #include "health_dto.hpp"
 #include "meter_dto.hpp"
+#include "openapi.hpp"
 #include "query.hpp"
 #include "response.hpp"
 #include "routes.hpp"
@@ -491,6 +492,52 @@ webengine::Response get_meter_mains_signalling(AppContext &app,
 		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_power_quality_routes(DocumentedApiRegistry &registry)
+{
+	using Verb = webengine::http::verb;
+	constexpr std::string_view events =
+		"/api/v1/meter/power-quality/events";
+	registry.add_query_parameter(Verb::get, events, "event_id", "string",
+		false, "Return one event with this canonical UUID", {},
+		"d2f78547-4d73-46c2-bc69-c9cc763cc15a");
+	registry.add_query_parameter(Verb::get, events, "start_utc_ns", "integer",
+		false, "Inclusive UTC range start in nanoseconds");
+	registry.add_query_parameter(Verb::get, events, "end_utc_ns", "integer",
+		false, "Inclusive UTC range end in nanoseconds");
+	registry.add_query_parameter(Verb::get, events, "limit", "integer", false,
+		"Maximum number of events, from 1 through 1000", {}, "100");
+	registry.add_json_response<PowerQualityEventsDto>(Verb::get, events, 200,
+		"PowerQualityEvents", "Power-quality event catalogue page");
+	registry.add_error_response(Verb::get, events, 400,
+		"The event query is invalid");
+	registry.add_error_response(Verb::get, events, 404,
+		"The requested event does not exist");
+	registry.add_error_response(Verb::get, events, 503,
+		"The event catalogue is unavailable");
+
+	registry.add_json_request<PowerQualityEventDeleteDto>(Verb::delete_, events,
+		"PowerQualityEventDelete", "Selection and explicit confirmation");
+	registry.add_json_response<PowerQualityEventDeleteResultDto>(Verb::delete_,
+		events, 200, "PowerQualityEventDeleteResult",
+		"Number of catalogue events deleted");
+	registry.add_error_response(Verb::delete_, events, 400,
+		"The deletion request is invalid or unconfirmed");
+	registry.add_error_response(Verb::delete_, events, 409,
+		"The catalogue could not complete the deletion");
+
+	registry.add_json_response<FlickerDto>(Verb::get,
+		"/api/v1/meter/flicker", 200, "Flicker",
+		"Latest live, Pst, and Plt flicker records");
+	registry.add_error_response(Verb::get, "/api/v1/meter/flicker", 503,
+		"Flicker acquisition is unavailable");
+	registry.add_json_response<MainsSignalDto>(Verb::get,
+		"/api/v1/meter/mains-signalling", 200, "MainsSignalling",
+		"Latest mains-signalling carrier observation");
+	registry.add_error_response(Verb::get,
+		"/api/v1/meter/mains-signalling", 503,
+		"Mains-signalling acquisition is unavailable");
 }
 
 } // namespace msap1::web::api

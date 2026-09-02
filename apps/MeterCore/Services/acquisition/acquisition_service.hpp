@@ -19,9 +19,10 @@ namespace msap1::acquisition::daemon {
  * @brief Adapts the coordinator to the mnc::Service lifecycle.
  *
  * mnc::Service supplies readiness/watchdog/signal handling; this class only
- * maps its callbacks onto the coordinator: on_start runs the poll loop on a
- * worker thread, on_stop requests loop exit and joins, and a worker failure
- * is reported through health() so systemd restarts the unit.
+ * maps its callbacks onto the coordinator: on_start synchronously completes
+ * capture and IPC initialization before launching the poll loop, on_stop
+ * requests loop exit and joins, and a worker failure is reported through
+ * health() so systemd restarts the unit.
  */
 class AcquisitionService final : public mnc::Service {
 public:
@@ -37,6 +38,7 @@ private:
 	CaptureCoordinator coordinator_;
 	std::thread worker_;
 	std::exception_ptr failure_;
+	std::atomic<bool> ready_{false};
 	std::atomic<bool> failed_{false};
 };
 

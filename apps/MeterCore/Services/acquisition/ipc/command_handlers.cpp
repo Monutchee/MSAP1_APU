@@ -70,9 +70,17 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const auto &) {
 			return coordinator.waveform_response();
 		});
-	registry.on<msap1::WaveformListRequest>(AcquisitionStatus::dma_error,
-		[&coordinator](const auto &) {
-			return coordinator.waveform_response();
+	registry.on<msap1::WaveformListRequest>(AcquisitionStatus::bad_request,
+		[&coordinator](const msap1::WaveformListRequest &request) {
+			return coordinator.waveform_response({
+				request.before_session_id,
+				request.limit,
+				request.origin,
+			});
+		});
+	registry.on<msap1::WaveformLookupRequest>(AcquisitionStatus::bad_request,
+		[&coordinator](const msap1::WaveformLookupRequest &request) {
+			return coordinator.waveform_lookup_response(request);
 		});
 	registry.on<msap1::WaveformTriggerRequest>(AcquisitionStatus::dma_error,
 		[&coordinator](const msap1::WaveformTriggerRequest &request) {

@@ -22,6 +22,7 @@
 #include "pipeline/health_monitor.hpp"
 #include "pipeline/record_ingestor.hpp"
 #include "support/options.hpp"
+#include "support/meter_time_control.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -59,7 +60,15 @@ public:
 	CaptureCoordinator &operator=(const CaptureCoordinator &) = delete;
 
 	/**
-	 * @brief Serve the pipeline until request_stop().
+	 * @brief Complete the capture-critical startup sequence.
+	 *
+	 * Arms both DMA paths, starts RPU capture, and only then binds the IPC
+	 * socket. Returning from this method is the daemon's readiness boundary.
+	 */
+	void initialize();
+
+	/**
+	 * @brief Serve an initialized pipeline until request_stop().
 	 *
 	 * One poll() multiplexes the meter DMA, the waveform DMA, and the IPC
 	 * eventfd; the periodic RPU health audit runs between wakeups.
@@ -110,7 +119,10 @@ public:
 	[[nodiscard]] msap1::CaptureResponse capture_response() const;
 	[[nodiscard]] msap1::FrequencyResponse frequency_response() const;
 	[[nodiscard]] msap1::DiagnosticResponse diagnostic_response() const;
-	[[nodiscard]] msap1::WaveformResponse waveform_response();
+	[[nodiscard]] msap1::WaveformResponse waveform_response(
+		const msap1::WaveformSessionQuery &query = {});
+	[[nodiscard]] msap1::WaveformLookupResponse waveform_lookup_response(
+		const msap1::WaveformLookupRequest &request);
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
 	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;
@@ -154,7 +166,7 @@ private:
 	 * @brief Refresh the measurement-timebase sync point (~10 s cadence).
 	 *
 	 * Correlates the PL 64-bit conversion sample counter with
-	 * CLOCK_REALTIME through the waveform correlation latch, binds the
+	 * CLOCK_REALTIME through the independent meter-time latch, binds the
 	 * sync to the ACTIVE configuration (generation + sample rate), and
 	 * folds in the kernel clock discipline state (adjtimex). Missing the
 	 * cadence long enough moves TimeQuality to Holdover on its own.
@@ -177,6 +189,7 @@ private:
 	msap1::settings::ProductSettings product_settings_;
 	msap1::PreparedMeterConfiguration configuration_;
 	msap1::acquisition::MeterDmaReader meter_;
+	MeterTimeControl time_control_;
 	msap1::WaveformCapture waveform_;
 	msap1::acquisition::RpuController rpu_;
 	/* UTC mapping for decoded blocks; written by refresh_time_sync() and
@@ -184,6 +197,11 @@ private:
 	 * holds a reference to it. */
 	msap1::meter::MeasurementTimebase timebase_;
 	std::optional<Clock::time_point> last_time_sync_;
+	/* Consecutive TAI/sample correlations provide the measured conversion rate
+	 * used by the Class-A ten-second UTC boundary mapper. */
+	std::optional<MeterTimeSync> previous_frequency_time_sync_;
+	std::uint32_t frequency_10s_boundary_generation_ = 0;
+	Frequency10sObserverStatus frequency_10s_observer_status_{};
 	/* True after the next UTC ten-minute boundary has been mapped into the
 	 * active PL sample-counter epoch. Capture/configuration restarts clear it
 	 * and force a fresh mapping. */

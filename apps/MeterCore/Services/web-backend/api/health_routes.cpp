@@ -5,6 +5,7 @@
  */
 
 #include "health_dto.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -117,9 +118,22 @@ webengine::Response get_health(AppContext &app,
 {
 	try {
 		const auto response = app.acquisition.information();
+		if (app.acquisition_unavailable.exchange(false))
+			log_api_event(mnc::logging::Priority::notice,
+				"metering service recovered and health IPC is available",
+				"system_ready");
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
 			system_health(response, app.nginx));
+	} catch (const msap1::AcquisitionUnavailable &) {
+		if (!app.acquisition_unavailable.exchange(true))
+			log_api_event(mnc::logging::Priority::notice,
+				"metering service is starting or recovering",
+				"system_not_ready");
+		return error_response(
+			webengine::http::status::service_unavailable,
+			"Metering service is starting or recovering.",
+			"system_not_ready", true);
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/health", error);
 		return error_response(
@@ -141,6 +155,21 @@ webengine::Response get_about(AppContext &,
 			      const webengine::RequestContext &)
 {
 	return json_response(webengine::http::status::ok, system_about());
+}
+
+void document_health_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	registry.add_json_response<SessionDto>(V::get, "/api/v1/session", 200,
+		"Session", "Authenticated session identity",
+		R"({"username":"admin","role":"admin"})");
+	registry.add_json_response<HealthDto>(V::get, "/api/v1/health", 200,
+		"SystemHealth", "Aggregate system health");
+	registry.add_error_response(V::get, "/api/v1/health", 503,
+		"Metering services are starting, recovering, or unavailable",
+		"Metering service is starting or recovering.");
+	registry.add_json_response<SystemAboutDto>(V::get, "/api/v1/about", 200,
+		"SystemAbout", "Product and installed-image identity");
 }
 
 } // namespace msap1::web::api

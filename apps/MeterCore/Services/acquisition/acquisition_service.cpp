@@ -13,6 +13,10 @@ AcquisitionService::AcquisitionService(const Options &options)
 void AcquisitionService::on_start()
 {
 	coordinator_.clear_stop_request();
+	/* This synchronous boundary is what mnc::Service turns into READY=1.
+	 * Archive CRC validation is already running in the background, so only
+	 * capture-critical DMA/RPU setup and the IPC bind delay readiness. */
+	coordinator_.initialize();
 	worker_ = std::thread([this] {
 		try {
 			coordinator_.run();
@@ -22,6 +26,7 @@ void AcquisitionService::on_start()
 			request_stop();
 		}
 	});
+	ready_ = true;
 }
 
 void AcquisitionService::on_reload()
@@ -34,6 +39,7 @@ void AcquisitionService::on_reload()
 
 void AcquisitionService::on_stop() noexcept
 {
+	ready_ = false;
 	coordinator_.request_stop();
 	if (worker_.joinable())
 		worker_.join();
@@ -54,9 +60,11 @@ void AcquisitionService::on_stop() noexcept
 
 mnc::ServiceHealth AcquisitionService::health() const
 {
-	return failed_.load()
-		? mnc::ServiceHealth{false, "acquisition worker failed"}
-		: mnc::ServiceHealth{true, "acquisition running"};
+	if (failed_.load())
+		return {false, "acquisition worker failed"};
+	return ready_.load()
+		? mnc::ServiceHealth{true, "acquisition running"}
+		: mnc::ServiceHealth{false, "acquisition is not ready"};
 }
 
 } // namespace msap1::acquisition::daemon

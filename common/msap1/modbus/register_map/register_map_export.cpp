@@ -124,6 +124,7 @@ std::string_view period_name(MeasurementPeriod period)
 {
 	switch (period) {
 	case MeasurementPeriod::Basic: return "10/12-cycle";
+	case MeasurementPeriod::Seconds10: return "UTC 10-second frequency";
 	case MeasurementPeriod::Cycles150_180: return "150/180-cycle";
 	case MeasurementPeriod::Min10: return "10-minute";
 	case MeasurementPeriod::Hour2: return "2-hour";
@@ -138,6 +139,7 @@ std::string_view period_key(MeasurementPeriod period)
 {
 	switch (period) {
 	case MeasurementPeriod::Basic: return "basic";
+	case MeasurementPeriod::Seconds10: return "seconds_10";
 	case MeasurementPeriod::Cycles150_180: return "cycles_150_180";
 	case MeasurementPeriod::Min10: return "minute_10";
 	case MeasurementPeriod::Hour2: return "hour_2";

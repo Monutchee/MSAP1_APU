@@ -2,13 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -80,6 +83,25 @@ std::vector<msap1::WaveformSessionSummary> wait_for_session(
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
 	throw std::runtime_error("waveform materialization timed out");
+}
+
+msap1::WaveformStatus wait_for_archive_discovery(
+	msap1::WaveformCapture &capture)
+{
+	for (unsigned int attempt = 0; attempt < 1000; ++attempt) {
+		auto status = capture.status();
+		if (status.archive_discovery.state ==
+		    msap1::WaveformArchiveDiscoveryState::complete)
+			return status;
+		if (status.archive_discovery.state ==
+			    msap1::WaveformArchiveDiscoveryState::failed ||
+		    status.archive_discovery.state ==
+			    msap1::WaveformArchiveDiscoveryState::cancelled)
+			throw std::runtime_error(
+				"waveform archive discovery did not complete");
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	throw std::runtime_error("waveform archive discovery timed out");
 }
 
 msap1::WaveformCaptureContext test_capture_context()
@@ -269,6 +291,235 @@ bool has_capture_lineage(const msap1::MncwfV4Reader &reader,
 		});
 }
 
+void test_session_pagination_and_origin_filters()
+{
+	const auto source_bit = [](msap1::WaveformTriggerSource source) {
+		return 1u << static_cast<unsigned>(source);
+	};
+	const auto manual = source_bit(
+		msap1::WaveformTriggerSource::manual_web);
+	const auto power_quality = source_bit(
+		msap1::WaveformTriggerSource::pq_event);
+
+	std::vector<msap1::WaveformSessionSummary> sessions;
+	for (std::uint64_t id = 1u; id <= 25u; ++id) {
+		msap1::WaveformSessionSummary session{};
+		session.id = id;
+		session.state = id == 25u
+			? msap1::WaveformSessionState::capturing
+			: id == 24u
+				? msap1::WaveformSessionState::incomplete
+				: msap1::WaveformSessionState::complete;
+		if (id == 20u)
+			session.trigger_source_mask = manual | power_quality;
+		else if ((id % 3u) == 0u)
+			session.trigger_source_mask = power_quality;
+		else if ((id % 2u) == 0u)
+			session.trigger_source_mask = manual;
+		/* Odd, non-PQ sessions deliberately model legacy/unknown files. */
+		sessions.push_back(session);
+	}
+
+	msap1::WaveformSessionQuery query{};
+	query.limit = 16u;
+	const auto newest = msap1::waveform_session_page(sessions, query);
+	require(newest.total_sessions == 25u &&
+			newest.completed_sessions == 23u &&
+			newest.incomplete_sessions == 1u &&
+			newest.active_sessions == 1u &&
+			newest.sessions.size() == 16u &&
+			newest.sessions.front().id == 25u &&
+			newest.sessions.back().id == 10u &&
+			newest.next_before_session_id == 10u,
+		"newest waveform page metadata is wrong");
+
+	query.before_session_id = newest.next_before_session_id;
+	const auto older = msap1::waveform_session_page(sessions, query);
+	require(older.sessions.size() == 9u &&
+			older.sessions.front().id == 9u &&
+			older.sessions.back().id == 1u &&
+			older.next_before_session_id == 0u,
+		"exclusive waveform cursor skipped or duplicated a session");
+
+	/* A newer capture cannot perturb an already-issued exclusive cursor. */
+	msap1::WaveformSessionSummary added{};
+	added.id = 26u;
+	sessions.push_back(added);
+	const auto stable = msap1::waveform_session_page(sessions, query);
+	require(stable.sessions.size() == older.sessions.size() &&
+			std::ranges::equal(stable.sessions, older.sessions,
+				{}, &msap1::WaveformSessionSummary::id,
+				&msap1::WaveformSessionSummary::id),
+		"new capture changed an older waveform page");
+
+	query.before_session_id = 0u;
+	query.limit = 100u;
+	query.origin = msap1::WaveformOriginFilter::manual;
+	const auto manual_page = msap1::waveform_session_page(sessions, query);
+	query.origin = msap1::WaveformOriginFilter::power_quality;
+	const auto pq_page = msap1::waveform_session_page(sessions, query);
+	const auto contains = [](const auto &page, std::uint64_t id) {
+		return std::ranges::any_of(page.sessions,
+			[id](const auto &session) { return session.id == id; });
+	};
+	require(contains(manual_page, 20u) && contains(pq_page, 20u),
+		"mixed waveform session is not in both origin filters");
+	require(!contains(manual_page, 1u) && !contains(pq_page, 1u),
+		"legacy waveform session leaked into an origin filter");
+	require(std::ranges::all_of(manual_page.sessions,
+			[manual](const auto &session) {
+				return (session.trigger_source_mask & manual) != 0u;
+			}) &&
+			std::ranges::all_of(pq_page.sessions,
+				[power_quality](const auto &session) {
+					return (session.trigger_source_mask &
+						power_quality) != 0u;
+				}),
+		"waveform origin filtering returned a nonmatching session");
+
+	bool rejected = false;
+	try {
+		query.limit = 0u;
+		(void)msap1::waveform_session_page(sessions, query);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "zero waveform page limit was accepted");
+	query.limit = 1u;
+	query.origin = static_cast<msap1::WaveformOriginFilter>(99u);
+	rejected = false;
+	try {
+		(void)msap1::waveform_session_page(sessions, query);
+	} catch (const std::invalid_argument &) {
+		rejected = true;
+	}
+	require(rejected, "unknown waveform origin filter was accepted");
+}
+
+void test_async_archive_discovery_and_cancellation()
+{
+	const auto device = unique_path(".archive-device");
+	const auto output = unique_path(".archive-captures");
+	const auto cancel_device = unique_path(".archive-cancel-device");
+	const auto cancel_output = unique_path(".archive-cancel-captures");
+	std::mutex gate_mutex;
+	std::condition_variable gate;
+	bool entered = false;
+	bool release = false;
+	std::atomic<bool> cancelled_hook_exited{false};
+	try {
+		std::filesystem::create_directories(output);
+		{
+			std::ofstream malformed(
+				output / "waveform-41-blocked.mncwf",
+				std::ios::binary | std::ios::trunc);
+			malformed << "not an MNCWF file";
+		}
+		write_test_block(device);
+		msap1::WaveformCaptureOptions options{};
+		options.history_capacity_frames = 70'000u;
+		options.archive_discovery_hook =
+			[&](std::stop_token stop, const std::filesystem::path &) {
+				std::unique_lock lock(gate_mutex);
+				entered = true;
+				gate.notify_all();
+				std::stop_callback notify_stop(stop,
+					[&gate] { gate.notify_all(); });
+				gate.wait(lock, [&] {
+					return release || stop.stop_requested();
+				});
+			};
+
+		msap1::WaveformCapture capture(device.string(), output,
+			test_capture_context(), options);
+		capture.start();
+		{
+			std::unique_lock lock(gate_mutex);
+			require(gate.wait_for(lock, std::chrono::seconds(1),
+				[&] { return entered; }),
+				"archive validation worker did not reach the test gate");
+		}
+		capture.read_available();
+		const auto scanning = capture.status();
+		require(scanning.running != 0u &&
+				scanning.frames == msap1::waveform_frames_per_block &&
+				scanning.archive_discovery.state ==
+					msap1::WaveformArchiveDiscoveryState::scanning &&
+				scanning.archive_discovery.scanned_files == 0u &&
+				scanning.archive_discovery.total_files == 1u,
+			"capture did not run while archive validation was blocked");
+		const auto created = capture.trigger(
+			0u, 0u, 1u, msap1::WaveformTriggerSource::manual_cli);
+		require(created.id == 42u,
+			"persisted filename did not reserve the next session ID");
+		{
+			std::scoped_lock lock(gate_mutex);
+			release = true;
+		}
+		gate.notify_all();
+		const auto complete = wait_for_archive_discovery(capture);
+		require(complete.archive_discovery.scanned_files == 1u &&
+				complete.archive_discovery.rejected_files == 1u,
+			"malformed archive was not counted as rejected");
+		require(find_session(capture.sessions(), 42u,
+				"capture created during discovery disappeared").id == 42u,
+			"runtime session collided with archive discovery");
+		capture.stop();
+
+		std::filesystem::create_directories(cancel_output);
+		{
+			std::ofstream malformed(
+				cancel_output / "waveform-7-cancel.mncwf",
+				std::ios::binary | std::ios::trunc);
+			malformed << "not an MNCWF file";
+		}
+		{
+			std::ofstream empty(cancel_device, std::ios::binary);
+			require(static_cast<bool>(empty),
+				"create archive cancellation device");
+		}
+		entered = false;
+		release = false;
+		options.archive_discovery_hook =
+			[&](std::stop_token stop, const std::filesystem::path &) {
+				std::unique_lock lock(gate_mutex);
+				entered = true;
+				gate.notify_all();
+				std::stop_callback notify_stop(stop,
+					[&gate] { gate.notify_all(); });
+				gate.wait(lock, [&] { return stop.stop_requested(); });
+				cancelled_hook_exited = true;
+			};
+		{
+			msap1::WaveformCapture cancelling(cancel_device.string(),
+				cancel_output, test_capture_context(), options);
+			cancelling.start();
+			std::unique_lock lock(gate_mutex);
+			require(gate.wait_for(lock, std::chrono::seconds(1),
+				[&] { return entered; }),
+				"cancellable archive worker did not start");
+		}
+		require(cancelled_hook_exited.load(),
+			"waveform shutdown did not cancel archive discovery");
+
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(cancel_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(cancel_device);
+	} catch (...) {
+		{
+			std::scoped_lock lock(gate_mutex);
+			release = true;
+		}
+		gate.notify_all();
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(cancel_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(cancel_device);
+		throw;
+	}
+}
+
 void test_materialized_continuation_and_restart_recovery()
 {
 	const auto device = unique_path(".continuation-device");
@@ -279,7 +530,8 @@ void test_materialized_continuation_and_restart_recovery()
 	constexpr std::uint32_t test_sample_rate_hz = 128'000u;
 	constexpr std::size_t test_history_frames =
 		2u * test_sample_rate_hz + 2'048u;
-	const msap1::WaveformCaptureOptions options{test_history_frames};
+	msap1::WaveformCaptureOptions options{};
+	options.history_capacity_frames = test_history_frames;
 	try {
 		msap1::WaveformSessionSummary master{};
 		msap1::WaveformSessionSummary continuation{};
@@ -375,6 +627,7 @@ void test_materialized_continuation_and_restart_recovery()
 			msap1::WaveformCapture discovered(discovery_device.string(), output,
 				test_capture_context(), options);
 			discovered.start();
+			(void)wait_for_archive_discovery(discovered);
 			const auto restored = discovered.sessions();
 			const auto restored_master = find_session(restored, master.id,
 				"restart did not discover continuation master");
@@ -458,6 +711,8 @@ int main()
 	const auto device = unique_path(".device");
 	const auto output = unique_path(".captures");
 	try {
+		test_session_pagination_and_origin_filters();
+		test_async_archive_discovery_and_cancellation();
 		test_materialized_continuation_and_restart_recovery();
 		write_test_block(device);
 		msap1::WaveformCapture capture(
@@ -774,6 +1029,7 @@ int main()
 		msap1::WaveformCapture restarted(
 			empty_device.string(), output, test_capture_context());
 		restarted.start();
+		(void)wait_for_archive_discovery(restarted);
 		const auto restored = restarted.sessions();
 		require(!restored.empty() &&
 				restored.front().id == triggered.id &&
@@ -782,6 +1038,13 @@ int main()
 				restored.front()
 						.trigger_realtime_nanoseconds != 0,
 			"persisted waveform history was not restored");
+		const auto found_by_id = restarted.find_session(triggered.id);
+		const auto found_by_uuid =
+			restarted.find_session(restored.front().capture_uuid);
+		require(found_by_id && found_by_uuid &&
+				found_by_id->capture_uuid == restored.front().capture_uuid &&
+				found_by_uuid->id == triggered.id,
+			"exact waveform archive lookup did not find an old capture");
 		restarted.erase(triggered.id);
 		require(restarted.sessions().empty(),
 			"deleted waveform session was retained");

@@ -32,6 +32,11 @@ enum class MeasurementPeriod : std::uint8_t {
 	Hour2Live,
 	/** Configured M17 active-demand profile (fixed block or sliding). */
 	Demand,
+	/**
+	 * IEC 61000-4-30 frequency result over one UTC-aligned 10 s interval.
+	 * Appended to preserve the numeric identities of every existing period.
+	 */
+	Seconds10,
 };
 
 /**

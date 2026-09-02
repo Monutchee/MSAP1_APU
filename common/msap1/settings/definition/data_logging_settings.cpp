@@ -97,6 +97,7 @@ std::uint64_t nominal_period_seconds(Period period,
 {
 	switch (period) {
 	case Period::Basic: return 1; // settings durations are whole seconds
+	case Period::Seconds10: return 10;
 	case Period::Cycles150_180: return 3;
 	case Period::Min10: return 600;
 	case Period::Hour2: return 7200;

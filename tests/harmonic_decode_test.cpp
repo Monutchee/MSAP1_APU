@@ -3,6 +3,7 @@
 #include "msap1/meter/harmonic_spectrum.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -118,6 +119,88 @@ void rejects(Function function, const char *message)
 		return;
 	}
 	require(false, message);
+}
+
+msap1::HarmonicSpectrumSnapshot thd_snapshot()
+{
+	msap1::HarmonicSpectrumSnapshot snapshot{};
+	snapshot.status = 0x3eu;
+	snapshot.valid_mask = 0x7fu;
+	snapshot.qualified_max_order = 127u;
+	for (auto &channel : snapshot.channels) {
+		for (std::size_t index = 0; index < channel.size(); ++index)
+			channel[index].order = static_cast<std::uint8_t>(index + 1u);
+		channel[0].magnitude_micro_units = 100'000'000u;
+		for (std::size_t order = 1; order <= 50; ++order)
+			channel[order - 1u].magnitude_valid = true;
+	}
+	return snapshot;
+}
+
+void harmonic_distortion_contract()
+{
+	using Status = msap1::HarmonicDistortionStatus;
+	auto snapshot = thd_snapshot();
+
+	auto result = msap1::harmonic_distortion(snapshot, 0);
+	require(result.status == Status::valid && result.percent &&
+		*result.percent == 0.0 && result.first_order == 2u &&
+		result.last_order == 50u,
+		"a pure fundamental has valid zero H2-H50 THD");
+
+	snapshot.channels[0][2].magnitude_micro_units = 3'000'000u;
+	snapshot.channels[0][4].magnitude_micro_units = 4'000'000u;
+	result = msap1::harmonic_distortion(snapshot, 0);
+	require(result.status == Status::valid && result.percent &&
+		std::abs(*result.percent - 5.0) < 1e-12,
+		"known H3 and H5 magnitudes use root-sum-square THD");
+
+	auto invalid = thd_snapshot();
+	invalid.channels[0][0].magnitude_micro_units = 0u;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::fundamental_unavailable,
+		"zero H1 is unavailable rather than zero THD");
+	invalid = thd_snapshot();
+	invalid.channels[0][0].magnitude_valid = false;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::fundamental_unavailable,
+		"invalid H1 is unavailable");
+
+	invalid = thd_snapshot();
+	invalid.qualified_max_order = 49u;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::insufficient_order_range,
+		"a family qualified below H50 cannot publish H2-H50 THD");
+	invalid = thd_snapshot();
+	invalid.channels[0][16].magnitude_valid = false;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::harmonic_unavailable,
+		"one invalid H2-H50 magnitude invalidates THD");
+	invalid = thd_snapshot();
+	invalid.valid_mask &= ~std::uint8_t{1};
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::channel_unavailable,
+		"the selected channel must be valid");
+	require(msap1::harmonic_distortion(invalid, 7).status ==
+			Status::channel_unavailable,
+		"an out-of-range channel is unavailable");
+
+	invalid = thd_snapshot();
+	invalid.status &= ~0x10u;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::interval_invalid,
+		"an invalid basic interval cannot publish THD");
+	invalid = thd_snapshot();
+	invalid.period = mnc::meter::MeasurementPeriod::Cycles150_180;
+	invalid.aligned = false;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::interval_invalid,
+		"a misaligned aggregate interval cannot publish THD");
+	invalid.aligned = true;
+	invalid.contaminated = true;
+	require(msap1::harmonic_distortion(invalid, 0).status ==
+			Status::interval_invalid,
+		"a contaminated aggregate interval cannot publish THD");
 }
 
 } // namespace
@@ -238,6 +321,8 @@ int main()
 				aggregate->channels[6][126].angle_millidegrees == 127000u &&
 				aggregate->channels[6][126].angle_valid,
 			"aggregate magnitude and angle at order 127 survive assembly");
+
+	harmonic_distortion_contract();
 
 	if (failures != 0) {
 		std::fprintf(stderr, "FAILED: %d check(s)\n", failures);

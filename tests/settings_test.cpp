@@ -57,7 +57,8 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
-		assert(initial.settings.schema_version == 6u);
+		assert(initial.settings.schema_version == 7u);
+		assert(initial.settings.time.synchronization == "ntp");
 		assert(initial.settings.metering.events.voltage_sag.enabled);
 		assert(initial.settings.metering.events.voltage_sag.waveform.decimation == 8u);
 		assert(initial.settings.metering.events.voltage_swell.waveform.decimation == 8u);
@@ -278,7 +279,7 @@ void test_existing_settings_default_system_nominal_voltage()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 			 std::istreambuf_iterator<char>());
-	const std::string schema = "\"schema_version\": 6";
+	const std::string schema = "\"schema_version\": 7";
 	const auto schema_position = json.find(schema);
 	assert(schema_position != std::string::npos);
 	json.replace(schema_position, schema.size(), "\"schema_version\": 2");
@@ -325,7 +326,7 @@ void test_existing_settings_default_system_nominal_voltage()
 
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
-	assert(handler.active().settings.schema_version == 6u);
+	assert(handler.active().settings.schema_version == 7u);
 	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
 	assert(handler.active().settings.metering.measurement_topology == "wye");
 	assert(handler.active().settings.metering.system_nominal_voltage_v ==
@@ -438,9 +439,9 @@ void test_schema_four_migrates_to_empty_data_logging()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 		std::istreambuf_iterator<char>());
-	const auto version = json.find("\"schema_version\": 6");
+	const auto version = json.find("\"schema_version\": 7");
 	require(version != std::string::npos, "factory schema marker is missing");
-	json.replace(version, std::string_view{"\"schema_version\": 6"}.size(),
+	json.replace(version, std::string_view{"\"schema_version\": 7"}.size(),
 		"\"schema_version\": 4");
 	const auto data_logging = json.find(",\n  \"data_logging\"");
 	require(data_logging != std::string::npos,
@@ -451,14 +452,43 @@ void test_schema_four_migrates_to_empty_data_logging()
 	json.erase(data_logging, root_close - data_logging);
 
 	const auto migrated = msap1::settings::SettingsCodec::decode(json);
-	require(migrated.schema_version == 6u,
-		"schema-four document did not migrate to schema six");
+	require(migrated.schema_version == 7u,
+		"schema-four document did not migrate to schema seven");
+	require(migrated.time.synchronization == "ntp",
+		"legacy settings did not receive default NTP synchronization");
 	require(migrated.data_logging.channels.empty() &&
 		migrated.data_logging.jobs.empty(),
 		"schema migration enabled outbound traffic");
 	require(migrated.metering.events.voltage_sag.enabled &&
 		migrated.waveform.default_pretrigger_ms == 3000u,
 		"schema migration changed an M18 setting");
+}
+
+void test_time_synchronization_settings()
+{
+	TestTree tree("time-synchronization");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	auto settings = handler.active().settings;
+	settings.time.synchronization = "ptp";
+	settings.validate();
+
+	settings.time.synchronization = "gps";
+	bool rejected = false;
+	try {
+		settings.validate();
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	require(rejected, "unsupported time synchronization source was accepted");
+
+	settings.time.synchronization = "ptp";
+	settings.schema_version = 6u;
+	const auto migrated = msap1::settings::SettingsCodec::decode(
+		msap1::settings::SettingsCodec::encode(settings, false));
+	require(migrated.schema_version == 7u &&
+		migrated.time.synchronization == "ntp",
+		"schema-six settings did not migrate to default NTP");
 }
 
 void test_current_wiring_schema_migration_and_validation()
@@ -499,8 +529,8 @@ void test_current_wiring_schema_migration_and_validation()
 		legacy.schema_version = schema;
 		const auto migrated = msap1::settings::SettingsCodec::decode(
 			msap1::settings::SettingsCodec::encode(legacy, false));
-		require(migrated.schema_version == 6u,
-			"legacy product settings did not migrate to schema six");
+		require(migrated.schema_version == 7u,
+			"legacy product settings did not migrate to schema seven");
 		require(msap1::current_adc_phase_map(
 			migrated.metering.current_wiring) == 0xe4u &&
 			msap1::current_adc_invert_mask(
@@ -688,6 +718,7 @@ int main()
 	test_invalid_active_recovers_factory_defaults();
 	test_secrets_and_factory_reset();
 	test_schema_four_migrates_to_empty_data_logging();
+	test_time_synchronization_settings();
 	test_current_wiring_schema_migration_and_validation();
 	test_data_logging_configuration_validation();
 	test_channel_scoped_credentials_and_assets();

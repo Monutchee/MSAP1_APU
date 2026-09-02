@@ -20,6 +20,7 @@ namespace msap1::service_manager::daemon {
  *                         \----->  meter-historian  ----/
  *                         \----->  mqtt-publisher (settings-controlled)
  *                                   meter-historian -> data-sender
+ *   settings -> time-sync-ntp OR time-sync-ptp-clock -> time-sync-ptp-system
  *
  * (Acquisition needs the settings authority to hand it the active
  * configuration; the web backend needs acquisition for live data.)
@@ -43,6 +44,12 @@ inline void register_product_units(mnc::ServiceManager &manager)
 	manager.register_service({"mqtt-publisher",
 		"msap1-mqtt-publisher.service",
 		{"settings", "fpga-acquisition"}, false});
+	manager.register_service({"time-sync-ntp",
+		"systemd-timesyncd.service", {"settings"}, false});
+	manager.register_service({"time-sync-ptp-clock",
+		"ptp4l@end0.service", {"settings"}, false});
+	manager.register_service({"time-sync-ptp-system",
+		"phc2sys@end0.service", {"time-sync-ptp-clock"}, false});
 	manager.register_service({"data-sender",
 		"msap1-data-sender.service", {"settings", "meter-historian"}});
 	manager.register_service({"web-backend",

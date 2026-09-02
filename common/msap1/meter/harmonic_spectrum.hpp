@@ -115,6 +115,36 @@ struct HarmonicSpectrumSnapshot {
 	}
 };
 
+/** Product THD availability for one channel of one atomic harmonic family. */
+enum class HarmonicDistortionStatus : std::uint8_t {
+	valid,
+	interval_invalid,
+	channel_unavailable,
+	fundamental_unavailable,
+	insufficient_order_range,
+	harmonic_unavailable,
+};
+
+/**
+ * Product-defined H2--H50 total harmonic distortion for one channel.
+ *
+ * `percent` is populated only for `valid`; an unavailable result must never be
+ * interpreted as zero. The order bounds are part of the public definition so
+ * callers cannot accidentally present a rate-limited spectrum as the same
+ * metric.
+ */
+struct HarmonicDistortion {
+	std::optional<double> percent{};
+	std::uint8_t first_order = 2;
+	std::uint8_t last_order = 50;
+	HarmonicDistortionStatus status =
+		HarmonicDistortionStatus::interval_invalid;
+};
+
+/** Calculate 100 * RSS(H2..H50) / H1 from integer micro-unit magnitudes. */
+[[nodiscard]] HarmonicDistortion harmonic_distortion(
+	const HarmonicSpectrumSnapshot &snapshot, std::size_t channel);
+
 /** Decode and fully validate one base or R5-aggregated harmonic chunk. */
 [[nodiscard]] HarmonicRecordChunk decode_harmonic_record(
 	const MeterRecord &record);

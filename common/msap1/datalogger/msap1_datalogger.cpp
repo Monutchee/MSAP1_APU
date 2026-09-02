@@ -30,6 +30,7 @@ std::int64_t nominal_interval(mnc::meter::MeasurementPeriod period)
 	using Period = mnc::meter::MeasurementPeriod;
 	switch (period) {
 	case Period::Basic: return 200'000'000ll;
+	case Period::Seconds10: return 10'000'000'000ll;
 	case Period::Cycles150_180: return 3'000'000'000ll;
 	case Period::Min10: return 600'000'000'000ll;
 	case Period::Hour2: return 7'200'000'000'000ll;
@@ -48,6 +49,7 @@ std::int64_t query_chunk(mnc::meter::MeasurementPeriod period)
 	using Period = mnc::meter::MeasurementPeriod;
 	switch (period) {
 	case Period::Basic: return 30'000'000'000ll;
+	case Period::Seconds10: return 300'000'000'000ll;
 	case Period::Cycles150_180: return 300'000'000'000ll;
 	case Period::Min10:
 	case Period::Demand: return 3'600'000'000'000ll;
@@ -66,6 +68,7 @@ mnc::meter_stream::DatabaseDataset dataset(
 	using Period = mnc::meter::MeasurementPeriod;
 	switch (period) {
 	case Period::Basic: return Dataset::basic;
+	case Period::Seconds10: return Dataset::seconds_10;
 	case Period::Cycles150_180: return Dataset::cycles_150_180;
 	case Period::Min10: return Dataset::minutes_10;
 	case Period::Hour2: return Dataset::hours_2;

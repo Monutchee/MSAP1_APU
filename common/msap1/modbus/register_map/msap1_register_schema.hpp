@@ -8,7 +8,7 @@
 namespace msap1::modbus::schema {
 
 /** External MSAP1 Modbus map contract version. */
-inline constexpr std::uint16_t register_map_version = 2;
+inline constexpr std::uint16_t register_map_version = 3;
 
 namespace blocks {
 
@@ -299,6 +299,15 @@ inline constexpr auto demand_peak_anchors = make_special_block(
 			DataType::uint64, Period::Demand},
 	});
 
+/* M20 keeps the legacy Basic frequency at 0x0000 and publishes the
+ * standardized UTC ten-second result at a new stable address. */
+inline constexpr RegisterBlock frequency_10s_layout{
+	blocks::power_quality.function, 0x6000, 0x0002,
+	"frequency.seconds_10"};
+inline constexpr auto frequency_10s = make_attribute_block(
+	frequency_10s_layout, Period::Seconds10, DataType::float32,
+	std::array{Key{Id::Frequency, std::nullopt}});
+
 /** One sorted source of truth used by runtime, tests, and map documentation. */
 inline constexpr auto register_map = concat(
 	metadata, basic_frequency, basic_voltage_ln, basic_current, basic_status,
@@ -306,7 +315,7 @@ inline constexpr auto register_map = concat(
 	reactive_energy_quadrant_i, reactive_energy_quadrant_ii,
 	reactive_energy_quadrant_iii, reactive_energy_quadrant_iv,
 	energy_metadata, current_demand, import_demand_peak, export_demand_peak,
-	demand_metadata, demand_peak_anchors);
+	demand_metadata, demand_peak_anchors, frequency_10s);
 
 inline constexpr std::array basic_published_attributes{
 	Key{Id::Frequency, std::nullopt},
@@ -368,7 +377,8 @@ inline constexpr auto published_measurement_attributes = concat(
 		Key{Id::ExportDemandPeakA, std::nullopt},
 		Key{Id::ExportDemandPeakB, std::nullopt},
 		Key{Id::ExportDemandPeakC, std::nullopt},
-		Key{Id::ExportDemandPeakTotal, std::nullopt}});
+		Key{Id::ExportDemandPeakTotal, std::nullopt},
+		Key{Id::Frequency, std::nullopt}});
 
 static_assert(validate_register_map(register_blocks, register_map),
 	"MSAP1 Modbus blocks or generated register definitions are invalid");

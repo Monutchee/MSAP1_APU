@@ -284,6 +284,11 @@ public:
 	{
 		return aggregate_sequence_gaps_;
 	}
+	/** @brief Missing FREQUENCY-10S records on the independent R5C1 stream. */
+	[[nodiscard]] std::uint64_t frequency_10s_sequence_gaps() const
+	{
+		return frequency_10s_sequence_gaps_;
+	}
 	/** @brief Missing TEN-MINUTE records detected on the M13 stream. */
 	[[nodiscard]] std::uint64_t ten_minute_sequence_gaps() const
 	{
@@ -330,6 +335,8 @@ private:
 	[[nodiscard]] bool track_ten_minute_continuity(
 		const msap1::MeterRecord &record);
 	[[nodiscard]] bool track_two_hour_continuity(
+		const msap1::MeterRecord &record);
+	[[nodiscard]] bool track_frequency_10s_continuity(
 		const msap1::MeterRecord &record);
 
 	msap1::acquisition::MeterRecordSource &meter_;
@@ -419,6 +426,7 @@ private:
 	std::uint64_t aggregate_sequence_gaps_ = 0;
 	std::uint64_t ten_minute_sequence_gaps_ = 0;
 	std::uint64_t two_hour_sequence_gaps_ = 0;
+	std::uint64_t frequency_10s_sequence_gaps_ = 0;
 	/* Kernel transport-overrun total at the last sequence-gap log. The
 	 * delta at gap time is what attributes the loss: it either matches the
 	 * gap (kernel ring overrun) or stays zero (upstream/PL loss). */
@@ -441,6 +449,7 @@ private:
 	std::optional<std::uint32_t> last_aggregate_sequence_;
 	std::optional<std::uint32_t> last_ten_minute_sequence_;
 	std::optional<std::uint32_t> last_two_hour_sequence_;
+	std::optional<std::uint32_t> last_frequency_10s_sequence_;
 	std::optional<Clock::time_point> last_record_time_;
 	/* Newest accepted aggregate and its arrival time. Held beside — never
 	 * inside — the basic caches above so /meter/readings semantics are

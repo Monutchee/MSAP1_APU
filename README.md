@@ -26,6 +26,10 @@ msap1-meter-historian -> typed, paged historian IPC
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
     -> /dev/msap1-waveform -> 128 MiB daemon history
     -> triggered .mncwf files
+
+PL tick + conversion sample index -> meter-time AXI-Lite registers
+    -> /dev/meter-time -> kernel-bracketed UTC correlation
+    -> 10-second and 10-minute sample-domain boundary control
 ```
 
 R5 core 0 retains exclusive ownership of AD7771 SPI, reset/synchronization,
@@ -132,8 +136,10 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 20 adds typed meter
-snapshot selection by period and attribute set. `MeterDataProvider` publishes
+little-endian product payloads. Acquisition IPC version 42 includes bounded
+waveform archive pagination, trigger-origin filtering, exact retained-session
+lookup, and archive-discovery progress in addition to typed meter snapshot
+selection by period and attribute set. `MeterDataProvider` publishes
 typed latest values for the Basic (10/12-cycle), 150/180-cycle, clock-aligned
 10-minute, and 2-hour measurement periods, plus non-normative live partials
 for the two long periods. Unavailable values are never represented as valid
@@ -243,7 +249,11 @@ The authenticated external API is:
   selected historian projections while preserving the raw-record spool)
 - `GET /api/v1/meter/configuration/frequency`
 - `PUT /api/v1/meter/configuration/frequency`
-- `GET /api/v1/waveforms`
+- `GET /api/v1/waveforms?origin=all|manual|power_quality&before_session_id=<id>&limit=<1..100>`
+  (authenticated viewer; defaults to the newest 16 sessions across all
+  origins)
+- `GET /api/v1/waveforms/session?capture_uuid=<uuid>` (authenticated viewer;
+  exact full-archive lookup for linked evidence)
 - `POST /api/v1/waveforms/trigger` (administrator only)
 - `DELETE /api/v1/waveforms` (administrator only; deletes one session or, with
   explicit confirmation, all inactive sessions and their MNCWF files)
@@ -266,24 +276,68 @@ The authenticated external API is:
 - `GET /api/v1/settings/active`
 - `PUT /api/v1/settings/active` (administrator only)
 - `POST /api/v1/settings/factory-reset` (administrator only)
+- `GET /api/v1/documentation/msap1_api.yaml` (authenticated viewer; exact
+  build-time OpenAPI contract as an attachment)
+- `GET /api/v1/documentation/msap1_modbus_registers.xlsx` (authenticated
+  viewer; exact build-time Modbus register workbook as an attachment)
+
+`msap1-openapi-dump` validates and emits the comprehensive OpenAPI 3.1 YAML
+for this surface. It uses the pinned Glaze library for named DTO JSON schemas
+and deterministic YAML serialization. Yocto runs the target executable under
+QEMU at build time and installs only `msap1_api.yaml`; neither the Web backend
+nor any HTTP request generates documentation at runtime.
+
+To add an endpoint, declare its method, exact path, minimum role, handler, and
+summary once in `api/routes.hpp`, then attach the named Glaze request/response
+DTOs, parameters, statuses, media types, and examples in the matching route
+module's `document_*_routes()` function. WebEngine registration and OpenAPI
+generation both import the same route table. The exporter fails on duplicate
+routes or operation IDs, missing success metadata, conflicting schemas, and
+unresolved schema references.
+
+While acquisition is still starting or recovering, `GET /api/v1/health`
+returns HTTP 503 with `code: "system_not_ready"` and `retryable: true`.
+Clients may keep settings and navigation available, but must suppress
+acquisition-dependent polling and clear stale live measurements until health
+IPC is reachable again.
 
 Waveform session summaries classify their contributing triggers as `manual`,
 `power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
 manual and PQ capture still share the same capture coordinator, MNCWF-v4
-storage, parser, and export path.
+storage, parser, and export path. Mixed sessions match both filtered views;
+legacy sessions match only `origin=all`.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
-folded from 15 basic blocks; `GET /api/v1/meter/minutes-10` reports the
-independently aligned 10-minute aggregate; and `GET /api/v1/meter/hours-2`
-reports twelve consecutive clean ten-minute intervals. Each finalized
-aggregate endpoint exposes the typed RMS, line-line, power, phasor, and
-unbalance values produced for that period. The periods never inherit from one
-another. The 150/180-cycle aggregate's `frequency` object is
-**informative only** — the standardized Class A frequency product is defined
-over its own 10 s interval, which is not implemented — so it carries
-`"informative": true` and deliberately no validity flag, and consumers must
-never present it as a Class A frequency measurement. The aggregate's
+folded from 15 basic blocks; `GET /api/v1/meter/frequency-10s` reports the
+independent UTC-aligned IEC 61000-4-30 ten-second frequency result;
+`GET /api/v1/meter/minutes-10` reports the independently aligned 10-minute
+aggregate; and `GET /api/v1/meter/hours-2` reports twelve consecutive clean
+ten-minute intervals. Each finalized aggregate endpoint exposes the typed RMS,
+line-line, power, phasor, and unbalance values produced for that period. The
+periods never inherit from one another.
+
+The ten-second frequency endpoint exposes `frequency_hz` and
+`frequency_millihz` only when `valid` is true. Invalid completed intervals
+retain their exact `quality`, raw and named status flags, named rejection
+reasons, observer counters, profile identity, and crossing geometry, but the
+two numeric frequency fields are omitted so zero cannot be mistaken for a
+measurement. UTC nanoseconds, sample anchors, and Q16 crossing positions are
+decimal strings so audit values remain exact in JavaScript. A stopped or
+not-yet-complete stream returns `{"available":false}` with HTTP 200.
+
+The ten-second Class A clock gate combines the PL correlation-latch bracket,
+the capture-FIFO elasticity bound, and the kernel's live disciplined-clock
+estimate (absolute PLL phase offset, estimated error, and clock precision).
+It deliberately does not use `adjtimex.maxerror`: Linux grows that worst-case
+holdover ceiling at the kernel tolerance between NTP updates, so treating it
+as the current uncertainty would reject a healthy synchronized clock after
+roughly two seconds. `STA_UNSYNC` remains an independent hard rejection gate.
+
+The 150/180-cycle aggregate's `frequency` object remains **informative only**:
+it carries `"informative":true` and deliberately no validity flag, and
+consumers must never present it as the standardized ten-second frequency
+measurement. The aggregate's
 `time_quality` (`"unsynchronized"`, `"synchronized"`, or `"holdover"`) is the
 UTC synchronization state captured when that aggregate was measured, not the
 daemon's state when the request arrived: an aggregate measured while
@@ -312,8 +366,14 @@ positive is inductive/lagging and negative is capacitive/leading. Backend
 apparent power S is an independent authoritative quantity and need not equal
 the conventional P–Q₁ resultant `sqrt(P² + Q₁²)` in distorted or unbalanced
 conditions. Clients must not sum phase values to construct totals or label the
-difference as distortion power. The API does not currently publish THD,
-fundamental P₁/S₁ or power algorithm profile/version;
+difference as distortion power. Each channel returned by
+`GET /api/v1/meter/harmonics` includes a product-defined H₂–H₅₀ THD result,
+calculated as `100 * sqrt(sum(Hn², n=2..50)) / H1` from one complete atomic
+harmonic family. The result remains unavailable when the interval, channel,
+fundamental, qualified order range, or any included magnitude is invalid; it
+is never inferred from power factor or RMS values. This product metric does
+not assert IEC compliance or certification. The scalar power record still
+does not publish an authoritative S₁ or a complete P₁–Q₁–S₁ decomposition;
 those fields must remain unavailable rather than inferred.
 
 Energy quadrant selection uses simultaneous active power P and fundamental
@@ -396,8 +456,8 @@ sequence. The daemon retains 128 MiB of raw eight-channel frames (about
 resulting file can include samples that
 precede the trigger. Overlapping manual or future PQ-event windows are merged
 into one longest capture and retain every event marker. Each trigger refreshes
-an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the separate
-waveform AXI-Lite registers. The acquisition loop snapshots a completed
+an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the independent
+`/dev/meter-time` endpoint. The acquisition loop snapshots a completed
 session from history and a background writer publishes it atomically, so
 filesystem latency cannot block DMA draining. A session that intersects a
 reported transport gap is marked incomplete and is not published as a valid
@@ -406,6 +466,16 @@ capture. Completed files survive service and system restarts under:
 ```text
 /data/mnc/waveform/
 ```
+
+At daemon startup, filenames are enumerated synchronously to reserve session
+IDs, then file structure and CRCs are validated on a cancellable background
+worker while both DMA streams run. `GET /api/v1/waveforms` exposes the
+additive `archive_discovery` state and counters plus full matching totals and
+an exclusive descending-session cursor. Exact session/capture-UUID lookup and
+event export search the entire discovered archive rather than only the newest
+page. A delete-all request is rejected until discovery completes and walks
+unfiltered pages, so an unseen retained file cannot survive an apparently
+successful clear operation.
 
 New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
 or explicitly identified boxcar-decimated averages and deliberately omit

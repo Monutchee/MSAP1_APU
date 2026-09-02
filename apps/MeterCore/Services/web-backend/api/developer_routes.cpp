@@ -4,6 +4,7 @@
  *        fingerprints, and the bounded journald query.
  */
 
+#include "openapi.hpp"
 #include "response.hpp"
 #include "query.hpp"
 #include "routes.hpp"
@@ -367,6 +368,43 @@ webengine::Response get_developer_logs(AppContext &,
 			webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_developer_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto temperatures = "/api/v1/developer/temperatures";
+	registry.add_json_response<SocTemperaturesDto>(V::get, temperatures, 200,
+		"SocTemperatures", "Label-discovered SoC temperatures");
+	registry.add_error_response(V::get, temperatures, 503,
+		"Temperature sampling failed");
+
+	registry.add_json_response<DeveloperAboutDto>(V::get,
+		"/api/v1/developer/about", 200, "DeveloperAbout",
+		"Diagnostic component fingerprints");
+
+	constexpr auto logs = "/api/v1/developer/logs";
+	registry.add_query_parameter(V::get, logs, "component", "string", false,
+		"Product component filter",
+		{"fpga-acquisition", "web-backend", "mqtt-publisher", "modbus",
+		 "firmware"}, "web-backend");
+	registry.add_query_parameter(V::get, logs, "module", "string", false,
+		"Exact structured-log module filter");
+	registry.add_query_parameter(V::get, logs, "priority", "string", false,
+		"Maximum syslog severity", {"debug", "info", "notice", "warning",
+		 "error", "critical", "alert", "emergency"}, "warning");
+	registry.add_query_parameter(V::get, logs, "after", "string", false,
+		"Opaque journal continuation cursor");
+	registry.add_query_parameter(V::get, logs, "limit", "integer", false,
+		"Maximum entries, from 1 through 500", {}, "100");
+	registry.add_json_response<DeveloperLogsDto>(V::get, logs, 200,
+		"DeveloperLogs", "Bounded journal entries and continuation cursor");
+	registry.add_error_response(V::get, logs, 400,
+		"A query parameter is invalid");
+	registry.add_error_response(V::get, logs, 409,
+		"The supplied journal cursor is no longer valid");
+	registry.add_error_response(V::get, logs, 503,
+		"The system journal is unavailable");
 }
 
 } // namespace msap1::web::api

@@ -54,6 +54,11 @@ void describes_protocol_independent_attributes()
 	require(frequency.key == "frequency" &&
 			frequency.unit == MeterUnit::MilliHertz,
 		"frequency descriptor changed");
+	require(mnc::meter::supports_attribute(
+			{MeterAttributeId::Frequency, std::nullopt},
+			mnc::meter::MeasurementPeriod::Seconds10,
+			mnc::meter::MeterAttributeUsage::Snapshot),
+		"ten-second frequency capability is missing");
 
 	const auto defined = mnc::meter::attributes_in(
 		mnc::meter::MeterAttributeGroup::AllDefined);
@@ -94,36 +99,101 @@ void capabilities_advertise_only_supported_periods()
 	msap1::MeterData data;
 	msap1::meter::InProcessMeterSnapshotProvider provider(data);
 	const auto capabilities = provider.capabilities();
-	require(capabilities.size() == 7,
+	require(capabilities.size() == 8,
 		"provider did not advertise every implemented completed/live period");
 	require(capabilities[0].period ==
 			mnc::meter::MeasurementPeriod::Basic &&
 			!capabilities[0].attributes.empty(),
 		"basic period capability is missing");
 	require(capabilities[1].period ==
-			mnc::meter::MeasurementPeriod::Cycles150_180 &&
-			!capabilities[1].attributes.empty(),
-		"150/180-cycle capability is missing");
+			mnc::meter::MeasurementPeriod::Seconds10 &&
+			capabilities[1].attributes.size() == 1 &&
+			capabilities[1].attributes.front().id ==
+				mnc::meter::MeterAttributeId::Frequency,
+		"ten-second frequency capability is missing");
 	require(capabilities[2].period ==
-			mnc::meter::MeasurementPeriod::Min10 &&
+			mnc::meter::MeasurementPeriod::Cycles150_180 &&
 			!capabilities[2].attributes.empty(),
-		"ten-minute capability is missing");
+		"150/180-cycle capability is missing");
 	require(capabilities[3].period ==
-			mnc::meter::MeasurementPeriod::Hour2 &&
+			mnc::meter::MeasurementPeriod::Min10 &&
 			!capabilities[3].attributes.empty(),
-		"two-hour capability is missing");
+		"ten-minute capability is missing");
 	require(capabilities[4].period ==
-			mnc::meter::MeasurementPeriod::Min10Live &&
+			mnc::meter::MeasurementPeriod::Hour2 &&
 			!capabilities[4].attributes.empty(),
-		"ten-minute live-partial capability is missing");
+		"two-hour capability is missing");
 	require(capabilities[5].period ==
-			mnc::meter::MeasurementPeriod::Hour2Live &&
+			mnc::meter::MeasurementPeriod::Min10Live &&
 			!capabilities[5].attributes.empty(),
-		"two-hour live-partial capability is missing");
+		"ten-minute live-partial capability is missing");
 	require(capabilities[6].period ==
-			mnc::meter::MeasurementPeriod::Demand &&
+			mnc::meter::MeasurementPeriod::Hour2Live &&
 			!capabilities[6].attributes.empty(),
+		"two-hour live-partial capability is missing");
+	require(capabilities[7].period ==
+			mnc::meter::MeasurementPeriod::Demand &&
+			!capabilities[7].attributes.empty(),
 		"configured demand capability is missing");
+}
+
+void projects_frequency_10s_audit_metadata()
+{
+	msap1::MeterData data;
+	msap1::MeterUpdate update{};
+	update.period = msap1::MeasurementPeriod::Seconds10;
+	update.kind = msap1::RecordKind::frequency_10s;
+	update.sequence = 9;
+	update.configuration_generation = 4;
+	update.fundamental.emplace();
+	update.fundamental->frequency = {49'999,
+		msap1::MeasurementQuality::valid, 9,
+		std::chrono::system_clock::time_point{
+			std::chrono::nanoseconds{1'700'000'010'000'000'000ll}},
+		{1'280'000, std::chrono::seconds{10}}};
+	update.timing.emplace();
+	update.timing->sequence = 9;
+	update.timing->configuration_generation = 4;
+	update.timing->first_sample_index = 10'000;
+	update.timing->sample_count = 1'280'000;
+	update.timing->sample_rate_hz = 128'000;
+	update.timing->cycle_count = 500;
+	update.timing->nominal_frequency = msap1::NominalFrequency::Hz50;
+	update.timing->time_quality = msap1::TimeQuality::Synchronized;
+	update.frequency_10s = msap1::Frequency10sMetadata{
+		.interval_end_sample_index = 1'290'000,
+		.utc_start_nanoseconds = 1'700'000'000'000'000'000ull,
+		.utc_end_nanoseconds = 1'700'000'010'000'000'000ull,
+		.utc_uncertainty_nanoseconds = 250,
+		.measured_sample_rate_millihz = 127'999'999,
+		.source_sequence = 9,
+		.boundary_generation = 3,
+		.source_status = 0x61fu,
+		.status = 0x607eu,
+		.observed_crossings = 501,
+		.included_crossings = 501,
+		.duration_q16_samples = 1'280'000ull << 16u,
+		.last_crossing_q16_samples = 1'280'000ll << 16u,
+		.nominal_frequency_hz = 50,
+		.reference_channel = 6,
+		.filter_profile = 1,
+		.calibration_profile = 1,
+	};
+	data.apply(update);
+
+	msap1::meter::InProcessMeterSnapshotProvider provider(data);
+	mnc::meter::MeterSnapshotRequest request{};
+	request.period = mnc::meter::MeasurementPeriod::Seconds10;
+	const auto snapshot = provider.latest(request);
+	require(snapshot && snapshot->values.size() == 1 &&
+		snapshot->values.front().attribute.id ==
+			mnc::meter::MeterAttributeId::Frequency &&
+		snapshot->values.front().value == 49'999 && snapshot->frequency_10s &&
+		snapshot->frequency_10s->utc_end_nanoseconds ==
+			1'700'000'010'000'000'000ull &&
+		snapshot->frequency_10s->boundary_generation == 3 &&
+		snapshot->frequency_10s->reference_channel == 6,
+		"ten-second frequency projection lost its value or audit metadata");
 }
 
 void facade_exposes_the_injected_delivery_paths()
@@ -411,6 +481,7 @@ int main()
 	try {
 		describes_protocol_independent_attributes();
 		capabilities_advertise_only_supported_periods();
+		projects_frequency_10s_audit_metadata();
 		facade_exposes_the_injected_delivery_paths();
 		projects_selected_values_and_unavailable_attributes();
 		preserves_explicit_order_after_deduplication();

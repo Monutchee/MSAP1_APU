@@ -14,9 +14,13 @@
  *   1. implement a handler with the RouteHandler signature in the matching
  *      *_routes.cpp (or a new module),
  *   2. declare it below next to its module,
- *   3. append one RouteEntry to route_table.
+ *   3. append one RouteEntry to route_table, and
+ *   4. attach its typed schemas, parameters, statuses, content types, and
+ *      examples in that module's document_*_routes() decorator.
  *
- * register_routes() wires the whole table into the WebEngine at startup.
+ * register_routes() wires the whole table into WebEngine at startup, while
+ * the build-only OpenAPI adapter imports that same table and rejects missing
+ * documentation metadata.
  */
 
 #include "app_context.hpp"
@@ -114,6 +118,9 @@ webengine::Response get_meter_single_cycle(AppContext &,
 /** @brief GET /api/v1/meter/aggregate — newest 150/180-cycle aggregate. */
 webengine::Response get_meter_aggregate(AppContext &,
 					const webengine::RequestContext &);
+/** @brief GET /api/v1/meter/frequency-10s — standardized UTC result. */
+webengine::Response get_meter_frequency_10s(AppContext &,
+					    const webengine::RequestContext &);
 /** @brief GET /api/v1/meter/minutes-10 — newest aligned ten-minute block. */
 webengine::Response get_meter_ten_minute(AppContext &,
 					 const webengine::RequestContext &);
@@ -172,6 +179,9 @@ webengine::Response delete_adc_capture(AppContext &,
 /** @brief GET /api/v1/waveforms — waveform engine status and sessions. */
 webengine::Response get_waveforms(AppContext &,
 				  const webengine::RequestContext &);
+/** @brief GET /api/v1/waveforms/session — exact capture UUID lookup. */
+webengine::Response get_waveform_session(AppContext &,
+	const webengine::RequestContext &);
 /** @brief POST /api/v1/waveforms/trigger — start a manual capture. */
 webengine::Response post_waveform_trigger(AppContext &,
 					  const webengine::RequestContext &);
@@ -288,6 +298,12 @@ webengine::Response upload_data_logging_asset(AppContext &,
 webengine::HandlerResult download_data_logging_artifact(AppContext &,
 	const webengine::RequestContext &);
 
+/* ── documentation_routes.cpp — immutable build documentation ───────── */
+std::optional<webengine::FileDownload> download_openapi_document(AppContext &,
+	const webengine::RequestContext &);
+std::optional<webengine::FileDownload> download_modbus_document(AppContext &,
+	const webengine::RequestContext &);
+
 /**
  * @brief Every route of the external JSON API, grouped by module.
  *
@@ -320,6 +336,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/meter/aggregate",
 	 webengine::Role::Viewer, &get_meter_aggregate,
 	 "Newest 150/180-cycle aggregate meter values"},
+	{webengine::http::verb::get, "/api/v1/meter/frequency-10s",
+	 webengine::Role::Viewer, &get_meter_frequency_10s,
+	 "Newest UTC-aligned IEC ten-second frequency result"},
 	{webengine::http::verb::get, "/api/v1/meter/minutes-10",
 	 webengine::Role::Viewer, &get_meter_ten_minute,
 	 "Newest clock-aligned ten-minute aggregate"},
@@ -405,7 +424,10 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	/* Waveforms (waveform_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/waveforms",
 	 webengine::Role::Viewer, &get_waveforms,
-	 "Waveform engine status and capture sessions"},
+	 "Waveform engine status and paged capture sessions"},
+	{webengine::http::verb::get, "/api/v1/waveforms/session",
+	 webengine::Role::Viewer, &get_waveform_session,
+	 "Resolve one capture UUID across the waveform archive"},
 	{webengine::http::verb::post, "/api/v1/waveforms/trigger",
 	 webengine::Role::Admin, &post_waveform_trigger,
 	 "Trigger a manual waveform capture"},
@@ -668,6 +690,16 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 			return upload_data_logging_asset(context, request, file);
 		}, data_logging_asset_upload_role, certificate_limit,
 		data_channel_asset_types);
+
+	engine.add_file_download("/api/v1/documentation/msap1_api.yaml",
+		[&context](const auto &request) {
+			return download_openapi_document(context, request);
+		}, webengine::Role::Viewer);
+	engine.add_file_download(
+		"/api/v1/documentation/msap1_modbus_registers.xlsx",
+		[&context](const auto &request) {
+			return download_modbus_document(context, request);
+		}, webengine::Role::Viewer);
 }
 
 } // namespace msap1::web::api

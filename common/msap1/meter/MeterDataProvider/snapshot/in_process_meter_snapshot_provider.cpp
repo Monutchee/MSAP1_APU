@@ -267,6 +267,8 @@ InProcessMeterSnapshotProvider::capabilities() const
 {
 	return {
 		{MeasurementPeriod::Basic, supported(MeasurementPeriod::Basic)},
+		{MeasurementPeriod::Seconds10,
+		 supported(MeasurementPeriod::Seconds10)},
 		{MeasurementPeriod::Cycles150_180,
 		 supported(MeasurementPeriod::Cycles150_180)},
 		{MeasurementPeriod::Min10, supported(MeasurementPeriod::Min10)},
@@ -301,6 +303,38 @@ mnc::meter::MeterSnapshot InProcessMeterSnapshotProvider::project(
 		result.timing = snapshot_timing(*view.timing);
 	else if (view.aggregate_timing)
 		result.timing = snapshot_timing(*view.aggregate_timing);
+	if (view.frequency_10s) {
+		const auto &frequency = *view.frequency_10s;
+		result.frequency_10s = mnc::meter::Frequency10sSnapshotMetadata{
+			.interval_end_sample_index =
+				frequency.interval_end_sample_index,
+			.utc_start_nanoseconds = frequency.utc_start_nanoseconds,
+			.utc_end_nanoseconds = frequency.utc_end_nanoseconds,
+			.utc_uncertainty_nanoseconds =
+				frequency.utc_uncertainty_nanoseconds,
+			.measured_sample_rate_millihz =
+				frequency.measured_sample_rate_millihz,
+			.source_sequence = frequency.source_sequence,
+			.boundary_generation = frequency.boundary_generation,
+			.source_status = frequency.source_status,
+			.status = frequency.status,
+			.reasons = frequency.reasons,
+			.observer_drop_count = frequency.observer_drop_count,
+			.guard_flags = frequency.guard_flags,
+			.observed_crossings = frequency.observed_crossings,
+			.included_crossings = frequency.included_crossings,
+			.rejected_cycles = frequency.rejected_cycles,
+			.duration_q16_samples = frequency.duration_q16_samples,
+			.first_crossing_q16_samples =
+				frequency.first_crossing_q16_samples,
+			.last_crossing_q16_samples =
+				frequency.last_crossing_q16_samples,
+			.nominal_frequency_hz = frequency.nominal_frequency_hz,
+			.reference_channel = frequency.reference_channel,
+			.filter_profile = frequency.filter_profile,
+			.calibration_profile = frequency.calibration_profile,
+		};
+	}
 	if (view.period == MeasurementPeriod::Basic &&
 	    view.values.energy.session_id != 0) {
 		const auto &energy = view.values.energy;

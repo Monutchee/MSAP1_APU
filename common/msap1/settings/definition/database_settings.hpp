@@ -76,6 +76,7 @@ struct DatabaseSettings {
 	DatasetStorageSettings harmonic_minutes_10{};
 	DatasetStorageSettings harmonic_hours_2{};
 	DatasetStorageSettings demand{};
+	DatasetStorageSettings seconds_10{};
 
 	void validate() const
 	{
@@ -88,6 +89,7 @@ struct DatabaseSettings {
 		harmonic_minutes_10.validate(false);
 		harmonic_hours_2.validate(false);
 		demand.validate(false);
+		seconds_10.validate(false);
 	}
 
 	[[nodiscard]] std::vector<mnc::meter_stream::DatabaseStoragePolicy>
@@ -120,6 +122,7 @@ struct DatabaseSettings {
 			convert(DatabaseDataset::harmonic_hours_2,
 				harmonic_hours_2),
 			convert(DatabaseDataset::demand, demand),
+			convert(DatabaseDataset::seconds_10, seconds_10),
 		};
 	}
 

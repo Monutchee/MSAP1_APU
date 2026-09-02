@@ -90,6 +90,8 @@ MeasurementPeriod period_for(mnc::meter_stream::DatabaseDataset dataset)
 		return MeasurementPeriod::Hour2;
 	case mnc::meter_stream::DatabaseDataset::demand:
 		return MeasurementPeriod::Demand;
+	case mnc::meter_stream::DatabaseDataset::seconds_10:
+		return MeasurementPeriod::Seconds10;
 	case mnc::meter_stream::DatabaseDataset::raw_record_spool:
 	case mnc::meter_stream::DatabaseDataset::harmonic_cycles_150_180:
 	case mnc::meter_stream::DatabaseDataset::harmonic_minutes_10:
@@ -122,6 +124,7 @@ mnc::meter_stream::DatabaseDataset harmonic_dataset_for(
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
 	case MeasurementPeriod::Demand:
+	case MeasurementPeriod::Seconds10:
 		break;
 	}
 	throw std::invalid_argument("unsupported harmonic historian period");
@@ -154,6 +157,8 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 		return mnc::meter_stream::DatabaseDataset::hours_2;
 	case MeasurementPeriod::Demand:
 		return mnc::meter_stream::DatabaseDataset::demand;
+	case MeasurementPeriod::Seconds10:
+		return mnc::meter_stream::DatabaseDataset::seconds_10;
 	case MeasurementPeriod::Min10Live:
 	case MeasurementPeriod::Hour2Live:
 		throw std::invalid_argument(
@@ -165,9 +170,9 @@ mnc::meter_stream::DatabaseDataset dataset_for(MeasurementPeriod period)
 void validate_historian_policies(
 	const std::vector<mnc::meter_stream::DatabaseStoragePolicy> &policies)
 {
-	if (policies.size() != 8)
+	if (policies.size() != 9)
 		throw std::invalid_argument(
-			"historian requires exactly eight dataset policies");
+			"historian requires exactly nine dataset policies");
 	std::set<mnc::meter_stream::DatabaseDataset> datasets;
 	for (const auto &policy : policies) {
 		mnc::meter_stream::validate_database_policy(policy);
@@ -1813,6 +1818,7 @@ void MeterHistoryStore::recreate_database(std::uint64_t through_stream_cursor)
 		mnc::meter_stream::DatabaseDataset::harmonic_minutes_10,
 		mnc::meter_stream::DatabaseDataset::harmonic_hours_2,
 		mnc::meter_stream::DatabaseDataset::demand,
+		mnc::meter_stream::DatabaseDataset::seconds_10,
 	};
 	std::scoped_lock lock(impl_->mutex);
 

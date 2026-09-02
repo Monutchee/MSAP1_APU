@@ -11,6 +11,8 @@
 #include "gateway/mqtt_gateway.hpp"
 #include "gateway/settings_gateway.hpp"
 
+#include <atomic>
+
 namespace webengine {
 class NginxController;
 }
@@ -39,6 +41,9 @@ struct AppContext {
 	DataSenderGateway &data_sender;
 	/** Supervised nginx front end; consulted by the system health API. */
 	webengine::NginxController &nginx;
+	/** Transition latch used to log acquisition-unavailable/recovered once,
+	 * even though health requests run concurrently on multiple HTTP threads. */
+	std::atomic<bool> acquisition_unavailable{false};
 };
 
 } // namespace msap1::web

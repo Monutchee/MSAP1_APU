@@ -583,6 +583,18 @@ if(BUILD_TESTING)
 		-Wall -Wextra -Wpedantic)
 	add_test(NAME harmonic_decode_test COMMAND harmonic_decode_test)
 
+	# GET /api/v1/meter/harmonics additive THD projection and JSON contract.
+	add_executable(harmonic_dto_test
+		${PROJECT_SOURCE_DIR}/tests/harmonic_dto_test.cpp)
+	target_link_libraries(harmonic_dto_test PRIVATE
+		msap1::acquisition
+		glaze::glaze)
+	target_include_directories(harmonic_dto_test PRIVATE
+		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
+	target_compile_options(harmonic_dto_test PRIVATE
+		-Wall -Wextra -Wpedantic)
+	add_test(NAME harmonic_dto_test COMMAND harmonic_dto_test)
+
 	# M17 ENERGY-v1 two-part family and DEMAND-v1 typed decode.
 	add_executable(energy_demand_decode_test
 		${PROJECT_SOURCE_DIR}/tests/energy_demand_decode_test.cpp)
@@ -622,6 +634,21 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic)
     add_test(NAME meter_aggregate_route_test
         COMMAND meter_aggregate_route_test)
+
+    # GET /api/v1/meter/frequency-10s is the typed standardized result and
+    # exact audit projection; pin its JSON contract without the HTTP stack.
+    add_executable(meter_frequency_10s_route_test
+        ${PROJECT_SOURCE_DIR}/tests/meter_frequency_10s_route_test.cpp)
+    target_link_libraries(meter_frequency_10s_route_test PRIVATE
+        msap1::acquisition
+        glaze::glaze
+    )
+    target_include_directories(meter_frequency_10s_route_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/web-backend/api)
+    target_compile_options(meter_frequency_10s_route_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME meter_frequency_10s_route_test
+        COMMAND meter_frequency_10s_route_test)
 
     # GET /api/v1/meter/minutes-10 projects the typed provider snapshot;
     # pin that JSON contract without linking the HTTP stack.

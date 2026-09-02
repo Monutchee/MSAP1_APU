@@ -252,7 +252,7 @@ void metadata_and_boundaries()
 	const auto metadata = registers.read(
 		mnc::modbus::FunctionCode::read_holding_registers, 0, 3);
 	require(metadata.exception == mnc::modbus::ExceptionCode::none &&
-		metadata.values == (std::vector<std::uint16_t>{2, 0x1234, 48}),
+		metadata.values == (std::vector<std::uint16_t>{3, 0x1234, 49}),
 		"register-map metadata changed");
 	require(provider.reads == 0,
 		"metadata read unnecessarily queried meter data");
@@ -348,6 +348,25 @@ void projected_snapshot_requests()
 	require(quality.exception == mnc::modbus::ExceptionCode::none &&
 		provider.last_request.attributes.size() == 8,
 		"quality mask did not request all published attributes coherently");
+}
+
+void utc_ten_second_frequency_map()
+{
+	SnapshotProvider provider;
+	msap1::modbus::Msap1RegisterBank registers(provider);
+	const auto frequency = registers.read(
+		mnc::modbus::FunctionCode::read_input_registers, 0x6000, 2);
+	require(frequency.exception == mnc::modbus::ExceptionCode::none &&
+		frequency.values.size() == 2 &&
+		decode_float(frequency.values[0], frequency.values[1]) == 60.0f,
+		"UTC ten-second frequency is missing from 0x6000");
+	require(provider.last_request.period ==
+			mnc::meter::MeasurementPeriod::Seconds10 &&
+		provider.last_request.attributes ==
+			(std::vector<mnc::meter::MeterAttributeKey>{{
+				mnc::meter::MeterAttributeId::Frequency,
+				std::nullopt}}),
+		"UTC ten-second register selected the wrong typed snapshot");
 }
 
 void generated_map_lookup_and_export()
@@ -471,6 +490,7 @@ int main()
 	metadata_and_boundaries();
 	partial_register_reads();
 	projected_snapshot_requests();
+	utc_ten_second_frequency_map();
 	m17_energy_demand_map();
 	generated_map_lookup_and_export();
 }

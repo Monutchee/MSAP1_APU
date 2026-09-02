@@ -19,6 +19,7 @@ enum class RecordIntervalCategory : std::uint8_t {
 	single_cycle,
 	urms_half,
 	basic,
+	seconds_10,
 	cycles_150_180,
 	minutes_10,
 	hours_2,
@@ -71,6 +72,9 @@ struct RecordIntervalIdentity {
 	case msap1::meter_harmonic_format:
 		return {RecordIntervalCategory::basic, "basic",
 			"10/12-cycle"};
+	case msap1::meter_frequency_10s_format:
+		return {RecordIntervalCategory::seconds_10, "seconds_10",
+			"UTC 10-second frequency"};
 	case msap1::meter_aggregate_format:
 	case msap1::meter_aggregate_power_format:
 	case msap1::meter_aggregate_phasor_format:

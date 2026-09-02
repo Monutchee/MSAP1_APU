@@ -35,6 +35,8 @@ void rejection_interval_categories_cover_meter_tiers()
 	};
 	constexpr std::array cases{
 		Case{msap1::meter_periodic_format, 0, "basic", "10/12-cycle"},
+		Case{msap1::meter_frequency_10s_format, 0, "seconds_10",
+			"UTC 10-second frequency"},
 		Case{msap1::meter_harmonic_format, 0, "basic", "10/12-cycle"},
 		Case{msap1::meter_flicker_format, 0, "flicker", "flicker interval"},
 		Case{msap1::meter_mains_signal_format, 0, "mains_signal",
@@ -269,8 +271,8 @@ void typed_commands_round_trip_through_the_registry()
 			msap1::meter::TimeQuality::Synchronized,
 		"the two time-quality fields did not round trip separately");
 
-	/* IPC v20 carries reusable period/attribute selection and typed values,
-	 * including the optional attribute index reserved for harmonics. */
+	/* IPC v42 carries reusable period/attribute selection, typed values, and
+	 * the optional exact FREQUENCY-10S audit block. */
 	registry.on<msap1::MeterSnapshotRequest>(
 		msap1::AcquisitionStatus::internal_error,
 		[](const msap1::MeterSnapshotRequest &request) {
@@ -294,6 +296,34 @@ void typed_commands_round_trip_through_the_registry()
 			timing.cycle_count = 12;
 			timing.nominal_frequency_hz = 60;
 			response.snapshot.timing = timing;
+			response.snapshot.frequency_10s =
+				mnc::meter::Frequency10sSnapshotMetadata{
+					.interval_end_sample_index = 1'403'456,
+					.utc_start_nanoseconds =
+						1'700'000'000'000'000'000ull,
+					.utc_end_nanoseconds =
+						1'700'000'010'000'000'000ull,
+					.utc_uncertainty_nanoseconds = 250,
+					.measured_sample_rate_millihz = 128'000'000,
+					.source_sequence = 77,
+					.boundary_generation = 9,
+					.source_status = 0x607u,
+					.status = 0x407eu,
+					.reasons = 0,
+					.observer_drop_count = 4,
+					.guard_flags = 0xcu,
+					.observed_crossings = 501,
+					.included_crossings = 501,
+					.rejected_cycles = 0,
+					.duration_q16_samples = 1'280'000ull << 16u,
+					.first_crossing_q16_samples = 64,
+					.last_crossing_q16_samples =
+						static_cast<std::int64_t>(1'280'000ull << 16u) + 64,
+					.nominal_frequency_hz = 50,
+					.reference_channel = 6,
+					.filter_profile = 1,
+					.calibration_profile = 1,
+				};
 			response.snapshot.values.push_back({
 				.attribute = request.selection.attributes.front(),
 				.unit = mnc::meter::MeterUnit::MicroVolts,
@@ -324,6 +354,14 @@ void typed_commands_round_trip_through_the_registry()
 			mnc::meter::TimeQuality::Synchronized &&
 		snapshot_response.snapshot.timing->first_sample_index == 123456 &&
 		snapshot_response.snapshot.timing->cycle_count == 12 &&
+		snapshot_response.snapshot.frequency_10s &&
+		snapshot_response.snapshot.frequency_10s->utc_end_nanoseconds ==
+			1'700'000'010'000'000'000ull &&
+		snapshot_response.snapshot.frequency_10s->boundary_generation == 9 &&
+		snapshot_response.snapshot.frequency_10s->guard_flags == 0xcu &&
+		snapshot_response.snapshot.frequency_10s->
+			last_crossing_q16_samples ==
+			static_cast<std::int64_t>(1'280'000ull << 16u) + 64 &&
 		snapshot_response.snapshot.values.size() == 1 &&
 		snapshot_response.snapshot.values[0].value == 120'000'000,
 		"typed meter snapshot did not round trip");
@@ -415,16 +453,32 @@ void typed_commands_round_trip_through_the_registry()
 			mains_response.snapshot.detected_phase_mask == 0x5u,
 		"typed mains-signalling observation did not round trip");
 
-	/* IPC v38 carries private storage authority plus public v4 capture,
-	 * lineage, and trigger-origin identities used by catalogue projection. */
+	/* IPC v41 carries private storage authority, public v4 capture lineage,
+	 * trigger origins, paged archive queries, and exact archive lookup. */
 	registry.on<msap1::WaveformListRequest>(
 		msap1::AcquisitionStatus::dma_error,
 		[](const msap1::WaveformListRequest &request) {
 			require(request.version == msap1::acquisition_ipc_version,
 				"wrong decoded waveform request version");
+			require(request.before_session_id == 18u &&
+					request.limit == 7u &&
+					request.origin ==
+						msap1::WaveformOriginFilter::power_quality,
+				"wrong decoded waveform page query");
 			msap1::WaveformResponse response{};
 			response.waveform.completed_sessions = 1u;
+			response.waveform.archive_discovery = {
+				msap1::WaveformArchiveDiscoveryState::scanning,
+				7u, 11u, 2u};
 			response.waveform_directory = "/data/mnc/waveform";
+			response.page.origin = request.origin;
+			response.page.limit = request.limit;
+			response.page.total_sessions = 19u;
+			response.page.completed_sessions = 17u;
+			response.page.incomplete_sessions = 1u;
+			response.page.active_sessions = 1u;
+			response.page.returned_sessions = 1u;
+			response.page.next_before_session_id = 17u;
 			msap1::WaveformSessionIpc session{};
 			session.id = 17u;
 			session.state = msap1::WaveformSessionState::complete;
@@ -438,13 +492,28 @@ void typed_commands_round_trip_through_the_registry()
 			response.sessions.push_back(std::move(session));
 			return response;
 		});
+	msap1::WaveformListRequest waveform_request{};
+	waveform_request.before_session_id = 18u;
+	waveform_request.limit = 7u;
+	waveform_request.origin = msap1::WaveformOriginFilter::power_quality;
 	const auto waveform_reply = registry.dispatch(
-		msap1::encode_acquisition_request(msap1::WaveformListRequest{}));
+		msap1::encode_acquisition_request(waveform_request));
 	const auto waveform_response =
 		msap1::decode_acquisition_payload<msap1::WaveformResponse>(
 			waveform_reply);
 	require(waveform_response.waveform.completed_sessions == 1u &&
+			waveform_response.waveform.archive_discovery.state ==
+				msap1::WaveformArchiveDiscoveryState::scanning &&
+			waveform_response.waveform.archive_discovery.scanned_files == 7u &&
+			waveform_response.waveform.archive_discovery.total_files == 11u &&
+			waveform_response.waveform.archive_discovery.rejected_files == 2u &&
 			waveform_response.waveform_directory == "/data/mnc/waveform" &&
+			waveform_response.page.origin ==
+				msap1::WaveformOriginFilter::power_quality &&
+			waveform_response.page.limit == 7u &&
+			waveform_response.page.total_sessions == 19u &&
+			waveform_response.page.returned_sessions == 1u &&
+			waveform_response.page.next_before_session_id == 17u &&
 			waveform_response.sessions.size() == 1u &&
 			waveform_response.sessions[0].continuation_of_session_id == 16u &&
 			waveform_response.sessions[0].master_session_id == 15u &&
@@ -453,7 +522,55 @@ void typed_commands_round_trip_through_the_registry()
 					msap1::WaveformTriggerSource::pq_event)) &&
 			waveform_response.sessions[0].capture_uuid ==
 				"01234567-89ab-4def-8123-456789abcdef",
-		"typed waveform export authority did not round trip");
+		"typed waveform page authority did not round trip");
+
+	registry.on<msap1::WaveformLookupRequest>(
+		msap1::AcquisitionStatus::bad_request,
+		[](const msap1::WaveformLookupRequest &request) {
+			const bool by_uuid = request.session_id == 0u &&
+				request.capture_uuid ==
+					"01234567-89ab-4def-8123-456789abcdef";
+			const bool by_id = request.session_id == 59u &&
+				request.capture_uuid.empty();
+			require(request.version == msap1::acquisition_ipc_version &&
+					(by_uuid || by_id),
+				"wrong decoded waveform lookup request");
+			msap1::WaveformLookupResponse response{};
+			response.found = true;
+			response.waveform.archive_discovery.state =
+				msap1::WaveformArchiveDiscoveryState::complete;
+			response.session.id = by_id ? 59u : 3u;
+			response.session.capture_uuid =
+				"01234567-89ab-4def-8123-456789abcdef";
+			response.waveform_directory = "/data/mnc/waveform";
+			return response;
+		});
+	msap1::WaveformLookupRequest lookup_request{};
+	lookup_request.capture_uuid =
+		"01234567-89ab-4def-8123-456789abcdef";
+	const auto lookup_response =
+		msap1::decode_acquisition_payload<msap1::WaveformLookupResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				lookup_request)));
+	require(lookup_response.found && lookup_response.session.id == 3u &&
+			lookup_response.session.capture_uuid ==
+				lookup_request.capture_uuid &&
+			lookup_response.waveform.archive_discovery.state ==
+				msap1::WaveformArchiveDiscoveryState::complete &&
+			lookup_response.waveform_directory == "/data/mnc/waveform",
+		"typed waveform UUID lookup did not round trip");
+
+	lookup_request = {};
+	lookup_request.session_id = 59u;
+	const auto id_lookup_response =
+		msap1::decode_acquisition_payload<msap1::WaveformLookupResponse>(
+			registry.dispatch(msap1::encode_acquisition_request(
+				lookup_request)));
+	require(id_lookup_response.found &&
+			id_lookup_response.session.id == 59u &&
+			id_lookup_response.session.capture_uuid ==
+				"01234567-89ab-4def-8123-456789abcdef",
+		"typed waveform session-ID lookup did not round trip");
 }
 
 /* Record source double that hands the ingestor a scripted batch. */
@@ -1096,6 +1213,64 @@ msap1::MeterRecord aggregate_record(std::uint32_t sequence,
 	return record;
 }
 
+msap1::MeterRecord frequency_10s_record(std::uint32_t sequence,
+	std::uint32_t generation)
+{
+	constexpr std::uint64_t first_sample = 10'000;
+	constexpr std::uint64_t sample_span = 1'280'000;
+	constexpr std::uint64_t end_sample = first_sample + sample_span;
+	constexpr std::uint64_t interval_q16 = sample_span << 16u;
+	constexpr std::uint64_t utc_start = 1'700'000'000'000'000'000ull;
+	const auto put_u64 = [](msap1::MeterRecord &record, std::size_t word,
+		std::uint64_t value) {
+		record.words[word] = static_cast<std::uint32_t>(value);
+		record.words[word + 1] = static_cast<std::uint32_t>(value >> 32u);
+	};
+	msap1::MeterRecord record{};
+	record.words[0] = msap1::meter_record_magic;
+	record.words[1] = msap1::meter_frequency_10s_format;
+	record.words[2] = msap1::meter_record_size;
+	record.words[3] = sequence;
+	record.words[4] = generation;
+	record.words[5] = 128'000;
+	record.words[6] = static_cast<std::uint32_t>(sample_span);
+	record.words[7] = 1u << 6u;
+	record.words[8] = msap1::meter_frequency_10s_status_result_valid |
+		msap1::meter_frequency_10s_status_time_aligned |
+		msap1::meter_frequency_10s_status_profile_supported |
+		msap1::meter_frequency_10s_status_time_synchronized |
+		msap1::meter_frequency_10s_status_filter_ready |
+		msap1::meter_frequency_10s_status_reference_valid |
+		msap1::meter_frequency_10s_status_calibration_valid |
+		msap1::meter_frequency_10s_status_sample_rate_valid;
+	put_u64(record, 9, first_sample);
+	record.words[13] = 50u | (6u << 8u) | (1u << 16u) | (1u << 24u);
+	put_u64(record, msap1::meter_frequency_10s_last_sample_word,
+		end_sample - 1u);
+	record.words[msap1::meter_frequency_10s_value_word] = 50'000;
+	record.words[msap1::meter_frequency_10s_cycle_count_word] = 500;
+	put_u64(record, msap1::meter_frequency_10s_duration_q16_word,
+		interval_q16);
+	put_u64(record, msap1::meter_frequency_10s_last_crossing_q16_word,
+		interval_q16);
+	put_u64(record, msap1::meter_frequency_10s_end_sample_word, end_sample);
+	put_u64(record, msap1::meter_frequency_10s_utc_start_word, utc_start);
+	put_u64(record, msap1::meter_frequency_10s_utc_end_word,
+		utc_start + 10'000'000'000ull);
+	put_u64(record, msap1::meter_frequency_10s_utc_uncertainty_word, 250);
+	record.words[msap1::meter_frequency_10s_measured_rate_word] =
+		128'000'000;
+	record.words[msap1::meter_frequency_10s_source_sequence_word] = sequence;
+	record.words[msap1::meter_frequency_10s_boundary_generation_word] = 9;
+	record.words[msap1::meter_frequency_10s_source_status_word] =
+		(1u << 0u) | (1u << 1u) | (1u << 2u) | (1u << 3u) |
+		(1u << 4u) | (1u << 9u) | (1u << 10u);
+	record.words[msap1::meter_frequency_10s_guard_flags_word] = 0xcu;
+	record.words[msap1::meter_frequency_10s_observed_crossings_word] = 501;
+	record.words[msap1::meter_frequency_10s_included_crossings_word] = 501;
+	return record;
+}
+
 /* Minimal valid clock-aligned M13 record. Its sequence starts independently
  * from both basic and 150/180-cycle streams at the first UTC boundary. */
 msap1::MeterRecord ten_minute_record(std::uint32_t sequence,
@@ -1247,6 +1422,70 @@ void ingestor_tracks_two_hour_stream_independently()
 		ingest.aggregate_sequence_gaps() == 0 &&
 		ingest.ten_minute_sequence_gaps() == 0,
 		"two-hour gaps were not isolated from other record streams");
+}
+
+void ingestor_tracks_frequency_10s_stream_independently()
+{
+	using msap1::acquisition::daemon::MeterRecordIngestor;
+	ScriptedMeterSource source;
+	msap1::PreparedMeterConfiguration configuration{};
+	configuration.wire.generation = 0xfeedbeefu;
+	configuration.wire.sample_rate_hz = 128'000;
+	msap1::meter::MeasurementTimebase timebase;
+	/* A deliberately different mapping proves the R5 result is not restamped
+	 * with the APU timebase during ingestion. */
+	timebase.record_sync(
+		{.sample_counter = 10'000,
+		 .utc_ns = 1'600'000'000'000'000'000ll,
+		 .uncertainty_ns = 999,
+		 .sample_rate_hz = 128'000,
+		 .configuration_generation = 0xfeedbeefu,
+		 .utc_synchronized = true},
+		std::chrono::steady_clock::now());
+	FakeRecordPublisher publisher;
+	MeterRecordIngestor ingest(source, configuration, timebase, publisher);
+	ingest.begin_epoch();
+
+	const auto feed = [&](const msap1::MeterRecord &record) {
+		source.next = {};
+		source.next.records[0] = record;
+		source.next.count = 1;
+		source.next.bytes = sizeof(msap1::MeterRecord);
+		ingest.read_available();
+	};
+	feed(frequency_10s_record(1, 0xfeedbeefu));
+	const auto latest =
+		ingest.latest_decoded(msap1::MeasurementPeriod::Seconds10);
+	require(latest && latest->latest_sequence == 1 && latest->timing &&
+		latest->timing->utc_start && latest->frequency_10s &&
+		latest->values.fundamental.frequency.valid() &&
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			latest->timing->utc_start->time_since_epoch()).count() ==
+			1'700'000'000'000'000'000ll,
+		"FREQUENCY-10S was not published with its R5 UTC provenance");
+	require(publisher.records.size() == 1 &&
+		publisher.records.front().record_kind ==
+			static_cast<std::uint16_t>(msap1::RecordKind::frequency_10s) &&
+		publisher.records.front().measurement_period ==
+			static_cast<std::uint8_t>(
+				msap1::MeasurementPeriod::Seconds10) &&
+		publisher.records.front().timing.utc_start_nanoseconds ==
+			1'700'000'000'000'000'000ll,
+		"durable frequency record lost its period or UTC label");
+
+	feed(frequency_10s_record(2, 0xfeedbeefu));
+	feed(frequency_10s_record(4, 0xfeedbeefu));
+	require(ingest.frequency_10s_sequence_gaps() == 1 &&
+		ingest.sequence_gaps() == 0 && ingest.aggregate_sequence_gaps() == 0,
+		"frequency gaps leaked into another sequence space");
+	feed(frequency_10s_record(3, 0xfeedbeefu));
+	require(ingest.invalid_records() == 1 &&
+		ingest.frequency_10s_sequence_gaps() == 1,
+		"stale frequency result was accepted or counted as a gap");
+	ingest.clear_latest();
+	feed(frequency_10s_record(1, 0xfeedbeefu));
+	require(ingest.invalid_records() == 1,
+		"configuration boundary retained a stale frequency baseline");
 }
 
 /*
@@ -1599,6 +1838,7 @@ int main()
 	ingestor_tracks_interleaved_aggregate_stream();
 	ingestor_tracks_ten_minute_stream_independently();
 	ingestor_tracks_two_hour_stream_independently();
+	ingestor_tracks_frequency_10s_stream_independently();
 	ingestor_pins_aggregate_time_quality_at_ingest();
 	ingestor_handles_u32_sequence_wrap();
 	malformed_and_unknown_requests_are_rejected();

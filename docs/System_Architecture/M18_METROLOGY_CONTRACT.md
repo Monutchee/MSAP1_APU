@@ -115,9 +115,10 @@ capture UUID can appear on several overlapping events.
 
 Acquisition IPC session summaries include a bit mask of all trigger sources
 that contributed to a possibly merged capture. The web projection reports
-`manual`, `power_quality`, `mixed`, or `legacy`; this lets the manual capture
-library omit PQ-only evidence without splitting the underlying capture or
-storage implementation.
+`manual`, `power_quality`, `mixed`, or `legacy`. The waveform library defaults
+to all origins and supports manual and power-quality filters without splitting
+the underlying capture or storage implementation. Mixed sessions belong to
+both filtered views; legacy sessions belong only to the all-origin view.
 
 ## Simulator 1.5
 
@@ -143,8 +144,9 @@ write a lossy placeholder.
 Authenticated viewers request an event slice with
 `GET /api/v1/waveforms/export?session_id=...&event_id=...&format=mncwf`.
 Local operators use `mnc waveform export --session ... --event ... --format
-mncwf [--file ...]`. Both resolve only completed sessions reported by the
-acquisition daemon. The shared read-only exporter validates and maps the v4
+mncwf [--file ...]`. Both resolve completed sessions by exact full-archive
+lookup, including sessions older than the newest catalogue page. The shared
+read-only exporter validates and maps the v4
 master, regenerates the virtual slice metadata and integrity fields, and
 delivers bounded chunks without a second waveform-sized allocation or another
 persistent on-device capture.

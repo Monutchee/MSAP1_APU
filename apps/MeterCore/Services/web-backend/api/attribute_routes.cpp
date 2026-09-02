@@ -1,6 +1,7 @@
 /** @file attribute_routes.cpp Canonical snapshot/historian attribute API. */
 
 #include "query.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -168,6 +169,21 @@ webengine::Response get_meter_attributes(
 		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_attribute_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	constexpr auto path = "/api/v1/meter/attributes";
+	registry.add_query_parameter(V::get, path, "usage", "string", true,
+		"Capability view to return", {"snapshot", "historian"},
+		"snapshot");
+	registry.add_json_response<AttributeCatalogDto>(V::get, path, 200,
+		"MeterAttributeCatalog", "Canonical period-aware attribute catalog");
+	registry.add_error_response(V::get, path, 400,
+		"The usage query is absent or invalid");
+	registry.add_error_response(V::get, path, 503,
+		"The attribute catalogue is unavailable");
 }
 
 } // namespace msap1::web::api

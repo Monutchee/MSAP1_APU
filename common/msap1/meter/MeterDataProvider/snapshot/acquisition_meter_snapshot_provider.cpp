@@ -11,6 +11,8 @@ std::vector<mnc::meter::MeterAttributeKey> supported(
 	mnc::meter::MeasurementPeriod period)
 {
 	using Id = mnc::meter::MeterAttributeId;
+	if (period == mnc::meter::MeasurementPeriod::Seconds10)
+		return {{Id::Frequency, std::nullopt}};
 	if (period == mnc::meter::MeasurementPeriod::Demand) {
 		std::vector<mnc::meter::MeterAttributeKey> result;
 		for (const auto attribute :
@@ -67,6 +69,7 @@ AcquisitionMeterSnapshotProvider::capabilities() const
 	using Period = mnc::meter::MeasurementPeriod;
 	return {
 		{Period::Basic, supported(Period::Basic)},
+		{Period::Seconds10, supported(Period::Seconds10)},
 		{Period::Cycles150_180, supported(Period::Cycles150_180)},
 		{Period::Min10, supported(Period::Min10)},
 		{Period::Hour2, supported(Period::Hour2)},

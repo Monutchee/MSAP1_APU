@@ -37,6 +37,7 @@ enum class RecordKind : std::uint16_t {
 	power_quality_event = 9,
 	flicker = 10,
 	mains_signal = 11,
+	frequency_10s = 12,
 };
 
 enum class MeasurementQuality : std::uint8_t {
@@ -353,6 +354,39 @@ struct MeterValues {
 	PowerQualityValues power_quality{};
 };
 
+/**
+ * Audit provenance for one R5C1 FREQUENCY-10S-v1 result.
+ *
+ * The scalar frequency lives in FundamentalValues so every protocol adapter
+ * can use the canonical attribute path. This companion preserves the exact
+ * interval, observer, profile, and rejection geometry without asking a
+ * consumer to reinterpret the raw 256-byte record.
+ */
+struct Frequency10sMetadata {
+	std::uint64_t interval_end_sample_index = 0;
+	std::uint64_t utc_start_nanoseconds = 0;
+	std::uint64_t utc_end_nanoseconds = 0;
+	std::uint64_t utc_uncertainty_nanoseconds = 0;
+	std::uint32_t measured_sample_rate_millihz = 0;
+	std::uint32_t source_sequence = 0;
+	std::uint32_t boundary_generation = 0;
+	std::uint32_t source_status = 0;
+	std::uint32_t status = 0;
+	std::uint32_t reasons = 0;
+	std::uint32_t observer_drop_count = 0;
+	std::uint8_t guard_flags = 0;
+	std::uint32_t observed_crossings = 0;
+	std::uint32_t included_crossings = 0;
+	std::uint32_t rejected_cycles = 0;
+	std::uint64_t duration_q16_samples = 0;
+	std::int64_t first_crossing_q16_samples = 0;
+	std::int64_t last_crossing_q16_samples = 0;
+	std::uint8_t nominal_frequency_hz = 0;
+	std::uint8_t reference_channel = 0;
+	std::uint8_t filter_profile = 0;
+	std::uint8_t calibration_profile = 0;
+};
+
 struct MeterUpdate {
 	MeasurementPeriod period = MeasurementPeriod::Basic;
 	RecordKind kind = RecordKind::fundamental;
@@ -365,6 +399,7 @@ struct MeterUpdate {
 	std::optional<EnergyValues> energy;
 	std::optional<DemandValues> demand;
 	std::optional<PowerQualityValues> power_quality;
+	std::optional<Frequency10sMetadata> frequency_10s;
 	/* Cycle-timing identity of the source block. Present for every
 	 * 10/12-cycle basic update; absent for aggregate updates.
 	 * The Basic period has no fixed duration — the actual duration is
@@ -384,6 +419,7 @@ struct MeterPeriodView {
 	MeterValues values{};
 	std::optional<BlockTiming> timing{};
 	std::optional<AggregateTiming> aggregate_timing{};
+	std::optional<Frequency10sMetadata> frequency_10s{};
 };
 
 class MeterLatestStore {
@@ -394,7 +430,7 @@ public:
 	latest(MeasurementPeriod period) const;
 
 private:
-	static constexpr std::size_t period_count = 7;
+	static constexpr std::size_t period_count = 8;
 	mutable std::mutex mutex_;
 	std::array<std::optional<MeterPeriodView>, period_count> views_{};
 };
@@ -766,6 +802,15 @@ MeterUpdate decode_two_hour_open_unbalance_meter_record(
  * decoding.
  */
 [[nodiscard]] MeterUpdate decode_periodic_meter_record(
+	const MeterRecord &record, SystemTime received_at =
+					     std::chrono::system_clock::now());
+
+/**
+ * Decode the R5C1-authoritative FREQUENCY-10S-v1 record. Unlike PL-origin
+ * records, its UTC endpoints and uncertainty are part of the signed-off wire
+ * result and must never be restamped from the APU's current timebase.
+ */
+[[nodiscard]] MeterUpdate decode_frequency_10s_meter_record(
 	const MeterRecord &record, SystemTime received_at =
 					     std::chrono::system_clock::now());
 

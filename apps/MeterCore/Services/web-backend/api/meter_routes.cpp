@@ -5,7 +5,9 @@
  */
 
 #include "health_dto.hpp"
+#include "harmonic_dto.hpp"
 #include "meter_dto.hpp"
+#include "openapi.hpp"
 #include "response.hpp"
 #include "routes.hpp"
 
@@ -20,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -560,10 +563,9 @@ webengine::Response get_meter_readings(AppContext &app,
  * or whenever basic blocks were ineligible, so that case is a 200 with
  * `{"available": false}` — not an error.
  *
- * The embedded frequency is INFORMATIVE ONLY: the standardized Class A
- * frequency product is defined over its own 10 s interval, which is not
- * implemented, so the object carries `informative` and deliberately no
- * validity flag.
+ * The embedded frequency is INFORMATIVE ONLY. The standardized result is
+ * published independently by GET /api/v1/meter/frequency-10s, so this object
+ * carries `informative` and deliberately no validity flag.
  *
  * @return 200 with the aggregate document, or 503 when the daemon is
  *         unreachable, reports a failure status, or cached a malformed
@@ -730,78 +732,6 @@ webengine::Response get_meter_power_quality(AppContext &app,
 
 namespace {
 
-struct HarmonicOrderDto {
-	std::uint32_t order = 0;
-	std::uint64_t magnitude_micro_units = 0;
-	double magnitude = 0.0;
-	bool magnitude_valid = false;
-	std::uint32_t angle_millidegrees = 0;
-	double angle_degrees = 0.0;
-	bool angle_valid = false;
-};
-
-struct HarmonicChannelDto {
-	std::uint32_t channel = 0;
-	std::string name;
-	std::string unit;
-	std::vector<HarmonicOrderDto> orders;
-};
-
-struct HarmonicDto {
-	bool running = false;
-	bool available = false;
-	std::uint64_t records = 0;
-	std::uint64_t families = 0;
-	std::uint64_t incomplete_families = 0;
-	std::string period = "cycles_150_180";
-	std::uint32_t sequence = 0;
-	std::uint32_t configuration_generation = 0;
-	std::uint32_t sample_rate_hz = 0;
-	std::uint32_t sample_count = 0;
-	std::uint64_t first_sample = 0;
-	std::uint32_t measured_frequency_millihz = 0;
-	std::uint32_t qualified_max_order = 0;
-	std::uint32_t nominal_frequency_hz = 0;
-	std::uint32_t cycle_count = 0;
-	std::uint32_t filter_profile_id = 0;
-	std::uint32_t valid_mask = 0;
-	std::uint32_t status = 0;
-	std::uint32_t emit_drops = 0;
-	std::uint32_t result_drops = 0;
-	std::uint64_t target_sample = 0;
-	std::uint32_t contributors = 0;
-	std::uint32_t overshoot_samples = 0;
-	std::uint32_t first_source_sequence = 0;
-	std::uint32_t last_source_sequence = 0;
-	bool time_aligned = false;
-	bool contaminated = false;
-	bool interval_valid = false;
-	bool arithmetic_error = false;
-	bool grid_locked = false;
-	bool conditioner_valid = false;
-	bool fft_valid = false;
-	bool full_range = false;
-	bool first_after_discontinuity = false;
-	bool rate_limited = false;
-	std::vector<HarmonicChannelDto> channels;
-};
-
-std::string harmonic_period_name(mnc::meter::MeasurementPeriod period)
-{
-	switch (period) {
-	case mnc::meter::MeasurementPeriod::Basic:
-		return "basic";
-	case mnc::meter::MeasurementPeriod::Cycles150_180:
-		return "cycles_150_180";
-	case mnc::meter::MeasurementPeriod::Min10:
-		return "minutes_10";
-	case mnc::meter::MeasurementPeriod::Hour2:
-		return "hours_2";
-	default:
-		throw std::invalid_argument("unsupported harmonic period");
-	}
-}
-
 mnc::meter::MeasurementPeriod harmonic_period(std::string_view target)
 {
 	const auto marker = target.find("period=");
@@ -820,75 +750,7 @@ mnc::meter::MeasurementPeriod harmonic_period(std::string_view target)
 	if (value == "basic")
 		return mnc::meter::MeasurementPeriod::Basic;
 	throw std::invalid_argument(
-		"period must be cycles_150_180, minutes_10, or hours_2");
-}
-
-HarmonicDto harmonic_dto(const msap1::HarmonicResponse &response)
-{
-	static constexpr std::array<const char *, 7> names{
-		"Ia", "Ib", "Ic", "In", "Vc", "Vb", "Va"};
-	HarmonicDto dto{};
-	dto.running = response.running;
-	dto.available = response.has_snapshot;
-	dto.records = response.records;
-	dto.families = response.families;
-	dto.incomplete_families = response.incomplete_families;
-	dto.period = harmonic_period_name(response.period);
-	if (!response.has_snapshot)
-		return dto;
-	const auto &snapshot = response.snapshot;
-	dto.sequence = snapshot.sequence;
-	dto.configuration_generation = snapshot.configuration_generation;
-	dto.sample_rate_hz = snapshot.sample_rate_hz;
-	dto.sample_count = snapshot.sample_count;
-	dto.first_sample = snapshot.first_sample;
-	dto.measured_frequency_millihz =
-		snapshot.measured_frequency_millihz;
-	dto.qualified_max_order = snapshot.qualified_max_order;
-	dto.nominal_frequency_hz = snapshot.nominal_frequency_hz;
-	dto.cycle_count = snapshot.cycle_count;
-	dto.filter_profile_id = snapshot.filter_profile_id;
-	dto.valid_mask = snapshot.valid_mask;
-	dto.status = snapshot.status;
-	dto.emit_drops = snapshot.emit_drops;
-	dto.result_drops = snapshot.result_drops;
-	dto.target_sample = snapshot.target_sample;
-	dto.contributors = snapshot.contributors;
-	dto.overshoot_samples = snapshot.overshoot_samples;
-	dto.first_source_sequence = snapshot.first_source_sequence;
-	dto.last_source_sequence = snapshot.last_source_sequence;
-	dto.time_aligned = snapshot.aligned;
-	dto.contaminated = snapshot.contaminated;
-	dto.interval_valid = snapshot.interval_valid();
-	dto.arithmetic_error = snapshot.arithmetic_error();
-	dto.grid_locked = snapshot.grid_locked();
-	dto.conditioner_valid = snapshot.conditioner_valid();
-	dto.fft_valid = snapshot.fft_valid();
-	dto.full_range = snapshot.full_range();
-	dto.first_after_discontinuity =
-		snapshot.first_after_discontinuity();
-	dto.rate_limited = snapshot.rate_limited();
-	dto.channels.reserve(snapshot.channels.size());
-	for (std::size_t channel = 0; channel < snapshot.channels.size();
-	     ++channel) {
-		HarmonicChannelDto channel_dto{};
-		channel_dto.channel = static_cast<std::uint32_t>(channel);
-		channel_dto.name = names[channel];
-		channel_dto.unit = channel < 4 ? "A" : "V";
-		channel_dto.orders.reserve(harmonic_max_order);
-		for (const auto &point : snapshot.channels[channel])
-			channel_dto.orders.push_back({
-				point.order,
-				point.magnitude_micro_units,
-				static_cast<double>(point.magnitude_micro_units) / 1e6,
-				point.magnitude_valid,
-				point.angle_millidegrees,
-				static_cast<double>(point.angle_millidegrees) / 1000.0,
-				point.angle_valid,
-			});
-		dto.channels.push_back(std::move(channel_dto));
-	}
-	return dto;
+		"period must be basic, cycles_150_180, minutes_10, or hours_2");
 }
 
 } // namespace
@@ -967,6 +829,25 @@ webengine::Response get_meter_aggregate(AppContext &app,
 		log_api_failure("/api/v1/meter/aggregate", error);
 		return error_response(
 			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response get_meter_frequency_10s(
+	AppContext &app, const webengine::RequestContext &)
+{
+	try {
+		const auto response = app.acquisition.meter_snapshot(
+			meter_frequency_10s_snapshot_selection());
+		require_acquisition_ok(response.status);
+		const auto frequency = meter_frequency_10s_dto(response);
+		if (!frequency)
+			return json_response(webengine::http::status::ok,
+				MeterFrequency10sUnavailableDto{});
+		return json_response(webengine::http::status::ok, *frequency);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/meter/frequency-10s", error);
+		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
 }
@@ -1142,6 +1023,92 @@ put_frequency_configuration(AppContext &app,
 			webengine::http::status::service_unavailable,
 			error.what());
 	}
+}
+
+void document_meter_routes(DocumentedApiRegistry &registry)
+{
+	using V = webengine::http::verb;
+	registry.add_json_response<MeterHealthDto>(V::get,
+		"/api/v1/meter/health", 200, "MeterHealth",
+		"Metering pipeline, acquisition, ADC, and aggregation health");
+	registry.add_error_response(V::get, "/api/v1/meter/health", 503,
+		"Acquisition health is unavailable");
+
+	registry.add_json_response<MeterReadingsDto>(V::get,
+		"/api/v1/meter/readings", 200, "MeterReadings",
+		"Newest basic-block meter readings");
+	registry.add_error_response(V::get, "/api/v1/meter/readings", 503,
+		"No current meter result is available");
+
+	using AggregateResult =
+		std::variant<MeterAggregateDto, MeterAggregateUnavailableDto>;
+	registry.add_json_response<AggregateResult>(V::get,
+		"/api/v1/meter/aggregate", 200, "MeterAggregateResult",
+		"Newest 150/180-cycle aggregate or an unavailable marker");
+	registry.add_error_response(V::get, "/api/v1/meter/aggregate", 503,
+		"The aggregate snapshot is malformed or unavailable");
+
+	using Frequency10sResult =
+		std::variant<MeterFrequency10sDto, MeterFrequency10sUnavailableDto>;
+	registry.add_json_response<Frequency10sResult>(V::get,
+		"/api/v1/meter/frequency-10s", 200, "MeterFrequency10sResult",
+		"Newest UTC-aligned IEC 61000-4-30 ten-second frequency result, "
+		"including exact audit provenance, or an unavailable marker");
+	registry.add_error_response(V::get,
+		"/api/v1/meter/frequency-10s", 503,
+		"The ten-second frequency snapshot is malformed or unavailable");
+
+	using LongIntervalResult =
+		std::variant<MeterTenMinuteDto, MeterTenMinuteUnavailableDto>;
+	for (const auto path : {"/api/v1/meter/minutes-10",
+		"/api/v1/meter/hours-2", "/api/v1/meter/minutes-10/live",
+		"/api/v1/meter/hours-2/live"}) {
+		registry.add_json_response<LongIntervalResult>(V::get, path, 200,
+			"MeterLongIntervalResult",
+			"Finalized or live long-interval result, or unavailable marker");
+		registry.add_error_response(V::get, path, 503,
+			"The requested interval snapshot is malformed or unavailable");
+	}
+
+	registry.add_json_response<SingleCycleDto>(V::get,
+		"/api/v1/meter/single-cycle", 200, "MeterSingleCycle",
+		"Latest SCYC diagnostic snapshot");
+	registry.add_error_response(V::get, "/api/v1/meter/single-cycle", 503,
+		"Single-cycle diagnostics are unavailable");
+
+	registry.add_json_response<PowerQualityDto>(V::get,
+		"/api/v1/meter/power-quality", 200, "MeterPowerQuality",
+		"Latest Urms(1/2) record and newest event edge");
+	registry.add_error_response(V::get,
+		"/api/v1/meter/power-quality", 503,
+		"Power-quality live state is unavailable");
+
+	constexpr auto harmonics = "/api/v1/meter/harmonics";
+	registry.add_query_parameter(V::get, harmonics, "period", "string", false,
+		"Harmonic measurement period",
+		{"basic", "cycles_150_180", "3s", "minutes_10", "10m",
+		 "hours_2", "2h"}, "cycles_150_180");
+	registry.add_json_response<HarmonicDto>(V::get, harmonics, 200,
+		"MeterHarmonics", "Latest complete harmonic family for the period");
+	registry.add_error_response(V::get, harmonics, 400,
+		"The requested harmonic period is invalid");
+	registry.add_error_response(V::get, harmonics, 503,
+		"Harmonic state is unavailable");
+
+	constexpr auto frequency =
+		"/api/v1/meter/configuration/frequency";
+	registry.add_json_response<FrequencyConfigurationDto>(V::get, frequency,
+		200, "FrequencyConfiguration", "Active frequency configuration");
+	registry.add_error_response(V::get, frequency, 503,
+		"The active frequency configuration is unavailable");
+	registry.add_json_request<FrequencyConfigurationDto>(V::put, frequency,
+		"FrequencyConfiguration", "Complete frequency configuration");
+	registry.add_json_response<FrequencyConfigurationDto>(V::put, frequency,
+		200, "FrequencyConfiguration", "Applied frequency configuration");
+	registry.add_error_response(V::put, frequency, 400,
+		"Frequency JSON or values are invalid");
+	registry.add_error_response(V::put, frequency, 503,
+		"The frequency configuration could not be applied or read back");
 }
 
 } // namespace msap1::web::api

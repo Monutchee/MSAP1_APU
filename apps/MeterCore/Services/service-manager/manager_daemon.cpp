@@ -6,6 +6,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <sys/stat.h>
@@ -88,7 +89,9 @@ void ServiceManagerDaemon::schedule_settings_policy()
 void ServiceManagerDaemon::reconcile_settings_policy()
 {
 	try {
-		const auto mqtt = msap1::settings::ipc::SettingsClient{}.active(1500).mqtt;
+		const auto settings =
+			msap1::settings::ipc::SettingsClient{}.active(1500);
+		const auto &mqtt = settings.mqtt;
 		const auto status = manager_.status("mqtt-publisher");
 		const auto running = status.active_state == "active" ||
 			status.active_state == "activating";
@@ -103,9 +106,35 @@ void ServiceManagerDaemon::reconcile_settings_policy()
 				"stopped MQTT publisher from active settings",
 				"settings_controlled_service_stopped");
 		}
+
+		const auto service_running = [this](std::string_view service) {
+			const auto state = manager_.status(service).active_state;
+			return state == "active" || state == "activating";
+		};
+		const auto set_running = [this, &service_running](std::string_view service,
+			bool desired) {
+			if (service_running(service) == desired)
+				return;
+			(void)manager_.control(service, desired
+				? mnc::ServiceAction::start : mnc::ServiceAction::stop);
+			(void)logger().write(mnc::logging::Priority::notice,
+				std::string(desired ? "started " : "stopped ") +
+					std::string(service) + " from active settings",
+				"time_sync_policy_applied");
+		};
+		if (settings.time.synchronization == "ptp") {
+			set_running("time-sync-ntp", false);
+			set_running("time-sync-ptp-clock", true);
+			set_running("time-sync-ptp-system", true);
+		} else {
+			set_running("time-sync-ptp-system", false);
+			set_running("time-sync-ptp-clock", false);
+			set_running("time-sync-ntp", true);
+		}
 	} catch (const std::exception &error) {
 		(void)logger().write(mnc::logging::Priority::debug,
-			"MQTT activation policy deferred: " + std::string(error.what()),
+			"settings-controlled service policy deferred: " +
+				std::string(error.what()),
 			"settings_policy_deferred");
 	}
 }

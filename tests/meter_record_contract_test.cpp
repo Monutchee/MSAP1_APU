@@ -7,7 +7,7 @@
 
 namespace {
 
-constexpr std::array<std::uint32_t, 11> m18_allocations{
+constexpr std::array<std::uint32_t, 12> public_allocations{
 	msap1::meter_ten_minute_open_format,
 	msap1::meter_ten_minute_open_power_format,
 	msap1::meter_ten_minute_open_phasor_format,
@@ -19,6 +19,7 @@ constexpr std::array<std::uint32_t, 11> m18_allocations{
 	msap1::meter_pq_event_lifecycle_format,
 	msap1::meter_flicker_format,
 	msap1::meter_mains_signal_format,
+	msap1::meter_frequency_10s_format,
 };
 
 constexpr std::array<std::uint32_t, 8> migrated_preview_formats{
@@ -46,10 +47,10 @@ constexpr std::array<std::uint32_t, 6> retired_preview_formats{
 
 constexpr bool allocations_are_unique()
 {
-	for (std::size_t left = 0; left < m18_allocations.size(); ++left)
+	for (std::size_t left = 0; left < public_allocations.size(); ++left)
 		for (std::size_t right = left + 1;
-		     right < m18_allocations.size(); ++right)
-			if (m18_allocations[left] == m18_allocations[right])
+		     right < public_allocations.size(); ++right)
+			if (public_allocations[left] == public_allocations[right])
 				return false;
 	return true;
 }
@@ -65,6 +66,7 @@ static_assert(msap1::meter_two_hour_open_unbalance_format == 0x00270002u);
 static_assert(msap1::meter_pq_event_lifecycle_format == 0x00060001u);
 static_assert(msap1::meter_flicker_format == 0x000E0001u);
 static_assert(msap1::meter_mains_signal_format == 0x000F0001u);
+static_assert(msap1::meter_frequency_10s_format == 0x00280001u);
 static_assert(msap1::meter_pq_event_lifecycle_format !=
 	      msap1::meter_pq_event_format);
 static_assert(allocations_are_unique());
@@ -84,6 +86,11 @@ int main()
 				format);
 			return 1;
 		}
+	}
+	record.words[1] = msap1::meter_frequency_10s_format;
+	if (!record.header_valid()) {
+		std::fprintf(stderr, "FREQUENCY-10S-v1 format was rejected\n");
+		return 1;
 	}
 	for (const auto format : retired_preview_formats) {
 		record.words[1] = format;

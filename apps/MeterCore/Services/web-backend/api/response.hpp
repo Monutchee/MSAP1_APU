@@ -112,4 +112,13 @@ inline webengine::Response error_response(webengine::http::status status,
 	return json_response(status, glz::obj{"error", std::move(message)});
 }
 
+/** Build an error envelope with a stable machine code and retry hint. */
+inline webengine::Response error_response(webengine::http::status status,
+	std::string message, std::string code, bool retryable)
+{
+	return json_response(status,
+		glz::obj{"error", std::move(message), "code", std::move(code),
+			"retryable", retryable});
+}
+
 } // namespace msap1::web::api

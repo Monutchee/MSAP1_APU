@@ -670,3 +670,57 @@ mnc settings get   # or the web Settings page
    shows live Urms(1/2) per phase and, after an event, its type, affected
    phases, duration in ms, and residual/peak. Arming from that panel must
    produce the same record the CLI produced.
+
+## 20. UTC ten-second frequency (metrology M20)
+
+Prerequisite: one coordinated M20 PL/RPU/APU/kernel image, the 128 kSPS ADC
+profile, CH6 as the frequency reference, filter profile 1, calibration profile
+1, and a synchronized system clock. Use the authenticated
+`GET /api/v1/meter/frequency-10s` response and the Meter page's IEC 10 s card.
+
+1. **UTC cadence and exact anchors.** Poll for at least 70 seconds. A new
+   available result must appear on every exact UTC multiple-of-ten-second
+   boundary. `utc_end_nanoseconds % 10000000000` is zero; each result's UTC
+   end equals its start plus exactly 10,000,000,000 ns; the next start equals
+   the prior end; and the next `first_sample_index` equals the prior
+   `interval_end_sample_index`. Sequence and boundary generation advance
+   without gaps. Treat the decimal-string anchors as integers, not floats.
+2. **Steady 50/60 Hz accuracy.** At nominal 50 Hz expect about 500 included
+   cycles and a result within the calibrated source tolerance; at nominal
+   60 Hz expect about 600. `valid` is true, `quality` is `valid`, both numeric
+   frequency fields are present, `rejection_reasons` is empty, and the named
+   status includes `result_valid`, `time_aligned`, `time_synchronized`,
+   `profile_supported`, `filter_ready`, `reference_valid`,
+   `calibration_valid`, and `sample_rate_valid`.
+3. **Off-nominal calculation.** Drive 49.9/50.1 Hz (or 59.9/60.1 Hz). The
+   ten-second result must follow the source rather than the declared nominal.
+   Check that the reported millihertz agrees with an independent cycle/time
+   reference and that repeated halfway rounding cases follow ties-to-even.
+4. **Range gating.** Drive outside 42.5–57.5 Hz for a 50 Hz profile or
+   51–69 Hz for a 60 Hz profile. The interval remains available but has
+   `valid:false`, `quality:"out_of_range"`, no frequency fields, and named
+   `out_of_range` status/rejection. A numeric zero must never be displayed.
+5. **Clock-quality gating.** Remove synchronization before programming the
+   next boundary or force UTC uncertainty above 1 ms. The completed interval
+   is invalid with the corresponding `time_unsynchronized` or
+   `time_uncertainty` reason. Restore synchronization; only a subsequently
+   programmed clean interval may return valid.
+6. **Discontinuity and stale-boundary cancellation.** During an open interval,
+   stop/restart capture, change sample rate, apply a new configuration, and
+   restart the acquisition service. No pre-change boundary may later appear as
+   valid. The affected result is absent or invalid with discontinuity,
+   transport, boundary, or resynchronization provenance; the first clean
+   replacement interval starts on a new exact UTC boundary.
+7. **Reference/filter faults.** Remove CH6 or exercise filter warm-up. The
+   completed interval remains auditable but invalid with `reference_invalid`
+   or `filter_warmup`; frequency fields stay absent. Restoring the reference must
+   not validate an interval that already contains the fault.
+8. **Cross-surface identity.** For one sequence, compare REST, MQTT
+   `frequency_10s`, Modbus input registers `0x6000..0x6001`, and historian
+   period `seconds_10`. Valid values must agree exactly in millihertz before
+   protocol scaling. The legacy Basic frequency at Modbus `0x0000` and the
+   informative 150/180-cycle aggregate are different products and must not be
+   relabelled as the IEC ten-second result.
+9. **Sustained health.** Run at least one hour. Expect one result per UTC
+   boundary, no unexplained source-sequence gaps, no observer/transport drops,
+   bounded historian/MQTT queues, and unchanged basic/aggregate/PQ continuity.
