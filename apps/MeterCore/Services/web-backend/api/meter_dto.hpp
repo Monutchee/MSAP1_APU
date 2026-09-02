@@ -317,6 +317,8 @@ inline constexpr std::array frequency_10s_source_status_catalog{
 	Frequency10sFlagName{1u << 9u, "calibration_valid"},
 	Frequency10sFlagName{1u << 10u, "profile_supported"},
 };
+inline constexpr std::uint32_t frequency_10s_source_time_synchronized =
+	1u << 1u;
 
 inline constexpr std::array frequency_10s_guard_catalog{
 	Frequency10sFlagName{1u << 0u, "before_start"},
@@ -335,6 +337,8 @@ struct MeterFrequency10sDto {
 	std::optional<double> frequency_hz;
 	std::optional<std::uint32_t> frequency_millihz;
 	std::string time_quality;
+	bool clock_synchronized;
+	bool class_a_time_qualified;
 	std::uint32_t age_ms;
 	std::string first_sample_index;
 	std::string interval_end_sample_index;
@@ -485,6 +489,14 @@ meter_frequency_10s_dto(const msap1::MeterSnapshotResponse &response)
 		std::min<std::int64_t>(age_ns / 1'000'000,
 			std::numeric_limits<std::uint32_t>::max()));
 	const auto millihz = static_cast<std::uint32_t>(frequency->value);
+	const bool clock_synchronized =
+		(audit.source_status & frequency_10s_source_time_synchronized) != 0u;
+	const bool class_a_time_qualified = clock_synchronized &&
+		audit.utc_uncertainty_nanoseconds <= 1'000'000ull;
+	if ((timing.quality == mnc::meter::TimeQuality::Synchronized) !=
+	    class_a_time_qualified)
+		throw std::invalid_argument(
+			"ten-second frequency clock and Class A time qualification disagree");
 	return MeterFrequency10sDto{
 		.available = true,
 		.sequence = static_cast<std::uint32_t>(snapshot.sequence),
@@ -497,6 +509,8 @@ meter_frequency_10s_dto(const msap1::MeterSnapshotResponse &response)
 		.frequency_millihz = valid
 			? std::optional<std::uint32_t>{millihz} : std::nullopt,
 		.time_quality = time_quality_name(timing.quality),
+		.clock_synchronized = clock_synchronized,
+		.class_a_time_qualified = class_a_time_qualified,
 		.age_ms = age_ms,
 		.first_sample_index = std::to_string(*timing.first_sample_index),
 		.interval_end_sample_index =

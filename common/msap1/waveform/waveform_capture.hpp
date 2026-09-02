@@ -402,10 +402,11 @@ public:
 	find_session(const MncwfUuid &capture_uuid);
 
 	/**
-	 * Sample one PL-counter/CLOCK_REALTIME correlation for the UTC
-	 * measurement timebase. Available whenever the waveform device is
-	 * open (a capture session is not required); nullopt when the device
-	 * is closed or the correlation read fails.
+	 * Sample a bounded burst of PL-counter/CLOCK_REALTIME correlations for
+	 * the UTC measurement timebase and return the one with the narrowest
+	 * complete bracket. Available whenever the waveform device is open (a
+	 * capture session is not required); nullopt when the device is closed or
+	 * every correlation read fails.
 	 */
 	std::optional<WaveformTimeSync> time_sync() const noexcept;
 

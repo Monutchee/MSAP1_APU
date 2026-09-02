@@ -35,6 +35,7 @@ constexpr unsigned long waveform_ten_minute_boundary_ioctl =
 	_IOW('W', 0x03, WaveformTenMinuteBoundaryIoctl);
 constexpr unsigned long waveform_frequency_10s_boundary_ioctl =
 	_IOWR('W', 0x04, WaveformFrequency10sBoundaryIoctl);
+constexpr unsigned time_sync_attempts = 3u;
 
 constexpr std::uint32_t frequency_10s_boundary_valid = 1u << 0u;
 constexpr std::uint32_t frequency_10s_time_synchronized = 1u << 1u;
@@ -1088,30 +1089,43 @@ std::optional<WaveformTimeSync> WaveformCapture::time_sync() const noexcept
 	 * maps to. The `frame_sequence` correlation field carries the PL
 	 * 64-bit conversion-domain sample counter.
 	 */
-	std::uint64_t realtime_before = 0;
-	std::uint64_t realtime_after = 0;
-	WaveformCorrelationIoctl sample{};
-	try {
-		realtime_before = realtime_now_nanoseconds();
-		if (::ioctl(fd_, waveform_correlate_ioctl, &sample) != 0)
-			return std::nullopt;
-		realtime_after = realtime_now_nanoseconds();
-	} catch (...) {
-		return std::nullopt;
+	/*
+	 * Scheduler preemption can widen one userspace CLOCK_REALTIME bracket by
+	 * milliseconds even though the in-kernel latch is fast. Take a small,
+	 * bounded burst and retain the narrowest complete correlation. This can
+	 * remove local scheduling noise, but deliberately does not reduce the
+	 * kernel clock-discipline error that the caller adds to the Class A bound.
+	 */
+	std::optional<WaveformTimeSync> best;
+	for (unsigned attempt = 0; attempt < time_sync_attempts; ++attempt) {
+		std::uint64_t realtime_before = 0;
+		std::uint64_t realtime_after = 0;
+		WaveformCorrelationIoctl sample{};
+		try {
+			realtime_before = realtime_now_nanoseconds();
+			if (::ioctl(fd_, waveform_correlate_ioctl, &sample) != 0)
+				continue;
+			realtime_after = realtime_now_nanoseconds();
+		} catch (...) {
+			continue;
+		}
+		if (sample.tai_after_nanoseconds < sample.tai_before_nanoseconds ||
+		    realtime_after < realtime_before)
+			continue;
+		WaveformTimeSync candidate{
+			.sample_counter = sample.frame_sequence,
+			.tai_nanoseconds = sample.tai_before_nanoseconds +
+				(sample.tai_after_nanoseconds -
+				 sample.tai_before_nanoseconds) /
+					2u,
+			.realtime_nanoseconds = realtime_before +
+				(realtime_after - realtime_before) / 2u,
+			.bracket_nanoseconds = realtime_after - realtime_before,
+		};
+		if (!best || candidate.bracket_nanoseconds < best->bracket_nanoseconds)
+			best = candidate;
 	}
-	if (sample.tai_after_nanoseconds < sample.tai_before_nanoseconds ||
-	    realtime_after < realtime_before)
-		return std::nullopt;
-	return WaveformTimeSync{
-		.sample_counter = sample.frame_sequence,
-		.tai_nanoseconds = sample.tai_before_nanoseconds +
-			(sample.tai_after_nanoseconds -
-			 sample.tai_before_nanoseconds) /
-				2u,
-		.realtime_nanoseconds = realtime_before +
-			(realtime_after - realtime_before) / 2u,
-		.bracket_nanoseconds = realtime_after - realtime_before,
-	};
+	return best;
 }
 
 void WaveformCapture::program_ten_minute_boundary(

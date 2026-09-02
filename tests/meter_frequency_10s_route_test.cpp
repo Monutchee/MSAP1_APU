@@ -149,6 +149,8 @@ void valid_result_exposes_exact_value_and_audit_provenance()
 		projected->sequence == 77 &&
 		projected->configuration_generation == 12 &&
 		projected->time_quality == "synchronized" &&
+		projected->clock_synchronized &&
+		projected->class_a_time_qualified &&
 		projected->first_sample_index == "9007199254740000" &&
 		projected->interval_end_sample_index == "9007199256020000" &&
 		projected->sample_count == sample_count &&
@@ -181,12 +183,37 @@ void valid_result_exposes_exact_value_and_audit_provenance()
 		"ten-second frequency named audit flags changed");
 	const auto body = json(*projected);
 	require(body.find(R"("frequency_hz":50.001)") != std::string::npos &&
+		body.find(R"("clock_synchronized":true)") != std::string::npos &&
+		body.find(R"("class_a_time_qualified":true)") !=
+			std::string::npos &&
 		body.find(R"("first_sample_index":"9007199254740000")") !=
 			std::string::npos &&
 		body.find(R"("utc_end_nanoseconds":"1788000210000000000")") !=
 			std::string::npos &&
 		body.find(R"("rejection_reasons":[])") != std::string::npos,
 		"ten-second frequency JSON loses value or exact audit integers");
+}
+
+void synchronized_clock_is_distinct_from_class_a_time_qualification()
+{
+	auto response = contract_response();
+	auto &timing = *response.snapshot.timing;
+	auto &audit = *response.snapshot.frequency_10s;
+	auto &reading = response.snapshot.values.front();
+	timing.quality = mnc::meter::TimeQuality::Unsynchronized;
+	timing.utc_uncertainty_nanoseconds = 3'500'000u;
+	audit.utc_uncertainty_nanoseconds = 3'500'000u;
+	audit.reasons = msap1::meter_frequency_10s_reason_time_uncertainty;
+	audit.status &= ~msap1::meter_frequency_10s_status_result_valid;
+	reading.quality = Quality::Invalid;
+	reading.value = 0;
+	const auto projected = meter_frequency_10s_dto(response);
+	require(projected && projected->clock_synchronized &&
+		!projected->class_a_time_qualified &&
+		projected->time_quality == "unsynchronized" &&
+		projected->rejection_reasons ==
+			(std::vector<std::string>{"time_uncertainty"}),
+		"disciplined clock was conflated with Class A time qualification");
 }
 
 void invalid_result_never_publishes_zero_as_a_measurement()
@@ -263,6 +290,7 @@ int main()
 		selection_is_typed_and_minimal();
 		absence_has_the_stable_unavailable_shape();
 		valid_result_exposes_exact_value_and_audit_provenance();
+		synchronized_clock_is_distinct_from_class_a_time_qualification();
 		invalid_result_never_publishes_zero_as_a_measurement();
 		malformed_snapshot_provenance_is_rejected();
 	} catch (const std::exception &error) {
