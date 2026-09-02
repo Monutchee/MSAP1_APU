@@ -2,6 +2,7 @@ add_executable(msap1-fpga-acquisition
     main.cpp
     acquisition_service.cpp
     support/options.cpp
+    support/meter_time_control.cpp
     config/runtime_config.cpp
     pipeline/capture_coordinator.cpp
 	pipeline/event_waveform_linker.cpp

@@ -22,6 +22,7 @@ SettingsDaemon::SettingsDaemon()
 			   },
 			   [](const auto &settings) {
 				   apply_to_mqtt_service(settings);
+				   apply_to_time_sync_services(settings);
 				   apply_to_data_sender_service(settings);
 			   }}),
 	  router_(handler_),

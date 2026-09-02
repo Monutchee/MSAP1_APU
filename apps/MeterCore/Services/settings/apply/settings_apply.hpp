@@ -29,6 +29,10 @@ void apply_to_database_services(
 /** Reconcile the optional MQTT unit with the candidate settings. */
 void apply_to_mqtt_service(const msap1::settings::ProductSettings &settings);
 
+/** Select NTP (default) or the end0 hardware-timestamped PTP client pair. */
+void apply_to_time_sync_services(
+	const msap1::settings::ProductSettings &settings);
+
 /** Reload the always-running Data Sender after schema-v5 settings persist. */
 void apply_to_data_sender_service(
 	const msap1::settings::ProductSettings &settings);

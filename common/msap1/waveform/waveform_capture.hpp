@@ -119,53 +119,13 @@ struct WaveformCaptureContext {
  * the runtime policy or allocating a production-sized test fixture. */
 struct WaveformCaptureOptions {
 	std::size_t history_capacity_frames = waveform_history_frames;
+	/** Independent metrology-time correlation source. Production binds this
+	 * to /dev/meter-time; waveform DMA itself never owns time registers. */
+	std::function<std::optional<WaveformCorrelation>()> correlation_source;
 	/** Optional deterministic test seam invoked immediately before each
 	 * persisted file is validated. Production leaves it empty. */
 	std::function<void(std::stop_token, const std::filesystem::path &)>
 		archive_discovery_hook;
-};
-
-/*
- * One correlation of the PL conversion-domain sample counter with
- * CLOCK_REALTIME, produced for the measurement timebase (UTC mapping).
- * The PL latches the counter atomically inside the correlation ioctl; the
- * CLOCK_REALTIME bracket around that ioctl bounds the latch instant, so the
- * midpoint is the estimate and the bracket width is the uncertainty. The
- * caller adds the PL elasticity-FIFO offset bound, which depends on the
- * active sample rate.
- */
-struct WaveformTimeSync {
-	std::uint64_t sample_counter = 0;
-	/** Midpoint of the kernel's CLOCK_TAI bracket; used only for rate. */
-	std::uint64_t tai_nanoseconds = 0;
-	std::uint64_t realtime_nanoseconds = 0;
-	std::uint64_t bracket_nanoseconds = 0;
-};
-
-/** One Linux-owned UTC interval handed coherently to the PL frequency observer. */
-struct WaveformFrequency10sBoundary {
-	std::uint64_t start_sample_index = 0;
-	std::uint64_t end_sample_index = 0;
-	std::uint64_t utc_start_nanoseconds = 0;
-	std::uint64_t utc_end_nanoseconds = 0;
-	std::uint64_t utc_uncertainty_nanoseconds = 0;
-	std::uint32_t measured_sample_rate_millihz = 0;
-	std::uint32_t boundary_generation = 0;
-	std::uint8_t nominal_frequency_hz = 0;
-	std::uint8_t reference_channel = 0;
-	std::uint8_t filter_profile = 0;
-	std::uint8_t calibration_profile = 0;
-	bool valid = false;
-	bool time_synchronized = false;
-};
-
-/** PL observer state sampled immediately after a boundary commit. */
-struct WaveformFrequency10sObserverStatus {
-	std::uint32_t status = 0;
-	std::uint32_t completed_count = 0;
-	std::uint32_t dropped_count = 0;
-	std::uint32_t overflow_count = 0;
-	std::uint32_t discontinuity_count = 0;
 };
 
 struct WaveformSessionSummary {
@@ -303,13 +263,6 @@ struct WaveformBlock {
 		frames;
 };
 
-struct WaveformCorrelationIoctl {
-	std::uint64_t tai_before_nanoseconds;
-	std::uint64_t tai_after_nanoseconds;
-	std::uint64_t pl_tick;
-	std::uint64_t frame_sequence;
-};
-
 struct WaveformTransportStatusIoctl {
 	std::uint64_t produced_blocks;
 	std::uint64_t consumed_blocks;
@@ -319,43 +272,11 @@ struct WaveformTransportStatusIoctl {
 	std::uint32_t callbacks;
 };
 
-/**
- * Programs the next UTC-aligned ten-minute boundary in the PL sample-counter
- * domain.  The kernel writes the target and commit bit to the waveform AXI
- * register bank; the metrology datapath consumes the committed value without
- * involving the waveform DMA stream itself.
- */
-struct WaveformTenMinuteBoundaryIoctl {
-	std::uint64_t target_sample_index;
-	std::uint32_t valid;
-	std::uint32_t reserved;
-};
-
-struct WaveformFrequency10sBoundaryIoctl {
-	std::uint64_t start_sample_index;
-	std::uint64_t end_sample_index;
-	std::uint64_t utc_start_nanoseconds;
-	std::uint64_t utc_end_nanoseconds;
-	std::uint64_t utc_uncertainty_nanoseconds;
-	std::uint32_t measured_sample_rate_millihz;
-	std::uint32_t boundary_generation;
-	std::uint32_t profile;
-	std::uint32_t flags;
-	std::uint32_t observer_status;
-	std::uint32_t completed_count;
-	std::uint32_t dropped_count;
-	std::uint32_t overflow_count;
-	std::uint32_t discontinuity_count;
-	std::uint32_t reserved;
-};
 #pragma pack(pop)
 
 static_assert(sizeof(WaveformBlockHeader) == waveform_block_header_bytes);
 static_assert(sizeof(WaveformBlock) == waveform_block_bytes);
-static_assert(sizeof(WaveformCorrelationIoctl) == 32);
 static_assert(sizeof(WaveformTransportStatusIoctl) == 32);
-static_assert(sizeof(WaveformTenMinuteBoundaryIoctl) == 16);
-static_assert(sizeof(WaveformFrequency10sBoundaryIoctl) == 80);
 
 class WaveformCapture {
 public:
@@ -401,32 +322,6 @@ public:
 	[[nodiscard]] std::optional<WaveformSessionSummary>
 	find_session(const MncwfUuid &capture_uuid);
 
-	/**
-	 * Sample a bounded burst of PL-counter/CLOCK_REALTIME correlations for
-	 * the UTC measurement timebase and return the one with the narrowest
-	 * complete bracket. Available whenever the waveform device is open (a
-	 * capture session is not required); nullopt when the device is closed or
-	 * every correlation read fails.
-	 */
-	std::optional<WaveformTimeSync> time_sync() const noexcept;
-
-	/**
-	 * Commit or invalidate the next ten-minute UTC boundary.
-	 *
-	 * The target is expressed in the same free-running PL sample-counter
-	 * domain returned by time_sync().  A disabled target is used during an
-	 * orderly capture stop so stale UTC mappings cannot survive a restart.
-	 */
-	void program_ten_minute_boundary(std::uint64_t target_sample_index,
-					 bool valid);
-
-	/** Commit the next Class-A ten-second interval and return observer health. */
-	[[nodiscard]] WaveformFrequency10sObserverStatus
-	program_frequency_10s_boundary(
-		const WaveformFrequency10sBoundary &boundary);
-	/** Drop active/queued boundaries without producing a measurement record. */
-	void cancel_frequency_10s_boundary();
-
 private:
 	struct Event;
 	struct Session;
@@ -456,6 +351,7 @@ private:
 	std::string device_path_;
 	std::filesystem::path output_directory_;
 	WaveformCaptureContext context_{};
+	std::function<std::optional<WaveformCorrelation>()> correlation_source_;
 	std::function<void(std::stop_token, const std::filesystem::path &)>
 		archive_discovery_hook_;
 	mutable std::mutex archive_discovery_mutex_;

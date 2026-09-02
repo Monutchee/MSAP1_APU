@@ -27,19 +27,8 @@
 namespace msap1 {
 namespace {
 
-constexpr unsigned long waveform_correlate_ioctl =
-	_IOR('W', 0x01, WaveformCorrelationIoctl);
 constexpr unsigned long waveform_transport_status_ioctl =
 	_IOR('W', 0x02, WaveformTransportStatusIoctl);
-constexpr unsigned long waveform_ten_minute_boundary_ioctl =
-	_IOW('W', 0x03, WaveformTenMinuteBoundaryIoctl);
-constexpr unsigned long waveform_frequency_10s_boundary_ioctl =
-	_IOWR('W', 0x04, WaveformFrequency10sBoundaryIoctl);
-constexpr unsigned time_sync_attempts = 3u;
-
-constexpr std::uint32_t frequency_10s_boundary_valid = 1u << 0u;
-constexpr std::uint32_t frequency_10s_time_synchronized = 1u << 1u;
-constexpr std::uint32_t frequency_10s_cancel = 1u << 2u;
 
 /*
  * Session outcomes are journaled here, where the state transitions happen:
@@ -539,6 +528,7 @@ WaveformCapture::WaveformCapture(std::string device_path,
 				 WaveformCaptureOptions options)
 	: device_path_(std::move(device_path)),
 	  output_directory_(std::move(output_directory)),
+	  correlation_source_(std::move(options.correlation_source)),
 	  archive_discovery_hook_(std::move(options.archive_discovery_hook)),
 	  history_(options.history_capacity_frames),
 	  writer_(std::make_unique<AsyncWriter>())
@@ -1062,139 +1052,13 @@ WaveformCapture::archive_discovery_status() const
 
 std::optional<WaveformCorrelation> WaveformCapture::correlate() const noexcept
 {
-	if (fd_ < 0)
+	if (fd_ < 0 || !correlation_source_)
 		return std::nullopt;
-	WaveformCorrelationIoctl sample{};
-	if (::ioctl(fd_, waveform_correlate_ioctl, &sample) != 0)
+	try {
+		return correlation_source_();
+	} catch (...) {
 		return std::nullopt;
-	const auto midpoint =
-		sample.tai_before_nanoseconds +
-		(sample.tai_after_nanoseconds - sample.tai_before_nanoseconds) / 2u;
-	return WaveformCorrelation{
-		midpoint,
-		sample.pl_tick,
-		sample.frame_sequence,
-		sample.tai_after_nanoseconds - sample.tai_before_nanoseconds,
-	};
-}
-
-std::optional<WaveformTimeSync> WaveformCapture::time_sync() const noexcept
-{
-	if (fd_ < 0)
-		return std::nullopt;
-	/*
-	 * The kernel brackets the atomic PL latch with CLOCK_TAI reads; a
-	 * CLOCK_REALTIME bracket around the whole ioctl bounds the same latch
-	 * instant in the UTC domain, which is what the measurement timebase
-	 * maps to. The `frame_sequence` correlation field carries the PL
-	 * 64-bit conversion-domain sample counter.
-	 */
-	/*
-	 * Scheduler preemption can widen one userspace CLOCK_REALTIME bracket by
-	 * milliseconds even though the in-kernel latch is fast. Take a small,
-	 * bounded burst and retain the narrowest complete correlation. This can
-	 * remove local scheduling noise, but deliberately does not reduce the
-	 * kernel clock-discipline error that the caller adds to the Class A bound.
-	 */
-	std::optional<WaveformTimeSync> best;
-	for (unsigned attempt = 0; attempt < time_sync_attempts; ++attempt) {
-		std::uint64_t realtime_before = 0;
-		std::uint64_t realtime_after = 0;
-		WaveformCorrelationIoctl sample{};
-		try {
-			realtime_before = realtime_now_nanoseconds();
-			if (::ioctl(fd_, waveform_correlate_ioctl, &sample) != 0)
-				continue;
-			realtime_after = realtime_now_nanoseconds();
-		} catch (...) {
-			continue;
-		}
-		if (sample.tai_after_nanoseconds < sample.tai_before_nanoseconds ||
-		    realtime_after < realtime_before)
-			continue;
-		WaveformTimeSync candidate{
-			.sample_counter = sample.frame_sequence,
-			.tai_nanoseconds = sample.tai_before_nanoseconds +
-				(sample.tai_after_nanoseconds -
-				 sample.tai_before_nanoseconds) /
-					2u,
-			.realtime_nanoseconds = realtime_before +
-				(realtime_after - realtime_before) / 2u,
-			.bracket_nanoseconds = realtime_after - realtime_before,
-		};
-		if (!best || candidate.bracket_nanoseconds < best->bracket_nanoseconds)
-			best = candidate;
 	}
-	return best;
-}
-
-void WaveformCapture::program_ten_minute_boundary(
-	std::uint64_t target_sample_index, bool valid)
-{
-	if (fd_ < 0)
-		throw std::runtime_error(
-			"program ten-minute boundary: waveform device is closed");
-	WaveformTenMinuteBoundaryIoctl request{
-		target_sample_index,
-		valid ? 1u : 0u,
-		0u,
-	};
-	if (::ioctl(fd_, waveform_ten_minute_boundary_ioctl, &request) != 0)
-		throw_errno("program ten-minute boundary");
-}
-
-WaveformFrequency10sObserverStatus
-WaveformCapture::program_frequency_10s_boundary(
-	const WaveformFrequency10sBoundary &boundary)
-{
-	if (fd_ < 0)
-		throw std::runtime_error(
-			"program frequency ten-second boundary: waveform device is closed");
-	const auto profile = static_cast<std::uint32_t>(
-		boundary.nominal_frequency_hz) |
-		(static_cast<std::uint32_t>(boundary.reference_channel) << 8u) |
-		(static_cast<std::uint32_t>(boundary.filter_profile) << 16u) |
-		(static_cast<std::uint32_t>(boundary.calibration_profile) << 24u);
-	WaveformFrequency10sBoundaryIoctl request{
-		boundary.start_sample_index,
-		boundary.end_sample_index,
-		boundary.utc_start_nanoseconds,
-		boundary.utc_end_nanoseconds,
-		boundary.utc_uncertainty_nanoseconds,
-		boundary.measured_sample_rate_millihz,
-		boundary.boundary_generation,
-		profile,
-		(boundary.valid ? frequency_10s_boundary_valid : 0u) |
-			(boundary.time_synchronized
-				 ? frequency_10s_time_synchronized
-				 : 0u),
-		0u,
-		0u,
-		0u,
-		0u,
-		0u,
-		0u,
-	};
-	if (::ioctl(fd_, waveform_frequency_10s_boundary_ioctl, &request) != 0)
-		throw_errno("program frequency ten-second boundary");
-	return {
-		request.observer_status,
-		request.completed_count,
-		request.dropped_count,
-		request.overflow_count,
-		request.discontinuity_count,
-	};
-}
-
-void WaveformCapture::cancel_frequency_10s_boundary()
-{
-	if (fd_ < 0)
-		throw std::runtime_error(
-			"cancel frequency ten-second boundary: waveform device is closed");
-	WaveformFrequency10sBoundaryIoctl request{};
-	request.flags = frequency_10s_cancel;
-	if (::ioctl(fd_, waveform_frequency_10s_boundary_ioctl, &request) != 0)
-		throw_errno("cancel frequency ten-second boundary");
 }
 
 void WaveformCapture::update_transport_status() noexcept

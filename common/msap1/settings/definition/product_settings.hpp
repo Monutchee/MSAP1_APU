@@ -6,6 +6,7 @@
 #include "msap1/settings/definition/metering_settings.hpp"
 #include "msap1/settings/definition/modbus_settings.hpp"
 #include "msap1/settings/definition/mqtt_settings.hpp"
+#include "msap1/settings/definition/time_settings.hpp"
 #include "msap1/settings/definition/waveform_settings.hpp"
 
 #include <cstdint>
@@ -14,7 +15,7 @@ namespace msap1::settings {
 
 struct ProductSettings {
 	//Constraints declaration
-	static constexpr std::uint32_t supported_schema_version = 6;
+	static constexpr std::uint32_t supported_schema_version = 7;
 
 	//Setting Payload
 	std::uint32_t schema_version = supported_schema_version;
@@ -24,6 +25,7 @@ struct ProductSettings {
 	DatabaseSettings database;
 	ModbusSettings modbus;
 	MqttSettings mqtt;
+	TimeSettings time;
 	DataLoggingSettings data_logging;
 
 	/** Per-domain constraints plus the cross-domain meter configuration

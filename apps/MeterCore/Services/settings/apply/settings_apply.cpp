@@ -7,6 +7,8 @@
 #include "msap1/service/service_control.hpp"
 
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -60,6 +62,45 @@ void apply_to_mqtt_service(const msap1::settings::ProductSettings &settings)
 	if (response.status != msap1::service_control::Status::ok)
 		throw std::runtime_error("MQTT publisher service action failed: " +
 			response.message);
+}
+
+void apply_to_time_sync_services(
+	const msap1::settings::ProductSettings &settings)
+{
+	msap1::service_control::Client manager;
+	const auto set_running = [&manager](std::string_view service,
+		bool desired) {
+		const auto current = manager.request(
+			msap1::service_control::Command::status,
+			std::string(service));
+		if (current.status != msap1::service_control::Status::ok ||
+		    current.services.size() != 1)
+			throw std::runtime_error(
+				"cannot inspect time synchronization service " +
+				std::string(service));
+		const auto &state = current.services.front().active_state;
+		const auto active = state == "active" || state == "activating";
+		if (active == desired)
+			return;
+		const auto response = manager.request(desired
+			? msap1::service_control::Command::start
+			: msap1::service_control::Command::stop,
+			std::string(service), 10000);
+		if (response.status != msap1::service_control::Status::ok)
+			throw std::runtime_error(
+				"time synchronization service action failed for " +
+				std::string(service) + ": " + response.message);
+	};
+
+	if (settings.time.synchronization == "ptp") {
+		set_running("time-sync-ntp", false);
+		set_running("time-sync-ptp-clock", true);
+		set_running("time-sync-ptp-system", true);
+	} else {
+		set_running("time-sync-ptp-system", false);
+		set_running("time-sync-ptp-clock", false);
+		set_running("time-sync-ntp", true);
+	}
 }
 
 void apply_to_data_sender_service(

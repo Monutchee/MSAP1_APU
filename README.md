@@ -26,6 +26,10 @@ msap1-meter-historian -> typed, paged historian IPC
 AD7771 raw frames -> nonblocking PL waveform packetizer -> waveform AXI DMA
     -> /dev/msap1-waveform -> 128 MiB daemon history
     -> triggered .mncwf files
+
+PL tick + conversion sample index -> meter-time AXI-Lite registers
+    -> /dev/meter-time -> kernel-bracketed UTC correlation
+    -> 10-second and 10-minute sample-domain boundary control
 ```
 
 R5 core 0 retains exclusive ownership of AD7771 SPI, reset/synchronization,
@@ -452,8 +456,8 @@ sequence. The daemon retains 128 MiB of raw eight-channel frames (about
 resulting file can include samples that
 precede the trigger. Overlapping manual or future PQ-event windows are merged
 into one longest capture and retain every event marker. Each trigger refreshes
-an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the separate
-waveform AXI-Lite registers. The acquisition loop snapshots a completed
+an uncertainty-bounded `CLOCK_TAI`/PL-tick correlation through the independent
+`/dev/meter-time` endpoint. The acquisition loop snapshots a completed
 session from history and a background writer publishes it atomically, so
 filesystem latency cannot block DMA draining. A session that intersects a
 reported transport gap is marked incomplete and is not published as a valid

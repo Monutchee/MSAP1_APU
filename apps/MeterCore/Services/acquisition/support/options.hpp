@@ -25,6 +25,8 @@ struct Options {
 	std::string meter_device = "/dev/msap1-meter";
 	/** Waveform block DMA character device. */
 	std::string waveform_device = "/dev/msap1-waveform";
+	/** Independent metrology time-control character device. */
+	std::string meter_time_device = "/dev/meter-time";
 	/** Directory receiving completed .mncwf captures. */
 	std::string waveform_directory = "/data/mnc/waveform";
 	/** Unix control socket serving the acquisition command IPC. */

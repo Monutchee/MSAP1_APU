@@ -18,6 +18,7 @@ void usage(const char *program)
 		<< "  --aggregation-rpmsg-device PATH Use an existing R5C1 /dev/rpmsgN endpoint\n"
 		<< "  --meter-device PATH  Meter DMA device (default: /dev/msap1-meter)\n"
 		<< "  --waveform-device PATH Waveform DMA device (default: /dev/msap1-waveform)\n"
+		<< "  --meter-time-device PATH Time-control device (default: /dev/meter-time)\n"
 		<< "  --waveform-directory PATH Completed waveform storage\n"
 		<< "  --socket PATH        Control socket path\n";
 }
@@ -48,6 +49,8 @@ Options parse_options(int argc, char **argv)
 			options.meter_device = value;
 		else if (option == "--waveform-device")
 			options.waveform_device = value;
+		else if (option == "--meter-time-device")
+			options.meter_time_device = value;
 		else if (option == "--waveform-directory")
 			options.waveform_directory = value;
 		else if (option == "--socket")

@@ -22,6 +22,7 @@
 #include "pipeline/health_monitor.hpp"
 #include "pipeline/record_ingestor.hpp"
 #include "support/options.hpp"
+#include "support/meter_time_control.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -165,7 +166,7 @@ private:
 	 * @brief Refresh the measurement-timebase sync point (~10 s cadence).
 	 *
 	 * Correlates the PL 64-bit conversion sample counter with
-	 * CLOCK_REALTIME through the waveform correlation latch, binds the
+	 * CLOCK_REALTIME through the independent meter-time latch, binds the
 	 * sync to the ACTIVE configuration (generation + sample rate), and
 	 * folds in the kernel clock discipline state (adjtimex). Missing the
 	 * cadence long enough moves TimeQuality to Holdover on its own.
@@ -188,6 +189,7 @@ private:
 	msap1::settings::ProductSettings product_settings_;
 	msap1::PreparedMeterConfiguration configuration_;
 	msap1::acquisition::MeterDmaReader meter_;
+	MeterTimeControl time_control_;
 	msap1::WaveformCapture waveform_;
 	msap1::acquisition::RpuController rpu_;
 	/* UTC mapping for decoded blocks; written by refresh_time_sync() and
@@ -197,9 +199,9 @@ private:
 	std::optional<Clock::time_point> last_time_sync_;
 	/* Consecutive TAI/sample correlations provide the measured conversion rate
 	 * used by the Class-A ten-second UTC boundary mapper. */
-	std::optional<msap1::WaveformTimeSync> previous_frequency_time_sync_;
+	std::optional<MeterTimeSync> previous_frequency_time_sync_;
 	std::uint32_t frequency_10s_boundary_generation_ = 0;
-	msap1::WaveformFrequency10sObserverStatus frequency_10s_observer_status_{};
+	Frequency10sObserverStatus frequency_10s_observer_status_{};
 	/* True after the next UTC ten-minute boundary has been mapped into the
 	 * active PL sample-counter epoch. Capture/configuration restarts clear it
 	 * and force a fresh mapping. */

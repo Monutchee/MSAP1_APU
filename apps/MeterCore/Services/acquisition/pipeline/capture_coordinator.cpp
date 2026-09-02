@@ -34,6 +34,16 @@ constexpr std::uint64_t sample_rate_millihz_time_scale =
 constexpr std::uint32_t maximum_frequency_10s_sample_rate_millihz =
 	200'000'000u;
 
+msap1::WaveformCaptureOptions waveform_capture_options(
+	MeterTimeControl &time_control)
+{
+	msap1::WaveformCaptureOptions options{};
+	options.correlation_source = [&time_control] {
+		return time_control.waveform_correlation();
+	};
+	return options;
+}
+
 std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept
 {
 	return right > std::numeric_limits<std::uint64_t>::max() - left
@@ -42,8 +52,8 @@ std::uint64_t saturating_add(std::uint64_t left, std::uint64_t right) noexcept
 }
 
 std::optional<std::uint32_t> measured_sample_rate_millihz(
-	const msap1::WaveformTimeSync &previous,
-	const msap1::WaveformTimeSync &current) noexcept
+	const MeterTimeSync &previous,
+	const MeterTimeSync &current) noexcept
 {
 	if (current.sample_counter <= previous.sample_counter ||
 	    current.tai_nanoseconds <= previous.tai_nanoseconds)
@@ -76,8 +86,8 @@ std::optional<std::uint64_t> frames_at_or_after(
 		(product % sample_rate_millihz_time_scale != 0u ? 1u : 0u);
 }
 
-std::optional<msap1::WaveformFrequency10sBoundary>
-next_frequency_10s_boundary(const msap1::WaveformTimeSync &sync,
+std::optional<Frequency10sBoundary>
+next_frequency_10s_boundary(const MeterTimeSync &sync,
 	std::uint32_t sample_rate_millihz, std::uint64_t uncertainty_nanoseconds,
 	std::uint32_t generation, std::uint8_t nominal_frequency_hz,
 	std::uint8_t reference_channel, bool mapping_valid,
@@ -103,7 +113,7 @@ next_frequency_10s_boundary(const msap1::WaveformTimeSync &sync,
 	    sync.sample_counter > std::numeric_limits<std::uint64_t>::max() -
 				      *end_offset)
 		return std::nullopt;
-	return msap1::WaveformFrequency10sBoundary{
+	return Frequency10sBoundary{
 		.start_sample_index = sync.sample_counter + *start_offset,
 		.end_sample_index = sync.sample_counter + *end_offset,
 		.utc_start_nanoseconds = utc_start,
@@ -269,8 +279,10 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  product_settings_(load_runtime_settings()),
 	  configuration_(prepare_product_configuration(product_settings_)),
 	  meter_(options.meter_device),
+	  time_control_(options.meter_time_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
-		    waveform_capture_context(product_settings_, configuration_)),
+		    waveform_capture_context(product_settings_, configuration_),
+		    waveform_capture_options(time_control_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
 	  ingest_(meter_, configuration_, timebase_, meter_stream_,
@@ -406,12 +418,11 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 	 * exactly what the Holdover state exists to report. */
 	last_time_sync_ = now;
 	/*
-	 * The waveform device stays open for the whole capture lifetime, so
-	 * the correlation latch is readable here without any capture session.
-	 * Its frame_sequence field carries the PL 64-bit conversion-domain
-	 * sample counter (PL change, same ioctl ABI).
+	 * The dedicated meter-time endpoint stays open for the daemon lifetime;
+	 * its latch observes the conversion sample counter without depending on
+	 * either DMA producer.
 	 */
-	const auto sync = waveform_.time_sync();
+	const auto sync = time_control_.time_sync();
 	if (!sync)
 		return;
 	/*
@@ -483,7 +494,7 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		} else {
 			try {
 				frequency_10s_observer_status_ =
-					waveform_.program_frequency_10s_boundary(*boundary);
+					time_control_.program_frequency_10s_boundary(*boundary);
 			} catch (const std::exception &error) {
 				log_message(config_log, mnc::logging::Priority::error,
 					"failed to program frequency ten-second boundary: " +
@@ -532,7 +543,7 @@ void CaptureCoordinator::refresh_time_sync(bool force)
 		const auto target =
 			sync->sample_counter + frames_until_boundary;
 		try {
-			waveform_.program_ten_minute_boundary(target, true);
+			time_control_.program_ten_minute_boundary(target, true);
 			ten_minute_boundary_programmed_ = true;
 			log_message(config_log, mnc::logging::Priority::notice,
 				"programmed next UTC ten-minute aggregation boundary",
@@ -690,7 +701,7 @@ void CaptureCoordinator::stop() noexcept
 		"meter DMA device closed: " + std::string(meter_.name()),
 		"dma_closed", {{"MNC_DEVICE", std::string(meter_.name())}});
 	try {
-		waveform_.program_ten_minute_boundary(0u, false);
+		time_control_.program_ten_minute_boundary(0u, false);
 	} catch (const std::exception &error) {
 		log_message(config_log, mnc::logging::Priority::warning,
 			"failed to invalidate ten-minute boundary: " +
@@ -698,7 +709,7 @@ void CaptureCoordinator::stop() noexcept
 			"ten_minute_boundary_invalidate_failed");
 	}
 	try {
-		waveform_.cancel_frequency_10s_boundary();
+		time_control_.cancel_frequency_10s_boundary();
 	} catch (const std::exception &error) {
 		log_message(config_log, mnc::logging::Priority::warning,
 			"failed to cancel frequency ten-second boundary: " +

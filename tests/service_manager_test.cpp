@@ -116,6 +116,10 @@ void product_topology_orders_the_data_sender_without_owning_mqtt()
 		"product topology did not order Data Sender after its durable sources");
 	require(position("mqtt-publisher") == controller->controls.size(),
 		"settings-controlled MQTT was started unconditionally");
+	require(position("time-sync-ntp") == controller->controls.size() &&
+		position("time-sync-ptp-clock") == controller->controls.size() &&
+		position("time-sync-ptp-system") == controller->controls.size(),
+		"settings-controlled time synchronization was started unconditionally");
 }
 
 } // namespace

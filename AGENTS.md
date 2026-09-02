@@ -42,8 +42,8 @@
   opens/arms DMA, commits the JSON-derived configuration through R5 core 0,
   requests capture START, and requests STOP before closing DMA.
 - The daemon is also the sole `/dev/msap1-waveform` owner. It maintains the
-  128 MiB multi-trigger raw history, refreshes the PL tick/CLOCK_TAI
-  correlation at each trigger, merges overlapping trigger windows, and writes
+  128 MiB multi-trigger raw history, obtains trigger correlation through the
+  independent meter-time owner, merges overlapping trigger windows, and writes
   completed `.mncwf` files asynchronously below persistent storage at
   `/data/mnc/waveform`. Persisted files contain CH0 through CH6 raw counts plus
   profile conversion metadata; CH7 remains available in live transport/debug
@@ -51,6 +51,11 @@
   gap is incomplete and must not be materialized as a valid capture. Other
   processes request captures through the daemon IPC/API and never open the
   waveform DMA directly.
+- The daemon is the sole `/dev/meter-time` owner. This register-only endpoint
+  has no DMA channel; it kernel-brackets atomic PL tick/sample-index latches
+  with CLOCK_TAI and CLOCK_REALTIME, and commits the Linux-owned UTC 10-second
+  and 10-minute sample-domain boundaries. Waveform transport must not regain
+  time-control ioctls.
 - Completed waveform history is rediscovered from persistent storage at daemon
   startup. Authenticated Web viewers may inspect or download captures through
   nginx's `/protected/waveforms/` routes; never expose the storage directory

@@ -124,8 +124,9 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 	auto settings = decode_document<ProductSettings>(json, "product settings");
 	// Schema 1 predates MQTT, schema 3 adds presentation-only measurement
 	// topology, schema 4 adds M18 event/flicker/mains policy plus neutral
-	// waveform identity, schema 5 adds M19 data logging, and schema 6 adds
-	// physical-ADC current wiring. Missing members
+	// waveform identity, schema 5 adds M19 data logging, schema 6 adds
+	// physical-ADC current wiring, and schema 7 adds clock-discipline choice.
+	// Missing members
 	// receive typed defaults; advancing old documents here provides a lossless
 	// in-memory migration and the next successful save persists the current
 	// schema. The M19 default contains no jobs, so migration cannot initiate
@@ -147,6 +148,9 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 	}
 	if (settings.schema_version >= 1 && settings.schema_version <= 5) {
 		settings.metering.current_wiring = CurrentWiringConfig{};
+	}
+	if (settings.schema_version >= 1 && settings.schema_version <= 6) {
+		settings.time = TimeSettings{};
 		settings.schema_version = ProductSettings::supported_schema_version;
 	}
 	return settings;
@@ -178,6 +182,7 @@ void ProductSettings::validate() const
 	database.validate();
 	modbus.validate();
 	mqtt.validate();
+	time.validate();
 	data_logging.validate(metering.demand.window_seconds);
 	(void)prepare_meter_configuration(to_meter_configuration(*this),
 		metering.sample_rate_hz);
