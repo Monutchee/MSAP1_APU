@@ -49,8 +49,8 @@ public:
 	}
 
 	/**
-	 * @brief Dispatch every queued request through @p registry and send
-	 *        the responses. Runs on the acquisition thread.
+	 * @brief Dispatch at most eight queued requests through @p registry and
+	 *        send the responses. Runs on the acquisition thread.
 	 */
 	void drain(msap1::AcquisitionCommandRegistry &registry);
 

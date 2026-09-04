@@ -135,18 +135,21 @@ configured fundamental peak. Disabled controls are all-zero and bit inert.
 
 ## Persistent and export boundary
 
-MNCWF v4 is the only persistent waveform master and the only accepted M18
-export format. It contains every capture-time authority needed by a future
-offline COMTRADE or PQDIF converter. An M18 request for either destination
-format must fail explicitly; the product must not fabricate missing fields or
-write a lossy placeholder.
+MNCWF v4 is the M18 persistent-waveform baseline. The current writer emits
+MNCWF v5, which keeps every v4 metadata field and replaces only sample section
+v1 with bounded raw/Zstd chunks. Product readers and the sole `mncwf` export
+path accept both v4 and v5; existing v4 masters are never recompressed. Both
+versions contain every capture-time authority needed by a future offline
+COMTRADE or PQDIF converter. A request for either destination format must fail
+explicitly; the product must not fabricate missing fields or write a lossy
+placeholder.
 
 Authenticated viewers request an event slice with
 `GET /api/v1/waveforms/export?session_id=...&event_id=...&format=mncwf`.
 Local operators use `mnc waveform export --session ... --event ... --format
 mncwf [--file ...]`. Both resolve completed sessions by exact full-archive
 lookup, including sessions older than the newest catalogue page. The shared
-read-only exporter validates and maps the v4
-master, regenerates the virtual slice metadata and integrity fields, and
-delivers bounded chunks without a second waveform-sized allocation or another
-persistent on-device capture.
+read-only exporter validates and maps the v4/v5 master, regenerates the
+virtual slice metadata and integrity fields, copies complete v5 chunks, and
+rebuilds only partial boundary chunks without another persistent on-device
+capture.

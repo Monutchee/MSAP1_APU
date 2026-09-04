@@ -12,7 +12,7 @@ waveform capture files. It is intended for:
 - AI-assisted diagnostic tools.
 
 The format is owned by the Linux acquisition implementation in `MSAP1_APU`.
-The production writer emits version 4. Its authoritative implementation and
+The production writer emits version 5. Its authoritative implementation and
 public data definitions are:
 
 ```text
@@ -23,11 +23,13 @@ common/msap1/waveform/waveform_capture.hpp
 Consumers in other repositories should link to this document instead of
 maintaining a second copy of the binary definition.
 
-The version 4 section-directory contract, encoder, defensive reader, and
-capture-time metadata rules are specified in
-[`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Versions 1 through 3
-remain accepted for existing persisted history. Future COMTRADE and PQDIF
-programs are converters from MNCWF v4, not alternate on-device recorders.
+The version 4 section-directory and capture-time metadata contract is specified
+in [`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Version 5 preserves
+those metadata sections and adds independently compressed sample chunks as
+specified in [`MNCWF_V5_FILE_FORMAT.md`](MNCWF_V5_FILE_FORMAT.md). Versions 1
+through 4 remain accepted for existing persisted history. Future COMTRADE and
+PQDIF programs are converters from validated MNCWF v4/v5 masters, not
+alternate on-device recorders.
 Their source-field matrix is in
 [`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
 
@@ -62,7 +64,7 @@ Two related formats exist, but they serve different purposes:
 | Format | Scope | Header | Channels | Purpose |
 |---|---|---:|---:|---|
 | `WFM1` | PL-to-Linux DMA transport | 64 bytes | 8 | Fixed 32,832-byte blocks used by the kernel driver and acquisition daemon |
-| `.mncwf` | Persistent capture file | 64-byte header plus section directory in v4 | 7 | Variable-length, self-describing product waveform archive |
+| `.mncwf` | Persistent capture file | 64-byte header plus section directory in v4/v5 | 7 | Variable-length, self-describing product waveform archive |
 
 Each `WFM1` block contains 1024 frames of eight signed 32-bit channel words.
 The daemon uses these blocks to maintain its rolling history. When a completed
@@ -225,7 +227,7 @@ frame_count = (last_sequence - first_sequence) / decimation + 1
 `last_sequence` identifies the first acquisition frame folded into the last
 stored frame. Version 3 does not retain the number of source frames in a short
 final group. A converter that requires that distinction must not guess it;
-MNCWF v4 will carry an explicit rate/decimation segment contract.
+MNCWF v4 and v5 carry an explicit rate/decimation segment contract.
 
 #### Session and trigger fields
 
@@ -643,8 +645,10 @@ transients; a min/max envelope is preferred.
 
 Versions 1 through 3 have no embedded checksum, signature, compression, or
 encryption. Version 4 adds CRC32C integrity for the header, directory, and
-every section, as specified in the version 4 document; CRC is integrity error
-detection, not authenticity or encryption. Files stored by the product are
+every section. Version 5 retains those checks and adds independent raw/Zstd
+sample chunks, Zstd frame checksums, and logical chunk CRC32C as specified in
+the version 5 document. CRC is integrity error detection, not authenticity or
+encryption. Files stored by the product are
 protected by filesystem and authenticated download policy, but an external
 `.mncwf` file must still be treated as untrusted binary input.
 

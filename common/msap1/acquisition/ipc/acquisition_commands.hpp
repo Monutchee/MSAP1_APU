@@ -77,8 +77,10 @@ inline constexpr const char *acquisition_socket_path =
  * archive.
  * 41: waveform-list carries bounded origin-filtered pagination, and
  * waveform-lookup resolves one retained session outside the recent page.
- * 42: typed meter snapshots add the FREQUENCY-10S audit metadata block. */
-inline constexpr std::uint16_t acquisition_ipc_version = 42;
+ * 42: typed meter snapshots add the FREQUENCY-10S audit metadata block.
+ * 43: waveform sessions expose v5 compression/retention metadata and support
+ * bounded ordered capture-UUID batch lookup. */
+inline constexpr std::uint16_t acquisition_ipc_version = 43;
 inline constexpr std::uint32_t meter_record_stale_after_ms = 1000;
 inline constexpr std::uint32_t acquisition_age_unavailable =
 	std::numeric_limits<std::uint32_t>::max();
@@ -233,6 +235,10 @@ struct WaveformSessionIpc {
 	std::string filename;
 	std::uint64_t continuation_of_session_id = 0;
 	std::uint64_t master_session_id = 0;
+	std::uint32_t format_version = 0;
+	WaveformCompression compression = WaveformCompression::none;
+	std::uint64_t stored_bytes = 0;
+	std::uint64_t logical_sample_bytes = 0;
 	/** Canonical MNCWF capture UUID; empty for retained pre-v4 files. */
 	std::string capture_uuid;
 };
@@ -428,6 +434,15 @@ struct WaveformLookupResponse {
 	std::string waveform_directory;
 };
 
+struct WaveformBatchLookupResponse {
+	AcquisitionStatus status = AcquisitionStatus::ok;
+	WaveformStatus waveform{};
+	/** Ordered one-for-one with the request; null means expired or unknown. */
+	std::vector<std::optional<WaveformSessionIpc>> sessions;
+	/** Local trusted path authority; API responses must not expose it. */
+	std::string waveform_directory;
+};
+
 struct AdcSourceResponse {
 	AcquisitionStatus status = AcquisitionStatus::ok;
 	bool running = false;
@@ -617,6 +632,13 @@ struct WaveformLookupRequest {
 	std::string capture_uuid;
 };
 
+struct WaveformBatchLookupRequest {
+	static constexpr std::string_view command = "waveform-batch-lookup";
+	using Response = WaveformBatchLookupResponse;
+	std::uint16_t version = acquisition_ipc_version;
+	std::vector<std::string> capture_uuids;
+};
+
 struct WaveformTriggerRequest {
 	static constexpr std::string_view command = "waveform-trigger";
 	using Response = WaveformResponse;
@@ -721,7 +743,8 @@ using AcquisitionCommandList = std::tuple<
 	InfoRequest, MeterSnapshotRequest, HealthRequest, HealthRefreshRequest, StartRequest,
 	StopRequest, FrequencyGetRequest, SampleRateSetRequest,
 	DiagnosticRunRequest, WaveformStatusRequest, WaveformListRequest,
-	WaveformLookupRequest, WaveformTriggerRequest, WaveformDeleteRequest, AdcSourceGetRequest,
+	WaveformLookupRequest, WaveformBatchLookupRequest, WaveformTriggerRequest,
+	WaveformDeleteRequest, AdcSourceGetRequest,
 	SimulatorGetRequest, SingleCycleRequest, PowerQualityRequest,
 	FlickerRequest, MainsSignalRequest, HarmonicRequest,
 	SimulatorEventRequest, ConfigurationApplyRequest>;

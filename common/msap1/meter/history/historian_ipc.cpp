@@ -107,6 +107,7 @@ std::vector<std::byte> encode_power_quality_event_query(
 	flags |= query.event_uuid ? 1u << 1u : 0u;
 	flags |= query.start_utc_nanoseconds ? 1u << 2u : 0u;
 	flags |= query.end_utc_nanoseconds ? 1u << 3u : 0u;
+	flags |= !query.include_waveform_links ? 1u << 4u : 0u;
 	writer.u8(flags);
 	writer.u8(0u);
 	writer.u16(0u);
@@ -128,7 +129,7 @@ PowerQualityEventQuery decode_power_quality_event_query(ByteReader &reader)
 {
 	PowerQualityEventQuery result;
 	const auto flags = reader.u8();
-	if ((flags & 0xf0u) != 0u || reader.u8() != 0u || reader.u16() != 0u)
+	if ((flags & 0xe0u) != 0u || reader.u8() != 0u || reader.u16() != 0u)
 		throw std::invalid_argument("PQ event query reserved fields are nonzero");
 	result.limit = reader.u32();
 	if ((flags & (1u << 0u)) != 0u)
@@ -139,6 +140,7 @@ PowerQualityEventQuery decode_power_quality_event_query(ByteReader &reader)
 		result.start_utc_nanoseconds = reader.i64();
 	if ((flags & (1u << 3u)) != 0u)
 		result.end_utc_nanoseconds = reader.i64();
+	result.include_waveform_links = (flags & (1u << 4u)) == 0u;
 	if (result.id && result.event_uuid)
 		throw std::invalid_argument(
 			"PQ event query combines private ID and UUID");
@@ -149,7 +151,7 @@ void encode_power_quality_event_entry(ByteWriter &writer,
 	const PowerQualityEventCatalogEntry &entry)
 {
 	const auto &event = entry.event;
-	writer.u16(1u);
+	writer.u16(2u);
 	std::uint16_t optional = 0u;
 	optional |= entry.start_utc_nanoseconds ? 1u << 0u : 0u;
 	optional |= entry.last_utc_nanoseconds ? 1u << 1u : 0u;
@@ -197,6 +199,9 @@ void encode_power_quality_event_entry(ByteWriter &writer,
 	writer.i64(entry.start_utc_nanoseconds.value_or(0));
 	writer.i64(entry.last_utc_nanoseconds.value_or(0));
 	writer.u64(entry.utc_uncertainty_nanoseconds.value_or(0));
+	writer.u32(entry.waveform_capture_count == 0u
+		? static_cast<std::uint32_t>(entry.waveform_capture_uuids.size())
+		: entry.waveform_capture_count);
 	if (entry.waveform_capture_uuids.size() > 4096u)
 		throw std::invalid_argument("PQ event has too many waveform links");
 	writer.u32(static_cast<std::uint32_t>(
@@ -208,7 +213,8 @@ void encode_power_quality_event_entry(ByteWriter &writer,
 PowerQualityEventCatalogEntry decode_power_quality_event_entry(
 	ByteReader &reader)
 {
-	if (reader.u16() != 1u)
+	const auto version = reader.u16();
+	if (version != 1u && version != 2u)
 		throw std::invalid_argument("unsupported PQ event entry version");
 	const auto optional = reader.u16();
 	if ((optional & ~0x7u) != 0u)
@@ -264,6 +270,8 @@ PowerQualityEventCatalogEntry decode_power_quality_event_entry(
 		entry.last_utc_nanoseconds = last;
 	if ((optional & (1u << 2u)) != 0u)
 		entry.utc_uncertainty_nanoseconds = uncertainty;
+	if (version >= 2u)
+		entry.waveform_capture_count = reader.u32();
 	const auto count = reader.u32();
 	if (count > 4096u)
 		throw std::invalid_argument("PQ event waveform link count is excessive");
@@ -271,6 +279,11 @@ PowerQualityEventCatalogEntry decode_power_quality_event_entry(
 	for (std::uint32_t index = 0; index < count; ++index)
 		entry.waveform_capture_uuids.push_back(
 			read_uuid<WaveformCaptureUuid>(reader));
+	if (version == 1u)
+		entry.waveform_capture_count = count;
+	else if (count > entry.waveform_capture_count)
+		throw std::invalid_argument(
+			"PQ event waveform links exceed the declared count");
 	return entry;
 }
 

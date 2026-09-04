@@ -15,6 +15,7 @@ inline constexpr std::array<std::byte, 8> mncwf_magic{
 	std::byte{'M'}, std::byte{'N'}, std::byte{'C'}, std::byte{'W'},
 	std::byte{'F'}, std::byte{'1'}, std::byte{0}, std::byte{0}};
 inline constexpr std::uint32_t mncwf_v4_version = 4;
+inline constexpr std::uint32_t mncwf_v5_version = 5;
 inline constexpr std::size_t mncwf_v4_header_bytes = 64;
 inline constexpr std::size_t mncwf_v4_directory_entry_bytes = 56;
 inline constexpr std::size_t mncwf_v4_section_header_bytes = 48;
@@ -24,6 +25,11 @@ inline constexpr std::size_t mncwf_v4_channel_definition_bytes = 208;
 inline constexpr std::size_t mncwf_v4_event_descriptor_bytes = 256;
 inline constexpr std::size_t mncwf_v4_quality_interval_bytes = 64;
 inline constexpr std::size_t mncwf_v4_lineage_entry_bytes = 64;
+inline constexpr std::size_t mncwf_v5_chunk_entry_bytes = 56;
+inline constexpr std::uint64_t mncwf_v5_max_chunk_logical_bytes =
+	1024ull * 1024ull;
+inline constexpr std::uint64_t mncwf_v5_max_chunks = 4096u;
+inline constexpr std::uint16_t mncwf_v5_chunk_frame_checksum = 1u << 0u;
 
 inline constexpr std::size_t mncwf_v4_mandatory_section_count = 7;
 inline constexpr std::size_t mncwf_v4_max_sections = 64;
@@ -201,11 +207,33 @@ using MncwfUuid = std::array<std::byte, 16>;
 using MncwfSha256 = std::array<std::byte, 32>;
 
 struct MncwfV4Header {
+	std::uint32_t version = 0;
 	std::uint32_t section_count = 0;
 	std::uint64_t directory_offset = 0;
 	std::uint64_t directory_bytes = 0;
 	std::uint64_t file_bytes = 0;
 	std::uint32_t flags = 0;
+};
+
+enum class MncwfValidationMode : std::uint8_t {
+	complete = 0,
+	metadata_only = 1,
+};
+
+enum class MncwfChunkCodec : std::uint16_t {
+	raw = 0,
+	zstd = 1,
+};
+
+struct MncwfV5ChunkInfo {
+	std::uint64_t first_frame = 0;
+	std::uint64_t frame_count = 0;
+	std::uint64_t stored_offset = 0;
+	std::uint64_t stored_bytes = 0;
+	std::uint64_t logical_bytes = 0;
+	MncwfChunkCodec codec = MncwfChunkCodec::raw;
+	std::uint16_t flags = 0;
+	std::uint32_t logical_crc32c = 0;
 };
 
 struct MncwfV4SectionInfo {
@@ -418,6 +446,10 @@ struct MncwfV4Document {
 [[nodiscard]] std::vector<std::byte>
 encode_mncwf_v4(const MncwfV4Document &document);
 
+/** Encode the v4 metadata contract with independently compressed v5 samples. */
+[[nodiscard]] std::vector<std::byte>
+encode_mncwf_v5(const MncwfV4Document &document);
+
 /**
  * Defensive, read-only MNCWF v4 view.
  *
@@ -427,7 +459,13 @@ encode_mncwf_v4(const MncwfV4Document &document);
  */
 class MncwfV4Reader {
 public:
-	explicit MncwfV4Reader(std::span<const std::byte> bytes);
+	explicit MncwfV4Reader(std::span<const std::byte> bytes,
+		MncwfValidationMode mode = MncwfValidationMode::complete);
+
+	[[nodiscard]] std::uint32_t version() const noexcept
+	{
+		return header_.version;
+	}
 
 	[[nodiscard]] const MncwfV4Header &header() const noexcept
 	{
@@ -478,9 +516,18 @@ public:
 	}
 	[[nodiscard]] std::span<const std::byte> sample_frame(
 		std::uint64_t index) const;
+	[[nodiscard]] const std::vector<MncwfV5ChunkInfo> &sample_chunks() const noexcept
+	{
+		return sample_chunks_;
+	}
+	[[nodiscard]] bool samples_materialized() const noexcept
+	{
+		return mode_ == MncwfValidationMode::complete;
+	}
 
 private:
 	std::span<const std::byte> bytes_{};
+	MncwfValidationMode mode_ = MncwfValidationMode::complete;
 	MncwfV4Header header_{};
 	std::vector<MncwfV4SectionInfo> sections_;
 	MncwfV4CaptureMetadata capture_metadata_{};
@@ -489,19 +536,21 @@ private:
 	std::vector<MncwfV4EventDescriptor> events_;
 	std::vector<MncwfV4QualityInterval> quality_intervals_;
 	std::vector<MncwfV4LineageEntry> lineage_;
+	std::vector<MncwfV5ChunkInfo> sample_chunks_;
+	std::vector<std::byte> owned_sample_data_;
 	std::span<const std::byte> sample_data_{};
 	std::uint64_t sample_frame_count_ = 0;
 	std::uint32_t sample_frame_bytes_ = 0;
 };
 
 /**
- * Read-only, non-owning event subcapture encoded as a complete MNCWF v4 file.
+ * Read-only event subcapture encoded as a complete MNCWF file.
  *
  * Metadata, directory entries, CRC32C values, and zero padding are owned by
- * this object. The sample region remains a span into the validated parent
- * reader, so the parent's byte storage must outlive the virtual file. read()
- * supports bounded sequential or random-access delivery without materializing
- * or persisting another waveform-sized buffer.
+ * this object. A v4 sample region remains a span into the validated parent.
+ * A v5 export owns only its compressed output and reuses complete compressed
+ * source chunks byte-for-byte; only partial boundary chunks are expanded and
+ * recompressed. The parent's byte storage must outlive the virtual file.
  */
 class MncwfV4VirtualFile {
 public:

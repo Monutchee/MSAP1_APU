@@ -136,10 +136,11 @@ Internal readers use a persistent Boost.Asio Unix-domain stream endpoint:
 ```
 
 The stream uses the version-1 24-byte `MNCI` envelope and explicitly
-little-endian product payloads. Acquisition IPC version 42 includes bounded
-waveform archive pagination, trigger-origin filtering, exact retained-session
-lookup, and archive-discovery progress in addition to typed meter snapshot
-selection by period and attribute set. `MeterDataProvider` publishes
+little-endian product payloads. Acquisition IPC version 43 includes bounded
+waveform archive pagination, trigger-origin filtering, ordered batch lookup of
+up to 32 capture UUIDs, MNCWF v5 compression/retention metadata, and
+archive-discovery progress in addition to typed meter snapshot selection by
+period and attribute set. `MeterDataProvider` publishes
 typed latest values for the Basic (10/12-cycle), 150/180-cycle, clock-aligned
 10-minute, and 2-hour measurement periods, plus non-normative live partials
 for the two long periods. Unavailable values are never represented as valid
@@ -213,7 +214,9 @@ The authenticated external API is:
   active demand, profile metadata, and authoritative import/export peaks)
 - `GET /api/v1/meter/power-quality` (M12 live Urms(1/2) diagnostics)
 - `GET /api/v1/meter/power-quality/events` (durable M18 event catalogue;
-  optional `event_id`, `start_utc_ns`, `end_utc_ns`, and `limit` filters)
+  optional `event_id`, `start_utc_ns`, `end_utc_ns`, `limit`, and
+  `include_waveform_links` filters; summaries retain
+  `waveform_capture_count` when links are omitted)
 - `DELETE /api/v1/meter/power-quality/events` (administrator only; explicitly
   confirmed selected UUIDs or complete-catalogue deletion; MNCWF files are
   retained)
@@ -254,6 +257,8 @@ The authenticated external API is:
   origins)
 - `GET /api/v1/waveforms/session?capture_uuid=<uuid>` (authenticated viewer;
   exact full-archive lookup for linked evidence)
+- `POST /api/v1/waveforms/sessions/lookup` (authenticated viewer; ordered
+  session-or-null lookup for 1–32 distinct capture UUIDs)
 - `POST /api/v1/waveforms/trigger` (administrator only)
 - `DELETE /api/v1/waveforms` (administrator only; deletes one session or, with
   explicit confirmation, all inactive sessions and their MNCWF files)
@@ -303,9 +308,10 @@ IPC is reachable again.
 
 Waveform session summaries classify their contributing triggers as `manual`,
 `power_quality`, `mixed`, or `legacy`. This is presentation provenance only:
-manual and PQ capture still share the same capture coordinator, MNCWF-v4
+manual and PQ capture still share the same capture coordinator, MNCWF-v5
 storage, parser, and export path. Mixed sessions match both filtered views;
-legacy sessions match only `origin=all`.
+legacy sessions match only `origin=all`. Existing MNCWF v1-v4 files remain
+readable.
 
 `GET /api/v1/meter/readings` reports the ~200 ms cycle-defined basic block;
 `GET /api/v1/meter/aggregate` reports the ~3 s 150/180-cycle aggregate R5C1
@@ -445,6 +451,14 @@ mnc service status fpga-acquisition
 mnc service restart web-backend
 ```
 
+Service-control IPC version 2 reports the declared tier, expected nice value,
+effective systemd nice value, and match status. FPGA acquisition is Critical
+(-10), meter stream is High (-5), settings/service-manager/Web/Modbus/time are
+Normal (0), and historian/Data Sender/MQTT are Background (+5). All use
+`SCHED_OTHER`. Within acquisition, IPC runs at 0 and waveform scanning,
+writing/compression, and historian link delivery run at +5 while DMA/control
+retains -10.
+
 `mnc system temperature` discovers the ZynqMP LPD, FPD, and PL sensors from
 their `Temp_LPD`, `Temp_FPD`, and `Temp_PL` hwmon labels. It deliberately does
 not depend on a fixed `/sys/class/hwmon/hwmonN` index because Linux may assign
@@ -468,33 +482,48 @@ capture. Completed files survive service and system restarts under:
 ```
 
 At daemon startup, filenames are enumerated synchronously to reserve session
-IDs, then file structure and CRCs are validated on a cancellable background
-worker while both DMA streams run. `GET /api/v1/waveforms` exposes the
+IDs, then uncompressed metadata, chunk geometry, and metadata CRCs are
+validated on a cancellable background worker while both DMA streams run.
+Sample decompression and full validation are deferred until sample use or
+retention eligibility. `GET /api/v1/waveforms` exposes the
 additive `archive_discovery` state and counters plus full matching totals and
 an exclusive descending-session cursor. Exact session/capture-UUID lookup and
 event export search the entire discovered archive rather than only the newest
 page. A delete-all request is rejected until discovery completes and walks
 unfiltered pages, so an unseen retained file cannot survive an apparently
-successful clear operation.
+successful clear operation. Settings schema 8 adds
+`waveform.archive_limit_gib` (default 8, range 1–16). A background retention
+pass counts physical bytes and expires only the oldest fully validated,
+completed, inactive files. Malformed, temporary, and incomplete files are
+preserved; if the limit cannot be reclaimed safely, the new final commit is
+rejected and remains an incomplete session.
 
-New `.mncwf` version 4 files store CH0 through CH6 as signed 32-bit raw counts
+New `.mncwf` version 5 files store CH0 through CH6 as signed 32-bit raw counts
 or explicitly identified boxcar-decimated averages and deliberately omit
-diagnostic CH7. Versioned sections freeze exact channel transforms, timebase,
+diagnostic CH7. Metadata remains in the version 4 section contract; sample
+section v2 uses independent frame-aligned chunks of at most 1 MiB, Zstd level
+1 with checksum and no dictionary, and raw fallback when compression is not
+smaller. Versioned sections freeze exact channel transforms, timebase,
 quality, events, capture/device identity, and UUID lineage so later COMTRADE or
-PQDIF export needs only the master file. Legacy versions 1 through 3 remain
+PQDIF export needs only the master file. Legacy versions 1 through 4 remain
 discoverable. See the
-[MNCWF v4 contract](docs/File_Standard/MNCWF_V4_FILE_FORMAT.md) for the exact
-binary layout. R5 firmware and RPMsg are not in this payload path.
+[MNCWF v4 metadata contract](docs/File_Standard/MNCWF_V4_FILE_FORMAT.md) and
+[MNCWF v5 compressed-sample contract](docs/File_Standard/MNCWF_V5_FILE_FORMAT.md).
+R5 firmware and RPMsg are not in this payload path.
 
-Event export validates and read-only maps the completed v4 master, rebuilds
-only the selected virtual slice's metadata/directory/CRCs, and streams the
-unchanged sample extent in bounded chunks. It does not persist a second master
-on the device. Both the API and CLI advertise only `mncwf`; `comtrade` and
-`pqdif` fail explicitly until the later protocol-gateway converters land.
+Event export validates and read-only maps a completed v4 or v5 master and
+rebuilds only the selected virtual slice's metadata, directory, and CRCs. A v5
+export copies complete middle compressed chunks and regenerates only partial
+boundary chunks. It does not persist a second master on the device. Both the
+API and CLI advertise only `mncwf`; `comtrade` and `pqdif` fail explicitly
+until the later protocol-gateway converters land.
 The acquisition daemon delivers each event/capture UUID association to the
 durable historian on an isolated retry worker, so historian startup or ingest
 lag can never block DMA. Catalogue results and the Web UI join those capture
-UUIDs to the daemon-reported session/master/continuation identities.
+UUIDs to the daemon-reported session identity. PQ event START takes one fixed
+onset window, UPDATE never extends or duplicates it, and END/ABORT takes one
+fixed recovery window (merged when it overlaps onset), so a normal event has
+at most two waveform associations.
 
 `mnc log` combines acquisition, web-backend/nginx, PL-load, and RPU-load
 events in timestamp order. Structured entries identify their process component,

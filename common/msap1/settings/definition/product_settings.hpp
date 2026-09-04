@@ -15,7 +15,7 @@ namespace msap1::settings {
 
 struct ProductSettings {
 	//Constraints declaration
-	static constexpr std::uint32_t supported_schema_version = 7;
+	static constexpr std::uint32_t supported_schema_version = 8;
 
 	//Setting Payload
 	std::uint32_t schema_version = supported_schema_version;

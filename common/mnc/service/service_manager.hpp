@@ -11,6 +11,37 @@ namespace mnc {
 
 enum class ServiceAction : std::uint8_t { start, stop, restart, reload };
 
+enum class ServicePriorityTier : std::uint8_t {
+	critical = 0,
+	high = 1,
+	normal = 2,
+	background = 3,
+};
+
+[[nodiscard]] constexpr std::int32_t
+service_priority_nice(ServicePriorityTier tier) noexcept
+{
+	switch (tier) {
+	case ServicePriorityTier::critical: return -10;
+	case ServicePriorityTier::high: return -5;
+	case ServicePriorityTier::normal: return 0;
+	case ServicePriorityTier::background: return 5;
+	}
+	return 0;
+}
+
+[[nodiscard]] constexpr std::string_view
+service_priority_name(ServicePriorityTier tier) noexcept
+{
+	switch (tier) {
+	case ServicePriorityTier::critical: return "critical";
+	case ServicePriorityTier::high: return "high";
+	case ServicePriorityTier::normal: return "normal";
+	case ServicePriorityTier::background: return "background";
+	}
+	return "unknown";
+}
+
 struct ManagedService {
 	std::string name;
 	std::string unit;
@@ -18,6 +49,7 @@ struct ManagedService {
 	/** Optional units are registered and controllable, but are not started by
 	 * start_registered(). Product policy may activate them later. */
 	bool auto_start = true;
+	ServicePriorityTier priority_tier = ServicePriorityTier::normal;
 };
 
 struct ManagedServiceStatus {
@@ -28,6 +60,10 @@ struct ManagedServiceStatus {
 	std::uint32_t restart_count = 0;
 	bool permanently_failed = false;
 	bool required_active = true;
+	ServicePriorityTier priority_tier = ServicePriorityTier::normal;
+	std::int32_t expected_nice = 0;
+	std::int32_t effective_nice = 0;
+	bool priority_matches = false;
 };
 
 class UnitController {

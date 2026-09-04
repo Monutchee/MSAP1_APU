@@ -66,8 +66,11 @@ mnc::ipc::Frame encode_response(const Response &response,
 		writer.fixed_string(service.sub_state, state_width);
 		writer.u32(service.restart_count);
 		writer.u8(service.permanently_failed ? 1 : 0);
-		writer.u8(0);
-		writer.u16(0);
+		writer.u8(service.required_active ? 1 : 0);
+		writer.u8(static_cast<std::uint8_t>(service.priority_tier));
+		writer.u8(service.priority_matches ? 1 : 0);
+		writer.i32(service.expected_nice);
+		writer.i32(service.effective_nice);
 	}
 	return {response.status == Status::ok ? mnc::ipc::FrameKind::response
 						: mnc::ipc::FrameKind::error,
@@ -97,8 +100,16 @@ Response decode_response(const mnc::ipc::Frame &frame)
 		service.sub_state = reader.fixed_string(state_width);
 		service.restart_count = reader.u32();
 		service.permanently_failed = reader.u8() != 0;
-		(void)reader.u8();
-		(void)reader.u16();
+		service.required_active = reader.u8() != 0;
+		const auto priority = reader.u8();
+		if (priority > static_cast<std::uint8_t>(
+				       mnc::ServicePriorityTier::background))
+			throw std::invalid_argument("service priority tier is invalid");
+		service.priority_tier =
+			static_cast<mnc::ServicePriorityTier>(priority);
+		service.priority_matches = reader.u8() != 0;
+		service.expected_nice = reader.i32();
+		service.effective_nice = reader.i32();
 		result.services.push_back(std::move(service));
 	}
 	reader.require_finished();

@@ -182,6 +182,9 @@ webengine::Response get_waveforms(AppContext &,
 /** @brief GET /api/v1/waveforms/session — exact capture UUID lookup. */
 webengine::Response get_waveform_session(AppContext &,
 	const webengine::RequestContext &);
+/** @brief POST /api/v1/waveforms/sessions/lookup — bounded UUID lookup. */
+webengine::Response post_waveform_session_lookup(AppContext &,
+	const webengine::RequestContext &);
 /** @brief POST /api/v1/waveforms/trigger — start a manual capture. */
 webengine::Response post_waveform_trigger(AppContext &,
 					  const webengine::RequestContext &);
@@ -428,6 +431,9 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::get, "/api/v1/waveforms/session",
 	 webengine::Role::Viewer, &get_waveform_session,
 	 "Resolve one capture UUID across the waveform archive"},
+	{webengine::http::verb::post, "/api/v1/waveforms/sessions/lookup",
+	 webengine::Role::Viewer, &post_waveform_session_lookup,
+	 "Resolve up to 32 capture UUIDs across the waveform archive"},
 	{webengine::http::verb::post, "/api/v1/waveforms/trigger",
 	 webengine::Role::Admin, &post_waveform_trigger,
 	 "Trigger a manual waveform capture"},

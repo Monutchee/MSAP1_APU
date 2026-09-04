@@ -14,6 +14,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace msap1 {
@@ -34,6 +35,8 @@ inline constexpr std::size_t waveform_max_ipc_sessions = 16;
 inline constexpr std::size_t waveform_max_page_sessions = 100;
 inline constexpr std::size_t waveform_session_name_size = 96;
 inline constexpr std::size_t waveform_persisted_channels = 7;
+inline constexpr std::uint64_t waveform_default_archive_limit_bytes =
+	8ull * 1024ull * 1024ull * 1024ull;
 
 enum class WaveformChannelKind : std::uint32_t {
 	current = 1,
@@ -69,6 +72,13 @@ enum class WaveformSessionState : std::uint32_t {
 	capturing = 1,
 	complete = 2,
 	incomplete = 3,
+};
+
+enum class WaveformCompression : std::uint32_t {
+	none = 0,
+	zstd_chunks = 1,
+	mixed_raw_zstd_chunks = 2,
+	raw_chunks = 3,
 };
 
 enum class WaveformOriginFilter : std::uint32_t {
@@ -126,6 +136,10 @@ struct WaveformCaptureOptions {
 	 * persisted file is validated. Production leaves it empty. */
 	std::function<void(std::stop_token, const std::filesystem::path &)>
 		archive_discovery_hook;
+	/** Physical archive ceiling. Enforcement runs only on the background
+	 * writer and never deletes an active, temporary, malformed, or incomplete
+	 * capture. */
+	std::uint64_t archive_limit_bytes = waveform_default_archive_limit_bytes;
 };
 
 struct WaveformSessionSummary {
@@ -152,6 +166,12 @@ struct WaveformSessionSummary {
 	 * frame domain; the effective file rate is sample_rate_hz/decimation.
 	 */
 	std::uint32_t decimation = 1;
+	std::uint32_t format_version = 0;
+	WaveformCompression compression = WaveformCompression::none;
+	std::uint64_t stored_bytes = 0;
+	std::uint64_t logical_sample_bytes = 0;
+	/** Internal edge indicator used to avoid duplicate historian links. */
+	bool association_created = false;
 	std::array<char, waveform_session_name_size> filename{};
 	MncwfUuid capture_uuid{};
 };
@@ -220,6 +240,10 @@ struct WaveformStatus {
 	std::uint64_t history_capacity_frames = waveform_history_frames;
 	std::uint64_t completed_sessions = 0;
 	std::uint64_t incomplete_sessions = 0;
+	std::uint64_t archive_limit_bytes = waveform_default_archive_limit_bytes;
+	std::uint64_t archive_stored_bytes = 0;
+	std::uint64_t expired_sessions = 0;
+	std::uint64_t retention_failures = 0;
 	WaveformArchiveDiscoveryStatus archive_discovery{};
 	WaveformCorrelation correlation{};
 };
@@ -310,6 +334,7 @@ public:
 	/** Replace the authority used by sessions created after this call. Existing
 	 * sessions retain their original capture-time snapshot. */
 	void set_context(WaveformCaptureContext context);
+	void set_archive_limit_gib(std::uint32_t limit_gib);
 	void set_time_context(MncwfClockSource source, MncwfTimeQuality quality,
 		std::uint16_t leap_flags = 0u) noexcept;
 	void erase(std::uint64_t session_id);
@@ -325,6 +350,11 @@ public:
 private:
 	struct Event;
 	struct Session;
+	struct EventCaptureState {
+		std::uint64_t onset_session_id = 0;
+		std::uint64_t recovery_session_id = 0;
+		bool terminal = false;
+	};
 	struct AsyncWriter;
 	struct GapRange {
 		std::uint64_t first = 0;
@@ -341,6 +371,8 @@ private:
 		std::stop_token stop, std::vector<std::filesystem::path> files);
 	void collect_discovery_results();
 	void rebuild_session_lineage();
+	void rebuild_indexes();
+	void rebuild_event_capture_index();
 	[[nodiscard]] WaveformArchiveDiscoveryStatus
 	archive_discovery_status() const;
 	bool intersects_gap(std::uint64_t first, std::uint64_t last) const;
@@ -360,6 +392,7 @@ private:
 	bool archive_discovery_result_ready_ = false;
 	bool archive_discovery_result_collected_ = false;
 	bool archive_discovery_error_reported_ = false;
+	bool startup_retention_queued_ = false;
 	std::jthread archive_discovery_worker_;
 	int fd_ = -1;
 	std::vector<std::array<std::int32_t, waveform_channels>> history_;
@@ -380,11 +413,18 @@ private:
 	std::optional<std::uint32_t> configuration_generation_;
 	std::uint64_t next_session_id_ = 1;
 	std::vector<Session> sessions_;
+	std::unordered_map<std::uint64_t, std::size_t> session_index_;
+	std::unordered_map<std::string, std::size_t> capture_index_;
+	std::unordered_map<std::string, EventCaptureState> event_capture_index_;
 	std::vector<Session> discovered_sessions_;
 	std::vector<GapRange> gaps_;
 	std::unique_ptr<AsyncWriter> writer_;
 	WaveformCorrelation correlation_{};
 	std::uint64_t correlation_utc_nanoseconds_ = 0;
+	std::uint64_t archive_limit_bytes_ = waveform_default_archive_limit_bytes;
+	std::uint64_t archive_stored_bytes_ = 0;
+	std::uint64_t expired_sessions_ = 0;
+	std::uint64_t retention_failures_ = 0;
 };
 
 } // namespace msap1

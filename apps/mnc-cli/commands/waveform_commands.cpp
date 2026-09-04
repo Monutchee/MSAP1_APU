@@ -84,6 +84,18 @@ std::string archive_state_name(WaveformArchiveDiscoveryState state)
 	return "unknown";
 }
 
+std::string compression_name(WaveformCompression compression)
+{
+	switch (compression) {
+	case WaveformCompression::none: return "pending/none";
+	case WaveformCompression::zstd_chunks: return "zstd chunks";
+	case WaveformCompression::mixed_raw_zstd_chunks:
+		return "mixed raw/zstd chunks";
+	case WaveformCompression::raw_chunks: return "raw chunks";
+	}
+	return "unknown";
+}
+
 WaveformResult collect(WaveformResponse response)
 {
 	return {response.waveform, std::move(response.sessions), {"mncwf"}};
@@ -124,6 +136,10 @@ public:
 		       << '\n'
 		       << "  Incomplete sessions:  " << status.incomplete_sessions
 		       << '\n'
+		       << "  Archive use/limit:    " << status.archive_stored_bytes
+		       << "/" << status.archive_limit_bytes << " bytes\n"
+		       << "  Expired sessions:     " << status.expired_sessions << '\n'
+		       << "  Retention failures:   " << status.retention_failures << '\n'
 		       << "  Archive discovery:    "
 		       << archive_state_name(status.archive_discovery.state) << " ("
 		       << status.archive_discovery.scanned_files << "/"
@@ -140,6 +156,11 @@ public:
 				       << session.event_count;
 				if (!session.filename.empty())
 					output << "  " << session.filename;
+				output << "  v" << session.format_version << "  "
+				       << compression_name(session.compression) << "  "
+				       << session.stored_bytes << "/"
+				       << session.logical_sample_bytes
+				       << " stored/logical bytes";
 				output << '\n';
 			}
 		}
@@ -388,7 +409,7 @@ Command trigger_command()
 Command export_command()
 {
 	Command command(
-		"export", "Export one event as a virtual MNCWF v4 capture",
+		"export", "Export one event as a virtual MNCWF capture",
 		run_export,
 		{
 			.access = AccessLevel::local_only,

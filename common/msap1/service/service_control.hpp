@@ -12,7 +12,7 @@ namespace msap1::service_control {
 
 inline constexpr std::string_view socket_path =
 	"/run/monutchee/service-manager.sock";
-inline constexpr std::uint16_t protocol_version = 1;
+inline constexpr std::uint16_t protocol_version = 2;
 
 enum class Command : std::uint32_t {
 	list = 1,

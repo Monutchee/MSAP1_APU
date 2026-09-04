@@ -15,15 +15,16 @@ It opens only a daemon-reported basename beneath the daemon-reported capture
 directory, rejects symlinks with `openat(..., O_NOFOLLOW)`, maps the validated
 master read-only, and keeps that mapping alive for the streamed virtual file.
 
-The acquisition daemon writes MNCWF v4 for new captures. It freezes settings,
-device/channel identity, time quality, event descriptors, and UUID lineage at
-capture time, validates the encoded bytes through the independent reader, and
-publishes the file only after an atomic temporary-file rename. Existing v1-v3
-files remain discoverable as legacy history.
+The acquisition daemon wrote MNCWF v4 for captures produced before the v5
+rollout. The current writer emits v5 while retaining this defensive v4 reader.
+Version 4 freezes settings, device/channel identity, time quality, event
+descriptors, and UUID lineage at capture time and was published only after an
+atomic temporary-file rename. Existing v1-v4 files remain discoverable as
+legacy history.
 
-MNCWF v4 is the only planned on-device waveform master. COMTRADE and PQDIF are
-future export conversions; they do not replace or supplement this recording
-format. See
+MNCWF v4 remains a valid on-device waveform master, and v5 is its compressed
+successor. COMTRADE and PQDIF are future export conversions; they do not
+replace or supplement either recording format. See
 [`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
 
 ## Binary conventions and limits

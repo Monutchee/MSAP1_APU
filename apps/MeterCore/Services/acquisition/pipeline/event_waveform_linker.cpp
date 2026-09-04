@@ -4,7 +4,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <cstring>
 #include <string>
+
+#include <sys/resource.h>
 
 namespace msap1::acquisition::daemon {
 
@@ -59,6 +63,11 @@ std::uint64_t EventWaveformLinker::queue_overflows() const noexcept
 
 void EventWaveformLinker::run(std::stop_token stop)
 {
+	if (::setpriority(PRIO_PROCESS, 0, 5) != 0)
+		log_message(waveform_log, mnc::logging::Priority::warning,
+			"could not demote event waveform linker thread: " +
+				std::string(std::strerror(errno)),
+			"waveform_linker_priority_failed");
 	history::ipc::HistorianClient historian;
 	while (!stop.stop_requested()) {
 		Link link{};

@@ -60,6 +60,21 @@ void validate_file_name(std::string_view name)
 		throw std::invalid_argument("invalid MNCWF capture file name");
 }
 
+MncwfValidationMode export_validation_mode(
+	std::span<const std::byte> bytes) noexcept
+{
+	if (bytes.size() < 12u)
+		return MncwfValidationMode::complete;
+	std::uint32_t version = 0u;
+	for (unsigned index = 0; index < 4u; ++index)
+		version |= static_cast<std::uint32_t>(
+			std::to_integer<std::uint8_t>(bytes[8u + index])) <<
+			(index * 8u);
+	return version == mncwf_v5_version
+		? MncwfValidationMode::metadata_only
+		: MncwfValidationMode::complete;
+}
+
 class MappedFile final {
 public:
 	MappedFile(const std::filesystem::path &directory, std::string_view file_name)
@@ -118,7 +133,8 @@ private:
 struct MncwfV4ExportFile::Impl {
 	Impl(const std::filesystem::path &directory, std::string_view file_name,
 		const MncwfUuid &event_uuid)
-		: mapping(directory, file_name), reader(mapping.bytes()),
+		: mapping(directory, file_name),
+		  reader(mapping.bytes(), export_validation_mode(mapping.bytes())),
 		  virtual_file(make_mncwf_v4_event_slice(reader, event_uuid))
 	{
 	}

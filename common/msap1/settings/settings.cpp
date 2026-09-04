@@ -125,7 +125,8 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 	// Schema 1 predates MQTT, schema 3 adds presentation-only measurement
 	// topology, schema 4 adds M18 event/flicker/mains policy plus neutral
 	// waveform identity, schema 5 adds M19 data logging, schema 6 adds
-	// physical-ADC current wiring, and schema 7 adds clock-discipline choice.
+	// physical-ADC current wiring, schema 7 adds clock-discipline choice, and
+	// schema 8 adds bounded waveform archive retention.
 	// Missing members
 	// receive typed defaults; advancing old documents here provides a lossless
 	// in-memory migration and the next successful save persists the current
@@ -151,6 +152,9 @@ ProductSettings SettingsCodec::decode(std::string_view json)
 	}
 	if (settings.schema_version >= 1 && settings.schema_version <= 6) {
 		settings.time = TimeSettings{};
+	}
+	if (settings.schema_version >= 1 && settings.schema_version <= 7) {
+		settings.waveform.archive_limit_gib = 8u;
 		settings.schema_version = ProductSettings::supported_schema_version;
 	}
 	return settings;

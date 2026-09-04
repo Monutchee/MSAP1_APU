@@ -149,8 +149,17 @@ int main()
 		history.link_power_quality_event_waveform(id, capture);
 		rows = history.query_power_quality_events(by_id);
 		require(rows[0].waveform_capture_uuids.size() == 1 &&
+				rows[0].waveform_capture_count == 1 &&
 				rows[0].waveform_capture_uuids[0] == capture,
 			"waveform links are idempotent");
+		auto summary_only = by_id;
+		summary_only.include_waveform_links = false;
+		const auto summary_rows =
+			history.query_power_quality_events(summary_only);
+		require(summary_rows.size() == 1 &&
+				summary_rows[0].waveform_capture_count == 1 &&
+				summary_rows[0].waveform_capture_uuids.empty(),
+			"event summary returns a link count without expanding links");
 		require(history.status().power_quality_event_count == 1,
 			"historian status exposes the event count");
 
@@ -181,6 +190,7 @@ int main()
 		entry_reader.require_finished();
 		require(decoded_entry.event_uuid == event_uuid &&
 				decoded_entry.event.id == id &&
+				decoded_entry.waveform_capture_count == 1 &&
 				decoded_entry.waveform_capture_uuids.size() == 1 &&
 				decoded_entry.waveform_capture_uuids.front() == capture,
 			"PQ event IPC entry preserves lifecycle and waveform links");

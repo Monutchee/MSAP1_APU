@@ -19,9 +19,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace msap1 {
@@ -37,6 +41,75 @@ constexpr unsigned long waveform_transport_status_ioctl =
  * failure counter still reading zero.
  */
 const mnc::logging::Logger capture_log{"fpga-acquisition", "waveform"};
+
+[[noreturn]] void throw_errno(const std::string &operation);
+
+void set_current_thread_nice(int value, std::string_view role) noexcept
+{
+	if (::setpriority(PRIO_PROCESS, 0, value) == 0)
+		return;
+	const std::array fields{
+		mnc::logging::Field{"MNC_THREAD_ROLE", std::string(role)},
+		mnc::logging::Field{"MNC_EXPECTED_NICE", std::to_string(value)},
+		mnc::logging::Field{"MNC_ERRNO", std::to_string(errno)}};
+	(void)capture_log.write(mnc::logging::Priority::warning,
+		"could not apply waveform worker thread priority",
+		"waveform_thread_priority_failed", fields);
+}
+
+class MappedFile {
+public:
+	explicit MappedFile(const std::filesystem::path &path)
+	{
+		fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+		if (fd_ < 0)
+			throw_errno("open " + path.string());
+		struct stat status {};
+		if (::fstat(fd_, &status) != 0) {
+			const auto saved = errno;
+			::close(fd_);
+			fd_ = -1;
+			errno = saved;
+			throw_errno("stat " + path.string());
+		}
+		if (status.st_size <= 0) {
+			::close(fd_);
+			fd_ = -1;
+			throw std::invalid_argument("waveform file is empty");
+		}
+		size_ = static_cast<std::size_t>(status.st_size);
+		mapping_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+		if (mapping_ == MAP_FAILED) {
+			mapping_ = nullptr;
+			const auto saved = errno;
+			::close(fd_);
+			fd_ = -1;
+			errno = saved;
+			throw_errno("map " + path.string());
+		}
+	}
+
+	~MappedFile()
+	{
+		if (mapping_ != nullptr)
+			::munmap(mapping_, size_);
+		if (fd_ >= 0)
+			::close(fd_);
+	}
+
+	MappedFile(const MappedFile &) = delete;
+	MappedFile &operator=(const MappedFile &) = delete;
+
+	[[nodiscard]] std::span<const std::byte> bytes() const noexcept
+	{
+		return {static_cast<const std::byte *>(mapping_), size_};
+	}
+
+private:
+	int fd_ = -1;
+	void *mapping_ = nullptr;
+	std::size_t size_ = 0;
+};
 
 [[noreturn]] void throw_errno(const std::string &operation)
 {
@@ -337,6 +410,9 @@ struct WaveformCapture::AsyncWriter {
 		std::uint64_t correlation_utc_nanoseconds = 0;
 		std::filesystem::path output_directory;
 		std::uint64_t source_frame_count = 0;
+		std::uint64_t archive_limit_bytes =
+			waveform_default_archive_limit_bytes;
+		bool retention_only = false;
 		std::vector<Frame> frames;
 	};
 
@@ -345,6 +421,12 @@ struct WaveformCapture::AsyncWriter {
 		bool success = false;
 		std::string filename;
 		std::string error;
+		std::uint32_t format_version = 0;
+		WaveformCompression compression = WaveformCompression::none;
+		std::uint64_t stored_bytes = 0;
+		std::uint64_t logical_sample_bytes = 0;
+		std::uint64_t archive_stored_bytes = 0;
+		std::vector<std::uint64_t> expired_session_ids;
 	};
 
 	AsyncWriter() : worker([this] { run(); }) {}
@@ -382,10 +464,126 @@ struct WaveformCapture::AsyncWriter {
 	}
 
 private:
+	struct ArchiveCandidate {
+		std::filesystem::path path;
+		std::uint64_t bytes = 0;
+		std::uint64_t created_utc_nanoseconds = 0;
+		std::uint64_t session_id = 0;
+	};
+
+	static std::vector<Frame> decimate(const Job &job)
+	{
+		const auto divisor = std::max<std::uint32_t>(1u,
+			job.summary.decimation);
+		const auto output_count = (job.frames.size() + divisor - 1u) /
+			divisor;
+		std::vector<Frame> result;
+		result.reserve(output_count);
+		for (std::size_t first = 0; first < job.frames.size();
+		     first += divisor) {
+			const auto count = std::min<std::size_t>(divisor,
+				job.frames.size() - first);
+			std::array<std::int64_t, waveform_channels> sums{};
+			for (std::size_t offset = 0; offset < count; ++offset)
+				for (std::size_t channel = 0; channel < waveform_channels;
+				     ++channel)
+					sums[channel] += job.frames[first + offset][channel];
+			Frame frame{};
+			for (std::size_t channel = 0; channel < waveform_channels;
+			     ++channel)
+				frame[channel] = static_cast<std::int32_t>(
+					sums[channel] / static_cast<std::int64_t>(count));
+			result.push_back(frame);
+		}
+		return result;
+	}
+
+	static std::uint64_t enforce_retention(const Job &job,
+		const std::filesystem::path &temporary, std::uint64_t new_bytes,
+		std::vector<std::uint64_t> &expired)
+	{
+		std::vector<ArchiveCandidate> candidates;
+		std::uint64_t physical_bytes = new_bytes;
+		for (const auto &entry :
+		     std::filesystem::directory_iterator(job.output_directory)) {
+			if (!entry.is_regular_file() || entry.path() == temporary)
+				continue;
+			std::error_code size_error;
+			const auto bytes = entry.file_size(size_error);
+			if (size_error || bytes >
+				std::numeric_limits<std::uint64_t>::max() - physical_bytes)
+				throw std::runtime_error(
+					"measure waveform archive for retention");
+			physical_bytes += bytes;
+			if (entry.path().extension() != ".mncwf")
+				continue;
+			const auto session_id = session_id_from_filename(entry.path());
+			if (!session_id)
+				continue;
+			try {
+				MappedFile mapped(entry.path());
+				const MncwfV4Reader metadata(mapped.bytes(),
+					MncwfValidationMode::metadata_only);
+				candidates.push_back({entry.path(), bytes,
+					metadata.capture_metadata().created_utc_nanoseconds,
+					*session_id});
+			} catch (const std::exception &) {
+				// Unknown, incomplete, and malformed files count against the
+				// ceiling but are never automatic deletion candidates.
+			}
+		}
+		std::ranges::sort(candidates, [](const auto &left, const auto &right) {
+			if (left.created_utc_nanoseconds != right.created_utc_nanoseconds)
+				return left.created_utc_nanoseconds <
+					right.created_utc_nanoseconds;
+			return left.session_id < right.session_id;
+		});
+		std::vector<ArchiveCandidate> validated;
+		std::uint64_t reclaimable = 0u;
+		for (const auto &candidate : candidates) {
+			try {
+				MappedFile mapped(candidate.path);
+				(void)MncwfV4Reader{mapped.bytes()};
+				validated.push_back(candidate);
+				reclaimable += candidate.bytes;
+			} catch (const std::exception &) {
+				// A malformed candidate remains untouched.
+			}
+		}
+		if (physical_bytes > job.archive_limit_bytes &&
+		    reclaimable < physical_bytes - job.archive_limit_bytes)
+			throw std::runtime_error(
+				"waveform archive limit cannot be reclaimed safely");
+		for (const auto &candidate : validated) {
+			if (physical_bytes <= job.archive_limit_bytes)
+				break;
+			std::error_code remove_error;
+			if (!std::filesystem::remove(candidate.path, remove_error) ||
+			    remove_error)
+				continue;
+			physical_bytes -= candidate.bytes;
+			expired.push_back(candidate.session_id);
+		}
+		if (physical_bytes > job.archive_limit_bytes)
+			throw std::runtime_error(
+				"waveform archive limit cannot be reclaimed safely");
+		return physical_bytes;
+	}
+
 	static Result write(const Job &job)
 	{
 		Result result{};
 		result.session_id = job.summary.id;
+		if (job.retention_only) {
+			try {
+				result.archive_stored_bytes = enforce_retention(job, {}, 0u,
+					result.expired_session_ids);
+				result.success = true;
+			} catch (const std::exception &failure) {
+				result.error = failure.what();
+			}
+			return result;
+		}
 
 		std::ostringstream name;
 		name << "waveform-" << job.summary.id << "-"
@@ -397,6 +595,7 @@ private:
 		const auto temporary = path.string() + ".tmp";
 
 		try {
+			const auto persisted_frames = decimate(job);
 			std::ofstream output(
 				temporary, std::ios::binary | std::ios::trunc);
 			if (!output)
@@ -407,7 +606,7 @@ private:
 			document.capture_metadata = job.context.capture_metadata;
 			document.timebase_segments.push_back({
 				.first_frame = 0u,
-				.frame_count = job.frames.size(),
+				.frame_count = persisted_frames.size(),
 				.first_sequence = job.summary.first_sequence,
 				.sequence_step = job.summary.decimation,
 				.acquisition_rate_numerator = job.summary.sample_rate_hz,
@@ -435,17 +634,17 @@ private:
 			document.channels = job.context.channels;
 			document.events = job.events;
 			document.lineage = job.lineage;
-			document.sample_frame_count = job.frames.size();
+			document.sample_frame_count = persisted_frames.size();
 			document.sample_frame_bytes = static_cast<std::uint32_t>(
 				document.channels.size() * sizeof(std::int32_t));
-			document.sample_data.reserve(job.frames.size() *
+			document.sample_data.reserve(persisted_frames.size() *
 				document.sample_frame_bytes);
-			for (const auto &frame : job.frames) {
+			for (const auto &frame : persisted_frames) {
 				for (const auto &channel : document.channels) {
 					if (channel.source_channel >= frame.size() ||
 					    channel.storage_bits != 32u)
 						throw std::runtime_error(
-							"MNCWF v4 channel geometry is unsupported");
+							"MNCWF channel geometry is unsupported");
 					const auto value = std::bit_cast<std::uint32_t>(
 						frame[channel.source_channel]);
 					for (unsigned byte = 0; byte < 4u; ++byte)
@@ -457,7 +656,7 @@ private:
 			if (job.context.time_quality != MncwfTimeQuality::locked)
 				document.quality_intervals.push_back({
 					.first_frame = 0u,
-					.frame_count = job.frames.size(),
+					.frame_count = persisted_frames.size(),
 					.first_sequence = job.summary.first_sequence,
 					.last_sequence = job.summary.last_sequence,
 					.channel_mask = 0u,
@@ -466,13 +665,35 @@ private:
 					.source = 1u,
 					.detail_code = 0u,
 				});
-			const auto encoded = encode_mncwf_v4(document);
+			const auto encoded = encode_mncwf_v5(document);
 			output.write(reinterpret_cast<const char *>(encoded.data()),
 				static_cast<std::streamsize>(encoded.size()));
 			output.close();
 			if (!output)
 				throw std::runtime_error(
 					"write waveform file " + temporary);
+			MappedFile validation(temporary);
+			const MncwfV4Reader persisted(validation.bytes());
+			if (persisted.version() != mncwf_v5_version ||
+			    !std::ranges::equal(persisted.sample_data(),
+				    std::span<const std::byte>{document.sample_data}))
+				throw std::runtime_error(
+					"post-write MNCWF v5 validation mismatch");
+			const auto zstd_chunks = std::ranges::count_if(
+				persisted.sample_chunks(), [](const auto &chunk) {
+					return chunk.codec == MncwfChunkCodec::zstd;
+				});
+			result.compression = zstd_chunks == 0u
+				? WaveformCompression::raw_chunks
+				: zstd_chunks == static_cast<std::ptrdiff_t>(
+					persisted.sample_chunks().size())
+					? WaveformCompression::zstd_chunks
+					: WaveformCompression::mixed_raw_zstd_chunks;
+			result.format_version = mncwf_v5_version;
+			result.stored_bytes = encoded.size();
+			result.logical_sample_bytes = document.sample_data.size();
+			result.archive_stored_bytes = enforce_retention(job, temporary,
+				result.stored_bytes, result.expired_session_ids);
 			std::filesystem::rename(temporary, path);
 			result.success = true;
 		} catch (const std::exception &failure) {
@@ -491,6 +712,7 @@ private:
 
 	void run()
 	{
+		set_current_thread_nice(5, "waveform-writer");
 		for (;;) {
 			Job job;
 			{
@@ -531,11 +753,15 @@ WaveformCapture::WaveformCapture(std::string device_path,
 	  correlation_source_(std::move(options.correlation_source)),
 	  archive_discovery_hook_(std::move(options.archive_discovery_hook)),
 	  history_(options.history_capacity_frames),
-	  writer_(std::make_unique<AsyncWriter>())
+	  writer_(std::make_unique<AsyncWriter>()),
+	  archive_limit_bytes_(options.archive_limit_bytes)
 {
 	if (history_.empty())
 		throw std::invalid_argument(
 			"waveform history capacity must be non-zero");
+	if (archive_limit_bytes_ == 0u)
+		throw std::invalid_argument(
+			"waveform archive limit must be non-zero");
 	set_context(std::move(context));
 }
 
@@ -546,6 +772,26 @@ void WaveformCapture::set_context(WaveformCaptureContext context)
 		throw std::invalid_argument(
 			"MNCWF v4 capture context has an invalid channel count");
 	context_ = std::move(context);
+}
+
+void WaveformCapture::set_archive_limit_gib(std::uint32_t limit_gib)
+{
+	if (limit_gib < 1u || limit_gib > 16u)
+		throw std::invalid_argument(
+			"waveform archive limit must be 1..16 GiB");
+	const auto requested = static_cast<std::uint64_t>(limit_gib) *
+		1024ull * 1024ull * 1024ull;
+	if (requested == archive_limit_bytes_)
+		return;
+	archive_limit_bytes_ = requested;
+	if (fd_ >= 0 && archive_discovery_status().state ==
+			WaveformArchiveDiscoveryState::complete) {
+		AsyncWriter::Job retention{};
+		retention.output_directory = output_directory_;
+		retention.archive_limit_bytes = archive_limit_bytes_;
+		retention.retention_only = true;
+		writer_->enqueue(std::move(retention));
+	}
 }
 
 void WaveformCapture::set_time_context(MncwfClockSource source,
@@ -643,10 +889,18 @@ void WaveformCapture::begin_persisted_session_discovery()
 	}
 
 	std::vector<std::filesystem::path> files;
+	archive_stored_bytes_ = 0u;
 	for (const auto &entry :
 	     std::filesystem::directory_iterator(output_directory_)) {
-		if (!entry.is_regular_file() ||
-		    entry.path().extension() != ".mncwf")
+		if (!entry.is_regular_file())
+			continue;
+		std::error_code size_error;
+		const auto stored = entry.file_size(size_error);
+		if (!size_error && stored <=
+			std::numeric_limits<std::uint64_t>::max() -
+				archive_stored_bytes_)
+			archive_stored_bytes_ += stored;
+		if (entry.path().extension() != ".mncwf")
 			continue;
 		files.push_back(entry.path());
 
@@ -687,6 +941,7 @@ void WaveformCapture::begin_persisted_session_discovery()
 
 	archive_discovery_worker_ = std::jthread(
 		[this, files = std::move(files)](std::stop_token stop) mutable {
+			set_current_thread_nice(5, "waveform-archive-scanner");
 			discover_persisted_sessions(stop, std::move(files));
 		});
 }
@@ -704,7 +959,7 @@ void WaveformCapture::discover_persisted_sessions(
 			mncwf_magic))
 			return std::nullopt;
 		const auto version = read_little_u32(prefix, 8u);
-		if (version == mncwf_v4_version) {
+		if (version == mncwf_v4_version || version == mncwf_v5_version) {
 			const auto session_id = session_id_from_filename(path);
 			std::error_code error;
 			const auto file_bytes = std::filesystem::file_size(path, error);
@@ -712,17 +967,9 @@ void WaveformCapture::discover_persisted_sessions(
 			    file_bytes < mncwf_v4_header_bytes ||
 			    file_bytes > mncwf_v4_max_file_bytes)
 				return std::nullopt;
-			std::vector<std::byte> bytes(
-				static_cast<std::size_t>(file_bytes));
-			input.clear();
-			input.seekg(0, std::ios::beg);
-			input.read(reinterpret_cast<char *>(bytes.data()),
-				static_cast<std::streamsize>(bytes.size()));
-			if (input.gcount() !=
-			    static_cast<std::streamsize>(bytes.size()))
-				return std::nullopt;
-
-			const MncwfV4Reader reader(bytes);
+			MappedFile mapped(path);
+			const MncwfV4Reader reader(mapped.bytes(),
+				MncwfValidationMode::metadata_only);
 			const auto &segments = reader.timebase_segments();
 			const auto &first = segments.front();
 			const auto &last = segments.back();
@@ -787,6 +1034,26 @@ void WaveformCapture::discover_persisted_sessions(
 			session.summary.decimation = first.decimation_divisor;
 			session.summary.master_session_id = *session_id;
 			session.summary.state = WaveformSessionState::complete;
+			session.summary.format_version = reader.version();
+			session.summary.stored_bytes = file_bytes;
+			session.summary.logical_sample_bytes =
+				reader.sample_frame_count() * reader.sample_frame_bytes();
+			if (reader.version() == mncwf_v5_version) {
+				const auto zstd_chunks = std::ranges::count_if(
+					reader.sample_chunks(), [](const auto &chunk) {
+						return chunk.codec == MncwfChunkCodec::zstd;
+					});
+				session.summary.compression = zstd_chunks == 0u
+					? WaveformCompression::raw_chunks
+					: zstd_chunks == static_cast<std::ptrdiff_t>(
+						reader.sample_chunks().size())
+						? WaveformCompression::zstd_chunks
+						: WaveformCompression::mixed_raw_zstd_chunks;
+			}
+			for (const auto &descriptor : reader.events())
+				session.events.push_back({{},
+					descriptor.trigger_source == static_cast<std::uint16_t>(
+						WaveformTriggerSource::pq_event), descriptor});
 			for (const auto &lineage : reader.lineage()) {
 				if (lineage.relation ==
 				    MncwfLineageRelation::previous_continuation)
@@ -836,6 +1103,7 @@ void WaveformCapture::discover_persisted_sessions(
 		session.summary.decimation = decimation;
 		session.summary.master_session_id = header.session_id;
 		session.summary.state = WaveformSessionState::complete;
+		session.summary.format_version = version;
 
 		std::uint64_t expected_file_bytes = 0;
 		if (header.version >= 2u && bytes_read == sizeof(header) &&
@@ -893,6 +1161,10 @@ void WaveformCapture::discover_persisted_sessions(
 		const auto file_bytes = std::filesystem::file_size(path, error);
 		if (error || file_bytes != expected_file_bytes)
 			return std::nullopt;
+		session.summary.stored_bytes = file_bytes;
+		session.summary.logical_sample_bytes = expected_file_bytes >=
+			header.frame_data_offset
+			? expected_file_bytes - header.frame_data_offset : 0u;
 
 		const auto filename = path.filename().string();
 		std::copy_n(filename.c_str(),
@@ -993,6 +1265,14 @@ void WaveformCapture::collect_discovery_results()
 			return left.summary.id < right.summary.id;
 		});
 	rebuild_session_lineage();
+	if (!startup_retention_queued_) {
+		AsyncWriter::Job retention{};
+		retention.output_directory = output_directory_;
+		retention.archive_limit_bytes = archive_limit_bytes_;
+		retention.retention_only = true;
+		writer_->enqueue(std::move(retention));
+		startup_retention_queued_ = true;
+	}
 	{
 		std::scoped_lock lock(archive_discovery_mutex_);
 		archive_discovery_.state = WaveformArchiveDiscoveryState::complete;
@@ -1001,45 +1281,76 @@ void WaveformCapture::collect_discovery_results()
 
 void WaveformCapture::rebuild_session_lineage()
 {
-	/* MNCWF v4 persists UUID lineage rather than daemon-local session IDs.
-	 * Resolve those UUIDs only after every validated file has been merged. */
+	/* MNCWF persists UUID lineage rather than daemon-local session IDs. Resolve
+	 * it in one ascending pass after every validated file has been merged. */
+	rebuild_indexes();
 	for (auto &session : sessions_) {
 		session.summary.master_session_id = session.summary.id;
+		session.summary.continuation_of_session_id = 0u;
 		if (uuid_is_zero(session.previous_capture_uuid))
 			continue;
-		session.summary.continuation_of_session_id = 0u;
-		const auto predecessor = std::ranges::find_if(sessions_,
-			[&session](const Session &candidate) {
-				return candidate.summary.capture_uuid ==
-					session.previous_capture_uuid;
-			});
-		if (predecessor == sessions_.end() ||
-		    predecessor->summary.id >= session.summary.id ||
-		    predecessor->summary.last_sequence ==
+		const auto indexed = capture_index_.find(
+			mncwf_uuid_string(session.previous_capture_uuid));
+		if (indexed == capture_index_.end())
+			continue;
+		const auto &predecessor = sessions_[indexed->second];
+		if (predecessor.summary.id >= session.summary.id ||
+		    predecessor.summary.last_sequence ==
 			std::numeric_limits<std::uint64_t>::max() ||
-		    predecessor->summary.last_sequence + 1u !=
+		    predecessor.summary.last_sequence + 1u !=
 			session.summary.first_sequence ||
-		    predecessor->next_capture_uuid != session.summary.capture_uuid)
+		    predecessor.next_capture_uuid != session.summary.capture_uuid)
 			continue;
 		session.summary.continuation_of_session_id =
-			predecessor->summary.id;
+			predecessor.summary.id;
 	}
-	for (auto &session : sessions_) {
-		auto master = session.summary.id;
-		auto predecessor_id = session.summary.continuation_of_session_id;
-		for (std::size_t depth = 0u;
-		     predecessor_id != 0u && depth < sessions_.size(); ++depth) {
-			const auto predecessor = std::ranges::find_if(sessions_,
-				[predecessor_id](const Session &candidate) {
-					return candidate.summary.id == predecessor_id;
-				});
-			if (predecessor == sessions_.end())
-				break;
-			master = predecessor->summary.id;
-			predecessor_id =
-				predecessor->summary.continuation_of_session_id;
+	for (std::size_t index = 0; index < sessions_.size(); ++index) {
+		auto &session = sessions_[index];
+		const auto predecessor = session_index_.find(
+			session.summary.continuation_of_session_id);
+		if (predecessor != session_index_.end() &&
+		    predecessor->second < index)
+			session.summary.master_session_id =
+				sessions_[predecessor->second].summary.master_session_id;
+	}
+	rebuild_event_capture_index();
+}
+
+void WaveformCapture::rebuild_indexes()
+{
+	session_index_.clear();
+	capture_index_.clear();
+	session_index_.reserve(sessions_.size());
+	capture_index_.reserve(sessions_.size());
+	for (std::size_t index = 0; index < sessions_.size(); ++index) {
+		session_index_.insert_or_assign(sessions_[index].summary.id, index);
+		if (!uuid_is_zero(sessions_[index].summary.capture_uuid))
+			capture_index_.insert_or_assign(
+				mncwf_uuid_string(sessions_[index].summary.capture_uuid), index);
+	}
+}
+
+void WaveformCapture::rebuild_event_capture_index()
+{
+	event_capture_index_.clear();
+	for (const auto &session : sessions_) {
+		for (const auto &event : session.events) {
+			if (event.descriptor.trigger_source !=
+			    static_cast<std::uint16_t>(WaveformTriggerSource::pq_event) ||
+			    uuid_is_zero(event.descriptor.event_uuid))
+				continue;
+			auto &association = event_capture_index_[
+				mncwf_uuid_string(event.descriptor.event_uuid)];
+			if (association.onset_session_id == 0u)
+				association.onset_session_id = session.summary.id;
+			else if (association.onset_session_id != session.summary.id &&
+				 association.recovery_session_id == 0u)
+				association.recovery_session_id = session.summary.id;
+			association.terminal = association.terminal ||
+				event.descriptor.lifecycle == MncwfEventLifecycle::end ||
+				event.descriptor.lifecycle == MncwfEventLifecycle::abort ||
+				event.descriptor.lifecycle == MncwfEventLifecycle::complete;
 		}
-		session.summary.master_session_id = master;
 	}
 }
 
@@ -1254,6 +1565,9 @@ WaveformSessionSummary WaveformCapture::trigger(
 		session.summary.trigger_realtime_nanoseconds = now_realtime;
 		session.summary.sample_rate_hz = sample_rate_hz_;
 		session.summary.decimation = decimation;
+		session.summary.format_version = mncwf_v5_version;
+		/* The background writer reports the effective raw/Zstd mix. */
+		session.summary.compression = WaveformCompression::none;
 		session.summary.state = WaveformSessionState::capturing;
 		session.summary.capture_uuid = mncwf_random_uuid();
 		session.context = context_;
@@ -1262,6 +1576,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 		session.context.capture_metadata.created_tai_nanoseconds = now_tai;
 		session.context.capture_metadata.created_utc_nanoseconds = now_realtime;
 		sessions_.push_back(std::move(session));
+		rebuild_indexes();
 		active = std::prev(sessions_.end());
 	} else {
 		active->summary.first_sequence =
@@ -1291,6 +1606,10 @@ WaveformSessionSummary WaveformCapture::trigger(
 	active->summary.event_count =
 		static_cast<std::uint32_t>(active->events.size());
 	active->summary.trigger_source_mask |= trigger_source_bit(source);
+	active->summary.logical_sample_bytes =
+		((active->summary.last_sequence - active->summary.first_sequence + 1u +
+		  active->summary.decimation - 1u) / active->summary.decimation) *
+		active->context.channels.size() * sizeof(std::int32_t);
 	return active->summary;
 }
 
@@ -1318,15 +1637,10 @@ WaveformSessionSummary WaveformCapture::track_power_quality_event(
 		return (static_cast<std::uint64_t>(sample_rate_hz_) * milliseconds +
 			999u) / 1000u;
 	};
-	const auto requested_first = trigger_sequence > frames_for(pretrigger_ms)
-		? trigger_sequence - frames_for(pretrigger_ms) : 0u;
-	if (current_sequence > std::numeric_limits<std::uint64_t>::max() -
-			frames_for(posttrigger_ms))
-		throw std::invalid_argument("event post-trigger range overflows");
-	const auto requested_last = current_sequence + frames_for(posttrigger_ms);
+	const auto pretrigger_frames = frames_for(pretrigger_ms);
+	const auto posttrigger_frames = frames_for(posttrigger_ms);
 	const auto budget = max_capture_frames();
-	if (frames_for(pretrigger_ms) + frames_for(posttrigger_ms) + 1u >
-	    budget)
+	if (pretrigger_frames + posttrigger_frames + 1u > budget)
 		throw std::invalid_argument(
 			"one event waveform policy exceeds the history budget");
 
@@ -1337,123 +1651,157 @@ WaveformSessionSummary WaveformCapture::track_power_quality_event(
 	if (correlation_.tai_nanoseconds != 0u)
 		correlation_utc_nanoseconds_ = translate_clock(
 			correlation_.tai_nanoseconds, now_tai, now_realtime);
-	const auto has_event = [&event_id](const Session &session) {
-		return std::find(session.active_events.begin(),
-			session.active_events.end(), event_id) !=
-			session.active_events.end();
-	};
-	auto active = std::find_if(sessions_.begin(), sessions_.end(),
-		[&](const Session &session) {
-			return session.summary.state == WaveformSessionState::capturing &&
-				!session.materialization_queued && has_event(session);
-		});
-	if (active == sessions_.end()) {
-		active = std::find_if(sessions_.begin(), sessions_.end(),
-			[&](const Session &session) {
-				return session.summary.state ==
-						WaveformSessionState::capturing &&
-					!session.materialization_queued &&
-					!session.capacity_sealed &&
-					requested_first <= session.summary.last_sequence + 1u;
-			});
-	}
 
-	auto new_session = [&](std::uint64_t first, std::uint64_t last,
-		std::uint64_t continuation, std::uint64_t master,
-		const WaveformCaptureContext &snapshot) {
+	const auto event_key = mncwf_uuid_string(descriptor.event_uuid);
+	const auto session_for = [this](std::uint64_t id) -> Session * {
+		const auto found = session_index_.find(id);
+		return found == session_index_.end() ? nullptr
+			: &sessions_[found->second];
+	};
+	const auto response = [](const Session &session, bool created) {
+		auto result = session.summary;
+		result.association_created = created;
+		return result;
+	};
+	const auto update_marker = [&](Session &session,
+		const MncwfV4EventDescriptor &updated) {
+		if (session.summary.state != WaveformSessionState::capturing ||
+		    session.materialization_queued)
+			return;
+		const auto marker = std::ranges::find_if(session.events,
+			[&updated](const Event &event) {
+				return event.descriptor.event_uuid == updated.event_uuid;
+			});
+		if (marker == session.events.end())
+			session.events.push_back({event_id, true, updated});
+		else
+			marker->descriptor = updated;
+		session.summary.event_count = static_cast<std::uint32_t>(
+			session.events.size());
+	};
+	const auto bounded_window = [&](std::uint64_t anchor) {
+		if (anchor > std::numeric_limits<std::uint64_t>::max() -
+				posttrigger_frames)
+			throw std::invalid_argument("event post-trigger range overflows");
+		auto first = anchor > pretrigger_frames
+			? anchor - pretrigger_frames : 0u;
+		auto last = anchor + posttrigger_frames;
+		if (last < oldest_sequence_)
+			throw std::runtime_error(
+				"event waveform window is no longer retained");
+		first = std::max(first, oldest_sequence_);
+		if (last - first + 1u > budget)
+			first = last - budget + 1u;
+		return std::pair{first, last};
+	};
+	const auto new_session = [&](std::uint64_t first, std::uint64_t last) ->
+		Session & {
 		Session session{};
 		session.summary.id = next_session_id_++;
-		session.summary.trigger_sequence = trigger_sequence;
+		session.summary.trigger_sequence = lifecycle ==
+			WaveformEventLifecycle::start ? trigger_sequence : current_sequence;
 		session.summary.first_sequence = first;
 		session.summary.last_sequence = last;
 		session.summary.trigger_tai_nanoseconds = now_tai;
 		session.summary.trigger_realtime_nanoseconds = now_realtime;
 		session.summary.sample_rate_hz = sample_rate_hz_;
 		session.summary.decimation = decimation;
+		session.summary.format_version = mncwf_v5_version;
+		/* The background writer reports the effective raw/Zstd mix. */
+		session.summary.compression = WaveformCompression::none;
 		session.summary.state = WaveformSessionState::capturing;
-		session.summary.continuation_of_session_id = continuation;
-		session.summary.master_session_id = master == 0u
-			? session.summary.id : master;
+		session.summary.master_session_id = session.summary.id;
 		session.summary.capture_uuid = mncwf_random_uuid();
-		session.context = snapshot;
+		session.summary.trigger_source_mask =
+			trigger_source_bit(WaveformTriggerSource::pq_event);
+		session.context = context_;
 		session.context.capture_metadata.capture_uuid =
 			session.summary.capture_uuid;
 		session.context.capture_metadata.created_tai_nanoseconds = now_tai;
 		session.context.capture_metadata.created_utc_nanoseconds = now_realtime;
+		session.events.push_back({event_id, true, descriptor});
+		session.summary.event_count = 1u;
+		session.summary.logical_sample_bytes =
+			((last - first + 1u + decimation - 1u) / decimation) *
+			session.context.channels.size() * sizeof(std::int32_t);
 		sessions_.push_back(std::move(session));
-		return std::prev(sessions_.end());
+		rebuild_indexes();
+		return sessions_.back();
 	};
-	if (active == sessions_.end()) {
-		/* Recovery can first observe an UPDATE after an APU restart. Keep the
-		 * materializable tail if the already-active event predates the ring. */
-		const auto budget_limited_first =
-			requested_last - requested_first + 1u > budget
-				? requested_last - budget + 1u : requested_first;
-		const auto recoverable_first = requested_last < oldest_sequence_
-			? requested_last
-			: std::max(budget_limited_first, oldest_sequence_);
-		active = new_session(recoverable_first, requested_last, 0u, 0u,
-			context_);
+
+	auto association = event_capture_index_.find(event_key);
+	if (association == event_capture_index_.end()) {
+		const auto anchor = lifecycle == WaveformEventLifecycle::start
+			? trigger_sequence : current_sequence;
+		const auto [first, last] = bounded_window(anchor);
+		auto &created = new_session(first, last);
+		EventCaptureState state{};
+		if (lifecycle == WaveformEventLifecycle::start)
+			state.onset_session_id = created.summary.id;
+		else
+			state.recovery_session_id = created.summary.id;
+		state.terminal = lifecycle == WaveformEventLifecycle::end ||
+			lifecycle == WaveformEventLifecycle::abort;
+		event_capture_index_.insert_or_assign(event_key, state);
+		return response(created, true);
 	}
-	else {
-		/* Later records for an already-linked event still carry its original
-		 * trigger and must not pull a restart-clipped tail or continuation back
-		 * across its materializable boundary. Only a new overlapping event may
-		 * extend an unsealed master's lower bound. */
-		if (!has_event(*active) &&
-		    active->summary.continuation_of_session_id == 0u)
-			active->summary.first_sequence = std::min(
-				active->summary.first_sequence, requested_first);
-		if (requested_last - active->summary.first_sequence + 1u > budget) {
-			const auto predecessor = active->summary.id;
-			const auto master = active->summary.master_session_id;
-			const auto predecessor_uuid = active->summary.capture_uuid;
-			const auto predecessor_index = static_cast<std::size_t>(
-				std::distance(sessions_.begin(), active));
-			const auto continuation_context = active->context;
-			const auto continuation_first = active->summary.first_sequence + budget;
-			active->summary.last_sequence = continuation_first - 1u;
-			active->capacity_sealed = true;
-			auto carrying = active->active_events;
-			std::vector<Event> carrying_descriptors;
-			for (const auto &candidate : active->events)
-				if (candidate.stable_identity &&
-				    std::ranges::find(carrying, candidate.identity) !=
-					carrying.end())
-					carrying_descriptors.push_back(candidate);
-			active->active_events.clear();
-			active = new_session(continuation_first,
-				std::max(continuation_first, requested_last), predecessor,
-				master, continuation_context);
-			active->previous_capture_uuid = predecessor_uuid;
-			sessions_[predecessor_index].next_capture_uuid =
-				active->summary.capture_uuid;
-			active->active_events = std::move(carrying);
-			active->events = std::move(carrying_descriptors);
-		} else {
-			active->summary.last_sequence = std::max(
-				active->summary.last_sequence, requested_last);
+
+	auto &state = association->second;
+	Session *onset = session_for(state.onset_session_id);
+	Session *recovery = session_for(state.recovery_session_id);
+	Session *latest = recovery != nullptr ? recovery : onset;
+	if (latest == nullptr) {
+		event_capture_index_.erase(association);
+		const auto [first, last] = bounded_window(
+			lifecycle == WaveformEventLifecycle::start
+				? trigger_sequence : current_sequence);
+		auto &created = new_session(first, last);
+		EventCaptureState replacement{};
+		if (lifecycle == WaveformEventLifecycle::start)
+			replacement.onset_session_id = created.summary.id;
+		else
+			replacement.recovery_session_id = created.summary.id;
+		replacement.terminal = lifecycle == WaveformEventLifecycle::end ||
+			lifecycle == WaveformEventLifecycle::abort;
+		event_capture_index_.insert_or_assign(event_key, replacement);
+		return response(created, true);
+	}
+
+	if (lifecycle == WaveformEventLifecycle::start ||
+	    lifecycle == WaveformEventLifecycle::update || state.terminal ||
+	    recovery != nullptr) {
+		update_marker(*latest, descriptor);
+		return response(*latest, false);
+	}
+
+	const auto [recovery_first, recovery_last] =
+		bounded_window(current_sequence);
+	if (onset != nullptr &&
+	    onset->summary.state == WaveformSessionState::capturing &&
+	    !onset->materialization_queued &&
+	    recovery_first <= onset->summary.last_sequence + 1u &&
+	    onset->summary.first_sequence <= recovery_last + 1u) {
+		const auto merged_first = std::min(onset->summary.first_sequence,
+			recovery_first);
+		const auto merged_last = std::max(onset->summary.last_sequence,
+			recovery_last);
+		if (merged_last - merged_first + 1u <= budget) {
+			onset->summary.first_sequence = merged_first;
+			onset->summary.last_sequence = merged_last;
+			onset->summary.logical_sample_bytes =
+				((merged_last - merged_first + 1u + decimation - 1u) /
+				 decimation) * onset->context.channels.size() *
+				sizeof(std::int32_t);
+			update_marker(*onset, descriptor);
+			state.terminal = true;
+			return response(*onset, false);
 		}
 	}
 
-	if (!has_event(*active))
-		active->active_events.push_back(event_id);
-	const auto marker = std::find_if(active->events.begin(),
-		active->events.end(), [&event_id](const Event &event) {
-			return event.stable_identity && event.identity == event_id;
-		});
-	if (marker == active->events.end())
-		active->events.push_back({event_id, true, std::move(descriptor)});
-	else
-		marker->descriptor = std::move(descriptor);
-	active->summary.event_count = static_cast<std::uint32_t>(
-		active->events.size());
-	active->summary.trigger_source_mask |=
-		trigger_source_bit(WaveformTriggerSource::pq_event);
-	if (lifecycle == WaveformEventLifecycle::end ||
-	    lifecycle == WaveformEventLifecycle::abort)
-		std::erase(active->active_events, event_id);
-	return active->summary;
+	auto &created = new_session(recovery_first, recovery_last);
+	state.recovery_session_id = created.summary.id;
+	state.terminal = true;
+	return response(created, true);
 }
 
 void WaveformCapture::erase(std::uint64_t session_id)
@@ -1476,14 +1824,23 @@ void WaveformCapture::erase(std::uint64_t session_id)
 		const std::filesystem::path relative(filename);
 		if (relative != relative.filename())
 			throw std::runtime_error("waveform filename is invalid");
+		std::error_code size_error;
+		const auto stored = std::filesystem::file_size(
+			output_directory_ / relative, size_error);
 		std::error_code error;
-		(void)std::filesystem::remove(output_directory_ / relative, error);
+		const auto removed = std::filesystem::remove(
+			output_directory_ / relative, error);
 		if (error)
 			throw std::runtime_error(
 				"delete waveform file " + filename + ": " +
 				error.message());
+		if (removed && !size_error)
+			archive_stored_bytes_ = stored < archive_stored_bytes_
+				? archive_stored_bytes_ - stored : 0u;
 	}
 	sessions_.erase(session);
+	rebuild_indexes();
+	rebuild_event_capture_index();
 }
 
 bool WaveformCapture::intersects_gap(std::uint64_t first,
@@ -1591,6 +1948,7 @@ void WaveformCapture::enqueue_materialization(Session &session)
 			session.summary.trigger_tai_nanoseconds,
 			session.summary.trigger_realtime_nanoseconds);
 	job.output_directory = output_directory_;
+	job.archive_limit_bytes = archive_limit_bytes_;
 
 	const auto window =
 		session.summary.last_sequence -
@@ -1598,38 +1956,22 @@ void WaveformCapture::enqueue_materialization(Session &session)
 	job.source_frame_count = window;
 	if (window > history_.size())
 		throw std::runtime_error("waveform session exceeds history");
-	/*
-	 * Decimation by mean: each stored frame folds `decimation` raw frames
-	 * into their per-channel average — a crude anti-alias filter suited
-	 * to dip/swell inspection (transient hunting captures at 1). The
-	 * session's stored range is trimmed to whole groups so the persisted
-	 * invariant frame_count == (last - first) / decimation + 1 is exact.
-	 */
-	const std::uint64_t decimation =
-		std::max<std::uint32_t>(1u, session.summary.decimation);
-	const auto output_count = (window + decimation - 1u) / decimation;
-	job.frames.reserve(static_cast<std::size_t>(output_count));
-	for (std::uint64_t output = 0; output < output_count; ++output) {
-		const auto group_first =
-			session.summary.first_sequence + output * decimation;
-		const auto group_frames = std::min<std::uint64_t>(
-			decimation,
-			session.summary.first_sequence + window - group_first);
-		std::array<std::int64_t, waveform_channels> sums{};
-		for (std::uint64_t offset = 0; offset < group_frames; ++offset) {
-			const auto &frame =
-				history_[(group_first + offset) % history_.size()];
-			for (std::size_t channel = 0;
-			     channel < waveform_channels; ++channel)
-				sums[channel] += frame[channel];
-		}
-		AsyncWriter::Frame frame{};
-		for (std::size_t channel = 0; channel < waveform_channels;
-		     ++channel)
-			frame[channel] = static_cast<std::int32_t>(
-				sums[channel] /
-				static_cast<std::int64_t>(group_frames));
-		job.frames.push_back(frame);
+	/* The acquisition loop performs only a bounded ring snapshot. Decimation,
+	 * channel packing, CRC generation, compression, validation, and disk I/O
+	 * all run on the background writer. */
+	job.frames.reserve(static_cast<std::size_t>(window));
+	auto sequence = session.summary.first_sequence;
+	auto remaining = window;
+	while (remaining != 0u) {
+		const auto ring_offset = static_cast<std::size_t>(
+			sequence % history_.size());
+		const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(
+			remaining, history_.size() - ring_offset));
+		job.frames.insert(job.frames.end(), history_.begin() +
+			static_cast<std::ptrdiff_t>(ring_offset), history_.begin() +
+			static_cast<std::ptrdiff_t>(ring_offset + count));
+		sequence += count;
+		remaining -= count;
 	}
 
 	const auto timestamp_at = [&](std::uint64_t sequence,
@@ -1755,11 +2097,41 @@ void WaveformCapture::collect_materialization_results()
 	if (!writer_)
 		return;
 	for (auto &result : writer_->collect()) {
-		const auto session = std::find_if(
-			sessions_.begin(), sessions_.end(),
-			[&result](const Session &candidate) {
-				return candidate.summary.id == result.session_id;
-			});
+		if (!result.expired_session_ids.empty()) {
+			for (const auto expired : result.expired_session_ids) {
+				const std::array fields{
+					mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+						std::to_string(expired)}};
+				(void)capture_log.write(mnc::logging::Priority::notice,
+					"waveform capture expired by archive retention",
+					"waveform_session_expired", fields);
+			}
+			expired_sessions_ += result.expired_session_ids.size();
+			sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
+				[&result](const Session &candidate) {
+					return std::ranges::find(result.expired_session_ids,
+						candidate.summary.id) !=
+						result.expired_session_ids.end();
+				}), sessions_.end());
+			rebuild_indexes();
+			rebuild_event_capture_index();
+		}
+		if (result.success)
+			archive_stored_bytes_ = result.archive_stored_bytes;
+		if (result.session_id == 0u) {
+			if (!result.success) {
+				++retention_failures_;
+				(void)capture_log.write(mnc::logging::Priority::warning,
+					"waveform startup retention failed: " + result.error,
+					"waveform_retention_failed");
+			}
+			continue;
+		}
+		const auto indexed = session_index_.find(result.session_id);
+		const auto session = indexed == session_index_.end()
+			? sessions_.end()
+			: sessions_.begin() +
+				static_cast<std::ptrdiff_t>(indexed->second);
 		if (session == sessions_.end())
 			continue;
 		session->materialization_queued = false;
@@ -1767,6 +2139,8 @@ void WaveformCapture::collect_materialization_results()
 			session->summary.state =
 				WaveformSessionState::incomplete;
 			++materialization_failures_;
+			if (result.error.find("archive limit") != std::string::npos)
+				++retention_failures_;
 			const std::array fields{
 				mnc::logging::Field{"MNC_WAVEFORM_SESSION",
 					std::to_string(result.session_id)}};
@@ -1790,6 +2164,11 @@ void WaveformCapture::collect_materialization_results()
 				 session->summary.filename.size() - 1u),
 			session->summary.filename.begin());
 		session->summary.state = WaveformSessionState::complete;
+		session->summary.format_version = result.format_version;
+		session->summary.compression = result.compression;
+		session->summary.stored_bytes = result.stored_bytes;
+		session->summary.logical_sample_bytes =
+			result.logical_sample_bytes;
 	}
 }
 
@@ -1823,6 +2202,10 @@ WaveformStatus WaveformCapture::status()
 	result.history_oldest_sequence = have_history_ ? oldest_sequence_ : 0u;
 	result.history_latest_sequence = have_history_ ? latest_sequence_ : 0u;
 	result.history_capacity_frames = history_.size();
+	result.archive_limit_bytes = archive_limit_bytes_;
+	result.archive_stored_bytes = archive_stored_bytes_;
+	result.expired_sessions = expired_sessions_;
+	result.retention_failures = retention_failures_;
 	result.archive_discovery = archive_discovery_status();
 	result.correlation = correlation_;
 	for (const auto &session : sessions_) {
@@ -1856,13 +2239,10 @@ WaveformCapture::find_session(std::uint64_t session_id)
 {
 	collect_discovery_results();
 	collect_materialization_results();
-	const auto session = std::ranges::find_if(sessions_,
-		[session_id](const Session &candidate) {
-			return candidate.summary.id == session_id;
-		});
-	if (session == sessions_.end())
+	const auto session = session_index_.find(session_id);
+	if (session == session_index_.end())
 		return std::nullopt;
-	return session->summary;
+	return sessions_[session->second].summary;
 }
 
 std::optional<WaveformSessionSummary>
@@ -1872,13 +2252,10 @@ WaveformCapture::find_session(const MncwfUuid &capture_uuid)
 	collect_materialization_results();
 	if (uuid_is_zero(capture_uuid))
 		return std::nullopt;
-	const auto session = std::ranges::find_if(sessions_,
-		[&capture_uuid](const Session &candidate) {
-			return candidate.summary.capture_uuid == capture_uuid;
-		});
-	if (session == sessions_.end())
+	const auto session = capture_index_.find(mncwf_uuid_string(capture_uuid));
+	if (session == capture_index_.end())
 		return std::nullopt;
-	return session->summary;
+	return sessions_[session->second].summary;
 }
 
 } // namespace msap1

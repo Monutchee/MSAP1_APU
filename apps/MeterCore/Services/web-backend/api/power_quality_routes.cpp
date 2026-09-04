@@ -55,7 +55,8 @@ history::PowerQualityEventQuery event_query(std::string_view target)
 	for (const auto &[name, unused] : parameters) {
 		(void)unused;
 		if (name != "event_id" && name != "start_utc_ns" &&
-		    name != "end_utc_ns" && name != "limit")
+		    name != "end_utc_ns" && name != "limit" &&
+		    name != "include_waveform_links")
 			throw std::invalid_argument(
 				"unsupported event query parameter: " + name);
 	}
@@ -84,6 +85,16 @@ history::PowerQualityEventQuery event_query(std::string_view target)
 			throw std::invalid_argument(
 				"limit is not valid with an event_id detail query");
 		result.limit = parse_limit(found->second);
+	}
+	if (const auto found = parameters.find("include_waveform_links");
+	    found != parameters.end()) {
+		if (found->second == "true")
+			result.include_waveform_links = true;
+		else if (found->second == "false")
+			result.include_waveform_links = false;
+		else
+			throw std::invalid_argument(
+				"include_waveform_links must be true or false");
 	}
 	if (result.start_utc_nanoseconds && result.end_utc_nanoseconds &&
 	    *result.start_utc_nanoseconds > *result.end_utc_nanoseconds)
@@ -183,6 +194,7 @@ struct PowerQualityEventDto {
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
 	std::string settings_digest;
 	EventWaveformPolicyDto waveform;
+	std::uint32_t waveform_capture_count = 0;
 	std::vector<std::string> waveform_capture_uuids;
 };
 
@@ -230,6 +242,7 @@ PowerQualityEventDto event_dto(
 	result.waveform = {event.waveform_enabled,
 		event.waveform_pretrigger_ms, event.waveform_posttrigger_ms,
 		event.waveform_decimation};
+	result.waveform_capture_count = entry.waveform_capture_count;
 	result.waveform_capture_uuids.reserve(
 		entry.waveform_capture_uuids.size());
 	for (const auto &uuid : entry.waveform_capture_uuids)
@@ -508,6 +521,9 @@ void document_power_quality_routes(DocumentedApiRegistry &registry)
 		false, "Inclusive UTC range end in nanoseconds");
 	registry.add_query_parameter(Verb::get, events, "limit", "integer", false,
 		"Maximum number of events, from 1 through 1000", {}, "100");
+	registry.add_query_parameter(Verb::get, events, "include_waveform_links",
+		"boolean", false,
+		"Include capture UUIDs; counts are always returned", {}, "true");
 	registry.add_json_response<PowerQualityEventsDto>(Verb::get, events, 200,
 		"PowerQualityEvents", "Power-quality event catalogue page");
 	registry.add_error_response(Verb::get, events, 400,

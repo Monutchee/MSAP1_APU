@@ -15,13 +15,14 @@
 
 #include <openssl/sha.h>
 #include <sys/random.h>
+#include <zstd.h>
 
 namespace msap1 {
 namespace {
 
 [[noreturn]] void reject(std::string_view reason)
 {
-	throw std::invalid_argument("MNCWF v4: " + std::string(reason));
+	throw std::invalid_argument("MNCWF: " + std::string(reason));
 }
 
 std::uint32_t crc32c_update(std::uint32_t crc,
@@ -804,6 +805,220 @@ EncodedSection encode_lineage(
 		mncwf_v4_lineage_entry_bytes, std::move(records));
 }
 
+struct ZstdCompressionContext {
+	ZstdCompressionContext() = default;
+	ZSTD_CCtx *value = ZSTD_createCCtx();
+	~ZstdCompressionContext() { ZSTD_freeCCtx(value); }
+	ZstdCompressionContext(const ZstdCompressionContext &) = delete;
+	ZstdCompressionContext &operator=(const ZstdCompressionContext &) = delete;
+};
+
+void require_zstd(std::size_t result, std::string_view operation)
+{
+	if (ZSTD_isError(result) != 0u)
+		reject(std::string(operation) + ": " + ZSTD_getErrorName(result));
+}
+
+void validate_v5_zstd_frame(std::span<const std::byte> frame,
+	std::uint64_t expected_logical_bytes)
+{
+	if (frame.size() < 6u || read_u32(frame, 0u) != ZSTD_MAGICNUMBER)
+		reject("v5 Zstd frame magic is invalid");
+	const auto descriptor = std::to_integer<std::uint8_t>(frame[4]);
+	const auto content_size_flag = descriptor >> 6u;
+	const bool single_segment = (descriptor & 0x20u) != 0u;
+	if ((descriptor & 0x18u) != 0u ||
+	    (descriptor & 0x04u) == 0u ||
+	    (descriptor & 0x03u) != 0u)
+		reject("v5 Zstd frame options are unsupported");
+
+	std::size_t cursor = 5u;
+	std::uint64_t window_bytes = 0u;
+	if (!single_segment) {
+		if (cursor >= frame.size())
+			reject("v5 Zstd window descriptor is truncated");
+		const auto descriptor_byte =
+			std::to_integer<std::uint8_t>(frame[cursor++]);
+		const auto window_base = std::uint64_t{1u}
+			<< (10u + (descriptor_byte >> 3u));
+		window_bytes = window_base +
+			(window_base >> 3u) * (descriptor_byte & 0x07u);
+	}
+	const auto content_size_bytes = content_size_flag == 0u
+		? (single_segment ? 1u : 0u)
+		: (1u << content_size_flag);
+	if (content_size_bytes == 0u ||
+	    cursor > frame.size() ||
+	    content_size_bytes > frame.size() - cursor)
+		reject("v5 Zstd frame content size is missing or truncated");
+	std::uint64_t content_size = 0u;
+	for (unsigned byte = 0u; byte < content_size_bytes; ++byte)
+		content_size |= static_cast<std::uint64_t>(
+			std::to_integer<std::uint8_t>(frame[cursor + byte]))
+			<< (byte * 8u);
+	if (content_size_bytes == 2u)
+		content_size += 256u;
+	if (content_size != expected_logical_bytes)
+		reject("v5 Zstd frame content size is invalid");
+	if (single_segment)
+		window_bytes = content_size;
+	if (window_bytes > mncwf_v5_max_chunk_logical_bytes)
+		reject("v5 Zstd frame window exceeds the 1 MiB limit");
+	const auto frame_bytes = ZSTD_findFrameCompressedSize(
+		frame.data(), frame.size());
+	require_zstd(frame_bytes, "validate v5 Zstd frame extent");
+	if (frame_bytes != frame.size())
+		reject("v5 Zstd chunk must contain exactly one frame");
+}
+
+struct EncodedV5Chunk {
+	std::uint64_t first_frame = 0;
+	std::uint64_t frame_count = 0;
+	std::uint64_t logical_bytes = 0;
+	MncwfChunkCodec codec = MncwfChunkCodec::raw;
+	std::uint16_t flags = 0;
+	std::uint32_t logical_crc32c = 0;
+	EncodedBytes payload;
+};
+
+void configure_v5_compressor(ZSTD_CCtx *context)
+{
+	if (context == nullptr)
+		reject("cannot allocate the Zstd compression context");
+	require_zstd(ZSTD_CCtx_setParameter(context,
+		ZSTD_c_compressionLevel, 1), "configure Zstd level");
+	require_zstd(ZSTD_CCtx_setParameter(context,
+		ZSTD_c_checksumFlag, 1), "enable Zstd frame checksum");
+	require_zstd(ZSTD_CCtx_setParameter(context,
+		ZSTD_c_contentSizeFlag, 1), "enable Zstd content size");
+	require_zstd(ZSTD_CCtx_setParameter(context,
+		ZSTD_c_windowLog, 20), "bound Zstd compression window");
+}
+
+EncodedV5Chunk compress_v5_chunk(ZSTD_CCtx *context,
+	std::span<const std::byte> logical, std::uint64_t first_frame,
+	std::uint64_t frame_count)
+{
+	EncodedV5Chunk chunk{};
+	chunk.first_frame = first_frame;
+	chunk.frame_count = frame_count;
+	chunk.logical_bytes = logical.size();
+	chunk.logical_crc32c = mncwf_crc32c(logical);
+	chunk.payload.resize(ZSTD_compressBound(logical.size()));
+	const auto compressed = ZSTD_compress2(context,
+		chunk.payload.data(), chunk.payload.size(), logical.data(),
+		logical.size());
+	require_zstd(compressed, "compress v5 sample chunk");
+	if (compressed < logical.size()) {
+		chunk.payload.resize(compressed);
+		chunk.codec = MncwfChunkCodec::zstd;
+		chunk.flags = mncwf_v5_chunk_frame_checksum;
+	} else {
+		chunk.payload.assign(logical.begin(), logical.end());
+	}
+	return chunk;
+}
+
+EncodedBytes assemble_v5_sample_section(std::uint64_t frame_count,
+	std::uint32_t frame_bytes, const std::vector<EncodedV5Chunk> &chunks)
+{
+	if (chunks.empty() || chunks.size() > mncwf_v5_max_chunks)
+		reject("v5 chunk count is outside its bound");
+	std::uint64_t expected_first_frame = 0u;
+	for (const auto &chunk : chunks) {
+		const auto expected_logical = checked_multiply(chunk.frame_count,
+			frame_bytes, "v5 chunk logical bytes");
+		if (chunk.first_frame != expected_first_frame ||
+		    chunk.frame_count == 0u || chunk.logical_bytes != expected_logical ||
+		    chunk.logical_bytes > mncwf_v5_max_chunk_logical_bytes ||
+		    chunk.payload.empty() ||
+		    (chunk.codec == MncwfChunkCodec::raw
+			? chunk.flags != 0u || chunk.payload.size() != chunk.logical_bytes
+			: chunk.flags != mncwf_v5_chunk_frame_checksum ||
+			  chunk.payload.size() >= chunk.logical_bytes))
+			reject("encoded v5 chunk geometry is invalid");
+		expected_first_frame = checked_add(expected_first_frame,
+			chunk.frame_count, "v5 chunk frame coverage");
+	}
+	if (expected_first_frame != frame_count)
+		reject("encoded v5 chunk coverage is incomplete");
+
+	const auto table_bytes = checked_multiply(chunks.size(),
+		mncwf_v5_chunk_entry_bytes, "v5 chunk table");
+	auto next_offset = align_eight(checked_add(mncwf_v4_section_header_bytes,
+		table_bytes, "v5 chunk table"));
+	std::vector<std::uint64_t> offsets;
+	offsets.reserve(chunks.size());
+	for (const auto &chunk : chunks) {
+		offsets.push_back(next_offset);
+		next_offset = align_eight(checked_add(next_offset,
+			chunk.payload.size(), "v5 sample section"));
+	}
+	if (next_offset > mncwf_v4_max_file_bytes)
+		reject("v5 sample section exceeds the file bound");
+	EncodedBytes section(narrow_size(next_offset, "v5 sample section"));
+	put_u32(section, 0u,
+		static_cast<std::uint32_t>(MncwfV4SectionType::sample_data));
+	put_u16(section, 4u, 2u);
+	put_u16(section, 6u, mncwf_v4_section_header_bytes);
+	put_u32(section, 8u, 0u);
+	put_u32(section, 12u, frame_bytes);
+	put_u64(section, 16u, frame_count);
+	put_u64(section, 24u, mncwf_v4_section_header_bytes);
+	put_u64(section, 32u, table_bytes);
+	put_u64(section, 40u, 0u);
+	for (std::size_t index = 0; index < chunks.size(); ++index) {
+		const auto entry = mncwf_v4_section_header_bytes +
+			index * mncwf_v5_chunk_entry_bytes;
+		const auto &chunk = chunks[index];
+		put_u64(section, entry + 0u, chunk.first_frame);
+		put_u64(section, entry + 8u, chunk.frame_count);
+		put_u64(section, entry + 16u, offsets[index]);
+		put_u64(section, entry + 24u, chunk.payload.size());
+		put_u64(section, entry + 32u, chunk.logical_bytes);
+		put_u16(section, entry + 40u,
+			static_cast<std::uint16_t>(chunk.codec));
+		put_u16(section, entry + 42u, chunk.flags);
+		put_u32(section, entry + 44u, chunk.logical_crc32c);
+		put_u64(section, entry + 48u, 0u);
+		std::copy(chunk.payload.begin(), chunk.payload.end(), section.begin() +
+			static_cast<std::ptrdiff_t>(offsets[index]));
+	}
+	return section;
+}
+
+EncodedBytes encode_v5_sample_section(const MncwfV4Document &document)
+{
+	if (document.sample_frame_bytes == 0u ||
+	    document.sample_frame_bytes > mncwf_v5_max_chunk_logical_bytes)
+		reject("v5 sample frame size is outside the chunk bound");
+	const auto frames_per_chunk = std::max<std::uint64_t>(1u,
+		mncwf_v5_max_chunk_logical_bytes / document.sample_frame_bytes);
+	const auto chunk_count = (document.sample_frame_count +
+		frames_per_chunk - 1u) / frames_per_chunk;
+
+	ZstdCompressionContext context;
+	configure_v5_compressor(context.value);
+	std::vector<EncodedV5Chunk> chunks;
+	chunks.reserve(narrow_size(chunk_count, "v5 chunk count"));
+	for (std::uint64_t first = 0u; first < document.sample_frame_count;
+	     first += frames_per_chunk) {
+		const auto count = std::min(frames_per_chunk,
+			document.sample_frame_count - first);
+		const auto logical_bytes = checked_multiply(count,
+			document.sample_frame_bytes, "v5 chunk logical bytes");
+		const auto logical_offset = checked_multiply(first,
+			document.sample_frame_bytes, "v5 chunk logical offset");
+		const auto logical = std::span<const std::byte>{document.sample_data}
+			.subspan(narrow_size(logical_offset, "v5 chunk logical offset"),
+				narrow_size(logical_bytes, "v5 chunk logical bytes"));
+		chunks.push_back(compress_v5_chunk(context.value, logical, first,
+			count));
+	}
+	return assemble_v5_sample_section(document.sample_frame_count,
+		document.sample_frame_bytes, chunks);
+}
+
 } // namespace
 
 std::vector<std::byte> encode_mncwf_v4(const MncwfV4Document &document)
@@ -875,6 +1090,94 @@ std::vector<std::byte> encode_mncwf_v4(const MncwfV4Document &document)
 
 	/* One implementation is the writer; the other is the acceptance oracle. */
 	(void)MncwfV4Reader{file};
+	return file;
+}
+
+std::vector<std::byte> encode_mncwf_v5(const MncwfV4Document &document)
+{
+	const auto sample_bytes = checked_multiply(document.sample_frame_count,
+		document.sample_frame_bytes, "encoded sample data");
+	if (document.sample_data.size() != sample_bytes)
+		reject("encoder sample geometry is inconsistent");
+
+	/* The six metadata sections are intentionally byte-identical to v4. */
+	struct SectionCopy {
+		std::uint32_t type = 0;
+		std::uint16_t version = 1;
+		std::uint64_t item_count = 0;
+		std::uint32_t item_bytes = 0;
+		std::uint64_t logical_bytes = 0;
+		EncodedBytes payload;
+	};
+	std::array<SectionCopy, mncwf_v4_mandatory_section_count> sections{};
+	std::array<EncodedSection, 6u> metadata{
+		encode_capture(document.capture_metadata),
+		encode_timebase(document.timebase_segments),
+		encode_channels(document.channels),
+		encode_events(document.events),
+		encode_quality(document.quality_intervals),
+		encode_lineage(document.lineage),
+	};
+	for (std::size_t index = 0; index < metadata.size(); ++index) {
+		auto &destination = sections[index];
+		auto &source = metadata[index];
+		destination.type = static_cast<std::uint32_t>(source.type);
+		destination.item_count = source.item_count;
+		destination.item_bytes = source.item_bytes;
+		destination.payload = std::move(source.payload);
+		destination.logical_bytes = destination.payload.size();
+	}
+	auto &samples = sections.back();
+	samples.type = static_cast<std::uint32_t>(MncwfV4SectionType::sample_data);
+	samples.version = 2u;
+	samples.item_count = document.sample_frame_count;
+	samples.item_bytes = document.sample_frame_bytes;
+	samples.logical_bytes = sample_bytes;
+	samples.payload = encode_v5_sample_section(document);
+
+	const auto directory_bytes = checked_multiply(sections.size(),
+		mncwf_v4_directory_entry_bytes, "encoded directory");
+	auto next_offset = align_eight(checked_add(mncwf_v4_header_bytes,
+		directory_bytes, "encoded directory"));
+	std::array<std::uint64_t, mncwf_v4_mandatory_section_count> offsets{};
+	for (std::size_t index = 0; index < sections.size(); ++index) {
+		offsets[index] = next_offset;
+		next_offset = align_eight(checked_add(next_offset,
+			sections[index].payload.size(), "encoded v5 file"));
+	}
+	if (next_offset > mncwf_v4_max_file_bytes)
+		reject("encoded v5 file exceeds the 512 MiB bound");
+	EncodedBytes file(narrow_size(next_offset, "encoded v5 file"));
+	std::copy(mncwf_magic.begin(), mncwf_magic.end(), file.begin());
+	put_u32(file, 8u, mncwf_v5_version);
+	put_u32(file, 12u, mncwf_v4_header_bytes);
+	put_u32(file, 16u, mncwf_v4_directory_entry_bytes);
+	put_u32(file, 20u, static_cast<std::uint32_t>(sections.size()));
+	put_u64(file, 24u, mncwf_v4_header_bytes);
+	put_u64(file, 32u, directory_bytes);
+	put_u64(file, 40u, next_offset);
+	for (std::size_t index = 0; index < sections.size(); ++index) {
+		const auto entry = mncwf_v4_header_bytes +
+			index * mncwf_v4_directory_entry_bytes;
+		const auto &section = sections[index];
+		put_u32(file, entry + 0u, section.type);
+		put_u16(file, entry + 4u, section.version);
+		put_u16(file, entry + 6u, mncwf_v4_section_required);
+		put_u64(file, entry + 8u, offsets[index]);
+		put_u64(file, entry + 16u, section.payload.size());
+		put_u64(file, entry + 24u, section.logical_bytes);
+		put_u64(file, entry + 32u, section.item_count);
+		put_u32(file, entry + 40u, section.item_bytes);
+		put_u32(file, entry + 44u, mncwf_crc32c(section.payload));
+		std::copy(section.payload.begin(), section.payload.end(), file.begin() +
+			static_cast<std::ptrdiff_t>(offsets[index]));
+	}
+	const auto directory = std::span<const std::byte>{file}.subspan(
+		mncwf_v4_header_bytes, narrow_size(directory_bytes, "directory"));
+	put_u32(file, 52u, mncwf_crc32c(directory));
+	put_u32(file, 56u, 0u);
+	put_u32(file, 56u, mncwf_crc32c(
+		std::span<const std::byte>{file}.first(mncwf_v4_header_bytes)));
 	return file;
 }
 
@@ -1028,19 +1331,189 @@ void restamp_event(MncwfV4EventDescriptor &event,
 void write_directory_entry(EncodedBytes &file, std::size_t index,
 	MncwfV4SectionType type, std::uint64_t offset,
 	std::uint64_t stored_bytes, std::uint64_t item_count,
-	std::uint32_t item_bytes, std::uint32_t crc)
+	std::uint32_t item_bytes, std::uint32_t crc,
+	std::uint16_t version = 1u, std::uint64_t logical_bytes = 0u)
 {
 	const auto directory = mncwf_v4_header_bytes +
 		index * mncwf_v4_directory_entry_bytes;
 	put_u32(file, directory + 0u, static_cast<std::uint32_t>(type));
-	put_u16(file, directory + 4u, 1u);
+	put_u16(file, directory + 4u, version);
 	put_u16(file, directory + 6u, mncwf_v4_section_required);
 	put_u64(file, directory + 8u, offset);
 	put_u64(file, directory + 16u, stored_bytes);
-	put_u64(file, directory + 24u, stored_bytes);
+	put_u64(file, directory + 24u,
+		logical_bytes == 0u ? stored_bytes : logical_bytes);
 	put_u64(file, directory + 32u, item_count);
 	put_u32(file, directory + 40u, item_bytes);
 	put_u32(file, directory + 44u, crc);
+}
+
+const MncwfV4SectionInfo &sample_section_info(const MncwfV4Reader &reader)
+{
+	const auto sample_type = static_cast<std::uint32_t>(
+		MncwfV4SectionType::sample_data);
+	const auto found = std::ranges::find_if(reader.sections(),
+		[sample_type](const auto &section) {
+			return section.type == sample_type;
+		});
+	if (found == reader.sections().end())
+		reject("sample section lookup failed");
+	return *found;
+}
+
+std::vector<std::byte> decompress_v5_source_chunk(
+	const MncwfV4SectionInfo &sample_section,
+	const MncwfV5ChunkInfo &chunk, ZSTD_DCtx *decompressor)
+{
+	const auto stored = range(sample_section.data, chunk.stored_offset,
+		chunk.stored_bytes, "v5 event source chunk");
+	std::vector<std::byte> logical(
+		narrow_size(chunk.logical_bytes, "v5 event source chunk"));
+	if (chunk.codec == MncwfChunkCodec::raw) {
+		std::copy(stored.begin(), stored.end(), logical.begin());
+	} else {
+		const auto declared = ZSTD_getFrameContentSize(stored.data(),
+			stored.size());
+		if (declared != chunk.logical_bytes)
+			reject("v5 event source frame content size is invalid");
+		const auto produced = ZSTD_decompressDCtx(decompressor,
+			logical.data(), logical.size(), stored.data(), stored.size());
+		require_zstd(produced, "decompress v5 event boundary chunk");
+		if (produced != logical.size())
+			reject("v5 event boundary chunk size is invalid");
+	}
+	if (mncwf_crc32c(logical) != chunk.logical_crc32c)
+		reject("v5 event source chunk logical CRC32C mismatch");
+	return logical;
+}
+
+EncodedBytes make_v5_slice_sample_section(const MncwfV4Reader &reader,
+	std::uint64_t first_frame, std::uint64_t frame_count)
+{
+	const auto &sample_section = sample_section_info(reader);
+	/* Validate every stored source byte before reusing compressed chunks. */
+	if (mncwf_crc32c(sample_section.data) != sample_section.crc32c)
+		reject("v5 event source sample CRC32C mismatch");
+	const auto end_frame = checked_add(first_frame, frame_count,
+		"v5 event frame range");
+
+	ZstdCompressionContext compressor;
+	configure_v5_compressor(compressor.value);
+	ZSTD_DCtx *decompressor = ZSTD_createDCtx();
+	if (decompressor == nullptr)
+		reject("cannot allocate the Zstd decompression context");
+	const auto release = [&] { ZSTD_freeDCtx(decompressor); };
+	std::vector<EncodedV5Chunk> output;
+	try {
+		require_zstd(ZSTD_DCtx_setParameter(decompressor,
+			ZSTD_d_windowLogMax, 20), "bound event Zstd decompression window");
+		for (const auto &source : reader.sample_chunks()) {
+			const auto source_end = checked_add(source.first_frame,
+				source.frame_count, "v5 source chunk frame range");
+			const auto begin = std::max(first_frame, source.first_frame);
+			const auto end = std::min(end_frame, source_end);
+			if (begin >= end)
+				continue;
+			const auto relative_first = begin - first_frame;
+			const auto selected_frames = end - begin;
+			if (begin == source.first_frame && end == source_end) {
+				const auto stored = range(sample_section.data,
+					source.stored_offset, source.stored_bytes,
+					"v5 event source chunk");
+				if (source.codec == MncwfChunkCodec::raw &&
+				    mncwf_crc32c(stored) != source.logical_crc32c)
+					reject("v5 event raw source chunk CRC32C mismatch");
+				if (source.codec == MncwfChunkCodec::zstd &&
+				    ZSTD_getFrameContentSize(stored.data(), stored.size()) !=
+					    source.logical_bytes)
+					reject("v5 event source frame content size is invalid");
+				EncodedV5Chunk copied{};
+				copied.first_frame = relative_first;
+				copied.frame_count = selected_frames;
+				copied.logical_bytes = source.logical_bytes;
+				copied.codec = source.codec;
+				copied.flags = source.flags;
+				copied.logical_crc32c = source.logical_crc32c;
+				copied.payload.assign(stored.begin(), stored.end());
+				output.push_back(std::move(copied));
+				continue;
+			}
+
+			auto logical = decompress_v5_source_chunk(sample_section,
+				source, decompressor);
+			const auto local_frame = begin - source.first_frame;
+			const auto local_offset = checked_multiply(local_frame,
+				reader.sample_frame_bytes(), "v5 event boundary offset");
+			const auto selected_bytes = checked_multiply(selected_frames,
+				reader.sample_frame_bytes(), "v5 event boundary bytes");
+			const auto selected = std::span<const std::byte>{logical}.subspan(
+				narrow_size(local_offset, "v5 event boundary offset"),
+				narrow_size(selected_bytes, "v5 event boundary bytes"));
+			output.push_back(compress_v5_chunk(compressor.value, selected,
+				relative_first, selected_frames));
+		}
+		release();
+	} catch (...) {
+		release();
+		throw;
+	}
+	return assemble_v5_sample_section(frame_count,
+		reader.sample_frame_bytes(), output);
+}
+
+EncodedBytes make_v5_virtual_file(const std::array<EncodedSection, 6> &metadata,
+	EncodedBytes sample_section, std::uint64_t frame_count,
+	std::uint32_t frame_bytes)
+{
+	constexpr auto section_count = mncwf_v4_mandatory_section_count;
+	const auto directory_bytes = checked_multiply(section_count,
+		mncwf_v4_directory_entry_bytes, "v5 virtual directory");
+	auto next_offset = align_eight(checked_add(mncwf_v4_header_bytes,
+		directory_bytes, "v5 virtual directory"));
+	std::array<std::uint64_t, section_count> offsets{};
+	for (std::size_t index = 0; index < metadata.size(); ++index) {
+		offsets[index] = next_offset;
+		next_offset = align_eight(checked_add(next_offset,
+			metadata[index].payload.size(), "v5 virtual metadata"));
+	}
+	offsets.back() = next_offset;
+	const auto file_bytes = align_eight(checked_add(next_offset,
+		sample_section.size(), "v5 virtual sample section"));
+	if (file_bytes > mncwf_v4_max_file_bytes)
+		reject("v5 virtual file exceeds the 512 MiB bound");
+	EncodedBytes file(narrow_size(file_bytes, "v5 virtual file"));
+	std::copy(mncwf_magic.begin(), mncwf_magic.end(), file.begin());
+	put_u32(file, 8u, mncwf_v5_version);
+	put_u32(file, 12u, mncwf_v4_header_bytes);
+	put_u32(file, 16u, mncwf_v4_directory_entry_bytes);
+	put_u32(file, 20u, section_count);
+	put_u64(file, 24u, mncwf_v4_header_bytes);
+	put_u64(file, 32u, directory_bytes);
+	put_u64(file, 40u, file_bytes);
+	for (std::size_t index = 0; index < metadata.size(); ++index) {
+		const auto &section = metadata[index];
+		write_directory_entry(file, index, section.type, offsets[index],
+			section.payload.size(), section.item_count, section.item_bytes,
+			mncwf_crc32c(section.payload));
+		std::copy(section.payload.begin(), section.payload.end(), file.begin() +
+			static_cast<std::ptrdiff_t>(offsets[index]));
+	}
+	const auto logical_bytes = checked_multiply(frame_count, frame_bytes,
+		"v5 virtual logical sample bytes");
+	write_directory_entry(file, metadata.size(),
+		MncwfV4SectionType::sample_data, offsets.back(), sample_section.size(),
+		frame_count, frame_bytes, mncwf_crc32c(sample_section), 2u,
+		logical_bytes);
+	std::copy(sample_section.begin(), sample_section.end(), file.begin() +
+		static_cast<std::ptrdiff_t>(offsets.back()));
+	const auto directory = std::span<const std::byte>{file}.subspan(
+		mncwf_v4_header_bytes, narrow_size(directory_bytes,
+			"v5 virtual directory"));
+	put_u32(file, 52u, mncwf_crc32c(directory));
+	put_u32(file, 56u, 0u);
+	put_u32(file, 56u, mncwf_crc32c(
+		std::span<const std::byte>{file}.first(mncwf_v4_header_bytes)));
+	return file;
 }
 
 } // namespace
@@ -1236,6 +1709,25 @@ MncwfV4VirtualFile make_mncwf_v4_event_slice(
 	if (lineage.size() > mncwf_v4_max_lineage_entries)
 		reject("virtual slice lineage exceeds its bound");
 
+	std::array<EncodedSection, 6> metadata{
+		encode_capture(capture), encode_timebase(timebase),
+		encode_channels(reader.channels()), encode_events(events),
+		encode_quality(quality), encode_lineage(lineage),
+	};
+	if (reader.version() == mncwf_v5_version) {
+		auto file = make_v5_virtual_file(metadata,
+			make_v5_slice_sample_section(reader, *first_frame, frame_count),
+			frame_count, reader.sample_frame_bytes());
+		MncwfV4VirtualFile result{};
+		result.prefix_ = std::move(file);
+		result.file_bytes_ = result.prefix_.size();
+		result.capture_uuid_ = capture.capture_uuid;
+		result.first_sequence_ = slice_first_sequence;
+		result.last_sequence_ = slice_last_sequence;
+		return result;
+	}
+	if (!reader.samples_materialized())
+		reject("v4 virtual slice requires materialized samples");
 	const auto sample_offset = checked_multiply(*first_frame,
 		reader.sample_frame_bytes(), "virtual sample offset");
 	const auto sample_bytes = checked_multiply(frame_count,
@@ -1244,11 +1736,6 @@ MncwfV4VirtualFile make_mncwf_v4_event_slice(
 		narrow_size(sample_offset, "virtual sample offset"),
 		narrow_size(sample_bytes, "virtual sample bytes"));
 
-	std::array<EncodedSection, 6> metadata{
-		encode_capture(capture), encode_timebase(timebase),
-		encode_channels(reader.channels()), encode_events(events),
-		encode_quality(quality), encode_lineage(lineage),
-	};
 	constexpr auto section_count = mncwf_v4_mandatory_section_count;
 	const auto directory_bytes = checked_multiply(section_count,
 		mncwf_v4_directory_entry_bytes, "virtual directory");
@@ -1357,7 +1844,8 @@ std::size_t MncwfV4VirtualFile::read(std::uint64_t offset,
 	return copied;
 }
 
-MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
+MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes,
+	MncwfValidationMode mode) : bytes_(bytes), mode_(mode)
 {
 	if (bytes.size() < mncwf_v4_header_bytes)
 		reject("header is truncated");
@@ -1365,8 +1853,10 @@ MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
 		reject("file exceeds the configured size bound");
 	if (!std::equal(mncwf_magic.begin(), mncwf_magic.end(), bytes.begin()))
 		reject("magic is invalid");
-	if (read_u32(bytes, 8) != mncwf_v4_version)
-		reject("version is not 4");
+	header_.version = read_u32(bytes, 8);
+	if (header_.version != mncwf_v4_version &&
+	    header_.version != mncwf_v5_version)
+		reject("version is not supported");
 	if (read_u32(bytes, 12) != mncwf_v4_header_bytes ||
 	    read_u32(bytes, 16) != mncwf_v4_directory_entry_bytes)
 		reject("header geometry is unsupported");
@@ -1418,11 +1908,21 @@ MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
 		section.crc32c = read_u32(directory, offset + 44u);
 		if (read_u64(directory, offset + 48u) != 0u)
 			reject("directory reserved field is nonzero");
+		const bool sample_section = section.type == static_cast<std::uint32_t>(
+			MncwfV4SectionType::sample_data);
+		const bool valid_sample_version = header_.version == mncwf_v4_version
+			? section.version == 1u : section.version == 2u;
+		const bool valid_logical_size = header_.version == mncwf_v4_version ||
+			!sample_section
+			? section.logical_bytes == section.stored_bytes
+			: section.logical_bytes == checked_multiply(section.item_count,
+				section.item_bytes, "sample logical bytes");
 		if (section.type == 0u || section.version == 0u ||
 		    (section.flags & ~mncwf_v4_known_section_flags) != 0u ||
 		    section.stored_bytes == 0u ||
 		    section.item_count > mncwf_v4_max_file_bytes ||
-		    section.logical_bytes != section.stored_bytes ||
+		    !valid_logical_size ||
+		    (sample_section && !valid_sample_version) ||
 		    (section.offset & 7u) != 0u)
 			reject("directory entry is invalid");
 		if (!known_section(section.type) &&
@@ -1474,7 +1974,10 @@ MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
 	if (cursor != bytes.size())
 		reject("unreferenced bytes follow the final section");
 	for (const auto &section : sections_)
-		if (mncwf_crc32c(section.data) != section.crc32c)
+		if (!(mode_ == MncwfValidationMode::metadata_only &&
+		      section.type == static_cast<std::uint32_t>(
+			      MncwfV4SectionType::sample_data)) &&
+		    mncwf_crc32c(section.data) != section.crc32c)
 			reject("section CRC32C mismatch");
 
 	const auto find_section = [this](MncwfV4SectionType type)
@@ -1907,12 +2410,143 @@ MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
 	if (sample_info.item_bytes == 0u ||
 	    sample_info.item_bytes != expected_frame_bytes)
 		reject("sample frame size disagrees with channel definitions");
-	const auto sample_section = parse_section_envelope(sample_info,
-		sample_info.item_bytes, 1u,
-		mncwf_v4_max_file_bytes / sample_info.item_bytes, false);
-	sample_data_ = sample_section.records;
 	sample_frame_count_ = sample_info.item_count;
 	sample_frame_bytes_ = sample_info.item_bytes;
+	if (header_.version == mncwf_v4_version) {
+		const auto sample_section = parse_section_envelope(sample_info,
+			sample_info.item_bytes, 1u,
+			mncwf_v4_max_file_bytes / sample_info.item_bytes, false);
+		if (mode_ == MncwfValidationMode::complete)
+			sample_data_ = sample_section.records;
+	} else {
+		if (sample_info.logical_bytes > mncwf_v4_max_file_bytes)
+			reject("v5 logical sample data exceeds the configured size bound");
+		const auto section = sample_info.data;
+		if (section.size() < mncwf_v4_section_header_bytes ||
+		    read_u32(section, 0u) != sample_info.type ||
+		    read_u16(section, 4u) != 2u ||
+		    read_u16(section, 6u) != mncwf_v4_section_header_bytes ||
+		    read_u32(section, 8u) != 0u ||
+		    read_u32(section, 12u) != sample_info.item_bytes ||
+		    read_u64(section, 16u) != sample_info.item_count ||
+		    read_u64(section, 24u) != mncwf_v4_section_header_bytes ||
+		    read_u64(section, 40u) != 0u)
+			reject("v5 sample-section envelope is invalid");
+		const auto table_bytes = read_u64(section, 32u);
+		if (table_bytes == 0u ||
+		    table_bytes % mncwf_v5_chunk_entry_bytes != 0u)
+			reject("v5 chunk table geometry is invalid");
+		const auto chunk_count = table_bytes / mncwf_v5_chunk_entry_bytes;
+		if (chunk_count > mncwf_v5_max_chunks)
+			reject("v5 chunk count exceeds the allocation bound");
+		const auto table_end = checked_add(mncwf_v4_section_header_bytes,
+			table_bytes, "v5 chunk table");
+		(void)range(section, mncwf_v4_section_header_bytes, table_bytes,
+			"v5 chunk table");
+		auto expected_first_frame = std::uint64_t{0};
+		auto expected_stored_offset = align_eight(table_end);
+		sample_chunks_.reserve(narrow_size(chunk_count, "v5 chunk count"));
+		for (std::uint64_t index = 0u; index < chunk_count; ++index) {
+			const auto entry = narrow_size(checked_add(
+				mncwf_v4_section_header_bytes,
+				checked_multiply(index, mncwf_v5_chunk_entry_bytes,
+					"v5 chunk entry"), "v5 chunk entry"),
+				"v5 chunk entry");
+			MncwfV5ChunkInfo chunk{};
+			chunk.first_frame = read_u64(section, entry + 0u);
+			chunk.frame_count = read_u64(section, entry + 8u);
+			chunk.stored_offset = read_u64(section, entry + 16u);
+			chunk.stored_bytes = read_u64(section, entry + 24u);
+			chunk.logical_bytes = read_u64(section, entry + 32u);
+			const auto codec = read_u16(section, entry + 40u);
+			const auto flags = read_u16(section, entry + 42u);
+			chunk.logical_crc32c = read_u32(section, entry + 44u);
+			const auto expected_logical = checked_multiply(chunk.frame_count,
+				sample_info.item_bytes, "v5 chunk logical bytes");
+			if (chunk.first_frame != expected_first_frame ||
+			    chunk.frame_count == 0u ||
+			    chunk.logical_bytes != expected_logical ||
+			    chunk.logical_bytes > mncwf_v5_max_chunk_logical_bytes ||
+			    chunk.stored_offset != expected_stored_offset ||
+			    chunk.stored_bytes == 0u ||
+			    read_u64(section, entry + 48u) != 0u ||
+			    codec > static_cast<std::uint16_t>(MncwfChunkCodec::zstd) ||
+			    (codec == static_cast<std::uint16_t>(MncwfChunkCodec::raw)
+				? flags != 0u || chunk.stored_bytes != chunk.logical_bytes
+				: flags != mncwf_v5_chunk_frame_checksum ||
+				  chunk.stored_bytes >= chunk.logical_bytes))
+				reject("v5 sample chunk is invalid");
+			const auto stored = range(section, chunk.stored_offset,
+				chunk.stored_bytes, "v5 sample chunk");
+			chunk.codec = static_cast<MncwfChunkCodec>(codec);
+			chunk.flags = flags;
+			if (chunk.codec == MncwfChunkCodec::zstd)
+				validate_v5_zstd_frame(stored, chunk.logical_bytes);
+			expected_first_frame = checked_add(expected_first_frame,
+				chunk.frame_count, "v5 frame coverage");
+			expected_stored_offset = align_eight(checked_add(
+				chunk.stored_offset, chunk.stored_bytes,
+				"v5 stored chunk"));
+			if (expected_stored_offset > section.size())
+				reject("v5 chunk alignment exceeds the sample section");
+			const auto padding_begin = chunk.stored_offset + chunk.stored_bytes;
+			if (expected_stored_offset != padding_begin &&
+			    !all_zero(range(section, padding_begin,
+				expected_stored_offset - padding_begin,
+				"v5 chunk alignment padding")))
+				reject("v5 chunk alignment padding is nonzero");
+			sample_chunks_.push_back(chunk);
+		}
+		if (expected_first_frame != sample_info.item_count ||
+		    expected_stored_offset != section.size())
+			reject("v5 chunk coverage is incomplete");
+		if (mode_ == MncwfValidationMode::complete) {
+			owned_sample_data_.resize(narrow_size(sample_info.logical_bytes,
+				"v5 logical sample data"));
+			ZSTD_DCtx *decompressor = ZSTD_createDCtx();
+			if (decompressor == nullptr)
+				reject("cannot allocate the Zstd decompression context");
+			const auto release = [&] { ZSTD_freeDCtx(decompressor); };
+			try {
+				require_zstd(ZSTD_DCtx_setParameter(decompressor,
+					ZSTD_d_windowLogMax, 20),
+					"bound Zstd decompression window");
+				for (const auto &chunk : sample_chunks_) {
+					const auto stored = range(section, chunk.stored_offset,
+						chunk.stored_bytes, "v5 sample chunk");
+					const auto output_offset = checked_multiply(
+						chunk.first_frame, sample_info.item_bytes,
+						"v5 decompressed offset");
+					auto logical = std::span<std::byte>{owned_sample_data_}
+						.subspan(narrow_size(output_offset,
+							"v5 decompressed offset"),
+							narrow_size(chunk.logical_bytes,
+							"v5 chunk logical bytes"));
+					if (chunk.codec == MncwfChunkCodec::raw) {
+						std::copy(stored.begin(), stored.end(), logical.begin());
+					} else {
+						const auto declared = ZSTD_getFrameContentSize(
+							stored.data(), stored.size());
+						if (declared != chunk.logical_bytes)
+							reject("v5 Zstd frame content size is invalid");
+						const auto produced = ZSTD_decompressDCtx(decompressor,
+							logical.data(), logical.size(), stored.data(),
+							stored.size());
+						require_zstd(produced, "decompress v5 sample chunk");
+						if (produced != logical.size())
+							reject("v5 Zstd frame decompressed size is invalid");
+					}
+					if (mncwf_crc32c(logical) != chunk.logical_crc32c)
+						reject("v5 sample chunk logical CRC32C mismatch");
+				}
+				release();
+			} catch (...) {
+				release();
+				throw;
+			}
+			sample_data_ = owned_sample_data_;
+		}
+	}
 	if (expected_first_frame != sample_frame_count_)
 		reject("timebase segments do not cover every sample frame");
 
@@ -1949,8 +2583,11 @@ MncwfV4Reader::MncwfV4Reader(std::span<const std::byte> bytes) : bytes_(bytes)
 std::span<const std::byte> MncwfV4Reader::sample_frame(
 	std::uint64_t index) const
 {
+	if (mode_ != MncwfValidationMode::complete)
+		throw std::logic_error(
+			"MNCWF sample data was not materialized by the metadata-only reader");
 	if (index >= sample_frame_count_)
-		throw std::out_of_range("MNCWF v4 sample frame index");
+		throw std::out_of_range("MNCWF sample frame index");
 	const auto offset = checked_multiply(index, sample_frame_bytes_,
 		"sample frame offset");
 	return sample_data_.subspan(narrow_size(offset, "sample frame offset"),

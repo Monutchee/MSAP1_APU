@@ -486,10 +486,11 @@ void refresh_section_crc(Bytes &file, std::size_t entry)
 	refresh_checksums(file);
 }
 
-void expect_rejected(const Bytes &file, std::string_view what)
+void expect_rejected(const Bytes &file, std::string_view what,
+	msap1::MncwfValidationMode mode = msap1::MncwfValidationMode::complete)
 {
 	try {
-		(void)msap1::MncwfV4Reader{file};
+		(void)msap1::MncwfV4Reader{file, mode};
 		require(false, what);
 	} catch (const std::invalid_argument &) {
 		// Expected: readers reject before exposing any sample view.
@@ -511,6 +512,64 @@ Bytes materialize(const msap1::MncwfV4VirtualFile &file)
 		offset += copied;
 	}
 	return result;
+}
+
+msap1::MncwfV4Document document_from(const msap1::MncwfV4Reader &reader)
+{
+	msap1::MncwfV4Document document{};
+	document.capture_metadata = reader.capture_metadata();
+	document.timebase_segments = reader.timebase_segments();
+	document.channels = reader.channels();
+	document.events = reader.events();
+	document.quality_intervals = reader.quality_intervals();
+	document.lineage = reader.lineage();
+	document.sample_frame_count = reader.sample_frame_count();
+	document.sample_frame_bytes = reader.sample_frame_bytes();
+	document.sample_data.assign(reader.sample_data().begin(),
+		reader.sample_data().end());
+	return document;
+}
+
+Bytes make_mixed_v5_file(const Bytes &valid)
+{
+	const msap1::MncwfV4Reader source{valid};
+	auto document = document_from(source);
+	const auto frames_per_chunk = msap1::mncwf_v5_max_chunk_logical_bytes /
+		document.sample_frame_bytes;
+	document.sample_frame_count = frames_per_chunk * 3u;
+	document.timebase_segments.front().frame_count =
+		document.sample_frame_count;
+	document.timebase_segments.front().source_frame_count =
+		document.sample_frame_count *
+		document.timebase_segments.front().decimation_divisor;
+	auto &wide_event = document.events.front();
+	const auto sequence_step =
+		document.timebase_segments.front().decimation_divisor;
+	wide_event.start_sequence =
+		document.timebase_segments.front().first_sequence + 10u * sequence_step;
+	wide_event.current_sequence =
+		document.timebase_segments.front().first_sequence +
+		(document.sample_frame_count - 11u) * sequence_step;
+	wide_event.end_sequence = wide_event.current_sequence;
+	wide_event.trigger_sequence = wide_event.start_sequence;
+	wide_event.duration_samples = wide_event.end_sequence -
+		wide_event.start_sequence;
+	document.sample_data.assign(
+		static_cast<std::size_t>(document.sample_frame_count *
+			document.sample_frame_bytes), std::byte{0});
+
+	// The first two chunks compress strongly. A deterministic pseudorandom third
+	// chunk is intentionally incompressible and must use the raw fallback.
+	std::uint32_t state = 0x6d2b79f5u;
+	for (std::size_t index = 2u * msap1::mncwf_v5_max_chunk_logical_bytes;
+	     index < document.sample_data.size(); ++index) {
+		state ^= state << 13u;
+		state ^= state >> 17u;
+		state ^= state << 5u;
+		document.sample_data[index] =
+			std::byte{static_cast<std::uint8_t>(state)};
+	}
+	return msap1::encode_mncwf_v5(document);
 }
 
 } // namespace
@@ -564,17 +623,7 @@ int main()
 		}
 		require(bounds_checked, "sample-frame access is bounds checked");
 
-		msap1::MncwfV4Document document{};
-		document.capture_metadata = reader.capture_metadata();
-		document.timebase_segments = reader.timebase_segments();
-		document.channels = reader.channels();
-		document.events = reader.events();
-		document.quality_intervals = reader.quality_intervals();
-		document.lineage = reader.lineage();
-		document.sample_frame_count = reader.sample_frame_count();
-		document.sample_frame_bytes = reader.sample_frame_bytes();
-		document.sample_data.assign(reader.sample_data().begin(),
-			reader.sample_data().end());
+		auto document = document_from(reader);
 		const auto encoded = msap1::encode_mncwf_v4(document);
 		const msap1::MncwfV4Reader round_trip{encoded};
 		require(round_trip.header().section_count == 7u &&
@@ -693,6 +742,174 @@ int main()
 		} catch (const std::exception &error) {
 		std::fprintf(stderr, "FAIL: valid fixture rejected: %s\n", error.what());
 		++failures;
+	}
+	{
+		try {
+			const auto encoded = make_mixed_v5_file(valid);
+			const msap1::MncwfV4Reader reader{encoded};
+			require(reader.version() == msap1::mncwf_v5_version &&
+				reader.samples_materialized(),
+				"v5 reader identifies and materializes compressed files");
+			require(reader.sample_chunks().size() == 3u &&
+				reader.sample_chunks()[0].codec ==
+					msap1::MncwfChunkCodec::zstd &&
+				reader.sample_chunks()[1].codec ==
+					msap1::MncwfChunkCodec::zstd &&
+				reader.sample_chunks()[2].codec ==
+					msap1::MncwfChunkCodec::raw,
+				"v5 encoder mixes Zstd and raw chunks by benefit");
+			require(reader.sample_data().size() ==
+					3u * msap1::mncwf_v5_max_chunk_logical_bytes &&
+				reader.sample_data().front() == std::byte{0} &&
+				reader.sample_data()[2u *
+					msap1::mncwf_v5_max_chunk_logical_bytes] !=
+					std::byte{0},
+				"v5 chunks reconstruct the exact logical sample stream");
+
+			const msap1::MncwfV4Reader metadata{encoded,
+				msap1::MncwfValidationMode::metadata_only};
+			require(!metadata.samples_materialized() &&
+				metadata.sample_data().empty() &&
+				metadata.sample_chunks().size() == 3u &&
+				metadata.capture_metadata().capture_uuid ==
+					reader.capture_metadata().capture_uuid,
+				"metadata-only v5 discovery avoids sample decompression");
+
+			const auto wide_event = metadata.events().front().event_uuid;
+			const auto virtual_file =
+				msap1::make_mncwf_v4_event_slice(metadata, wide_event);
+			const auto virtual_bytes = materialize(virtual_file);
+			const msap1::MncwfV4Reader sliced{virtual_bytes};
+			const auto expected_first_frame = 10u;
+			const auto expected_frames = reader.sample_frame_count() - 20u;
+			const auto expected_offset = expected_first_frame *
+				reader.sample_frame_bytes();
+			const auto expected_bytes = expected_frames *
+				reader.sample_frame_bytes();
+			require(sliced.version() == msap1::mncwf_v5_version &&
+				sliced.sample_frame_count() == expected_frames &&
+				sliced.sample_chunks().size() == 3u &&
+				sliced.sample_chunks()[0].logical_bytes <
+					reader.sample_chunks()[0].logical_bytes &&
+				sliced.sample_chunks()[1].stored_bytes ==
+					reader.sample_chunks()[1].stored_bytes &&
+				sliced.sample_chunks()[2].logical_bytes <
+					reader.sample_chunks()[2].logical_bytes &&
+				std::ranges::equal(sliced.sample_data(),
+					reader.sample_data().subspan(
+						static_cast<std::size_t>(expected_offset),
+						static_cast<std::size_t>(expected_bytes))),
+				"v5 event export regenerates boundaries and preserves exact samples");
+			const auto source_sample_entry = entry_for(encoded,
+				static_cast<std::uint32_t>(
+					msap1::MncwfV4SectionType::sample_data));
+			const auto source_sample_offset = static_cast<std::size_t>(
+				get_u64(encoded, source_sample_entry + 8u));
+			const auto source_middle_entry = source_sample_offset +
+				msap1::mncwf_v4_section_header_bytes +
+				msap1::mncwf_v5_chunk_entry_bytes;
+			const auto sliced_sample_entry = entry_for(virtual_bytes,
+				static_cast<std::uint32_t>(
+					msap1::MncwfV4SectionType::sample_data));
+			const auto sliced_sample_offset = static_cast<std::size_t>(
+				get_u64(virtual_bytes, sliced_sample_entry + 8u));
+			const auto sliced_middle_entry = sliced_sample_offset +
+				msap1::mncwf_v4_section_header_bytes +
+				msap1::mncwf_v5_chunk_entry_bytes;
+			const auto source_middle_offset = source_sample_offset +
+				static_cast<std::size_t>(get_u64(encoded,
+					source_middle_entry + 16u));
+			const auto sliced_middle_offset = sliced_sample_offset +
+				static_cast<std::size_t>(get_u64(virtual_bytes,
+					sliced_middle_entry + 16u));
+			const auto middle_bytes = static_cast<std::size_t>(get_u64(encoded,
+				source_middle_entry + 24u));
+			require(std::ranges::equal(
+				std::span<const std::byte>{encoded}.subspan(
+					source_middle_offset, middle_bytes),
+				std::span<const std::byte>{virtual_bytes}.subspan(
+					sliced_middle_offset, middle_bytes)),
+				"v5 event export copies a complete middle chunk byte-for-byte");
+
+			const auto export_directory =
+				std::filesystem::temp_directory_path() /
+				("mncwf-v5-export-" + std::to_string(::getpid()));
+			std::filesystem::create_directories(export_directory);
+			{
+				std::ofstream output(export_directory / "capture.mncwf",
+					std::ios::binary | std::ios::trunc);
+				output.write(reinterpret_cast<const char *>(encoded.data()),
+					static_cast<std::streamsize>(encoded.size()));
+			}
+			const auto mapped = msap1::MncwfV4ExportFile::open(
+				export_directory, "capture.mncwf", wide_event);
+			Bytes streamed(static_cast<std::size_t>(mapped->size()));
+			require(mapped->read(0u, streamed) == streamed.size() &&
+				streamed == virtual_bytes,
+				"mapped v5 export uses the metadata-only compressed path");
+			std::filesystem::remove_all(export_directory);
+
+			auto bad_stored = encoded;
+			const auto sample_entry = entry_for(bad_stored,
+				static_cast<std::uint32_t>(
+					msap1::MncwfV4SectionType::sample_data));
+			const auto sample_offset = static_cast<std::size_t>(
+				get_u64(bad_stored, sample_entry + 8u));
+			const auto second_chunk_entry = sample_offset +
+				msap1::mncwf_v4_section_header_bytes +
+				msap1::mncwf_v5_chunk_entry_bytes;
+			const auto third_chunk_entry = second_chunk_entry +
+				msap1::mncwf_v5_chunk_entry_bytes;
+			const auto third_payload = sample_offset +
+				static_cast<std::size_t>(get_u64(bad_stored,
+					third_chunk_entry + 16u));
+			bad_stored[third_payload] ^= std::byte{1};
+			expect_rejected(bad_stored,
+				"v5 stored-payload CRC corruption is rejected");
+
+			auto bad_logical = encoded;
+			bad_logical[third_payload] ^= std::byte{1};
+			refresh_section_crc(bad_logical, sample_entry);
+			expect_rejected(bad_logical,
+				"v5 logical CRC corruption is rejected after stored CRC repair");
+
+			auto overlap = encoded;
+			const auto first_chunk_entry = sample_offset +
+				msap1::mncwf_v4_section_header_bytes;
+			put_u64(overlap, second_chunk_entry + 16u,
+				get_u64(overlap, first_chunk_entry + 16u));
+			refresh_section_crc(overlap, sample_entry);
+			expect_rejected(overlap,
+				"v5 overlapping chunk offsets are rejected");
+
+			auto excessive = encoded;
+			put_u64(excessive, first_chunk_entry + 32u,
+				msap1::mncwf_v5_max_chunk_logical_bytes + 8u);
+			refresh_section_crc(excessive, sample_entry);
+			expect_rejected(excessive,
+				"v5 excessive logical chunk allocation is rejected");
+
+			auto missing_frame_checksum = encoded;
+			const auto first_payload = sample_offset +
+				static_cast<std::size_t>(get_u64(missing_frame_checksum,
+					first_chunk_entry + 16u));
+			const auto descriptor = std::to_integer<std::uint8_t>(
+				missing_frame_checksum[first_payload + 4u]);
+			missing_frame_checksum[first_payload + 4u] = std::byte{
+				static_cast<std::uint8_t>(descriptor & ~0x04u)};
+			refresh_section_crc(missing_frame_checksum, sample_entry);
+			expect_rejected(missing_frame_checksum,
+				"v5 Zstd frame without a checksum is rejected during discovery",
+				msap1::MncwfValidationMode::metadata_only);
+
+			auto truncated = encoded;
+			truncated.pop_back();
+			expect_rejected(truncated, "truncated v5 file is rejected");
+		} catch (const std::exception &error) {
+			std::fprintf(stderr, "FAIL: valid v5 fixture rejected: %s\n",
+				error.what());
+			++failures;
+		}
 	}
 	{
 		const auto uuid = msap1::mncwf_random_uuid();
