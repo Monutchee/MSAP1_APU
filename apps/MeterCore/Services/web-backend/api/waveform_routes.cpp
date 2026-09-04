@@ -24,6 +24,7 @@
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -458,6 +459,16 @@ webengine::Response post_waveform_session_lookup(AppContext &app,
 		if (input.capture_uuids.empty() || input.capture_uuids.size() > 32u)
 			throw std::invalid_argument(
 				"waveform batch lookup requires 1..32 capture UUIDs");
+		std::unordered_set<std::string> distinct;
+		for (const auto &text : input.capture_uuids) {
+			const auto uuid = mncwf_uuid_from_string(text);
+			if (!uuid || mncwf_uuid_is_zero(*uuid))
+				throw std::invalid_argument(
+					"capture UUID must be a nonzero canonical UUID");
+			if (!distinct.insert(text).second)
+				throw std::invalid_argument(
+					"waveform batch lookup UUIDs must be distinct");
+		}
 		WaveformBatchLookupRequest request{};
 		request.capture_uuids = std::move(input.capture_uuids);
 		const auto response = app.acquisition.waveform_batch_lookup(request);
