@@ -1,0 +1,15 @@
+PQDIF normative definitions
+============================
+
+The PQDIF writer in pqdif_converter.cpp uses the subset of standard tags,
+record identifiers, semantic identifiers, physical types, and physical-record
+layout needed by this implementation. Those definitions were transcribed from
+the IEEE SA Open `pqdif/pqdif-normative` project, release 1.0.0, commit
+7119d2ac27841da5bc41fbe1484b82b2d3f84f11:
+
+https://opensource.ieee.org/pqdif/pqdif-normative/-/tree/1.0.0
+
+The upstream definitions are licensed under the Apache License, Version 2.0.
+The complete license text is retained in this repository's top-level LICENSE.
+No upstream implementation code is installed on the target, and no IEEE or
+third-party vendor identity is emitted as the recording-device vendor.

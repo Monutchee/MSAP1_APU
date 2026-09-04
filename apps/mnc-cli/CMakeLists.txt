@@ -1,3 +1,5 @@
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 add_library(mnc_cli STATIC
     core/cli.cpp
     commands/meter_commands.cpp
@@ -17,7 +19,10 @@ target_link_libraries(mnc_cli PUBLIC
     msap1::service-protocol
     msap1::system
     msap1::settings
+	msap1::waveform
+	msap1::waveform-ipc
     mnc::logging
+	OpenSSL::Crypto
     glaze::glaze
 )
 target_include_directories(mnc_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

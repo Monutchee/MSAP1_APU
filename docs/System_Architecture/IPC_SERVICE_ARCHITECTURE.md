@@ -125,7 +125,7 @@ scheduling or unavailable target cgroup CPU/I/O weights:
 | Critical | -10 | FPGA acquisition |
 | High | -5 | Meter stream |
 | Normal | 0 | Settings, service manager, web backend, Modbus, and time synchronization |
-| Background | +5 | Historian, Data Sender, and MQTT |
+| Background | +5 | Historian, Data Sender, MQTT, and waveform conversion |
 
 The acquisition DMA/control loop inherits -10. Its IPC transport explicitly
 runs at 0, while waveform archive discovery, materialization/compression, and
@@ -166,6 +166,23 @@ acquisition loop dispatches at most eight queued IPC frames per turn, and
 capture UUID lookup is indexed. Completed event details and resolved or
 expired captures are not polled again.
 
+Post-capture format conversion is a separate ProtocolGateway service,
+`msap1-waveform-converter`; it never participates in DMA draining or MNCWF
+materialization. The service retains a securely opened MNCWF v4/v5 descriptor
+and runs one bounded conversion worker. Versioned Unix-stream IPC provides
+`Capabilities`, `Submit`, `Status`, `ReadChunk`, and `Cancel`. Only root and
+the `mnc-web` peer UID are authorized with `SO_PEERCRED`. Generated CFF, legacy
+CFG/DAT ZIP, and PQDIF artifacts are private cache objects with a 30-minute
+TTL and are streamed through the authenticated Web backend rather than an
+nginx filesystem alias.
+
+The Web application owns export jobs above individual pages. It persists only
+owner-scoped job state in `sessionStorage`, resumes polling after navigation or
+reload, automatically starts each completed same-origin download once, and
+keeps an explicit download-again fallback. Converter failure removes only the
+converted capabilities; capture browsing and direct MNCWF downloads remain
+available.
+
 ## Focused libraries and ownership
 
 The CMake graph deliberately separates reusable infrastructure from MSAP1
@@ -175,9 +192,12 @@ product behavior:
 mnc::ipc                 framed Unix-stream transport only
 mnc::logging             structured journal writer and reader
 mnc::service             process lifecycle and systemd integration
+mnc::waveform            product-neutral source/sink/converter contracts,
+                         COMTRADE CFF/ZIP and PQDIF writers
 
 msap1::meter             record values, decoders, latest store and provider
 msap1::waveform          waveform DMA/session/file ownership
+msap1::waveform-ipc      converter protocol and client
 msap1::acquisition       product protocol, meter DMA and RPU adapters
 msap1::system            temperature and image identity
 msap1::service-protocol  service-manager product messages

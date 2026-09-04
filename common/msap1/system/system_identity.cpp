@@ -139,7 +139,7 @@ ComponentFingerprint fingerprint_component(const ComponentDefinition &component)
 
 std::vector<ComponentFingerprint> system_component_fingerprints()
 {
-	static const std::array<ComponentDefinition, 7> components{{
+	static const std::array<ComponentDefinition, 8> components{{
 		{"pl-bitstream", "Programmable logic", "FPGA bitstream",
 		 "/usr/lib/firmware/xilinx/msap1/msap1-dfx-firmware.bin"},
 		{"rpu-r5c0", "RPU core 0", "R5 firmware",
@@ -152,6 +152,8 @@ std::vector<ComponentFingerprint> system_component_fingerprints()
 		 "/usr/bin/msap1-web-backend"},
 		{"apu-data-sender", "Meter Data Sender", "APU executable",
 		 "/usr/bin/msap1-data-sender"},
+		{"apu-waveform-converter", "Waveform converter", "APU executable",
+		 "/usr/bin/msap1-waveform-converter"},
 		{"apu-mnc", "MNC diagnostic CLI", "APU executable",
 		 "/usr/bin/mnc"},
 	}};

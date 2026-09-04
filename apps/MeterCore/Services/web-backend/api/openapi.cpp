@@ -24,6 +24,7 @@ struct ErrorResponseDto {
 	std::string error;
 	std::optional<std::string> code;
 	std::optional<bool> retryable;
+	std::optional<std::vector<std::string>> missing_fields;
 };
 
 struct LoginRequestDto {
@@ -245,6 +246,9 @@ void add_external_operations(DocumentedApiRegistry &registry)
 	registry.add_operation(Verb::get, "/api/v1/waveforms/export",
 		webengine::Role::Viewer,
 		"Stream a virtual MNCWF event capture", "Waveforms");
+	registry.add_operation(Verb::get,
+		"/api/v1/waveform-exports/download", webengine::Role::Viewer,
+		"Stream one ready converted waveform artifact", "Waveforms");
 	registry.add_operation(Verb::get,
 		"/api/v1/data-logging/artifacts/download", webengine::Role::Viewer,
 		"Download one manifest-authorized generated artifact",
@@ -741,7 +745,7 @@ std::string generate_openapi_yaml()
 		registry.add_operation(route.method, route.path, route.min_role,
 			route.summary);
 	add_external_operations(registry);
-	constexpr std::size_t external_operation_count = 14;
+	constexpr std::size_t external_operation_count = 15;
 	if (registry.operation_count() !=
 	    route_table.size() + external_operation_count)
 		throw std::runtime_error(

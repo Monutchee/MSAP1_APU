@@ -583,6 +583,28 @@ private:
 	std::uint64_t last_sequence_ = 0;
 };
 
+/**
+ * Immutable description of the precise source interval selected for export.
+ * Both the virtual MNCWF endpoint and post-conversion adapters consume this
+ * descriptor so event boundaries and intersecting metadata cannot diverge.
+ */
+struct MncwfV4SelectionDescriptor {
+	MncwfV4CaptureMetadata capture_metadata{};
+	std::vector<MncwfV4TimebaseSegment> timebase_segments;
+	std::vector<MncwfV4EventDescriptor> events;
+	std::vector<MncwfV4QualityInterval> quality_intervals;
+	std::vector<MncwfV4LineageEntry> lineage;
+	MncwfUuid selected_event_uuid{};
+	std::uint64_t source_first_frame = 0;
+	std::uint64_t frame_count = 0;
+	std::uint64_t first_sequence = 0;
+	std::uint64_t last_sequence = 0;
+};
+
+/** Select the same deterministic event interval used by virtual MNCWF. */
+[[nodiscard]] MncwfV4SelectionDescriptor make_mncwf_v4_event_selection(
+	const MncwfV4Reader &reader, const MncwfUuid &event_uuid);
+
 /** Build a deterministic virtual subcapture around one event UUID. */
 [[nodiscard]] MncwfV4VirtualFile make_mncwf_v4_event_slice(
 	const MncwfV4Reader &reader, const MncwfUuid &event_uuid);

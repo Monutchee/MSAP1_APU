@@ -27,8 +27,8 @@ The version 4 section-directory and capture-time metadata contract is specified
 in [`MNCWF_V4_FILE_FORMAT.md`](MNCWF_V4_FILE_FORMAT.md). Version 5 preserves
 those metadata sections and adds independently compressed sample chunks as
 specified in [`MNCWF_V5_FILE_FORMAT.md`](MNCWF_V5_FILE_FORMAT.md). Versions 1
-through 4 remain accepted for existing persisted history. Future COMTRADE and
-PQDIF programs are converters from validated MNCWF v4/v5 masters, not
+through 4 remain accepted for existing persisted history. COMTRADE and PQDIF
+exports are post-capture conversions from validated MNCWF v4/v5 masters, not
 alternate on-device recorders.
 Their source-field matrix is in
 [`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).

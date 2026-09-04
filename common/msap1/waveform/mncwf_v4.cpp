@@ -1518,7 +1518,7 @@ EncodedBytes make_v5_virtual_file(const std::array<EncodedSection, 6> &metadata,
 
 } // namespace
 
-MncwfV4VirtualFile make_mncwf_v4_event_slice(
+MncwfV4SelectionDescriptor make_mncwf_v4_event_selection(
 	const MncwfV4Reader &reader, const MncwfUuid &event_uuid)
 {
 	if (all_zero(event_uuid))
@@ -1709,6 +1709,34 @@ MncwfV4VirtualFile make_mncwf_v4_event_slice(
 	if (lineage.size() > mncwf_v4_max_lineage_entries)
 		reject("virtual slice lineage exceeds its bound");
 
+	MncwfV4SelectionDescriptor result{};
+	result.capture_metadata = std::move(capture);
+	result.timebase_segments = std::move(timebase);
+	result.events = std::move(events);
+	result.quality_intervals = std::move(quality);
+	result.lineage = std::move(lineage);
+	result.selected_event_uuid = event_uuid;
+	result.source_first_frame = *first_frame;
+	result.frame_count = frame_count;
+	result.first_sequence = slice_first_sequence;
+	result.last_sequence = slice_last_sequence;
+	return result;
+}
+
+MncwfV4VirtualFile make_mncwf_v4_event_slice(
+	const MncwfV4Reader &reader, const MncwfUuid &event_uuid)
+{
+	auto selection = make_mncwf_v4_event_selection(reader, event_uuid);
+	auto &capture = selection.capture_metadata;
+	auto &timebase = selection.timebase_segments;
+	auto &events = selection.events;
+	auto &quality = selection.quality_intervals;
+	auto &lineage = selection.lineage;
+	const auto first_frame = selection.source_first_frame;
+	const auto frame_count = selection.frame_count;
+	const auto slice_first_sequence = selection.first_sequence;
+	const auto slice_last_sequence = selection.last_sequence;
+
 	std::array<EncodedSection, 6> metadata{
 		encode_capture(capture), encode_timebase(timebase),
 		encode_channels(reader.channels()), encode_events(events),
@@ -1716,7 +1744,7 @@ MncwfV4VirtualFile make_mncwf_v4_event_slice(
 	};
 	if (reader.version() == mncwf_v5_version) {
 		auto file = make_v5_virtual_file(metadata,
-			make_v5_slice_sample_section(reader, *first_frame, frame_count),
+			make_v5_slice_sample_section(reader, first_frame, frame_count),
 			frame_count, reader.sample_frame_bytes());
 		MncwfV4VirtualFile result{};
 		result.prefix_ = std::move(file);
@@ -1728,7 +1756,7 @@ MncwfV4VirtualFile make_mncwf_v4_event_slice(
 	}
 	if (!reader.samples_materialized())
 		reject("v4 virtual slice requires materialized samples");
-	const auto sample_offset = checked_multiply(*first_frame,
+	const auto sample_offset = checked_multiply(first_frame,
 		reader.sample_frame_bytes(), "virtual sample offset");
 	const auto sample_bytes = checked_multiply(frame_count,
 		reader.sample_frame_bytes(), "virtual sample bytes");

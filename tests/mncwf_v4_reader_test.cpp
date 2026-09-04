@@ -1,5 +1,6 @@
 #include "msap1/waveform/mncwf_v4.hpp"
 #include "msap1/waveform/mncwf_v4_export.hpp"
+#include "msap1/waveform/mncwf_waveform_source.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -738,6 +740,31 @@ int main()
 			}
 			require(traversal_rejected,
 				"mapped export rejects path traversal before openat");
+			const auto descriptor = ::open(
+				(export_directory / "capture.mncwf").c_str(), O_RDONLY | O_CLOEXEC);
+			require(descriptor >= 0, "open v4 converter-source fixture");
+			if (descriptor >= 0) {
+				msap1::MncwfWaveformSource capture_source(descriptor,
+					mnc::waveform::ExportFormat::comtrade);
+				msap1::MncwfWaveformSource event_source(descriptor,
+					mnc::waveform::ExportFormat::pqdif,
+					mnc::waveform::ExportScope::event, selected_event);
+				::close(descriptor);
+				std::filesystem::remove(export_directory / "capture.mncwf");
+				std::array<std::int64_t, 4> capture_samples{};
+				require(capture_source.source_version() ==
+						msap1::mncwf_v4_version &&
+					capture_source.read_frames(1u, 2u, capture_samples) == 2u &&
+					capture_samples == std::array<std::int64_t, 4>{
+						11, 230'001, 12, 230'002},
+					"v4 adapter retains its descriptor and maps signed samples");
+				std::array<std::int64_t, 2> event_samples{};
+				require(event_source.frame_count() == 1u &&
+					event_source.read_frames(0u, 1u, event_samples) == 1u &&
+					event_samples ==
+						std::array<std::int64_t, 2>{11, 230'001},
+					"v4 event adapter reuses the virtual-slice selection");
+			}
 			std::filesystem::remove_all(export_directory);
 		} catch (const std::exception &error) {
 		std::fprintf(stderr, "FAIL: valid fixture rejected: %s\n", error.what());
@@ -847,6 +874,24 @@ int main()
 			require(mapped->read(0u, streamed) == streamed.size() &&
 				streamed == virtual_bytes,
 				"mapped v5 export uses the metadata-only compressed path");
+			const auto source_descriptor = ::open(
+				(export_directory / "capture.mncwf").c_str(), O_RDONLY | O_CLOEXEC);
+			require(source_descriptor >= 0, "open v5 converter-source fixture");
+			if (source_descriptor >= 0) {
+				msap1::MncwfWaveformSource source(source_descriptor,
+					mnc::waveform::ExportFormat::comtrade);
+				::close(source_descriptor);
+				std::filesystem::remove(export_directory / "capture.mncwf");
+				const auto chunk_frames =
+					msap1::mncwf_v5_max_chunk_logical_bytes /
+					reader.sample_frame_bytes();
+				std::array<std::int64_t, 4> across_boundary{};
+				require(source.source_version() == msap1::mncwf_v5_version &&
+					source.read_frames(chunk_frames - 1u, 2u,
+						across_boundary) == 2u &&
+					across_boundary == std::array<std::int64_t, 4>{0, 0, 0, 0},
+					"v5 adapter decompresses only bounded chunks across a boundary");
+			}
 			std::filesystem::remove_all(export_directory);
 
 			auto bad_stored = encoded;

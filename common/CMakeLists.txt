@@ -5,6 +5,7 @@ option(MNC_LOGGING_REQUIRE_SYSTEMD
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 find_path(ZSTD_INCLUDE_DIR zstd.h)
 find_library(ZSTD_LIBRARY NAMES zstd libzstd.so.1)
 if(NOT ZSTD_INCLUDE_DIR OR NOT ZSTD_LIBRARY)
@@ -309,13 +310,34 @@ target_link_libraries(msap1_settings PRIVATE
     OpenSSL::Crypto
 )
 
+# Product-neutral, bounded post-capture waveform conversion. Product file
+# adapters and service policy deliberately live above this target.
+add_library(mnc_waveform STATIC
+    mnc/waveform/waveform_converter.cpp
+    mnc/waveform/comtrade_converter.cpp
+    mnc/waveform/comtrade_zip_converter.cpp
+    mnc/waveform/pqdif_converter.cpp
+)
+add_library(mnc::waveform ALIAS mnc_waveform)
+target_include_directories(mnc_waveform PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(mnc_waveform PUBLIC cxx_std_23)
+target_compile_options(mnc_waveform PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mnc_waveform PRIVATE ZLIB::ZLIB)
+install(FILES mnc/waveform/NOTICE
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/mnc-waveform)
+
 # Waveform device/session ownership is isolated from the meter record path so
 # future analysis code does not acquire access to the DMA descriptor.
 msap1_library(msap1_waveform msap1::waveform
     msap1/waveform/mncwf_v4.cpp
 	msap1/waveform/mncwf_v4_export.cpp
+	msap1/waveform/mncwf_waveform_source.cpp
     msap1/waveform/waveform_capture.cpp
 )
+target_link_libraries(msap1_waveform PUBLIC mnc::waveform)
 target_link_libraries(msap1_waveform PRIVATE
     mnc::logging
 	msap1::meter
@@ -323,6 +345,11 @@ target_link_libraries(msap1_waveform PRIVATE
 	${ZSTD_LIBRARY}
 )
 target_include_directories(msap1_waveform PRIVATE ${ZSTD_INCLUDE_DIR})
+
+msap1_library(msap1_waveform_ipc msap1::waveform-ipc
+	msap1/waveform/waveform_conversion_ipc.cpp
+)
+target_link_libraries(msap1_waveform_ipc PUBLIC mnc::ipc)
 
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
 # dependencies are intentional: acquisition_ipc.hpp binds the typed command
@@ -756,6 +783,27 @@ if(BUILD_TESTING)
     target_compile_options(mncwf_v4_reader_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME mncwf_v4_reader_test COMMAND mncwf_v4_reader_test)
+
+    add_executable(waveform_converter_test
+        ${PROJECT_SOURCE_DIR}/tests/waveform_converter_test.cpp)
+    target_link_libraries(waveform_converter_test PRIVATE
+        mnc::waveform
+        OpenSSL::Crypto
+        ZLIB::ZLIB)
+    target_compile_options(waveform_converter_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME waveform_converter_test COMMAND waveform_converter_test)
+
+    add_executable(waveform_conversion_ipc_test
+        ${PROJECT_SOURCE_DIR}/tests/waveform_conversion_ipc_test.cpp)
+    target_link_libraries(waveform_conversion_ipc_test PRIVATE
+        msap1::waveform-ipc)
+    target_include_directories(waveform_conversion_ipc_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/ProtocolGateway/Services/waveform-converter)
+    target_compile_options(waveform_conversion_ipc_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME waveform_conversion_ipc_test
+        COMMAND waveform_conversion_ipc_test)
 
     # The ingestor continuity rules are daemon code; compile the pipeline
     # source into the test rather than opening real devices.

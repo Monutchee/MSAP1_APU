@@ -20,6 +20,7 @@ namespace msap1::service_manager::daemon {
  *                         \----->  meter-historian  ----/
  *                         \----->  mqtt-publisher (settings-controlled)
  *                                   meter-historian -> data-sender
+ *                         \----->  waveform-converter
  *   settings -> time-sync-ntp OR time-sync-ptp-clock -> time-sync-ptp-system
  *
  * (Acquisition needs the settings authority to hand it the active
@@ -60,6 +61,9 @@ inline void register_product_units(mnc::ServiceManager &manager)
 		"phc2sys@end0.service", {"time-sync-ptp-clock"}, false});
 	manager.register_service({"data-sender",
 		"msap1-data-sender.service", {"settings", "meter-historian"}, true,
+		mnc::ServicePriorityTier::background});
+	manager.register_service({"waveform-converter",
+		"msap1-waveform-converter.service", {"fpga-acquisition"}, true,
 		mnc::ServicePriorityTier::background});
 	manager.register_service({"web-backend",
 		"msap1-web-backend.service",

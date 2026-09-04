@@ -10,6 +10,7 @@
 #include "gateway/data_sender_gateway.hpp"
 #include "gateway/mqtt_gateway.hpp"
 #include "gateway/settings_gateway.hpp"
+#include "gateway/waveform_conversion_gateway.hpp"
 
 #include <atomic>
 
@@ -39,6 +40,8 @@ struct AppContext {
 	MqttGateway &mqtt;
 	/** Typed boundary to generated artifacts, delivery, and channel assets. */
 	DataSenderGateway &data_sender;
+	/** Typed boundary to asynchronous waveform conversion and artifacts. */
+	WaveformConversionGateway &waveform_converter;
 	/** Supervised nginx front end; consulted by the system health API. */
 	webengine::NginxController &nginx;
 	/** Transition latch used to log acquisition-unavailable/recovered once,

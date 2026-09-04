@@ -2,6 +2,7 @@ add_library(msap1-web-api STATIC
     gateway/acquisition_gateway.cpp
     gateway/database_gateway.cpp
 	gateway/data_sender_gateway.cpp
+	gateway/waveform_conversion_gateway.cpp
     gateway/settings_gateway.cpp
     gateway/mqtt_gateway.cpp
     api/health_routes.cpp
@@ -28,6 +29,7 @@ target_link_libraries(msap1-web-api PUBLIC
     msap1::meter
     msap1::settings
 	msap1::datalogger
+	msap1::waveform-ipc
     msap1::mqtt
     msap1::meter-data-provider-stream
     msap1::system
