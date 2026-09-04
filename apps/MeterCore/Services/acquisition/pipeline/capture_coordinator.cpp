@@ -17,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include <poll.h>
@@ -35,12 +36,16 @@ constexpr std::uint32_t maximum_frequency_10s_sample_rate_millihz =
 	200'000'000u;
 
 msap1::WaveformCaptureOptions waveform_capture_options(
-	MeterTimeControl &time_control)
+	MeterTimeControl &time_control,
+	const msap1::settings::ProductSettings &settings)
 {
 	msap1::WaveformCaptureOptions options{};
 	options.correlation_source = [&time_control] {
 		return time_control.waveform_correlation();
 	};
+	options.archive_limit_bytes =
+		static_cast<std::uint64_t>(settings.waveform.archive_limit_gib) *
+		1024ull * 1024ull * 1024ull;
 	return options;
 }
 
@@ -282,7 +287,7 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 	  time_control_(options.meter_time_device),
 	  waveform_(options.waveform_device, options.waveform_directory,
 		    waveform_capture_context(product_settings_, configuration_),
-		    waveform_capture_options(time_control_)),
+		    waveform_capture_options(time_control_, product_settings_)),
 	  rpu_(options.service, options.rpmsg_device),
 	  meter_stream_(),
 	  ingest_(meter_, configuration_, timebase_, meter_stream_,
@@ -298,8 +303,9 @@ CaptureCoordinator::CaptureCoordinator(const Options &options)
 				  event.waveform_posttrigger_ms,
 				  event.waveform_decimation,
 				  waveform_event_descriptor(event));
-			  event_waveform_linker_.enqueue(event.id,
-				  session.capture_uuid);
+			  if (session.association_created)
+				  event_waveform_linker_.enqueue(event.id,
+					  session.capture_uuid);
 		  }),
 	  snapshot_provider_(ingest_.meter_data()),
 	  meter_data_provider_(snapshot_provider_, meter_stream_),
@@ -812,6 +818,7 @@ void CaptureCoordinator::apply_product_settings(std::string_view json)
 		throw;
 	}
 	auto capture_context = waveform_capture_context(candidate, configuration_);
+	waveform_.set_archive_limit_gib(candidate.waveform.archive_limit_gib);
 	product_settings_ = std::move(candidate);
 	waveform_.set_context(std::move(capture_context));
 }
@@ -1304,6 +1311,10 @@ static msap1::WaveformSessionIpc waveform_session_ipc(
 	result.filename = std::string(session.filename.data());
 	result.continuation_of_session_id = session.continuation_of_session_id;
 	result.master_session_id = session.master_session_id;
+	result.format_version = session.format_version;
+	result.compression = session.compression;
+	result.stored_bytes = session.stored_bytes;
+	result.logical_sample_bytes = session.logical_sample_bytes;
 	result.capture_uuid = mncwf_uuid_is_zero(session.capture_uuid)
 		? std::string{} : mncwf_uuid_string(session.capture_uuid);
 	return result;
@@ -1357,6 +1368,41 @@ msap1::WaveformLookupResponse CaptureCoordinator::waveform_lookup_response(
 	response.found = session.has_value();
 	if (session)
 		response.session = waveform_session_ipc(*session);
+	response.waveform_directory = options_.waveform_directory;
+	return response;
+}
+
+msap1::WaveformBatchLookupResponse
+CaptureCoordinator::waveform_batch_lookup_response(
+	const msap1::WaveformBatchLookupRequest &request)
+{
+	if (request.capture_uuids.empty() || request.capture_uuids.size() > 32u)
+		throw std::invalid_argument(
+			"waveform batch lookup requires 1..32 capture UUIDs");
+	std::vector<MncwfUuid> parsed;
+	parsed.reserve(request.capture_uuids.size());
+	std::unordered_set<std::string> distinct;
+	for (const auto &text : request.capture_uuids) {
+		const auto uuid = mncwf_uuid_from_string(text);
+		if (!uuid || mncwf_uuid_is_zero(*uuid))
+			throw std::invalid_argument(
+				"capture UUID must be a nonzero canonical UUID");
+		if (!distinct.insert(text).second)
+			throw std::invalid_argument(
+				"waveform batch lookup UUIDs must be distinct");
+		parsed.push_back(*uuid);
+	}
+
+	msap1::WaveformBatchLookupResponse response{};
+	response.waveform = waveform_.status();
+	response.sessions.reserve(parsed.size());
+	for (const auto &uuid : parsed) {
+		const auto session = waveform_.find_session(uuid);
+		if (session)
+			response.sessions.emplace_back(waveform_session_ipc(*session));
+		else
+			response.sessions.emplace_back(std::nullopt);
+	}
 	response.waveform_directory = options_.waveform_directory;
 	return response;
 }

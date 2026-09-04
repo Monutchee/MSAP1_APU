@@ -82,6 +82,11 @@ void register_acquisition_commands(msap1::AcquisitionCommandRegistry &registry,
 		[&coordinator](const msap1::WaveformLookupRequest &request) {
 			return coordinator.waveform_lookup_response(request);
 		});
+	registry.on<msap1::WaveformBatchLookupRequest>(
+		AcquisitionStatus::bad_request,
+		[&coordinator](const msap1::WaveformBatchLookupRequest &request) {
+			return coordinator.waveform_batch_lookup_response(request);
+		});
 	registry.on<msap1::WaveformTriggerRequest>(AcquisitionStatus::dma_error,
 		[&coordinator](const msap1::WaveformTriggerRequest &request) {
 			const auto &defaults =

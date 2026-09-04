@@ -1,10 +1,12 @@
-# MNCWF v4 COMTRADE and PQDIF source readiness
+# MNCWF v4/v5 COMTRADE and PQDIF source readiness
 
 ## Decision and scope
 
-MNCWF v4 remains the sole persistent waveform master. M18 does **not** ship a
-COMTRADE or PQDIF writer and must advertise only `mncwf` as an export format.
-Later gateway converters consume one validated MNCWF v4 stream; they do not
+MNCWF v4 defines the conversion metadata contract and MNCWF v5 preserves it
+byte-for-byte while compressing only sample storage. The product does **not**
+ship a COMTRADE or PQDIF writer and must advertise only `mncwf` as an export
+format. Later gateway converters consume one validated MNCWF v4 or v5 stream;
+they do not
 query live settings, the event historian, the sensor-profile database, or
 device identity services.
 
@@ -22,7 +24,7 @@ Monitor Settings, and Observation records, with channel definitions and
 series definitions/instances below them. Its public identifiers are used by
 name below so a future implementation can be reviewed mechanically.
 
-“Ready” means the source value is explicit in MNCWF v4 or can be derived
+“Ready” means the source value is explicit in MNCWF v4/v5 or can be derived
 deterministically from that file and this format specification. It does not
 mean a destination encoder exists, and it is not an IEC/IEEE conformance
 claim. Destination syntax, identifier tables, rounding, output splitting, and

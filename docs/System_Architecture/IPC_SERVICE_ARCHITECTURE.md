@@ -114,6 +114,24 @@ services, starts them in dependency order, adopts already-running units after
 its own restart, inspects restart counts through sd-bus, and exposes bounded
 control through `/run/monutchee/service-manager.sock`. Read-only status is
 available to diagnostics; mutating operations require root peer credentials.
+Service-control protocol version 2 also reports each declared priority tier,
+its expected nice value, the effective systemd value, and whether they match.
+
+All services remain under `SCHED_OTHER`; the product does not use real-time
+scheduling or unavailable target cgroup CPU/I/O weights:
+
+| Tier | Nice | Services |
+|---|---:|---|
+| Critical | -10 | FPGA acquisition |
+| High | -5 | Meter stream |
+| Normal | 0 | Settings, service manager, web backend, Modbus, and time synchronization |
+| Background | +5 | Historian, Data Sender, and MQTT |
+
+The acquisition DMA/control loop inherits -10. Its IPC transport explicitly
+runs at 0, while waveform archive discovery, materialization/compression, and
+event-link delivery explicitly run at +5. This keeps filesystem, compression,
+and historian delays away from the hardware-drain loop without granting a
+real-time policy.
 
 ```sh
 mnc service list
@@ -125,6 +143,28 @@ mnc service reload fpga-acquisition
 Future publishers should inherit `mnc::Service`, use a persistent
 `mnc::ipc::RequestClient`, subscribe to the desired `MeterData` period, and
 keep their protocol-specific serialization outside the reusable transport.
+
+## Waveform archive and Web data flow
+
+New captures use MNCWF v5. The DMA loop snapshots the bounded source frames
+and queues one background job; decimation, 1 MiB frame-aligned Zstd level-1
+chunks, CRCs, complete post-write validation, retention, and atomic rename all
+run outside the acquisition loop. Existing MNCWF v1-v4 captures remain
+readable and age out without recompression.
+
+nginx remains the authenticated static-file transport. It uses `sendfile`,
+normal byte ranges and `Content-Length`, and media type `application/x-mncwf`.
+It never adds `Content-Encoding` or dynamically gzip-compresses a waveform.
+The Web module worker validates MNCWF v1-v5, expands v5 chunks with a pinned
+decompression-only WASM decoder, and builds min/max pyramids before
+transferring typed arrays to React.
+
+PQ-event catalogue summaries carry `waveform_capture_count` without requiring
+the link list. A selected detail request expands links, displays 25 at a time,
+and resolves at most 32 distinct UUIDs per acquisition IPC request. The
+acquisition loop dispatches at most eight queued IPC frames per turn, and
+capture UUID lookup is indexed. Completed event details and resolved or
+expired captures are not polled again.
 
 ## Focused libraries and ownership
 

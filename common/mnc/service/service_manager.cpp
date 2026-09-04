@@ -34,8 +34,13 @@ public:
 		if (call < 0) {
 			::sd_bus_error_free(&error);
 			::sd_bus_message_unref(reply);
-			return {service.name, service.unit, "inactive", "not-found", 0,
+			ManagedServiceStatus result{
+				service.name, service.unit, "inactive", "not-found", 0,
 				false};
+			result.priority_tier = service.priority_tier;
+			result.expected_nice =
+				service_priority_nice(service.priority_tier);
+			return result;
 		}
 		const char *path = nullptr;
 		if (::sd_bus_message_read(reply, "o", &path) < 0 || path == nullptr) {
@@ -70,6 +75,18 @@ public:
 		result.restart_count = restarts;
 		result.permanently_failed = result.active_state == "failed" &&
 			restarts >= 3;
+		result.priority_tier = service.priority_tier;
+		result.expected_nice = service_priority_nice(service.priority_tier);
+		std::int32_t nice = 0;
+		error = SD_BUS_ERROR_NULL;
+		const int nice_result = ::sd_bus_get_property_trivial(bus_,
+			"org.freedesktop.systemd1", unit_path.c_str(),
+			"org.freedesktop.systemd1.Service", "Nice", &error, 'i',
+			&nice);
+		::sd_bus_error_free(&error);
+		result.effective_nice = nice;
+		result.priority_matches = nice_result >= 0 &&
+			nice == result.expected_nice;
 		return result;
 	}
 
@@ -106,8 +123,11 @@ class SystemdUnitController final : public UnitController {
 public:
 	ManagedServiceStatus inspect(const ManagedService &service) override
 	{
-		return {service.name, service.unit, "unavailable", "libsystemd-missing",
-			0, true};
+		ManagedServiceStatus result{service.name, service.unit, "unavailable",
+			"libsystemd-missing", 0, true};
+		result.priority_tier = service.priority_tier;
+		result.expected_nice = service_priority_nice(service.priority_tier);
+		return result;
 	}
 	void control(const ManagedService &, ServiceAction) override
 	{
@@ -180,6 +200,8 @@ std::vector<ManagedServiceStatus> ServiceManager::statuses()
 	for (const auto &service : services_) {
 		auto status = controller_->inspect(service);
 		status.required_active = service.auto_start;
+		status.priority_tier = service.priority_tier;
+		status.expected_nice = service_priority_nice(service.priority_tier);
 		result.push_back(std::move(status));
 	}
 	return result;
@@ -191,6 +213,8 @@ ManagedServiceStatus ServiceManager::status(std::string_view name)
 	const auto service = find(name);
 	auto status = controller_->inspect(service);
 	status.required_active = service.auto_start;
+	status.priority_tier = service.priority_tier;
+	status.expected_nice = service_priority_nice(service.priority_tier);
 	return status;
 }
 
@@ -202,6 +226,8 @@ ManagedServiceStatus ServiceManager::control(std::string_view name,
 	controller_->control(service, action);
 	auto status = controller_->inspect(service);
 	status.required_active = service.auto_start;
+	status.priority_tier = service.priority_tier;
+	status.expected_nice = service_priority_nice(service.priority_tier);
 	return status;
 }
 

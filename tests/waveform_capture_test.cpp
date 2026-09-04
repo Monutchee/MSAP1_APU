@@ -281,16 +281,6 @@ msap1::WaveformSessionSummary find_session(
 	return *found;
 }
 
-bool has_capture_lineage(const msap1::MncwfV4Reader &reader,
-	msap1::MncwfLineageRelation relation, const msap1::MncwfUuid &uuid)
-{
-	return std::ranges::any_of(reader.lineage(),
-		[relation, &uuid](const auto &entry) {
-			return entry.relation == relation &&
-				entry.related_capture_uuid == uuid;
-		});
-}
-
 void test_session_pagination_and_origin_filters()
 {
 	const auto source_bit = [](msap1::WaveformTriggerSource source) {
@@ -520,7 +510,109 @@ void test_async_archive_discovery_and_cancellation()
 	}
 }
 
-void test_materialized_continuation_and_restart_recovery()
+void test_archive_retention_and_safe_exclusions()
+{
+	const auto device = unique_path(".retention-device");
+	const auto output = unique_path(".retention-captures");
+	const auto blocked_device = unique_path(".retention-blocked-device");
+	const auto blocked_output = unique_path(".retention-blocked-captures");
+	try {
+		write_test_block(device);
+		msap1::WaveformCaptureOptions options{};
+		options.history_capacity_frames = 70'000u;
+		options.archive_limit_bytes = 1024u * 1024u;
+
+		msap1::WaveformSessionSummary first{};
+		std::filesystem::path first_path;
+		std::uint64_t first_bytes = 0u;
+		{
+			msap1::WaveformCapture capture(device.string(), output,
+				test_capture_context(), options);
+			capture.start();
+			(void)wait_for_archive_discovery(capture);
+			capture.read_available();
+			first = capture.trigger(0u, 0u, 1u,
+				msap1::WaveformTriggerSource::manual_cli);
+			capture.read_available();
+			first = find_session(wait_for_session(capture, first.id), first.id,
+				"first retention fixture disappeared");
+			first_path = output / first.filename.data();
+			first_bytes = std::filesystem::file_size(first_path);
+			require(first.state == msap1::WaveformSessionState::complete &&
+					first_bytes > 1024u,
+				"first retention fixture did not materialize");
+			capture.stop();
+		}
+
+		options.archive_limit_bytes = first_bytes + 1024u;
+		{
+			msap1::WaveformCapture capture(device.string(), output,
+				test_capture_context(), options);
+			capture.start();
+			(void)wait_for_archive_discovery(capture);
+			capture.read_available();
+			auto newest = capture.trigger(0u, 0u, 1u,
+				msap1::WaveformTriggerSource::manual_cli);
+			capture.read_available();
+			newest = find_session(wait_for_session(capture, newest.id), newest.id,
+				"new retention fixture disappeared");
+			const auto status = capture.status();
+			require(newest.state == msap1::WaveformSessionState::complete &&
+					!std::filesystem::exists(first_path) &&
+					std::filesystem::exists(output / newest.filename.data()) &&
+					status.expired_sessions == 1u &&
+					status.archive_stored_bytes <= status.archive_limit_bytes,
+				"retention did not expire the oldest valid completed capture");
+			capture.stop();
+		}
+
+		write_test_block(blocked_device);
+		std::filesystem::create_directories(blocked_output);
+		const auto malformed_path =
+			blocked_output / "waveform-40-malformed.mncwf";
+		{
+			std::ofstream malformed(malformed_path,
+				std::ios::binary | std::ios::trunc);
+			malformed << "not an MNCWF file";
+		}
+		const auto malformed_bytes = std::filesystem::file_size(malformed_path);
+		options.archive_limit_bytes = malformed_bytes + first_bytes - 1u;
+		{
+			msap1::WaveformCapture capture(blocked_device.string(), blocked_output,
+				test_capture_context(), options);
+			capture.start();
+			(void)wait_for_archive_discovery(capture);
+			capture.read_available();
+			auto rejected = capture.trigger(0u, 0u, 1u,
+				msap1::WaveformTriggerSource::manual_cli);
+			capture.read_available();
+			rejected = find_session(wait_for_session(capture, rejected.id),
+				rejected.id, "quota-rejected session disappeared");
+			const auto status = capture.status();
+			require(rejected.state == msap1::WaveformSessionState::incomplete &&
+					std::filesystem::exists(malformed_path) &&
+					status.retention_failures >= 1u &&
+					std::ranges::distance(
+						std::filesystem::directory_iterator(blocked_output),
+						std::filesystem::directory_iterator{}) == 1,
+				"unsafe retention candidate was removed or final commit succeeded");
+			capture.stop();
+		}
+
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(blocked_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(blocked_device);
+	} catch (...) {
+		std::filesystem::remove_all(output);
+		std::filesystem::remove_all(blocked_output);
+		std::filesystem::remove(device);
+		std::filesystem::remove(blocked_device);
+		throw;
+	}
+}
+
+void test_bounded_onset_and_restart_recovery()
 {
 	const auto device = unique_path(".continuation-device");
 	const auto output = unique_path(".continuation-captures");
@@ -534,7 +626,7 @@ void test_materialized_continuation_and_restart_recovery()
 	options.history_capacity_frames = test_history_frames;
 	try {
 		msap1::WaveformSessionSummary master{};
-		msap1::WaveformSessionSummary continuation{};
+		msap1::WaveformSessionSummary recovery_window{};
 		{
 			write_test_block(device, 1u, false, test_sample_rate_hz);
 			msap1::WaveformCapture capture(device.string(), output,
@@ -553,22 +645,22 @@ void test_materialized_continuation_and_restart_recovery()
 				1024u, 1024u, 0u, 0u, 1u,
 				pq_descriptor(event_id,
 					msap1::WaveformEventLifecycle::start, 1024u, 1024u));
-			continuation = capture.track_power_quality_event(
+			const auto update = capture.track_power_quality_event(
 				event_id, msap1::WaveformEventLifecycle::update,
 				1024u, 3072u, 0u, 0u, 1u,
 				pq_descriptor(event_id,
 					msap1::WaveformEventLifecycle::update, 1024u, 3072u));
-			require(master.id != continuation.id &&
-					continuation.continuation_of_session_id == master.id &&
-					continuation.master_session_id == master.id &&
-					continuation.first_sequence == 3072u,
-				"capacity rollover did not create a contiguous continuation");
+			require(master.association_created &&
+					update.id == master.id && !update.association_created &&
+					update.first_sequence == 1024u &&
+					update.last_sequence == 1024u,
+				"PQ UPDATE extended or duplicated the fixed onset window");
 
 			write_test_block(device, 1025u, true, test_sample_rate_hz);
 			write_test_block(device, 2049u, true, test_sample_rate_hz);
 			write_test_block(device, 3073u, true, test_sample_rate_hz);
 			capture.read_available();
-			(void)capture.track_power_quality_event(
+			recovery_window = capture.track_power_quality_event(
 				event_id, msap1::WaveformEventLifecycle::end,
 				1024u, 4096u, 0u, 0u, 1u,
 				pq_descriptor(event_id,
@@ -577,46 +669,43 @@ void test_materialized_continuation_and_restart_recovery()
 			const auto completed_master = find_session(
 				wait_for_session(capture, master.id), master.id,
 				"materialized continuation master disappeared");
-			const auto completed_continuation = find_session(
-				wait_for_session(capture, continuation.id), continuation.id,
-				"materialized continuation disappeared");
+			const auto completed_recovery = find_session(
+				wait_for_session(capture, recovery_window.id),
+				recovery_window.id, "materialized recovery window disappeared");
 			require(completed_master.state ==
 					msap1::WaveformSessionState::complete &&
-					completed_continuation.state ==
+					completed_recovery.state ==
 						msap1::WaveformSessionState::complete &&
 					completed_master.first_sequence == 1024u &&
-					completed_master.last_sequence == 3071u &&
-					completed_continuation.first_sequence == 3072u &&
-					completed_continuation.last_sequence == 4096u,
-				"master and continuation did not materialize as exact parts");
+					completed_master.last_sequence == 1024u &&
+					completed_recovery.first_sequence == 4096u &&
+					completed_recovery.last_sequence == 4096u &&
+					recovery_window.association_created,
+				"onset and terminal recovery did not materialize as fixed windows");
 			master = completed_master;
-			continuation = completed_continuation;
+			recovery_window = completed_recovery;
 			capture.stop();
 		}
 
 		const auto master_bytes = read_bytes(output / master.filename.data());
-		const auto continuation_bytes = read_bytes(
-			output / continuation.filename.data());
+		const auto recovery_bytes = read_bytes(
+			output / recovery_window.filename.data());
 		const msap1::MncwfV4Reader master_reader(master_bytes);
-		const msap1::MncwfV4Reader continuation_reader(continuation_bytes);
-		require(master_reader.sample_frame_count() == 2'048u &&
-				continuation_reader.sample_frame_count() == 1'025u &&
+		const msap1::MncwfV4Reader recovery_reader(recovery_bytes);
+		require(master_reader.version() == msap1::mncwf_v5_version &&
+				recovery_reader.version() == msap1::mncwf_v5_version &&
+				master_reader.sample_frame_count() == 1u &&
+				recovery_reader.sample_frame_count() == 1u &&
 				master_reader.capture_metadata().capture_uuid ==
 					master.capture_uuid &&
-				continuation_reader.capture_metadata().capture_uuid ==
-					continuation.capture_uuid,
-			"materialized continuation sample spans or UUIDs are wrong");
-		require(has_capture_lineage(master_reader,
-				msap1::MncwfLineageRelation::next_continuation,
-				continuation.capture_uuid) &&
-			has_capture_lineage(continuation_reader,
-				msap1::MncwfLineageRelation::previous_continuation,
-				master.capture_uuid) &&
-			master_reader.events().size() == 1u &&
-			continuation_reader.events().size() == 1u &&
+				recovery_reader.capture_metadata().capture_uuid ==
+					recovery_window.capture_uuid,
+			"materialized onset/recovery spans or UUIDs are wrong");
+		require(master_reader.events().size() == 1u &&
+			recovery_reader.events().size() == 1u &&
 			master_reader.events().front().event_uuid ==
-				continuation_reader.events().front().event_uuid,
-			"materialized continuation lost bidirectional or event lineage");
+				recovery_reader.events().front().event_uuid,
+			"bounded event windows lost stable event lineage");
 
 		{
 			std::ofstream empty(discovery_device, std::ios::binary);
@@ -631,20 +720,20 @@ void test_materialized_continuation_and_restart_recovery()
 			const auto restored = discovered.sessions();
 			const auto restored_master = find_session(restored, master.id,
 				"restart did not discover continuation master");
-			const auto restored_continuation = find_session(
-				restored, continuation.id,
-				"restart did not discover continuation");
+			const auto restored_recovery = find_session(
+				restored, recovery_window.id,
+				"restart did not discover recovery window");
 			require(restored_master.master_session_id == master.id &&
-					restored_continuation.continuation_of_session_id ==
-						master.id &&
-					restored_continuation.master_session_id == master.id &&
+					restored_recovery.continuation_of_session_id == 0u &&
+					restored_recovery.master_session_id ==
+						recovery_window.id &&
 					(restored_master.trigger_source_mask &
 						(1u << static_cast<unsigned>(
 							msap1::WaveformTriggerSource::pq_event))) != 0u &&
-					(restored_continuation.trigger_source_mask &
+					(restored_recovery.trigger_source_mask &
 						(1u << static_cast<unsigned>(
 							msap1::WaveformTriggerSource::pq_event))) != 0u,
-				"restart did not reconstruct numeric continuation lineage");
+				"restart did not reconstruct bounded PQ capture metadata");
 			discovered.stop();
 		}
 
@@ -661,14 +750,18 @@ void test_materialized_continuation_and_restart_recovery()
 				1u, 51'023u, 0u, 0u, 1u,
 				pq_descriptor(recovered_event,
 					msap1::WaveformEventLifecycle::update, 1u, 51'023u));
-			require(recovered.first_sequence == 50'000u &&
+			require(recovered.association_created &&
+					recovered.first_sequence == 51'023u &&
 					recovered.last_sequence == 51'023u,
-				"UPDATE-first recovery did not clamp to retained history");
-			(void)recovery.track_power_quality_event(
+				"UPDATE-first recovery was not bounded at the observed edge");
+			const auto terminal = recovery.track_power_quality_event(
 				recovered_event, msap1::WaveformEventLifecycle::end,
 				1u, 51'023u, 0u, 0u, 1u,
 				pq_descriptor(recovered_event,
 					msap1::WaveformEventLifecycle::end, 1u, 51'023u));
+			require(terminal.id == recovered.id &&
+					!terminal.association_created,
+				"terminal edge duplicated an UPDATE-first recovery capture");
 			recovery.read_available();
 			const auto completed = find_session(
 				wait_for_session(recovery, recovered.id), recovered.id,
@@ -679,7 +772,7 @@ void test_materialized_continuation_and_restart_recovery()
 			const auto recovered_bytes = read_bytes(
 				recovery_output / completed.filename.data());
 			const msap1::MncwfV4Reader recovered_reader(recovered_bytes);
-			require(recovered_reader.sample_frame_count() == 1'024u &&
+			require(recovered_reader.sample_frame_count() == 1u &&
 					recovered_reader.events().size() == 1u &&
 					(recovered_reader.events().front().flags &
 						msap1::mncwf_event_discontinuous) != 0u &&
@@ -713,7 +806,8 @@ int main()
 	try {
 		test_session_pagination_and_origin_filters();
 		test_async_archive_discovery_and_cancellation();
-		test_materialized_continuation_and_restart_recovery();
+		test_archive_retention_and_safe_exclusions();
+		test_bounded_onset_and_restart_recovery();
 		write_test_block(device);
 		msap1::WaveformCapture capture(
 			device.string(), output, test_capture_context());
@@ -777,6 +871,8 @@ int main()
 			"session was not materialized");
 		require(sessions.front().event_count == 1,
 			"event marker count mismatch");
+		require(sessions.front().master_session_id == sessions.front().id,
+			"manual capture did not identify itself as the lineage master");
 		const auto capture_file = output / sessions.front().filename.data();
 		require(std::filesystem::exists(capture_file),
 			"capture file is missing");
@@ -879,108 +975,92 @@ int main()
 		require(!std::filesystem::exists(decimated_file),
 			"deleted decimated capture was retained");
 
-		/* Stable PQ events share one capture union. Lifecycle updates extend
-		 * it without duplicate markers, and a terminal edge cannot close the
-		 * union while another overlapping event remains active. */
+		/* UPDATE never extends an onset capture. A nearby END merges its fixed
+		 * recovery window while the onset has not yet been queued. */
 		const msap1::WaveformEventIdentity pq_one{11, 1};
-		const msap1::WaveformEventIdentity pq_two{11, 2};
 		const auto pq_started = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::start,
 			1000, 1024, 1, 0, 1,
 			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::start,
 				1000, 1024));
-		capture.read_available();
-		auto pq_sessions = capture.sessions();
-		auto pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
-			[&](const auto &session) { return session.id == pq_started.id; });
-		require(pq_session != pq_sessions.end() &&
-				pq_session->state == msap1::WaveformSessionState::capturing,
-			"an active PQ event did not hold its capture union open");
-		const auto pq_overlap = capture.track_power_quality_event(
-			pq_two, msap1::WaveformEventLifecycle::start,
-			1005, 1024, 1, 0, 1,
-			pq_descriptor(pq_two, msap1::WaveformEventLifecycle::start,
-				1005, 1024));
-		require(pq_overlap.id == pq_started.id && pq_overlap.event_count == 2,
-			"overlapping PQ events did not merge into one master");
-		require((pq_overlap.trigger_source_mask &
+		require(pq_started.association_created &&
+				(pq_started.trigger_source_mask &
 				(1u << static_cast<unsigned>(
 					msap1::WaveformTriggerSource::pq_event))) != 0u,
 			"PQ capture origin was not retained");
 		const auto pq_update = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::update,
-			1000, 1024, 1, 0, 1,
+			1000, 100000, 1, 0, 1,
 			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::update,
-				1000, 1024));
-		require(pq_update.event_count == 2,
-			"PQ UPDATE added a duplicate event marker");
-		(void)capture.track_power_quality_event(
+				1000, 100000));
+		require(pq_update.id == pq_started.id &&
+				pq_update.first_sequence == pq_started.first_sequence &&
+				pq_update.last_sequence == pq_started.last_sequence &&
+				!pq_update.association_created,
+			"PQ UPDATE extended or duplicated the onset capture");
+		const auto pq_terminal = capture.track_power_quality_event(
 			pq_one, msap1::WaveformEventLifecycle::end,
 			1000, 1024, 1, 0, 1,
 			pq_descriptor(pq_one, msap1::WaveformEventLifecycle::end,
 				1000, 1024));
+		require(pq_terminal.id == pq_started.id &&
+				!pq_terminal.association_created &&
+				pq_terminal.first_sequence == 968u &&
+				pq_terminal.last_sequence == 1024u,
+			"overlapping onset and recovery windows were not merged");
 		capture.read_available();
-		pq_sessions = capture.sessions();
-		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
-			[&](const auto &session) { return session.id == pq_started.id; });
-		require(pq_session->state == msap1::WaveformSessionState::capturing,
-			"one terminal event closed a still-overlapping capture union");
-		(void)capture.track_power_quality_event(
-			pq_two, msap1::WaveformEventLifecycle::abort,
-			1005, 1024, 1, 0, 1,
-			pq_descriptor(pq_two, msap1::WaveformEventLifecycle::abort,
-				1005, 1024));
-		capture.read_available();
-		pq_sessions = wait_for_session(capture, pq_started.id);
-		pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
+		auto pq_sessions = wait_for_session(capture, pq_started.id);
+		auto pq_session = std::find_if(pq_sessions.begin(), pq_sessions.end(),
 			[&](const auto &session) { return session.id == pq_started.id; });
 		require(pq_session != pq_sessions.end() &&
 				pq_session->state == msap1::WaveformSessionState::complete &&
-				pq_session->event_count == 2 &&
+				pq_session->event_count == 1 &&
 				pq_session->master_session_id == pq_session->id &&
 				pq_session->continuation_of_session_id == 0,
-			"the completed PQ capture lost union or lineage identity");
+			"the completed PQ capture lost its bounded identity");
 		const auto pq_file = output / pq_session->filename.data();
 		const auto pq_bytes = read_bytes(pq_file);
 		const msap1::MncwfV4Reader pq_reader(pq_bytes);
-		require(pq_reader.events().size() == 2u,
-			"the MNCWF master lost an overlapping event descriptor");
+		require(pq_reader.events().size() == 1u,
+			"the MNCWF capture lost its event descriptor");
 		require(std::ranges::count_if(pq_reader.lineage(), [](const auto &entry) {
 			return entry.relation == msap1::MncwfLineageRelation::event;
-		}) == 2,
+		}) == 1,
 			"the MNCWF master lost event UUID lineage");
 		capture.erase(pq_started.id);
 
-		/* A live event longer than the safe materialization budget seals one
-		 * master and carries the stable ID into a contiguous continuation. */
+		/* A long UPDATE remains one onset. Once it materializes, END creates
+		 * exactly one bounded recovery association, never continuations. */
 		const msap1::WaveformEventIdentity pq_long{11, 3};
-		const auto long_master = capture.track_power_quality_event(
+		const auto long_onset = capture.track_power_quality_event(
 			pq_long, msap1::WaveformEventLifecycle::start,
 			1024, 1024, 0, 0, 1,
 			pq_descriptor(pq_long, msap1::WaveformEventLifecycle::start,
 				1024, 1024));
 		const auto safe_frames = capture.status().max_capture_frames;
-		const auto long_continuation = capture.track_power_quality_event(
+		const auto ignored_update = capture.track_power_quality_event(
 			pq_long, msap1::WaveformEventLifecycle::update,
 			1024, 1024 + safe_frames + 10, 0, 0, 1,
 			pq_descriptor(pq_long, msap1::WaveformEventLifecycle::update,
 				1024, 1024 + safe_frames + 10));
-		require(long_continuation.id != long_master.id &&
-				long_continuation.continuation_of_session_id ==
-					long_master.id &&
-				long_continuation.master_session_id == long_master.id,
-			"capacity continuation lost master/predecessor lineage");
-		const auto long_sessions = capture.sessions();
-		const auto sealed = std::find_if(long_sessions.begin(),
-			long_sessions.end(), [&](const auto &session) {
-				return session.id == long_master.id;
-			});
-		require(sealed != long_sessions.end() &&
-				sealed->last_sequence + 1 ==
-					long_continuation.first_sequence &&
-				sealed->last_sequence - sealed->first_sequence + 1 ==
-					safe_frames,
-			"capacity continuation is not contiguous at the safe limit");
+		require(ignored_update.id == long_onset.id &&
+				ignored_update.last_sequence == 1024u &&
+				!ignored_update.association_created,
+			"long UPDATE created a continuation");
+		capture.read_available();
+		(void)wait_for_session(capture, long_onset.id);
+		const auto long_recovery = capture.track_power_quality_event(
+			pq_long, msap1::WaveformEventLifecycle::end,
+			1024, 1024, 0, 0, 1,
+			pq_descriptor(pq_long, msap1::WaveformEventLifecycle::end,
+				1024, 1024));
+		require(long_recovery.id != long_onset.id &&
+				long_recovery.association_created &&
+				long_recovery.continuation_of_session_id == 0u &&
+				long_recovery.first_sequence == 1024u &&
+				long_recovery.last_sequence == 1024u,
+			"terminal event did not create one bounded recovery window");
+		capture.erase(long_onset.id);
 
 		/*
 		 * A coordinated source change closes and reopens waveform DMA. The

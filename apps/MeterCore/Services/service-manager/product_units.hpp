@@ -32,18 +32,26 @@ inline void register_product_units(mnc::ServiceManager &manager)
 {
 	manager.register_service({"settings",
 		"msap1-settings.service", {}});
+	/* Observe the manager's own priority without asking a Type=notify service
+	 * to start itself while it is still activating. */
+	manager.register_service({"service-manager",
+		"msap1-service-manager.service", {"settings"}, false});
 	manager.register_service({"meter-stream",
-		"msap1-meter-stream.service", {"settings"}});
+		"msap1-meter-stream.service", {"settings"}, true,
+		mnc::ServicePriorityTier::high});
 	manager.register_service({"fpga-acquisition",
-		"msap1-fpga-acquisition.service", {"settings", "meter-stream"}});
+		"msap1-fpga-acquisition.service", {"settings", "meter-stream"}, true,
+		mnc::ServicePriorityTier::critical});
 	manager.register_service({"meter-historian",
-		"msap1-meter-historian.service", {"meter-stream"}});
+		"msap1-meter-historian.service", {"meter-stream"}, true,
+		mnc::ServicePriorityTier::background});
 	manager.register_service({"modbus",
 		"msap1-modbus-server.service",
 		{"settings", "fpga-acquisition"}});
 	manager.register_service({"mqtt-publisher",
 		"msap1-mqtt-publisher.service",
-		{"settings", "fpga-acquisition"}, false});
+		{"settings", "fpga-acquisition"}, false,
+		mnc::ServicePriorityTier::background});
 	manager.register_service({"time-sync-ntp",
 		"systemd-timesyncd.service", {"settings"}, false});
 	manager.register_service({"time-sync-ptp-clock",
@@ -51,7 +59,8 @@ inline void register_product_units(mnc::ServiceManager &manager)
 	manager.register_service({"time-sync-ptp-system",
 		"phc2sys@end0.service", {"time-sync-ptp-clock"}, false});
 	manager.register_service({"data-sender",
-		"msap1-data-sender.service", {"settings", "meter-historian"}});
+		"msap1-data-sender.service", {"settings", "meter-historian"}, true,
+		mnc::ServicePriorityTier::background});
 	manager.register_service({"web-backend",
 		"msap1-web-backend.service",
 		{"fpga-acquisition", "meter-historian", "data-sender"}});

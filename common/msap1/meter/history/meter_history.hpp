@@ -88,6 +88,7 @@ struct PowerQualityEventCatalogEntry {
 	std::optional<std::int64_t> start_utc_nanoseconds;
 	std::optional<std::int64_t> last_utc_nanoseconds;
 	std::optional<std::uint64_t> utc_uncertainty_nanoseconds;
+	std::uint32_t waveform_capture_count = 0;
 	std::vector<WaveformCaptureUuid> waveform_capture_uuids;
 };
 
@@ -97,6 +98,7 @@ struct PowerQualityEventQuery {
 	std::optional<std::int64_t> start_utc_nanoseconds;
 	std::optional<std::int64_t> end_utc_nanoseconds;
 	std::uint32_t limit = 1000;
+	bool include_waveform_links = true;
 };
 
 /**

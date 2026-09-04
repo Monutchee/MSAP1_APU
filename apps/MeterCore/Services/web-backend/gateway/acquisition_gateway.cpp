@@ -34,6 +34,12 @@ WaveformLookupResponse AcquisitionGateway::waveform_lookup(
 	return client_.request(request, timeout_ms);
 }
 
+WaveformBatchLookupResponse AcquisitionGateway::waveform_batch_lookup(
+	const WaveformBatchLookupRequest &request, int timeout_ms)
+{
+	return client_.request(request, timeout_ms);
+}
+
 WaveformResponse AcquisitionGateway::trigger_waveform(
 	std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
 	std::uint32_t decimation, WaveformTriggerSource source, int timeout_ms)

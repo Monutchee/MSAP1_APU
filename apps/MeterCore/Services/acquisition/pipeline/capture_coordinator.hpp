@@ -123,6 +123,9 @@ public:
 		const msap1::WaveformSessionQuery &query = {});
 	[[nodiscard]] msap1::WaveformLookupResponse waveform_lookup_response(
 		const msap1::WaveformLookupRequest &request);
+	[[nodiscard]] msap1::WaveformBatchLookupResponse
+	waveform_batch_lookup_response(
+		const msap1::WaveformBatchLookupRequest &request);
 	[[nodiscard]] msap1::AdcSourceResponse adc_source_response() const;
 	[[nodiscard]] msap1::SimulatorResponse simulator_response() const;
 	[[nodiscard]] msap1::SingleCycleResponse single_cycle_response() const;

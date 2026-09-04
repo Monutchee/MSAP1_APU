@@ -5,6 +5,11 @@ option(MNC_LOGGING_REQUIRE_SYSTEMD
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
+find_path(ZSTD_INCLUDE_DIR zstd.h)
+find_library(ZSTD_LIBRARY NAMES zstd libzstd.so.1)
+if(NOT ZSTD_INCLUDE_DIR OR NOT ZSTD_LIBRARY)
+    message(FATAL_ERROR "MNCWF v5 requires libzstd development files")
+endif()
 option(MNC_DATA_SENDER_REQUIRE_CURL
     "Fail configuration when the Data Sender libcurl adapter is unavailable"
     OFF)
@@ -315,7 +320,9 @@ target_link_libraries(msap1_waveform PRIVATE
     mnc::logging
 	msap1::meter
     OpenSSL::Crypto
+	${ZSTD_LIBRARY}
 )
+target_include_directories(msap1_waveform PRIVATE ${ZSTD_INCLUDE_DIR})
 
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
 # dependencies are intentional: acquisition_ipc.hpp binds the typed command
@@ -694,7 +701,9 @@ if(BUILD_TESTING)
 
     add_executable(service_manager_test
         ${PROJECT_SOURCE_DIR}/tests/service_manager_test.cpp)
-    target_link_libraries(service_manager_test PRIVATE mnc::service)
+    target_link_libraries(service_manager_test PRIVATE
+		mnc::service
+		msap1::service-protocol)
 	target_include_directories(service_manager_test PRIVATE
 		${PROJECT_SOURCE_DIR}/apps/MeterCore/Services/service-manager)
     target_compile_options(service_manager_test PRIVATE

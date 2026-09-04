@@ -916,7 +916,9 @@ MeterHistoryStore::query_power_quality_events(
 	std::scoped_lock lock(impl_->mutex);
 	std::string sql = R"SQL(
 SELECT event_id,event_uuid,stream_cursor,start_utc_ns,last_utc_ns,time_quality,
- utc_uncertainty_ns,payload
+ utc_uncertainty_ns,payload,
+ (SELECT COUNT(*) FROM power_quality_event_waveforms links
+  WHERE links.event_id=power_quality_events.event_id)
 FROM power_quality_events WHERE 1=1
 )SQL";
 	if (query.id)
@@ -967,6 +969,12 @@ FROM power_quality_events WHERE 1=1
 		if (const auto value = select.integer(6); value != 0)
 			entry.utc_uncertainty_nanoseconds =
 				static_cast<std::uint64_t>(value);
+		entry.waveform_capture_count = static_cast<std::uint32_t>(
+			select.integer(8));
+		if (!query.include_waveform_links) {
+			result.push_back(std::move(entry));
+			continue;
+		}
 		auto links = impl_->persistent.prepare(R"SQL(
 SELECT capture_uuid FROM power_quality_event_waveforms
 WHERE event_id=? ORDER BY capture_uuid
@@ -979,6 +987,10 @@ WHERE event_id=? ORDER BY capture_uuid
 			std::memcpy(entry.waveform_capture_uuids.back().data(),
 				uuid.data(), uuid.size());
 		}
+		if (entry.waveform_capture_uuids.size() !=
+		    entry.waveform_capture_count)
+			throw std::runtime_error(
+				"event waveform link count changed during query");
 		result.push_back(std::move(entry));
 	}
 	return result;

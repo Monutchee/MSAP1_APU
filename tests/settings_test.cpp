@@ -57,7 +57,7 @@ void test_first_boot_and_direct_save()
 		SettingsHandler handler(tree.data, tree.factory);
 		handler.initialize();
 		const auto initial = handler.active();
-		assert(initial.settings.schema_version == 7u);
+		assert(initial.settings.schema_version == 8u);
 		assert(initial.settings.time.synchronization == "ntp");
 		assert(initial.settings.metering.events.voltage_sag.enabled);
 		assert(initial.settings.metering.events.voltage_sag.waveform.decimation == 8u);
@@ -75,6 +75,7 @@ void test_first_boot_and_direct_save()
 		assert(!initial.settings.metering.mains_signalling.enabled);
 		assert(initial.settings.metering.sample_rate_hz == 128000u);
 		assert(initial.settings.waveform.default_decimation == 1u);
+		assert(initial.settings.waveform.archive_limit_gib == 8u);
 		assert(initial.settings.metering.measurement_topology == "wye");
 		assert(initial.settings.metering.system_nominal_voltage_v == 120.0);
 		assert(initial.settings.metering.demand.method == "sliding");
@@ -279,7 +280,7 @@ void test_existing_settings_default_system_nominal_voltage()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 			 std::istreambuf_iterator<char>());
-	const std::string schema = "\"schema_version\": 7";
+	const std::string schema = "\"schema_version\": 8";
 	const auto schema_position = json.find(schema);
 	assert(schema_position != std::string::npos);
 	json.replace(schema_position, schema.size(), "\"schema_version\": 2");
@@ -326,7 +327,7 @@ void test_existing_settings_default_system_nominal_voltage()
 
 	SettingsHandler handler(tree.data, tree.factory);
 	handler.initialize();
-	assert(handler.active().settings.schema_version == 7u);
+	assert(handler.active().settings.schema_version == 8u);
 	assert(handler.active().settings.waveform.default_pretrigger_ms == 4321u);
 	assert(handler.active().settings.metering.measurement_topology == "wye");
 	assert(handler.active().settings.metering.system_nominal_voltage_v ==
@@ -439,9 +440,9 @@ void test_schema_four_migrates_to_empty_data_logging()
 	std::ifstream input(tree.factory);
 	std::string json((std::istreambuf_iterator<char>(input)),
 		std::istreambuf_iterator<char>());
-	const auto version = json.find("\"schema_version\": 7");
+	const auto version = json.find("\"schema_version\": 8");
 	require(version != std::string::npos, "factory schema marker is missing");
-	json.replace(version, std::string_view{"\"schema_version\": 7"}.size(),
+	json.replace(version, std::string_view{"\"schema_version\": 8"}.size(),
 		"\"schema_version\": 4");
 	const auto data_logging = json.find(",\n  \"data_logging\"");
 	require(data_logging != std::string::npos,
@@ -452,8 +453,8 @@ void test_schema_four_migrates_to_empty_data_logging()
 	json.erase(data_logging, root_close - data_logging);
 
 	const auto migrated = msap1::settings::SettingsCodec::decode(json);
-	require(migrated.schema_version == 7u,
-		"schema-four document did not migrate to schema seven");
+	require(migrated.schema_version == 8u,
+		"schema-four document did not migrate to schema eight");
 	require(migrated.time.synchronization == "ntp",
 		"legacy settings did not receive default NTP synchronization");
 	require(migrated.data_logging.channels.empty() &&
@@ -486,9 +487,41 @@ void test_time_synchronization_settings()
 	settings.schema_version = 6u;
 	const auto migrated = msap1::settings::SettingsCodec::decode(
 		msap1::settings::SettingsCodec::encode(settings, false));
-	require(migrated.schema_version == 7u &&
+	require(migrated.schema_version == 8u &&
 		migrated.time.synchronization == "ntp",
 		"schema-six settings did not migrate to default NTP");
+}
+
+void test_waveform_archive_limit_settings()
+{
+	TestTree tree("waveform-archive-limit");
+	SettingsHandler handler(tree.data, tree.factory);
+	handler.initialize();
+	auto settings = handler.active().settings;
+	settings.waveform.archive_limit_gib = 1u;
+	settings.validate();
+	settings.waveform.archive_limit_gib = 16u;
+	settings.validate();
+
+	for (const auto invalid : {0u, 17u}) {
+		settings.waveform.archive_limit_gib = invalid;
+		bool rejected = false;
+		try {
+			settings.validate();
+		} catch (const std::runtime_error &) {
+			rejected = true;
+		}
+		require(rejected,
+			"out-of-range waveform archive limit was accepted");
+	}
+
+	settings.schema_version = 7u;
+	settings.waveform.archive_limit_gib = 16u;
+	const auto migrated = msap1::settings::SettingsCodec::decode(
+		msap1::settings::SettingsCodec::encode(settings, false));
+	require(migrated.schema_version == 8u &&
+		migrated.waveform.archive_limit_gib == 8u,
+		"schema-seven settings did not receive the 8 GiB archive default");
 }
 
 void test_current_wiring_schema_migration_and_validation()
@@ -529,8 +562,8 @@ void test_current_wiring_schema_migration_and_validation()
 		legacy.schema_version = schema;
 		const auto migrated = msap1::settings::SettingsCodec::decode(
 			msap1::settings::SettingsCodec::encode(legacy, false));
-		require(migrated.schema_version == 7u,
-			"legacy product settings did not migrate to schema seven");
+		require(migrated.schema_version == 8u,
+			"legacy product settings did not migrate to schema eight");
 		require(msap1::current_adc_phase_map(
 			migrated.metering.current_wiring) == 0xe4u &&
 			msap1::current_adc_invert_mask(
@@ -719,6 +752,7 @@ int main()
 	test_secrets_and_factory_reset();
 	test_schema_four_migrates_to_empty_data_logging();
 	test_time_synchronization_settings();
+	test_waveform_archive_limit_settings();
 	test_current_wiring_schema_migration_and_validation();
 	test_data_logging_configuration_validation();
 	test_channel_scoped_credentials_and_assets();

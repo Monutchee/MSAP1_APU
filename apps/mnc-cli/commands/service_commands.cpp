@@ -19,6 +19,10 @@ struct ServiceStatusDto {
 	std::string sub_state;
 	std::uint32_t restart_count = 0;
 	bool permanently_failed = false;
+	std::string priority_tier;
+	std::int32_t expected_nice = 0;
+	std::int32_t effective_nice = 0;
+	bool priority_matches = false;
 };
 
 struct ServiceResult {
@@ -42,6 +46,11 @@ ServiceResult collect(msap1::service_control::Command command,
 			.sub_state = status.sub_state,
 			.restart_count = status.restart_count,
 			.permanently_failed = status.permanently_failed,
+			.priority_tier = std::string(
+				mnc::service_priority_name(status.priority_tier)),
+			.expected_nice = status.expected_nice,
+			.effective_nice = status.effective_nice,
+			.priority_matches = status.priority_matches,
 		});
 	return result;
 }
@@ -52,12 +61,18 @@ public:
 	{
 		output << std::left << std::setw(20) << "SERVICE"
 		       << std::setw(12) << "ACTIVE" << std::setw(16) << "STATE"
-		       << std::setw(10) << "RESTARTS" << "FAULT\n";
+		       << std::setw(10) << "RESTARTS" << std::setw(12) << "PRIORITY"
+		       << std::setw(10) << "EXPECTED" << std::setw(10) << "EFFECTIVE"
+		       << std::setw(8) << "MATCH" << "FAULT\n";
 		for (const auto &service : result.services)
 			output << std::left << std::setw(20) << service.name
 			       << std::setw(12) << service.active_state
 			       << std::setw(16) << service.sub_state
 			       << std::setw(10) << service.restart_count
+			       << std::setw(12) << service.priority_tier
+			       << std::setw(10) << service.expected_nice
+			       << std::setw(10) << service.effective_nice
+			       << std::setw(8) << (service.priority_matches ? "yes" : "no")
 			       << (service.permanently_failed ? "permanent" : "none")
 			       << '\n';
 		return 0;

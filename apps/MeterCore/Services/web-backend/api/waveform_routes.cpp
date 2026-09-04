@@ -24,6 +24,7 @@
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -64,6 +65,10 @@ struct WaveformSessionDto {
 	std::uint64_t continuation_of_session_id;
 	std::uint64_t master_session_id;
 	std::string capture_uuid;
+	std::uint32_t format_version;
+	std::string compression;
+	std::uint64_t stored_bytes;
+	std::uint64_t logical_sample_bytes;
 };
 
 struct WaveformArchiveDiscoveryDto {
@@ -104,6 +109,10 @@ struct WaveformDto {
 	std::uint64_t history_capacity_frames;
 	std::uint64_t completed_sessions;
 	std::uint64_t incomplete_sessions;
+	std::uint64_t archive_limit_bytes;
+	std::uint64_t archive_stored_bytes;
+	std::uint64_t expired_sessions;
+	std::uint64_t retention_failures;
 	WaveformArchiveDiscoveryDto archive_discovery;
 	WaveformPageDto page;
 	std::vector<std::string> export_formats;
@@ -114,6 +123,15 @@ struct WaveformSessionLookupDto {
 	std::string capture_uuid;
 	WaveformArchiveDiscoveryDto archive_discovery;
 	std::optional<WaveformSessionDto> session;
+};
+
+struct WaveformBatchLookupRequestDto {
+	std::vector<std::string> capture_uuids;
+};
+
+struct WaveformBatchLookupDto {
+	WaveformArchiveDiscoveryDto archive_discovery;
+	std::vector<std::optional<WaveformSessionDto>> sessions;
 };
 
 std::string waveform_state_name(msap1::WaveformSessionState state)
@@ -157,6 +175,18 @@ std::string waveform_origin(std::uint32_t mask)
 	return "legacy";
 }
 
+std::string waveform_compression(WaveformCompression compression)
+{
+	switch (compression) {
+	case WaveformCompression::none: return "none";
+	case WaveformCompression::zstd_chunks: return "zstd_chunks";
+	case WaveformCompression::mixed_raw_zstd_chunks:
+		return "mixed_raw_zstd_chunks";
+	case WaveformCompression::raw_chunks: return "raw_chunks";
+	}
+	return "unknown";
+}
+
 std::string origin_filter_name(WaveformOriginFilter origin)
 {
 	switch (origin) {
@@ -196,6 +226,10 @@ WaveformSessionDto waveform_session(const WaveformSessionIpc &session)
 		session.continuation_of_session_id,
 		session.master_session_id,
 		session.capture_uuid,
+		session.format_version,
+		waveform_compression(session.compression),
+		session.stored_bytes,
+		session.logical_sample_bytes,
 	};
 }
 
@@ -286,6 +320,10 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 		status.history_capacity_frames,
 		status.completed_sessions,
 		status.incomplete_sessions,
+		status.archive_limit_bytes,
+		status.archive_stored_bytes,
+		status.expired_sessions,
+		status.retention_failures,
 		archive_discovery_status(status.archive_discovery),
 		{origin_filter_name(response.page.origin),
 		 response.page.limit,
@@ -406,6 +444,51 @@ webengine::Response get_waveform_session(AppContext &app,
 		log_api_failure("/api/v1/waveforms/session", error);
 		return error_response(
 			webengine::http::status::service_unavailable,
+			error.what());
+	}
+}
+
+webengine::Response post_waveform_session_lookup(AppContext &app,
+	const webengine::RequestContext &context)
+{
+	try {
+		WaveformBatchLookupRequestDto input{};
+		if (const auto error = glz::read_json(input, context.request.body()))
+			return error_response(webengine::http::status::bad_request,
+				"invalid waveform batch lookup JSON");
+		if (input.capture_uuids.empty() || input.capture_uuids.size() > 32u)
+			throw std::invalid_argument(
+				"waveform batch lookup requires 1..32 capture UUIDs");
+		std::unordered_set<std::string> distinct;
+		for (const auto &text : input.capture_uuids) {
+			const auto uuid = mncwf_uuid_from_string(text);
+			if (!uuid || mncwf_uuid_is_zero(*uuid))
+				throw std::invalid_argument(
+					"capture UUID must be a nonzero canonical UUID");
+			if (!distinct.insert(text).second)
+				throw std::invalid_argument(
+					"waveform batch lookup UUIDs must be distinct");
+		}
+		WaveformBatchLookupRequest request{};
+		request.capture_uuids = std::move(input.capture_uuids);
+		const auto response = app.acquisition.waveform_batch_lookup(request);
+		require_acquisition_ok(response.status);
+		WaveformBatchLookupDto result{
+			archive_discovery_status(response.waveform.archive_discovery), {}};
+		result.sessions.reserve(response.sessions.size());
+		for (const auto &session : response.sessions) {
+			if (session)
+				result.sessions.emplace_back(waveform_session(*session));
+			else
+				result.sessions.emplace_back(std::nullopt);
+		}
+		return json_response(webengine::http::status::ok, result);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what());
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveforms/sessions/lookup", error);
+		return error_response(webengine::http::status::service_unavailable,
 			error.what());
 	}
 }
@@ -658,6 +741,18 @@ void document_waveform_routes(DocumentedApiRegistry &registry)
 	registry.add_error_response(Verb::get, lookup, 400,
 		"The capture UUID is absent or malformed");
 	registry.add_error_response(Verb::get, lookup, 503,
+		"Waveform acquisition is unavailable");
+
+	constexpr std::string_view batch_lookup =
+		"/api/v1/waveforms/sessions/lookup";
+	registry.add_json_request<WaveformBatchLookupRequestDto>(Verb::post,
+		batch_lookup, "WaveformBatchLookup", "One through 32 distinct capture UUIDs",
+		true, R"({"capture_uuids":["d2f78547-4d73-46c2-bc69-c9cc763cc15a"]})");
+	registry.add_json_response<WaveformBatchLookupDto>(Verb::post, batch_lookup,
+		200, "WaveformBatchLookupResult", "Ordered retained session or null results");
+	registry.add_error_response(Verb::post, batch_lookup, 400,
+		"The UUID list is empty, oversized, duplicated, or malformed");
+	registry.add_error_response(Verb::post, batch_lookup, 503,
 		"Waveform acquisition is unavailable");
 
 	constexpr std::string_view trigger = "/api/v1/waveforms/trigger";

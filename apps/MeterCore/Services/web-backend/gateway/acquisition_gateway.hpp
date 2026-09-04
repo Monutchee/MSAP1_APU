@@ -27,6 +27,8 @@ public:
 		const WaveformListRequest &request, int timeout_ms = 1000);
 	[[nodiscard]] WaveformLookupResponse waveform_lookup(
 		const WaveformLookupRequest &request, int timeout_ms = 1000);
+	[[nodiscard]] WaveformBatchLookupResponse waveform_batch_lookup(
+		const WaveformBatchLookupRequest &request, int timeout_ms = 1000);
 	[[nodiscard]] WaveformResponse trigger_waveform(
 		std::uint32_t pretrigger_ms, std::uint32_t posttrigger_ms,
 		std::uint32_t decimation, WaveformTriggerSource source,
