@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -471,6 +472,16 @@ private:
 		std::uint64_t session_id = 0;
 	};
 
+	static void log_expired_session(std::uint64_t session_id)
+	{
+		const std::array fields{
+			mnc::logging::Field{"MNC_WAVEFORM_SESSION",
+				std::to_string(session_id)}};
+		(void)capture_log.write(mnc::logging::Priority::notice,
+			"waveform capture expired by archive retention",
+			"waveform_session_expired", fields);
+	}
+
 	static std::vector<Frame> decimate(const Job &job)
 	{
 		const auto divisor = std::max<std::uint32_t>(1u,
@@ -532,6 +543,8 @@ private:
 				// ceiling but are never automatic deletion candidates.
 			}
 		}
+		if (physical_bytes <= job.archive_limit_bytes)
+			return physical_bytes;
 		std::ranges::sort(candidates, [](const auto &left, const auto &right) {
 			if (left.created_utc_nanoseconds != right.created_utc_nanoseconds)
 				return left.created_utc_nanoseconds <
@@ -540,7 +553,11 @@ private:
 		});
 		std::vector<ArchiveCandidate> validated;
 		std::uint64_t reclaimable = 0u;
-		for (const auto &candidate : candidates) {
+		const auto required_reclaim = physical_bytes - job.archive_limit_bytes;
+		auto next_candidate = std::size_t{0};
+		for (; next_candidate < candidates.size() &&
+		       reclaimable < required_reclaim; ++next_candidate) {
+			const auto &candidate = candidates[next_candidate];
 			try {
 				MappedFile mapped(candidate.path);
 				(void)MncwfV4Reader{mapped.bytes()};
@@ -550,8 +567,7 @@ private:
 				// A malformed candidate remains untouched.
 			}
 		}
-		if (physical_bytes > job.archive_limit_bytes &&
-		    reclaimable < physical_bytes - job.archive_limit_bytes)
+		if (reclaimable < required_reclaim)
 			throw std::runtime_error(
 				"waveform archive limit cannot be reclaimed safely");
 		for (const auto &candidate : validated) {
@@ -563,6 +579,27 @@ private:
 				continue;
 			physical_bytes -= candidate.bytes;
 			expired.push_back(candidate.session_id);
+			log_expired_session(candidate.session_id);
+		}
+		/* A concurrent/manual removal failure must not make a newer capture
+		 * eligible without validating it first. Continue from the first
+		 * candidate that was not part of the initial safety proof. */
+		for (; physical_bytes > job.archive_limit_bytes &&
+		       next_candidate < candidates.size(); ++next_candidate) {
+			const auto &candidate = candidates[next_candidate];
+			try {
+				MappedFile mapped(candidate.path);
+				(void)MncwfV4Reader{mapped.bytes()};
+			} catch (const std::exception &) {
+				continue;
+			}
+			std::error_code remove_error;
+			if (!std::filesystem::remove(candidate.path, remove_error) ||
+			    remove_error)
+				continue;
+			physical_bytes -= candidate.bytes;
+			expired.push_back(candidate.session_id);
+			log_expired_session(candidate.session_id);
 		}
 		if (physical_bytes > job.archive_limit_bytes)
 			throw std::runtime_error(
@@ -2098,20 +2135,13 @@ void WaveformCapture::collect_materialization_results()
 		return;
 	for (auto &result : writer_->collect()) {
 		if (!result.expired_session_ids.empty()) {
-			for (const auto expired : result.expired_session_ids) {
-				const std::array fields{
-					mnc::logging::Field{"MNC_WAVEFORM_SESSION",
-						std::to_string(expired)}};
-				(void)capture_log.write(mnc::logging::Priority::notice,
-					"waveform capture expired by archive retention",
-					"waveform_session_expired", fields);
-			}
+			const std::unordered_set<std::uint64_t> expired(
+				result.expired_session_ids.begin(),
+				result.expired_session_ids.end());
 			expired_sessions_ += result.expired_session_ids.size();
 			sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
-				[&result](const Session &candidate) {
-					return std::ranges::find(result.expired_session_ids,
-						candidate.summary.id) !=
-						result.expired_session_ids.end();
+				[&expired](const Session &candidate) {
+					return expired.contains(candidate.summary.id);
 				}), sessions_.end());
 			rebuild_indexes();
 			rebuild_event_capture_index();
