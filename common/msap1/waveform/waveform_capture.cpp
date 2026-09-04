@@ -1606,6 +1606,7 @@ WaveformSessionSummary WaveformCapture::trigger(
 		/* The background writer reports the effective raw/Zstd mix. */
 		session.summary.compression = WaveformCompression::none;
 		session.summary.state = WaveformSessionState::capturing;
+		session.summary.master_session_id = session.summary.id;
 		session.summary.capture_uuid = mncwf_random_uuid();
 		session.context = context_;
 		session.context.capture_metadata.capture_uuid =

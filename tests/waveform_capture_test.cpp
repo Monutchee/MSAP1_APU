@@ -871,6 +871,8 @@ int main()
 			"session was not materialized");
 		require(sessions.front().event_count == 1,
 			"event marker count mismatch");
+		require(sessions.front().master_session_id == sessions.front().id,
+			"manual capture did not identify itself as the lineage master");
 		const auto capture_file = output / sessions.front().filename.data();
 		require(std::filesystem::exists(capture_file),
 			"capture file is missing");
