@@ -250,10 +250,22 @@ PowerQualityEventDto event_dto(
 	return result;
 }
 
+struct PowerQualityExportCapabilityDto {
+	std::string format;
+	std::string label;
+	std::string profile;
+	std::string extension;
+	std::vector<std::string> scopes;
+	bool asynchronous;
+};
+
 struct PowerQualityEventsDto {
 	std::uint32_t limit = 0;
 	std::uint32_t count = 0;
 	std::vector<std::string> export_formats{"mncwf"};
+	std::vector<PowerQualityExportCapabilityDto> export_capabilities{{
+		"mncwf", "MNCWF", "MNCWF v4/v5", ".mncwf",
+		{"capture", "event"}, false}};
 	std::vector<PowerQualityEventDto> events;
 };
 
@@ -408,6 +420,35 @@ webengine::Response get_power_quality_events(AppContext &app,
 			return error_response(webengine::http::status::not_found,
 				"power-quality event does not exist");
 		PowerQualityEventsDto result{};
+		try {
+			const auto capabilities = app.waveform_exports.capabilities();
+			if (capabilities.healthy) {
+				for (std::size_t index = 0;
+				     index < capabilities.formats.size(); ++index) {
+					const auto &format = capabilities.formats[index];
+					const auto profile = index < capabilities.profiles.size()
+						? capabilities.profiles[index] : std::string{};
+					if (format == "comtrade")
+						result.export_capabilities.push_back({format,
+							"COMTRADE CFF", profile, ".cff",
+							{"capture", "event"}, true});
+					else if (format == "comtrade-zip")
+						result.export_capabilities.push_back({format,
+							"COMTRADE CFG/DAT ZIP", profile, ".zip",
+							{"capture", "event"}, true});
+					else if (format == "pqdif")
+						result.export_capabilities.push_back({format,
+							"PQDIF", profile, ".pqd",
+							{"capture", "event"}, true});
+				}
+				for (std::size_t index = 1;
+				     index < result.export_capabilities.size(); ++index)
+					result.export_formats.push_back(
+						result.export_capabilities[index].format);
+			}
+		} catch (...) {
+			/* The event catalogue remains available with MNCWF-only export. */
+		}
 		result.limit = query.limit;
 		result.count = static_cast<std::uint32_t>(entries.size());
 		result.events.reserve(entries.size());

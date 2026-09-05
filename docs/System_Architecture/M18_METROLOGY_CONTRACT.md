@@ -34,7 +34,7 @@ The M18 co-release moves these authorities together:
 | APU/RPU control | RPMsg 9 | Headers are byte-identical; configuration and acknowledgement only. |
 | Acquisition IPC | 37 | Reject a peer with a different fixed protocol version. |
 | ADC simulator | 1.5 | Adds deterministic AM and absolute carrier/adjacent tones. |
-| Persistent waveform | MNCWF 4 | Sole master/export format in M18; COMTRADE and PQDIF remain future converters. |
+| Persistent waveform | MNCWF 4 | Sole M18 master format; current post-conversion exports also provide COMTRADE and PQDIF without changing capture. |
 
 `msap1_meter_config_payload` remains a fixed 352-byte request. The independent
 316-byte `msap1_m18_config_payload` keeps the complete RPMsg frame below the
@@ -137,19 +137,29 @@ configured fundamental peak. Disabled controls are all-zero and bit inert.
 
 MNCWF v4 is the M18 persistent-waveform baseline. The current writer emits
 MNCWF v5, which keeps every v4 metadata field and replaces only sample section
-v1 with bounded raw/Zstd chunks. Product readers and the sole `mncwf` export
-path accept both v4 and v5; existing v4 masters are never recompressed. Both
-versions contain every capture-time authority needed by a future offline
-COMTRADE or PQDIF converter. A request for either destination format must fail
-explicitly; the product must not fabricate missing fields or write a lossy
-placeholder.
+v1 with bounded raw/Zstd chunks. Product readers and exports accept both v4
+and v5; existing masters are never recompressed. MNCWF remains the sole
+recording format. The reusable post-capture converter emits IEC
+60255-24:2013 CFF/BINARY32, a legacy ZIP containing CFG and DAT, or IEEE
+1159.3-2025 PQDIF without consulting mutable live state. Missing source
+authority and discontinuous selections fail explicitly rather than producing
+a lossy placeholder.
 
 Authenticated viewers request an event slice with
 `GET /api/v1/waveforms/export?session_id=...&event_id=...&format=mncwf`.
 Local operators use `mnc waveform export --session ... --event ... --format
-mncwf [--file ...]`. Both resolve completed sessions by exact full-archive
+mncwf|comtrade|comtrade-zip|pqdif [--file ...]`; omitting `--event` selects the
+complete capture. Both resolve completed sessions by exact full-archive
 lookup, including sessions older than the newest catalogue page. The shared
 read-only exporter validates and maps the v4/v5 master, regenerates the
 virtual slice metadata and integrity fields, copies complete v5 chunks, and
 rebuilds only partial boundary chunks without another persistent on-device
 capture.
+
+Converted REST exports use `/api/v1/waveform-exports`: POST submits an
+owner-scoped asynchronous job, GET polls it, DELETE cancels/discards it, and
+`/download` streams a ready artifact through the authenticated backend. One
+process-local task worker owns these jobs; no converter daemon or IPC socket is
+involved. Task-manager failure is optional to Web availability: it leaves the
+legacy MNCWF paths intact and removes only converted capability entries. Local
+CLI exports invoke the same converter classes synchronously.

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstring>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -89,6 +90,15 @@ struct WaveformPageDto {
 	std::optional<std::uint64_t> next_before_session_id;
 };
 
+struct WaveformExportCapabilityDto {
+	std::string format;
+	std::string label;
+	std::string profile;
+	std::string extension;
+	std::vector<std::string> scopes;
+	bool asynchronous;
+};
+
 /** Body of GET /api/v1/waveforms (also returned by trigger/delete). */
 struct WaveformDto {
 	bool running;
@@ -116,7 +126,42 @@ struct WaveformDto {
 	WaveformArchiveDiscoveryDto archive_discovery;
 	WaveformPageDto page;
 	std::vector<std::string> export_formats;
+	std::vector<WaveformExportCapabilityDto> export_capabilities;
 	std::vector<WaveformSessionDto> sessions;
+};
+
+/** Body of POST /api/v1/waveform-exports. */
+struct WaveformExportRequestDto {
+	std::uint64_t session_id = 0;
+	std::string scope;
+	std::optional<std::string> event_id;
+	std::string format;
+};
+
+/** Owner-filtered projection of one asynchronous converter job. */
+struct WaveformExportJobDto {
+	std::string job_id;
+	std::string state;
+	std::string session_id;
+	std::string source_filename;
+	std::string scope;
+	std::optional<std::string> event_id;
+	std::string format;
+	std::string profile;
+	std::uint32_t queue_position;
+	std::uint64_t processed_frames;
+	std::uint64_t total_frames;
+	std::string filename;
+	std::uint64_t bytes;
+	std::string sha256;
+	std::string created_at;
+	std::string started_at;
+	std::string completed_at;
+	std::string expires_at;
+	std::string download_url;
+	std::string error_code;
+	std::string error_message;
+	std::vector<std::string> missing_fields;
 };
 
 struct WaveformSessionLookupDto {
@@ -298,7 +343,37 @@ MncwfUuid waveform_capture_lookup(std::string_view target)
 }
 
 /** Project a daemon waveform response onto the JSON status document. */
-WaveformDto waveform_status(const msap1::WaveformResponse &response)
+std::vector<WaveformExportCapabilityDto> export_capabilities(AppContext &app)
+{
+	std::vector<WaveformExportCapabilityDto> result{{
+		"mncwf", "MNCWF", "MNCWF v4/v5", ".mncwf",
+		{"capture", "event"}, false}};
+	try {
+		const auto capabilities = app.waveform_exports.capabilities();
+		if (!capabilities.healthy)
+			return result;
+		for (std::size_t index = 0; index < capabilities.formats.size(); ++index) {
+			const auto &format = capabilities.formats[index];
+			const auto profile = index < capabilities.profiles.size()
+				? capabilities.profiles[index] : std::string{};
+			if (format == "comtrade")
+				result.push_back({format, "COMTRADE CFF", profile,
+					".cff", {"capture", "event"}, true});
+			else if (format == "comtrade-zip")
+				result.push_back({format, "COMTRADE CFG/DAT ZIP", profile,
+					".zip", {"capture", "event"}, true});
+			else if (format == "pqdif")
+				result.push_back({format, "PQDIF", profile,
+					".pqd", {"capture", "event"}, true});
+		}
+	} catch (...) {
+		/* Conversion is optional; waveform browsing and MNCWF remain healthy. */
+	}
+	return result;
+}
+
+WaveformDto waveform_status(AppContext &app,
+	const msap1::WaveformResponse &response)
 {
 	const auto &status = response.waveform;
 	WaveformDto result{
@@ -336,13 +411,100 @@ WaveformDto waveform_status(const msap1::WaveformResponse &response)
 			 ? std::nullopt
 			 : std::optional<std::uint64_t>{
 				response.page.next_before_session_id}},
-		{"mncwf"},
+		{},
+		{},
 		{},
 	};
+	result.export_capabilities = export_capabilities(app);
+	result.export_formats.reserve(result.export_capabilities.size());
+	for (const auto &capability : result.export_capabilities)
+		result.export_formats.push_back(capability.format);
 	result.sessions.reserve(response.sessions.size());
 	for (const auto &session : response.sessions)
 		result.sessions.push_back(waveform_session(session));
 	return result;
+}
+
+std::string authenticated_owner(const webengine::RequestContext &context)
+{
+	if (!context.user || context.user->username.empty())
+		throw std::runtime_error("authenticated waveform export owner is absent");
+	return context.user->username;
+}
+
+WaveformExportJobDto export_job(const WaveformExportJob &job)
+{
+	return {
+		job.job_id,
+		job.state,
+		job.session_id,
+		job.source_basename,
+		job.scope,
+		job.event_id.empty() ? std::nullopt
+			: std::optional<std::string>{job.event_id},
+		job.format,
+		job.profile,
+		job.queue_position,
+		job.processed_frames,
+		job.total_frames,
+		job.filename,
+		job.bytes,
+		job.sha256,
+		job.created_at,
+		job.started_at,
+		job.completed_at,
+		job.expires_at,
+		job.state == "ready"
+			? "/api/v1/waveform-exports/download?job_id=" + job.job_id
+			: std::string{},
+		job.error_code,
+		job.error_message,
+		job.missing_fields,
+	};
+}
+
+webengine::http::status converter_error_status(WaveformExportStatus status)
+{
+	using Status = WaveformExportStatus;
+	switch (status) {
+	case Status::invalid_request: return webengine::http::status::bad_request;
+	case Status::not_found: return webengine::http::status::not_found;
+	case Status::conflict: return webengine::http::status::conflict;
+	case Status::unprocessable:
+		return webengine::http::status::unprocessable_entity;
+	case Status::queue_full: return webengine::http::status::too_many_requests;
+	case Status::storage_full:
+		return static_cast<webengine::http::status>(507);
+	case Status::ok: return webengine::http::status::ok;
+	case Status::unavailable:
+	case Status::internal_error:
+		return webengine::http::status::service_unavailable;
+	}
+	return webengine::http::status::service_unavailable;
+}
+
+webengine::Response converter_error_response(
+	const WaveformExportTaskError &error, std::string fallback_code,
+	bool retryable)
+{
+	return json_response(converter_error_status(error.status()),
+		glz::obj{"error", std::string(error.what()), "code",
+			error.code().empty() ? std::move(fallback_code) : error.code(),
+			"retryable", retryable,
+			"missing_fields", error.missing_fields()});
+}
+
+std::string export_job_id(std::string_view target)
+{
+	const auto parameters = query_parameters(target);
+	if (parameters.size() != 1u || !parameters.contains("job_id") ||
+	    parameters.at("job_id").empty())
+		throw std::invalid_argument("required query: job_id=<export job UUID>");
+	const auto parsed = mncwf_uuid_from_string(parameters.at("job_id"));
+	if (!parsed || mncwf_uuid_is_zero(*parsed))
+		throw std::invalid_argument(
+			"job_id must be a nonzero canonical UUID");
+	return mncwf_uuid_string(*parsed);
 }
 
 struct WaveformExportSelection {
@@ -398,7 +560,7 @@ webengine::Response get_waveforms(AppContext &app,
 		const auto response = app.acquisition.waveform_list(request);
 		require_acquisition_ok(response.status);
 		return json_response(webengine::http::status::ok,
-			waveform_status(response));
+			waveform_status(app, response));
 	} catch (const std::invalid_argument &error) {
 		return error_response(webengine::http::status::bad_request,
 			error.what());
@@ -551,7 +713,7 @@ webengine::Response post_waveform_trigger(AppContext &app,
 			 {"MNC_POSTTRIGGER_MS",
 			  std::to_string(trigger.posttrigger_ms)}});
 		return json_response(webengine::http::status::ok,
-			waveform_status(response));
+			waveform_status(app, response));
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/waveforms/trigger", error);
 		return error_response(
@@ -640,11 +802,189 @@ delete_waveform_session(AppContext &app,
 			  std::to_string(deletion.all ? deleted
 				: deletion.session_id)}});
 		return json_response(webengine::http::status::ok,
-			waveform_status(response));
+			waveform_status(app, response));
 	} catch (const std::exception &error) {
 		log_api_failure("/api/v1/waveforms", error);
 		return error_response(webengine::http::status::conflict,
 			error.what());
+	}
+}
+
+webengine::Response post_waveform_export(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	try {
+		WaveformExportRequestDto request{};
+		if (glz::read_json(request, context.request.body()))
+			throw std::invalid_argument("invalid waveform export JSON");
+		if (request.session_id == 0u)
+			throw std::invalid_argument("session_id must be a positive integer");
+		if (request.scope != "capture" && request.scope != "event")
+			throw std::invalid_argument("scope must be capture or event");
+		if (request.format != "comtrade" &&
+		    request.format != "comtrade-zip" && request.format != "pqdif")
+			throw std::invalid_argument(
+				"format must be comtrade, comtrade-zip, or pqdif");
+		std::string event_id;
+		if (request.scope == "event") {
+			if (!request.event_id || request.event_id->empty())
+				throw std::invalid_argument(
+					"event_id is required for event scope");
+			const auto event_uuid = mncwf_uuid_from_string(*request.event_id);
+			if (!event_uuid || mncwf_uuid_is_zero(*event_uuid))
+				throw std::invalid_argument(
+					"event_id must be a nonzero canonical UUID");
+			event_id = mncwf_uuid_string(*event_uuid);
+		} else if (request.event_id && !request.event_id->empty()) {
+			throw std::invalid_argument(
+				"event_id is only valid for event scope");
+		}
+
+		WaveformLookupRequest lookup{};
+		lookup.session_id = request.session_id;
+		const auto source = app.acquisition.waveform_lookup(lookup);
+		require_acquisition_ok(source.status);
+		if (source.found == 0u)
+			return error_response(webengine::http::status::not_found,
+				"waveform session was not found", "source_not_found", false);
+		if (source.session.state != WaveformSessionState::complete ||
+		    source.session.filename.empty())
+			return error_response(
+				webengine::http::status::unprocessable_entity,
+				"waveform session is not a completed capture",
+				"source_not_ready", false);
+
+		const auto job = app.waveform_exports.submit(
+			authenticated_owner(context), std::to_string(request.session_id),
+			source.session.filename, request.scope, event_id, request.format);
+		auto response = json_response(webengine::http::status::accepted,
+			export_job(job));
+		response.set(webengine::http::field::location,
+			"/api/v1/waveform-exports?job_id=" + job.job_id);
+		return response;
+	} catch (const WaveformExportTaskError &error) {
+		return converter_error_response(error, "waveform_conversion_rejected",
+			error.status() == WaveformExportStatus::queue_full ||
+			error.status() == WaveformExportStatus::unavailable);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what(), "invalid_request", false);
+	} catch (const AcquisitionUnavailable &error) {
+		return error_response(webengine::http::status::service_unavailable,
+			error.what(), "acquisition_unavailable", true);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveform-exports", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what(), "converter_unavailable", true);
+	}
+}
+
+webengine::Response get_waveform_export(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	try {
+		const auto target = context.request.target();
+		const auto id = export_job_id(
+			std::string_view(target.data(), target.size()));
+		return json_response(webengine::http::status::ok,
+			export_job(app.waveform_exports.status(
+				authenticated_owner(context), id)));
+	} catch (const WaveformExportTaskError &error) {
+		return converter_error_response(error,
+			"waveform_conversion_status_failed", false);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what(), "invalid_request", false);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveform-exports", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what(), "converter_unavailable", true);
+	}
+}
+
+webengine::Response delete_waveform_export(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	try {
+		const auto target = context.request.target();
+		const auto id = export_job_id(
+			std::string_view(target.data(), target.size()));
+		return json_response(webengine::http::status::ok,
+			export_job(app.waveform_exports.cancel(
+				authenticated_owner(context), id)));
+	} catch (const WaveformExportTaskError &error) {
+		return converter_error_response(error,
+			"waveform_conversion_cancel_failed", false);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what(), "invalid_request", false);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveform-exports", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what(), "converter_unavailable", true);
+	}
+}
+
+webengine::HandlerResult download_waveform_export(
+	AppContext &app, const webengine::RequestContext &context)
+{
+	try {
+		const auto target = context.request.target();
+		const auto id = export_job_id(
+			std::string_view(target.data(), target.size()));
+		const auto owner = authenticated_owner(context);
+		const auto job = app.waveform_exports.status(owner, id);
+		if (job.state != "ready")
+			return error_response(webengine::http::status::conflict,
+				"waveform export is not ready for download",
+				"export_not_ready", true);
+		const auto media_type = job.format == "comtrade"
+			? "application/vnd.iec.comtrade"
+			: job.format == "comtrade-zip" ? "application/zip"
+				: "application/vnd.pqdif";
+		return webengine::StreamingDownload{
+			job.filename, media_type, job.bytes,
+			[&tasks = app.waveform_exports, owner, id,
+			 expected_size = job.bytes, expected_sha256 = job.sha256,
+			 expected_filename = job.filename, expected_media_type = media_type](
+				std::uint64_t offset, std::span<std::byte> destination) {
+				const auto requested = static_cast<std::uint32_t>(
+					std::min<std::size_t>(destination.size(),
+						WaveformExportTaskManager::maximum_chunk_bytes));
+				if (requested == 0u)
+					return std::size_t{0};
+				const auto chunk = tasks.read_chunk(
+					owner, id, offset, requested);
+				if (chunk.total_size != expected_size ||
+				    chunk.sha256 != expected_sha256 ||
+				    chunk.filename != expected_filename ||
+				    chunk.media_type != expected_media_type)
+					throw std::runtime_error(
+						"waveform converter changed artifact identity during download");
+				if (chunk.content.size() > destination.size())
+					throw std::runtime_error(
+						"waveform converter returned an oversized chunk");
+				if (chunk.content.empty() && offset != expected_size)
+					throw std::runtime_error(
+						"waveform converter stopped before artifact EOF");
+				if (chunk.end_of_file !=
+				    (offset + chunk.content.size() == expected_size))
+					throw std::runtime_error(
+						"waveform converter returned an invalid EOF marker");
+				std::memcpy(destination.data(), chunk.content.data(),
+					chunk.content.size());
+				return chunk.content.size();
+			}};
+	} catch (const WaveformExportTaskError &error) {
+		return converter_error_response(error,
+			"waveform_export_download_failed", false);
+	} catch (const std::invalid_argument &error) {
+		return error_response(webengine::http::status::bad_request,
+			error.what(), "invalid_request", false);
+	} catch (const std::exception &error) {
+		log_api_failure("/api/v1/waveform-exports/download", error);
+		return error_response(webengine::http::status::service_unavailable,
+			error.what(), "converter_unavailable", true);
 	}
 }
 
@@ -796,6 +1136,54 @@ void document_waveform_routes(DocumentedApiRegistry &registry)
 		"The event cannot be projected from the waveform");
 	registry.add_error_response(Verb::get, export_path, 503,
 		"Waveform acquisition is unavailable");
+
+	constexpr std::string_view converted = "/api/v1/waveform-exports";
+	registry.add_json_request<WaveformExportRequestDto>(Verb::post, converted,
+		"WaveformExportRequest", "Capture/event selection and output format",
+		true,
+		R"({"session_id":42,"scope":"event","event_id":"d2f78547-4d73-46c2-bc69-c9cc763cc15a","format":"comtrade-zip"})");
+	registry.add_json_response<WaveformExportJobDto>(Verb::post, converted, 202,
+		"WaveformExportJob", "Queued or deduplicated waveform export job");
+	for (const auto status : {400, 404, 422, 429, 507, 503})
+		registry.add_error_response(Verb::post, converted, status,
+			"Waveform export submission failed");
+	registry.add_query_parameter(Verb::get, converted, "job_id", "string",
+		true, "Owner-scoped export job UUID");
+	registry.add_json_response<WaveformExportJobDto>(Verb::get, converted, 200,
+		"WaveformExportJob", "Current asynchronous export state");
+	registry.add_error_response(Verb::get, converted, 400,
+		"The job query is invalid");
+	registry.add_error_response(Verb::get, converted, 404,
+		"The owner-scoped job does not exist or expired");
+	registry.add_error_response(Verb::get, converted, 503,
+		"The converter is unavailable");
+	registry.add_query_parameter(Verb::delete_, converted, "job_id", "string",
+		true, "Owner-scoped export job UUID");
+	registry.add_json_response<WaveformExportJobDto>(Verb::delete_, converted,
+		200, "WaveformExportJob", "Cancelled or discarded export job");
+	registry.add_error_response(Verb::delete_, converted, 400,
+		"The job query is invalid");
+	registry.add_error_response(Verb::delete_, converted, 404,
+		"The owner-scoped job does not exist or expired");
+	registry.add_error_response(Verb::delete_, converted, 409,
+		"The ready artifact is currently being streamed");
+	registry.add_error_response(Verb::delete_, converted, 503,
+		"The converter is unavailable");
+
+	constexpr std::string_view converted_download =
+		"/api/v1/waveform-exports/download";
+	registry.add_query_parameter(Verb::get, converted_download, "job_id",
+		"string", true, "Owner-scoped ready export job UUID");
+	registry.add_binary_response(Verb::get, converted_download, 200,
+		"application/octet-stream", "Converted waveform artifact", {}, true);
+	registry.add_error_response(Verb::get, converted_download, 400,
+		"The job query is invalid");
+	registry.add_error_response(Verb::get, converted_download, 404,
+		"The owner-scoped job does not exist or expired");
+	registry.add_error_response(Verb::get, converted_download, 409,
+		"The export is not ready");
+	registry.add_error_response(Verb::get, converted_download, 503,
+		"The converter is unavailable");
 
 	for (const auto &[path, attachment] : {
 		std::pair<std::string_view, bool>{

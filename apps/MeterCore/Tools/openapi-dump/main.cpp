@@ -31,6 +31,9 @@ void check_contract()
 	require_fragment(first,
 		"/api/v1/documentation/msap1_modbus_registers.xlsx");
 	require_fragment(first, "/api/v1/meter/frequency-10s");
+	require_fragment(first, "/api/v1/waveform-exports");
+	require_fragment(first, "WaveformExportJob");
+	require_fragment(first, "comtrade-zip");
 	require_fragment(first, "/protected/waveforms/view/{filename}");
 }
 

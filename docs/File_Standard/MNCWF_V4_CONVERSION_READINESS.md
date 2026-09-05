@@ -3,10 +3,9 @@
 ## Decision and scope
 
 MNCWF v4 defines the conversion metadata contract and MNCWF v5 preserves it
-byte-for-byte while compressing only sample storage. The product does **not**
-ship a COMTRADE or PQDIF writer and must advertise only `mncwf` as an export
-format. Later gateway converters consume one validated MNCWF v4 or v5 stream;
-they do not
+byte-for-byte while compressing only sample storage. The product now ships
+post-capture COMTRADE and PQDIF writers. They consume one validated MNCWF v4
+or v5 stream; they do not
 query live settings, the event historian, the sensor-profile database, or
 device identity services.
 
@@ -22,27 +21,32 @@ This matrix was checked on 2026-08-29 against:
 The IEEE normative model organizes PQDIF as Container, Data Source, optional
 Monitor Settings, and Observation records, with channel definitions and
 series definitions/instances below them. Its public identifiers are used by
-name below so a future implementation can be reviewed mechanically.
+name below so the implementation can be reviewed mechanically.
 
 “Ready” means the source value is explicit in MNCWF v4/v5 or can be derived
-deterministically from that file and this format specification. It does not
-mean a destination encoder exists, and it is not an IEC/IEEE conformance
-claim. Destination syntax, identifier tables, rounding, output splitting, and
-certification vectors remain converter work.
+deterministically from that file and this format specification. It is not an
+IEC/IEEE certification claim. The implemented profiles are IEC 60255-24:2013
+CFF/BINARY32, a compatibility ZIP containing only the corresponding CFG and
+DAT, and IEEE 1159.3-2025 PQDIF using normative definitions 1.0.0.
+
+The reusable C++23 interfaces and writers live under `common/mnc/waveform`.
+The MSAP1-only MNCWF adapter lives under `common/msap1/waveform`. The adapter
+retains an opened descriptor, maps v4 samples directly, and expands at most
+one bounded v5 sample chunk at a time.
 
 ## Executable readiness gate
 
 `assess_mncwf_v4_conversion_readiness()` returns separate missing-field lists
 for full-fidelity COMTRADE and PQDIF event export. A file is ready only when:
 
-- station, site, circuit, device model, serial, nominal voltage, and nominal
-  frequency are captured rather than inferred later;
+- device model, nominal voltage, and nominal frequency are captured rather
+  than inferred later;
 - every timebase segment has UTC context, TAI correlation, and known time
   quality;
 - every channel has phase, quantity, exact affine conversion,
   primary/secondary ratio, range, and clipping metadata;
-- PQDIF additionally has topology, calibration ID, clock source, channel
-  nominal/resolution/calibration validity; and
+- PQDIF additionally has topology, clock source, and channel nominal/resolution
+  metadata; and
 - at least one typed event exists, every event has taxonomy, TAI/UTC anchors,
   and its evaluated settings snapshot, while COMTRADE also requires an exact
   trigger sequence.
@@ -51,11 +55,26 @@ The binary reader's structural validation runs first. The readiness gate never
 repairs an incomplete file and never reads current device state. The test
 fixture proves both ready output and field-specific failure reporting.
 
+Station/site/circuit IDs and names, device serial, and calibration ID are
+optional provisioning metadata. Blank values do not block either converter,
+including for existing saved files. COMTRADE keeps empty text fields and uses
+the captured device model when serial is absent; PQDIF omits absent optional
+serial/location/group tags. Neither path invents identity or reads live settings.
+Unknown, expired, or invalid calibration is preserved in destination metadata,
+not promoted to valid. PQDIF sets `tagUseCalibration` false unless the capture
+and every channel assert valid calibration. Exact captured scale/offset still
+apply to raw series independently of calibration authority.
+
+Configuration → Waveform owns archive retention and these optional fields.
+Calibration may remain Unknown with an empty ID; any known status requires an
+ID and must reflect actual calibration evidence. Identity changes affect only
+new captures; old MNCWF files remain immutable.
+
 ## COMTRADE CFG readiness
 
 | Destination concept/field group | MNCWF v4 authority | Status and conversion rule |
 |---|---|---|
-| station name | capture `station_name` | Ready, direct; blank fails readiness |
+| station name | capture `station_name` | Direct; blank remains unspecified |
 | recording-device identity | product, model, serial, device UUID, firmware/build | Ready; converter formats a stable `rec_dev_id` from captured values |
 | revision year | converter profile | Converter-owned constant (`2013`), not measurement state |
 | total/analog/status channel counts | channel definitions plus selected event-active projections | Ready, derived before CFG is emitted |
@@ -96,9 +115,10 @@ fixture proves both ready output and field-specific failure reporting.
 | INF | machine-readable source/config identity | capture/device/channel UUIDs, configuration and sensor SHA-256 values, firmware/build IDs | Ready |
 | INF | evaluated event settings | configuration generation and settings-snapshot JSON | Ready; never reconstructed from current settings |
 | INF | continuation/parent links | lineage entries and capture/event UUIDs | Ready |
-| CFF | combined CFG/INF/HDR/DAT packaging | all regions above | Source-ready; framing and destination integrity are future converter work |
+| CFF | combined CFG/INF/HDR/DAT packaging | all regions above | Implemented with CRLF framing and BINARY32 DAT records |
+| compatibility ZIP | separate CFG and DAT members | CFF CFG/DAT regions | Implemented as a bounded, streaming classic ZIP; INF/HDR remain available in CFF, not in the two-member legacy package |
 
-For event-active status projection, one selected event channel is high from
+For event-active status projection, each included event channel is high from
 its start through its valid end sequence, inclusive. An event without a valid
 end remains high through the final source sequence in that master and is
 labelled incomplete/contaminated as applicable. Selection and naming are
@@ -123,11 +143,11 @@ stable functions of event UUID and descriptor content.
 | `tagVendorID` | no third-party branding in product records | Optional and intentionally omitted |
 | `tagEquipmentID` | device model and stable device UUID | Ready, deterministic GUID mapping |
 | `tagCustomSourceInfo` | product, firmware, build, hashes | Ready |
-| `tagSerialNumberDS` | captured device serial | Ready, direct |
+| `tagSerialNumberDS` | captured device serial | Optional; omitted when blank |
 | `tagVersionDS` | firmware and software build | Ready, direct |
 | `tagNameDS` | product/device model | Ready, direct |
 | `tagOwnerDS` | not a waveform measurement | Optional and intentionally omitted |
-| `tagLocationDS` | station, site, circuit | Ready, direct |
+| `tagLocationDS` | site or station | Optional; omitted when both are blank |
 | `tagTimeZoneDS`, `tagUTCtoLST` | active UTC-to-local offset | Ready; deterministic `UTC±hh:mm` text and numeric offset |
 | coordinates/latitude/longitude | not configured in M18 | Optional and intentionally omitted, never externally looked up |
 | `tagInstrumentTypeID` | product instrument class | Ready, converter mapping |
@@ -136,7 +156,7 @@ stable functions of event UUID and descriptor content.
 | `tagChannelName` | channel name | Ready, direct |
 | `tagPhaseID` | phase enum | Ready, direct mapping |
 | `tagOtherChannelIdentifier` | stable channel UUID and source channel | Ready |
-| `tagGroupName` | station/circuit and channel description | Ready |
+| `tagGroupName` | captured circuit | Optional; omitted when blank |
 | `tagQuantityTypeID` | quantity enum and sample-series shape | Ready, converter ID mapping |
 | `tagQuantityMeasuredID` | current/voltage/status/frequency/ratio enum | Ready, direct mapping |
 | `tagPhysicalChannel` | source-channel number | Ready, direct |
@@ -158,7 +178,7 @@ element identity but are never substituted blindly for a PQDIF semantic ID.
 | PQDIF tag/concept | MNCWF v4 authority | Status and rule |
 |---|---|---|
 | monitor-settings record identity/effective time | configuration SHA-256/ID/generation and creation/event times | Ready |
-| `tagUseCalibration` | capture and channel calibration status/flags | Ready |
+| `tagUseCalibration` | capture and channel calibration status/flags | False unless capture and every channel assert valid calibration |
 | `tagNominalFrequency` | exact nominal-frequency rational | Ready |
 | `tagChannelSettingsArray`, `tagOneChannelSetting`, `tagChannelDefnIdx` | channel order and stable IDs | Ready |
 | trigger type/high/low/deadband fields | typed event descriptor plus exact evaluated settings JSON | Ready; schema-aware converter reads the captured snapshot |
@@ -206,20 +226,33 @@ location. A future converter omits these fields unless a later MNCWF version
 captures them. It must never fetch them from a mutable external database while
 exporting an old event.
 
-## Converter implementation gates for the later milestone
+## Implemented converter and acceptance gates
 
-Before advertising either format, the later gateway milestone must:
+The Web backend advertises a converted format only while its process-local task
+manager is healthy. The converter implementation:
 
-1. accept only a structurally valid MNCWF v4 whose appropriate readiness list
-   is empty;
-2. pin destination revision/profile and identifier mappings;
-3. use checked integer/rational conversion and documented rounding;
-4. prove raw, boxcar-decimated, short-final-group, multi-rate, gap, clipping,
-   overlapping-event, and continuation vectors;
-5. define explicit split/reject behavior when one destination file cannot
-   represent a source discontinuity without loss;
-6. stream output instead of buffering a large derivative in memory;
-7. validate generated files with independent COMTRADE/PQDIF readers and
-   retained golden vectors; and
-8. add the format to advertised export capabilities only after those gates
-   pass. Until then, unavailable formats are rejected explicitly.
+1. accepts only completed, structurally valid MNCWF v4/v5 whose appropriate
+   readiness list is empty;
+2. pins destination revision/profile and PQDIF identifier mappings;
+3. uses checked rational conversion and deterministic half-even COMTRADE
+   timestamp rounding;
+4. preserves raw, boxcar-decimated, short-final-group, multi-rate, clipping,
+   overlapping-event, incomplete-event, and continuation information;
+5. rejects any selected interval with a sequence gap or discontinuity as
+   `source_discontinuity_unsupported`;
+6. bounds reads, decompression, writes, and total output instead of buffering
+   a waveform-sized derivative in memory;
+7. retains deterministic golden hashes and binary-structure/sample/timestamp
+   tests, with external readers reserved for the interoperability job; and
+8. exposes `comtrade`, `comtrade-zip`, and `pqdif` only while the Web-owned
+   task manager is ready. MNCWF remains available independently.
+
+The task manager accepts only basenames opened below `/data/mnc/waveform` with
+`openat` and `O_NOFOLLOW`, retains the source descriptor, and publishes
+mode-0600 artifacts atomically under `/data/mnc/waveform-exports`. Artifacts
+expire 30 minutes after completion. One `std::jthread`, an eight-job queue,
+owner isolation, active/ready deduplication, a 1 GiB quota/output ceiling, a
+512 MiB free-space reserve, non-streaming oldest-first eviction, stop-token
+cancellation, and startup orphan cleanup bound the work. Jobs do not survive a
+Web-backend restart. CLI exports use the converter classes directly and write
+to an exclusive destination without entering this queue.

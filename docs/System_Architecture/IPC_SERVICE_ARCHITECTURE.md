@@ -166,6 +166,26 @@ acquisition loop dispatches at most eight queued IPC frames per turn, and
 capture UUID lookup is indexed. Completed event details and resolved or
 expired captures are not polled again.
 
+Post-capture format conversion is a process-local task owned by the persistent
+Web backend; it is not another system service and never participates in DMA
+draining or MNCWF materialization. `WaveformExportTaskManager` retains a
+securely opened MNCWF v4/v5 descriptor and runs one bounded `std::jthread`.
+Each accepted job has a stop source plus a promise/shared-future completion
+signal; the worker performs the conversion while REST handlers submit, poll,
+cancel, and read chunks through normal in-process calls. Generated CFF, legacy
+CFG/DAT ZIP, and PQDIF artifacts are private `mnc-web` cache objects with a
+30-minute TTL and are streamed through the authenticated backend rather than
+an nginx filesystem alias. Tasks and artifacts are intentionally purged when
+the Web backend restarts.
+
+The Web application owns export jobs above individual pages. It persists only
+owner-scoped job state in `sessionStorage`, resumes polling after navigation or
+reload, automatically starts each completed same-origin download once, and
+keeps an explicit download-again fallback. Task-manager initialization failure
+removes only the converted capabilities; capture browsing and direct MNCWF
+downloads remain available. The local CLI uses the same converter classes
+directly and therefore needs no Web process or converter socket.
+
 ## Focused libraries and ownership
 
 The CMake graph deliberately separates reusable infrastructure from MSAP1
@@ -175,6 +195,8 @@ product behavior:
 mnc::ipc                 framed Unix-stream transport only
 mnc::logging             structured journal writer and reader
 mnc::service             process lifecycle and systemd integration
+mnc::waveform            product-neutral source/sink/converter contracts,
+                         COMTRADE CFF/ZIP and PQDIF writers
 
 msap1::meter             record values, decoders, latest store and provider
 msap1::waveform          waveform DMA/session/file ownership

@@ -23,8 +23,8 @@ atomic temporary-file rename. Existing v1-v4 files remain discoverable as
 legacy history.
 
 MNCWF v4 remains a valid on-device waveform master, and v5 is its compressed
-successor. COMTRADE and PQDIF are future export conversions; they do not
-replace or supplement either recording format. See
+successor. COMTRADE and PQDIF are generated only by post-capture export; they
+do not replace or supplement either recording format. See
 [`MNCWF_V4_CONVERSION_READINESS.md`](MNCWF_V4_CONVERSION_READINESS.md).
 
 ## Binary conventions and limits

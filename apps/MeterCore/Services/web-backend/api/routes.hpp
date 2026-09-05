@@ -194,6 +194,18 @@ delete_waveform_session(AppContext &, const webengine::RequestContext &);
 /** @brief GET /api/v1/waveforms/export — streamed event-specific MNCWF. */
 webengine::HandlerResult export_waveform_event(
 	AppContext &, const webengine::RequestContext &);
+/** @brief POST /api/v1/waveform-exports — queue a converted export. */
+webengine::Response post_waveform_export(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/waveform-exports — owner-scoped job status. */
+webengine::Response get_waveform_export(AppContext &,
+	const webengine::RequestContext &);
+/** @brief DELETE /api/v1/waveform-exports — cancel or discard a job. */
+webengine::Response delete_waveform_export(AppContext &,
+	const webengine::RequestContext &);
+/** @brief GET /api/v1/waveform-exports/download — stream ready output. */
+webengine::HandlerResult download_waveform_export(AppContext &,
+	const webengine::RequestContext &);
 
 /* ── settings_routes.cpp — persistent settings authority ───────────────── */
 
@@ -440,6 +452,15 @@ inline constexpr auto route_table = std::to_array<RouteEntry>({
 	{webengine::http::verb::delete_, "/api/v1/waveforms",
 	 webengine::Role::Admin, &delete_waveform_session,
 	 "Delete one completed waveform session or all inactive sessions"},
+	{webengine::http::verb::post, "/api/v1/waveform-exports",
+	 webengine::Role::Viewer, &post_waveform_export,
+	 "Queue an asynchronous COMTRADE or PQDIF waveform export"},
+	{webengine::http::verb::get, "/api/v1/waveform-exports",
+	 webengine::Role::Viewer, &get_waveform_export,
+	 "Get owner-scoped waveform export status"},
+	{webengine::http::verb::delete_, "/api/v1/waveform-exports",
+	 webengine::Role::Viewer, &delete_waveform_export,
+	 "Cancel or discard an owner-scoped waveform export"},
 
 	/* Settings (settings_routes.cpp) */
 	{webengine::http::verb::get, "/api/v1/settings/active",
@@ -657,6 +678,10 @@ inline void register_routes(webengine::WebEngine &engine, AppContext &context)
 	engine.add_streaming_download("/api/v1/waveforms/export",
 		[&context](const auto &request) {
 			return export_waveform_event(context, request);
+		}, webengine::Role::Viewer);
+	engine.add_streaming_download("/api/v1/waveform-exports/download",
+		[&context](const auto &request) {
+			return download_waveform_export(context, request);
 		}, webengine::Role::Viewer);
 	engine.add_streaming_download("/api/v1/data-logging/artifacts/download",
 		[&context](const auto &request) {

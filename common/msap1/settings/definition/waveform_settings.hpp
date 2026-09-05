@@ -28,8 +28,8 @@ struct WaveformSettings {
 	std::string site_name;
 	std::string circuit_id;
 	std::string circuit_name;
-	/* Provisioned identity and calibration authority. Blank/unknown values are
-	 * preserved as missing conversion-readiness fields; they are never guessed. */
+	/* Optional provisioned identity and calibration authority. Blank/unknown
+	 * values remain unspecified in converted exports; they are never guessed. */
 	std::string device_serial;
 	std::string calibration_id;
 	std::string calibration_status = "unknown";

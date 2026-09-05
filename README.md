@@ -264,6 +264,13 @@ The authenticated external API is:
   explicit confirmation, all inactive sessions and their MNCWF files)
 - `GET /api/v1/waveforms/export?session_id=<id>&event_id=<uuid>&format=mncwf`
   (authenticated viewer; streamed virtual event capture)
+- `POST /api/v1/waveform-exports` (authenticated viewer; queues a complete
+  capture or exact event-slice conversion to COMTRADE CFF, legacy COMTRADE
+  CFG/DAT ZIP, or PQDIF)
+- `GET/DELETE /api/v1/waveform-exports?job_id=<uuid>` (authenticated viewer;
+  owner-scoped status and cancellation/discard)
+- `GET /api/v1/waveform-exports/download?job_id=<uuid>` (authenticated viewer;
+  chunked same-origin streaming of a ready converted artifact)
 - `GET /protected/waveforms/view/<filename>` (authenticated viewer)
 - `GET /protected/waveforms/download/<filename>` (authenticated viewer,
   attachment)
@@ -438,6 +445,9 @@ mnc waveform list
 mnc waveform export --session 17 \
     --event 01234567-89ab-5def-8123-456789abcdef --format mncwf \
     --file event-17.mncwf
+mnc waveform export --session 17 --format comtrade --file capture-17.cff
+mnc waveform export --session 17 --format comtrade-zip --file capture-17.zip
+mnc waveform export --session 17 --format pqdif --file capture-17.pqd
 mnc log
 mnc log --component fpga-acquisition
 mnc log --module dma --priority warning
@@ -515,8 +525,23 @@ Event export validates and read-only maps a completed v4 or v5 master and
 rebuilds only the selected virtual slice's metadata, directory, and CRCs. A v5
 export copies complete middle compressed chunks and regenerates only partial
 boundary chunks. It does not persist a second master on the device. Both the
-API and CLI advertise only `mncwf`; `comtrade` and `pqdif` fail explicitly
-until the later protocol-gateway converters land.
+API and CLI preserve this direct MNCWF path. A one-worker task manager inside
+the persistent Web backend produces COMTRADE CFF/BINARY32, a legacy ZIP with
+separate CFG/DAT members, and PQDIF 2025. It uses a `std::jthread`, stop tokens,
+and promise/shared-future completion signals; it is not a separate system
+service. Web advertises those formats only while the task manager is healthy,
+keeps jobs across navigation/reload, and streams ready artifacts through the
+authenticated backend. Converter outputs expire after 30 minutes and are
+purged on Web-backend restart; MNCWF masters remain governed only by waveform
+archive retention. The CLI invokes the same converter library directly.
+Configuration → Waveform owns archive retention and optional station, site,
+circuit, device serial, and calibration identity. Blank identity and Unknown
+calibration do not block COMTRADE/PQDIF export, including existing v4/v5
+captures. Exports preserve unknown calibration rather than asserting valid
+calibration; measurement scaling, timing, and continuity checks remain strict.
+Identity changes apply only to new captures, never rewrite existing MNCWF
+files, and are never used to fill in metadata during export.
+
 The acquisition daemon delivers each event/capture UUID association to the
 durable historian on an isolated retry worker, so historian startup or ingest
 lag can never block DMA. Catalogue results and the Web UI join those capture

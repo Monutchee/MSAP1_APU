@@ -103,17 +103,23 @@ void option_parsing()
 
 	const auto waveform_export = application.parse({
 		"waveform", "export", "--session", "17", "--event",
-		"01234567-89ab-5def-8123-456789abcdef", "--format", "mncwf",
-		"--file", "/tmp/event.mncwf"});
+		"01234567-89ab-5def-8123-456789abcdef", "--format", "comtrade-zip",
+		"--file", "/tmp/event.zip"});
 	require(!waveform_export.show_help &&
 			waveform_export.command->name() == "export" &&
 			waveform_export.options.waveform_session_id == 17u &&
 			waveform_export.options.waveform_event_id ==
 				"01234567-89ab-5def-8123-456789abcdef" &&
-			waveform_export.options.waveform_export_format == "mncwf" &&
+			waveform_export.options.waveform_export_format == "comtrade-zip" &&
 			waveform_export.options.waveform_export_file ==
-				"/tmp/event.mncwf",
+				"/tmp/event.zip",
 		"waveform export selection was not parsed");
+	const auto full_capture_export = application.parse({
+		"waveform", "export", "--session", "18", "--format", "pqdif"});
+	require(!full_capture_export.show_help &&
+		!full_capture_export.options.waveform_event_id.has_value() &&
+		full_capture_export.options.waveform_export_format == "pqdif",
+		"full-capture waveform export was not parsed");
 
 	const auto pq_events = application.parse({
 		"meter", "power-quality", "events", "--event",
@@ -182,13 +188,12 @@ void help_and_errors()
 	output.str({});
 	error.str({});
 	require(application.execute(
-		{"waveform", "export", "--session", "1", "--event",
-		 "01234567-89ab-5def-8123-456789abcdef", "--format", "pqdif"},
+		{"waveform", "export", "--session", "1", "--format", "csv"},
 		output, error) == 2,
-		"unavailable PQDIF export format was accepted");
-	require(error.str().find("COMTRADE and PQDIF are not available") !=
+		"unknown waveform export format was accepted");
+	require(error.str().find("--format must be mncwf, comtrade, comtrade-zip, or pqdif") !=
 			std::string::npos,
-		"unavailable converter error omitted the explicit scope boundary");
+		"waveform format error omitted the available formats");
 	output.str({});
 	error.str({});
 	require(application.execute(

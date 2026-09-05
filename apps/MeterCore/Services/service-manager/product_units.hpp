@@ -20,6 +20,7 @@ namespace msap1::service_manager::daemon {
  *                         \----->  meter-historian  ----/
  *                         \----->  mqtt-publisher (settings-controlled)
  *                                   meter-historian -> data-sender
+ *                         \----->  waveform-converter
  *   settings -> time-sync-ntp OR time-sync-ptp-clock -> time-sync-ptp-system
  *
  * (Acquisition needs the settings authority to hand it the active
