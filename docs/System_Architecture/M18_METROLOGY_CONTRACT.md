@@ -139,7 +139,7 @@ MNCWF v4 is the M18 persistent-waveform baseline. The current writer emits
 MNCWF v5, which keeps every v4 metadata field and replaces only sample section
 v1 with bounded raw/Zstd chunks. Product readers and exports accept both v4
 and v5; existing masters are never recompressed. MNCWF remains the sole
-recording format. The post-capture ProtocolGateway converter emits IEC
+recording format. The reusable post-capture converter emits IEC
 60255-24:2013 CFF/BINARY32, a legacy ZIP containing CFG and DAT, or IEEE
 1159.3-2025 PQDIF without consulting mutable live state. Missing source
 authority and discontinuous selections fail explicitly rather than producing
@@ -158,6 +158,8 @@ capture.
 
 Converted REST exports use `/api/v1/waveform-exports`: POST submits an
 owner-scoped asynchronous job, GET polls it, DELETE cancels/discards it, and
-`/download` streams a ready artifact through the authenticated backend. The
-converter is optional to Web availability; an unhealthy service leaves the
-legacy MNCWF paths intact and removes only converted capability entries.
+`/download` streams a ready artifact through the authenticated backend. One
+process-local task worker owns these jobs; no converter daemon or IPC socket is
+involved. Task-manager failure is optional to Web availability: it leaves the
+legacy MNCWF paths intact and removes only converted capability entries. Local
+CLI exports invoke the same converter classes synchronously.

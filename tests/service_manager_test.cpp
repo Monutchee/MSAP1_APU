@@ -126,11 +126,9 @@ void product_topology_orders_the_data_sender_without_owning_mqtt()
 	const auto historian = position("meter-historian");
 	const auto sender = position("data-sender");
 	const auto acquisition = position("fpga-acquisition");
-	const auto converter = position("waveform-converter");
 	const auto web = position("web-backend");
 	require(settings < stream && stream < historian && settings < sender &&
-		historian < sender && sender < web && acquisition < web &&
-		acquisition < converter,
+		historian < sender && sender < web && acquisition < web,
 		"product topology did not order Data Sender after its durable sources");
 	require(position("mqtt-publisher") == controller->controls.size(),
 		"settings-controlled MQTT was started unconditionally");

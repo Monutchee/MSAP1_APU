@@ -1,5 +1,4 @@
-#include "waveform_conversion_service.hpp"
-#include "ipc_access_policy.hpp"
+#include "waveform_export_task_manager.hpp"
 
 #include "mnc/waveform/waveform_converter.hpp"
 #include "msap1/waveform/mncwf_v4.hpp"
@@ -8,7 +7,6 @@
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
-#include <glaze/glaze.hpp>
 #include <openssl/evp.h>
 #include <zlib.h>
 
@@ -34,7 +32,7 @@
 #include <unistd.h>
 #include <utility>
 
-namespace msap1::waveform::daemon {
+namespace msap1::web {
 namespace {
 
 using namespace std::chrono_literals;
@@ -44,19 +42,7 @@ using mnc::waveform::ConversionOptions;
 using mnc::waveform::ExportFormat;
 using mnc::waveform::ExportScope;
 
-constexpr std::uint64_t maximum_output_bytes = 1024ull * 1024ull * 1024ull;
-constexpr std::uint64_t minimum_free_bytes = 512ull * 1024ull * 1024ull;
-constexpr std::size_t maximum_queued_jobs = 8;
-constexpr auto artifact_ttl = 30min;
-constexpr auto stream_lease = 30s;
 constexpr std::size_t io_buffer_bytes = 64u * 1024u;
-
-class ServiceFailure final : public std::runtime_error {
-public:
-	ServiceFailure(ipc::Status status, std::string message)
-		: std::runtime_error(std::move(message)), status(status) {}
-	ipc::Status status;
-};
 
 class StorageFull final : public std::runtime_error {
 public:
@@ -90,14 +76,6 @@ private:
 	int value_;
 };
 
-std::string encode_json(const auto &value)
-{
-	const auto encoded = glz::write_json(value);
-	if (!encoded)
-		throw std::runtime_error("cannot encode waveform conversion IPC JSON");
-	return *encoded;
-}
-
 std::string iso_time(std::chrono::system_clock::time_point value)
 {
 	const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -129,7 +107,7 @@ void validate_owner(std::string_view owner)
 	    std::ranges::any_of(owner, [](unsigned char character) {
 			return character < 0x20u || character == 0x7fu;
 	    }))
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"authenticated export owner is invalid");
 }
 
@@ -145,7 +123,7 @@ void validate_basename(std::string_view name)
 			character == '.' || character == '-' || character == '_');
 	    }) ||
 	    !name.ends_with(".mncwf"))
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"source_basename must name one MNCWF file");
 }
 
@@ -153,7 +131,7 @@ void validate_job_id(std::string_view job_id)
 {
 	const auto parsed = mncwf_uuid_from_string(job_id);
 	if (!parsed || mncwf_uuid_is_zero(*parsed))
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"job_id must be a nonzero canonical UUID");
 }
 
@@ -164,7 +142,7 @@ void validate_session_id(std::string_view session_id)
 		session_id.data() + session_id.size(), parsed);
 	if (session_id.empty() || result.ec != std::errc{} ||
 	    result.ptr != session_id.data() + session_id.size() || parsed == 0u)
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"session_id must be a positive integer");
 }
 
@@ -178,7 +156,7 @@ std::string profile(ExportFormat format)
 	case ExportFormat::pqdif:
 		return "IEEE 1159.3-2025 PQDIF (normative definitions 1.0.0)";
 	}
-	throw ServiceFailure(ipc::Status::invalid_request,
+	throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 		"unsupported waveform export format");
 }
 
@@ -360,8 +338,18 @@ std::uint64_t available_bytes(const std::filesystem::path &directory)
 
 } // namespace
 
-struct WaveformConversionService::JobRecord {
-	ipc::Job dto;
+WaveformExportTaskError::WaveformExportTaskError(WaveformExportStatus status,
+	std::string message, std::string code,
+	std::vector<std::string> missing_fields)
+	: std::runtime_error(std::move(message)), status_(status),
+	  code_(std::move(code)), missing_fields_(std::move(missing_fields))
+{
+}
+
+struct WaveformExportTaskManager::JobRecord {
+	JobRecord() : completion_future(completion.get_future().share()) {}
+
+	WaveformExportJob dto;
 	std::string key;
 	std::string artifact_basename;
 	std::shared_ptr<MncwfWaveformSource> source;
@@ -371,19 +359,21 @@ struct WaveformConversionService::JobRecord {
 	std::stop_source stop;
 	bool streaming = false;
 	std::chrono::steady_clock::time_point stream_activity{};
-	std::chrono::system_clock::time_point created{};
 	std::chrono::system_clock::time_point completed{};
+	std::promise<void> completion;
+	std::shared_future<void> completion_future;
+	bool completion_signalled = false;
 };
 
-class WaveformConversionService::FileSink final
+class WaveformExportTaskManager::FileSink final
 	: public mnc::waveform::OutputSink {
 public:
-	FileSink(WaveformConversionService &service,
+	FileSink(WaveformExportTaskManager &manager,
 		std::shared_ptr<JobRecord> job)
-		: service_(service), job_(std::move(job)),
+		: manager_(manager), job_(std::move(job)),
 		  part_(job_->dto.job_id + ".part")
 	{
-		directory_ = Descriptor(::open(service_.export_root_.c_str(),
+		directory_ = Descriptor(::open(manager_.options_.export_root.c_str(),
 			O_RDONLY | O_CLOEXEC | O_DIRECTORY));
 		if (directory_.get() < 0)
 			throw std::system_error(errno, std::generic_category(),
@@ -404,8 +394,8 @@ public:
 	void write(std::span<const std::byte> bytes) override
 	{
 		{
-			std::scoped_lock lock(service_.mutex_);
-			service_.prepare_write_locked(job_, bytes_, bytes.size());
+			std::scoped_lock lock(manager_.mutex_);
+			manager_.prepare_write_locked(job_, bytes_, bytes.size());
 		}
 		std::size_t offset = 0;
 		while (offset != bytes.size()) {
@@ -427,7 +417,7 @@ public:
 	}
 	[[nodiscard]] std::uint64_t byte_limit() const noexcept override
 	{
-		return maximum_output_bytes;
+		return manager_.options_.maximum_output_bytes;
 	}
 
 	[[nodiscard]] int descriptor() const noexcept { return file_.get(); }
@@ -449,7 +439,7 @@ public:
 	}
 
 private:
-	WaveformConversionService &service_;
+	WaveformExportTaskManager &manager_;
 	std::shared_ptr<JobRecord> job_;
 	std::string part_;
 	Descriptor directory_;
@@ -458,98 +448,109 @@ private:
 	bool published_ = false;
 };
 
-WaveformConversionService::WaveformConversionService()
-	: Service("MSAP1 Waveform Converter", "waveform-converter"),
-	  server_(context_.get_executor(), std::string(ipc::socket_path))
+WaveformExportTaskManager::WaveformExportTaskManager(
+	WaveformExportTaskOptions options)
+	: options_(std::move(options))
 {
+	try {
+		if (options_.maximum_output_bytes == 0u ||
+		    options_.maximum_total_bytes == 0u ||
+		    options_.maximum_queued_jobs == 0u ||
+		    options_.artifact_ttl <= 0s || options_.stream_lease <= 0s)
+			throw std::invalid_argument(
+				"waveform export task limits must be positive");
+		Descriptor source_directory(::open(options_.source_root.c_str(),
+			O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+		if (source_directory.get() < 0)
+			throw std::system_error(errno, std::generic_category(),
+				"open waveform source directory");
+		purge_artifacts();
+		available_ = true;
+		worker_ = std::jthread([this](std::stop_token stop_token) {
+			worker_loop(stop_token);
+		});
+	} catch (const std::exception &error) {
+		fail_manager(error.what());
+	}
 }
 
-void WaveformConversionService::purge_artifacts()
+WaveformExportTaskManager::~WaveformExportTaskManager()
 {
-	std::filesystem::create_directories(export_root_);
-	std::filesystem::permissions(export_root_,
-		std::filesystem::perms::owner_all,
-		std::filesystem::perm_options::replace);
-	Descriptor directory(::open(export_root_.c_str(),
-		O_RDONLY | O_CLOEXEC | O_DIRECTORY));
-	if (directory.get() < 0)
-		throw std::system_error(errno, std::generic_category(),
-			"open waveform export directory");
-	for (const auto &entry : std::filesystem::directory_iterator(export_root_))
-		std::filesystem::remove_all(entry.path());
-	if (::fsync(directory.get()) != 0)
-		throw std::system_error(errno, std::generic_category(),
-			"synchronize purged waveform export directory");
-}
-
-void WaveformConversionService::on_start()
-{
-	purge_artifacts();
-	server_.start([this](auto connection, auto frame) {
-		handle(std::move(connection), std::move(frame));
-	}, [this](const std::string &error) {
-		(void)logger().write(mnc::logging::Priority::warning,
-			"Waveform converter IPC error: " + error, "ipc_error");
-	});
-	if (::chmod(ipc::socket_path.data(), 0660) != 0)
-		throw std::system_error(errno, std::generic_category(),
-			"set waveform converter socket mode");
-	io_worker_ = std::thread([this] {
-		try {
-			context_.run();
-		} catch (const std::exception &error) {
-			{
-				std::scoped_lock lock(failure_mutex_);
-				failure_message_ = error.what();
-			}
-			worker_failed_ = true;
-			request_stop();
-		}
-	});
-	conversion_worker_ = std::thread([this] { worker_loop(); });
-}
-
-void WaveformConversionService::on_reload()
-{
-	std::scoped_lock lock(mutex_);
-	cleanup_expired_locked();
-}
-
-void WaveformConversionService::on_stop() noexcept
-{
-	stopping_ = true;
+	available_ = false;
+	worker_.request_stop();
 	{
 		std::scoped_lock lock(mutex_);
 		for (const auto &[id, job] : jobs_)
 			job->stop.request_stop();
 	}
 	condition_.notify_all();
-	if (conversion_worker_.joinable())
-		conversion_worker_.join();
-	server_.stop();
-	context_.stop();
-	if (io_worker_.joinable())
-		io_worker_.join();
+	if (worker_.joinable())
+		worker_.join();
 }
 
-mnc::ServiceHealth WaveformConversionService::health() const
+void WaveformExportTaskManager::fail_manager(std::string message) noexcept
 {
-	if (worker_failed_) {
+	{
 		std::scoped_lock lock(failure_mutex_);
-		return {false, "waveform converter worker failed: " + failure_message_};
+		failure_message_ = std::move(message);
 	}
-	std::scoped_lock lock(mutex_);
-	return {true, "ready; queued=" + std::to_string(queue_.size())};
+	available_ = false;
 }
 
-void WaveformConversionService::update_queue_positions_locked()
+void WaveformExportTaskManager::require_available() const
+{
+	if (available_)
+		return;
+	std::scoped_lock lock(failure_mutex_);
+	throw WaveformExportTaskError(WaveformExportStatus::unavailable,
+		failure_message_.empty() ? "waveform export tasks are unavailable"
+			: failure_message_);
+}
+
+WaveformExportCapabilities WaveformExportTaskManager::capabilities() const
+{
+	WaveformExportCapabilities result;
+	result.healthy = available_;
+	result.maximum_queued_jobs = static_cast<std::uint32_t>(
+		std::min<std::size_t>(options_.maximum_queued_jobs,
+			std::numeric_limits<std::uint32_t>::max()));
+	result.maximum_output_bytes = options_.maximum_output_bytes;
+	result.artifact_ttl_seconds = static_cast<std::uint64_t>(
+		options_.artifact_ttl.count());
+	if (!result.healthy) {
+		std::scoped_lock lock(failure_mutex_);
+		result.unavailable_reason = failure_message_;
+	}
+	return result;
+}
+
+void WaveformExportTaskManager::purge_artifacts()
+{
+	std::filesystem::create_directories(options_.export_root);
+	std::filesystem::permissions(options_.export_root,
+		std::filesystem::perms::owner_all,
+		std::filesystem::perm_options::replace);
+	Descriptor directory(::open(options_.export_root.c_str(),
+		O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+	if (directory.get() < 0)
+		throw std::system_error(errno, std::generic_category(),
+			"open waveform export directory");
+	for (const auto &entry :
+	     std::filesystem::directory_iterator(options_.export_root))
+		std::filesystem::remove_all(entry.path());
+	if (::fsync(directory.get()) != 0)
+		throw std::system_error(errno, std::generic_category(),
+			"synchronize purged waveform export directory");
+}
+
+void WaveformExportTaskManager::update_queue_positions_locked()
 {
 	std::uint32_t position = 1;
 	for (const auto &job : queue_)
 		job->dto.queue_position = position++;
 }
 
-void WaveformConversionService::cleanup_expired_locked()
+void WaveformExportTaskManager::cleanup_expired_locked()
 {
 	const auto now = std::chrono::system_clock::now();
 	const auto steady_now = std::chrono::steady_clock::now();
@@ -557,17 +558,18 @@ void WaveformConversionService::cleanup_expired_locked()
 		const auto &job = iterator->second;
 		if (job->streaming && job->stream_activity !=
 		    std::chrono::steady_clock::time_point{} &&
-		    steady_now - job->stream_activity >= stream_lease)
+		    steady_now - job->stream_activity >= options_.stream_lease)
 			job->streaming = false;
-		const bool terminal = job->dto.state == "ready" ||
-			job->dto.state == "failed" || job->dto.state == "cancelled";
+		const bool terminal = (job->dto.state == "ready" ||
+			job->dto.state == "failed" || job->dto.state == "cancelled") &&
+			job->completion_future.wait_for(0s) == std::future_status::ready;
 		if (terminal && !job->streaming && job->completed !=
 		    std::chrono::system_clock::time_point{} &&
-		    now - job->completed >= artifact_ttl) {
+		    now - job->completed >= options_.artifact_ttl) {
 			if (!job->artifact_basename.empty()) {
 				std::error_code error;
 				(void)std::filesystem::remove(
-					export_root_ / job->artifact_basename, error);
+					options_.export_root / job->artifact_basename, error);
 				if (error) {
 					++iterator;
 					continue;
@@ -580,13 +582,14 @@ void WaveformConversionService::cleanup_expired_locked()
 	}
 }
 
-void WaveformConversionService::evict_locked(
+void WaveformExportTaskManager::evict_locked(
 	const std::shared_ptr<JobRecord> &job)
 {
 	if (!job || job->dto.state != "ready" || job->streaming)
 		return;
 	std::error_code error;
-	(void)std::filesystem::remove(export_root_ / job->artifact_basename, error);
+	(void)std::filesystem::remove(
+		options_.export_root / job->artifact_basename, error);
 	if (error)
 		throw StorageFull(
 			"cannot evict the oldest ready waveform export artifact");
@@ -598,12 +601,13 @@ void WaveformConversionService::evict_locked(
 	job->artifact_basename.clear();
 }
 
-void WaveformConversionService::prepare_write_locked(
+void WaveformExportTaskManager::prepare_write_locked(
 	const std::shared_ptr<JobRecord> &job, std::uint64_t current_bytes,
 	std::size_t additional_bytes)
 {
 	cleanup_expired_locked();
-	if (additional_bytes > maximum_output_bytes - current_bytes)
+	if (current_bytes > options_.maximum_output_bytes ||
+	    additional_bytes > options_.maximum_output_bytes - current_bytes)
 		throw ConversionError(ConversionErrorCode::output_too_large,
 			"waveform export exceeds the 1 GiB output limit");
 	for (;;) {
@@ -611,10 +615,12 @@ void WaveformConversionService::prepare_write_locked(
 		for (const auto &[id, candidate] : jobs_)
 			if (candidate != job && candidate->dto.state == "ready")
 				ready_bytes += candidate->dto.bytes;
-		const auto free = available_bytes(export_root_);
-		const bool quota_ok = ready_bytes <= maximum_output_bytes -
-			current_bytes - additional_bytes;
-		const bool reserve_ok = free >= minimum_free_bytes + additional_bytes;
+		const auto free = available_bytes(options_.export_root);
+		const auto pending = current_bytes + additional_bytes;
+		const bool quota_ok = pending <= options_.maximum_total_bytes &&
+			ready_bytes <= options_.maximum_total_bytes - pending;
+		const bool reserve_ok = free >= options_.minimum_free_bytes &&
+			additional_bytes <= free - options_.minimum_free_bytes;
 		if (quota_ok && reserve_ok)
 			return;
 		std::shared_ptr<JobRecord> oldest;
@@ -631,47 +637,61 @@ void WaveformConversionService::prepare_write_locked(
 	}
 }
 
-std::shared_ptr<WaveformConversionService::JobRecord>
-WaveformConversionService::submit(const ipc::Request &request)
+WaveformExportJob WaveformExportTaskManager::submit(std::string owner,
+	std::string session_id, std::string source_basename, std::string scope_name,
+	std::string event_id, std::string format_name)
 {
+	const struct {
+		std::string owner;
+		std::string session_id;
+		std::string source_basename;
+		std::string scope;
+		std::string event_id;
+		std::string format;
+	} request{std::move(owner), std::move(session_id),
+		std::move(source_basename), std::move(scope_name),
+		std::move(event_id), std::move(format_name)};
+	require_available();
 	validate_owner(request.owner);
 	validate_basename(request.source_basename);
 	validate_session_id(request.session_id);
 	const auto parsed_format = mnc::waveform::export_format_from_name(
 		request.format);
 	if (!parsed_format)
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"format must be comtrade, comtrade-zip, or pqdif");
 	ExportScope scope;
 	if (request.scope == "capture") scope = ExportScope::capture;
 	else if (request.scope == "event") scope = ExportScope::event;
-	else throw ServiceFailure(ipc::Status::invalid_request,
+	else throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 		"scope must be capture or event");
 	std::optional<MncwfUuid> event_uuid;
 	if (scope == ExportScope::event) {
 		event_uuid = mncwf_uuid_from_string(request.event_id);
-		if (!event_uuid)
-			throw ServiceFailure(ipc::Status::invalid_request,
+		if (!event_uuid || mncwf_uuid_is_zero(*event_uuid))
+			throw WaveformExportTaskError(
+				WaveformExportStatus::invalid_request,
 				"event scope requires a canonical event_id");
 	} else if (!request.event_id.empty()) {
-		throw ServiceFailure(ipc::Status::invalid_request,
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"event_id is only valid for event scope");
 	}
-	const auto key = request.owner + '\n' + request.source_basename + '\n' +
-		request.scope + '\n' + request.event_id + '\n' + request.format;
+	const auto key = request.owner + '\n' + request.session_id + '\n' +
+		request.source_basename + '\n' + request.scope + '\n' +
+		request.event_id + '\n' + request.format;
 	{
 		std::scoped_lock lock(mutex_);
 		cleanup_expired_locked();
 		for (const auto &[id, existing] : jobs_)
 			if (existing->key == key && (existing->dto.state == "queued" ||
 			    existing->dto.state == "running" || existing->dto.state == "ready"))
-				return existing;
-		if (queue_.size() >= maximum_queued_jobs)
-			throw ServiceFailure(ipc::Status::queue_full,
+				return existing->dto;
+		if (queue_.size() >= options_.maximum_queued_jobs)
+			throw WaveformExportTaskError(WaveformExportStatus::queue_full,
 				"waveform conversion queue is full");
 	}
 
-	Descriptor directory(::open(source_root_.c_str(),
+	Descriptor directory(::open(options_.source_root.c_str(),
 		O_RDONLY | O_CLOEXEC | O_DIRECTORY));
 	if (directory.get() < 0)
 		throw std::system_error(errno, std::generic_category(),
@@ -680,7 +700,7 @@ WaveformConversionService::submit(const ipc::Request &request)
 		O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
 	if (source_fd.get() < 0) {
 		if (errno == ENOENT)
-			throw ServiceFailure(ipc::Status::not_found,
+			throw WaveformExportTaskError(WaveformExportStatus::not_found,
 				"selected MNCWF source does not exist");
 		throw std::system_error(errno, std::generic_category(),
 			"open selected MNCWF source");
@@ -691,17 +711,23 @@ WaveformConversionService::submit(const ipc::Request &request)
 			"inspect selected MNCWF source");
 	if (!S_ISREG(source_status.st_mode) || source_status.st_size <= 0 ||
 	    static_cast<std::uint64_t>(source_status.st_size) > mncwf_v4_max_file_bytes)
-		throw ServiceFailure(ipc::Status::unprocessable,
+		throw WaveformExportTaskError(WaveformExportStatus::unprocessable,
 			"selected MNCWF source is not a bounded regular file");
 
 	std::shared_ptr<MncwfWaveformSource> source;
 	try {
 		source = std::make_shared<MncwfWaveformSource>(source_fd.get(),
 			*parsed_format, scope, event_uuid);
-	} catch (const ConversionError &) {
-		throw;
+	} catch (const ConversionError &error) {
+		throw WaveformExportTaskError(
+			error.code() == ConversionErrorCode::source_event_not_found
+				? WaveformExportStatus::not_found
+				: WaveformExportStatus::unprocessable,
+			error.what(), std::string(
+				mnc::waveform::conversion_error_code_name(error.code())),
+			error.missing_fields());
 	} catch (const std::exception &error) {
-		throw ServiceFailure(ipc::Status::unprocessable,
+		throw WaveformExportTaskError(WaveformExportStatus::unprocessable,
 			"selected MNCWF source is invalid: " + std::string(error.what()));
 	}
 
@@ -718,7 +744,6 @@ WaveformConversionService::submit(const ipc::Request &request)
 	job->dto.profile = profile(*parsed_format);
 	job->dto.total_frames = source->frame_count();
 	job->dto.created_at = iso_time(now);
-	job->created = now;
 	job->key = key;
 	job->source = std::move(source);
 	job->format = *parsed_format;
@@ -729,52 +754,70 @@ WaveformConversionService::submit(const ipc::Request &request)
 	job->dto.filename = stem + extension(*parsed_format);
 	job->artifact_basename = job->dto.job_id + extension(*parsed_format);
 
-	{
+	WaveformExportJob submitted;
+	try {
 		std::scoped_lock lock(mutex_);
 		cleanup_expired_locked();
 		for (const auto &[id, existing] : jobs_)
 			if (existing->key == key && (existing->dto.state == "queued" ||
 			    existing->dto.state == "running" || existing->dto.state == "ready"))
-				return existing;
-		if (queue_.size() >= maximum_queued_jobs)
-			throw ServiceFailure(ipc::Status::queue_full,
+				return existing->dto;
+		if (queue_.size() >= options_.maximum_queued_jobs)
+			throw WaveformExportTaskError(WaveformExportStatus::queue_full,
 				"waveform conversion queue is full");
 		prepare_write_locked(job, 0, 1);
 		jobs_.emplace(job->dto.job_id, job);
 		queue_.push_back(job);
 		update_queue_positions_locked();
+		submitted = job->dto;
+	} catch (const StorageFull &error) {
+		throw WaveformExportTaskError(WaveformExportStatus::storage_full,
+			error.what(), "storage_full");
 	}
 	condition_.notify_one();
-	return job;
+	return submitted;
 }
 
-std::shared_ptr<WaveformConversionService::JobRecord>
-WaveformConversionService::find_owned(std::string_view job_id,
+std::shared_ptr<WaveformExportTaskManager::JobRecord>
+WaveformExportTaskManager::find_owned_locked(std::string_view job_id,
 	std::string_view owner)
 {
-	validate_owner(owner);
-	validate_job_id(job_id);
-	std::scoped_lock lock(mutex_);
-	cleanup_expired_locked();
 	const auto found = jobs_.find(std::string(job_id));
 	if (found == jobs_.end() || found->second->dto.owner != owner)
-		throw ServiceFailure(ipc::Status::not_found,
+		throw WaveformExportTaskError(WaveformExportStatus::not_found,
 			"waveform export job was not found");
 	return found->second;
 }
 
-std::shared_ptr<WaveformConversionService::JobRecord>
-WaveformConversionService::cancel(const ipc::Request &request)
+WaveformExportJob WaveformExportTaskManager::status(std::string_view owner,
+	std::string_view job_id)
 {
-	validate_owner(request.owner);
-	validate_job_id(request.job_id);
+	require_available();
+	validate_owner(owner);
+	validate_job_id(job_id);
 	std::scoped_lock lock(mutex_);
 	cleanup_expired_locked();
-	const auto found = jobs_.find(request.job_id);
-	if (found == jobs_.end() || found->second->dto.owner != request.owner)
-		throw ServiceFailure(ipc::Status::not_found,
-			"waveform export job was not found");
-	const auto job = found->second;
+	return find_owned_locked(job_id, owner)->dto;
+}
+
+void WaveformExportTaskManager::signal_completion_locked(
+	const std::shared_ptr<JobRecord> &job)
+{
+	if (job->completion_signalled)
+		return;
+	job->completion.set_value();
+	job->completion_signalled = true;
+}
+
+WaveformExportJob WaveformExportTaskManager::cancel(std::string_view owner,
+	std::string_view job_id)
+{
+	require_available();
+	validate_owner(owner);
+	validate_job_id(job_id);
+	std::scoped_lock lock(mutex_);
+	cleanup_expired_locked();
+	const auto job = find_owned_locked(job_id, owner);
 	if (job->dto.state == "queued") {
 		std::erase(queue_, job);
 		update_queue_positions_locked();
@@ -782,11 +825,12 @@ WaveformConversionService::cancel(const ipc::Request &request)
 	if (job->dto.state == "running")
 		job->stop.request_stop();
 	if (job->dto.state == "ready" && job->streaming)
-		throw ServiceFailure(ipc::Status::conflict,
+		throw WaveformExportTaskError(WaveformExportStatus::conflict,
 			"waveform export is currently being downloaded");
 	if (job->dto.state == "ready" && !job->artifact_basename.empty()) {
 		std::error_code error;
-		(void)std::filesystem::remove(export_root_ / job->artifact_basename, error);
+		(void)std::filesystem::remove(
+			options_.export_root / job->artifact_basename, error);
 		if (error)
 			throw std::system_error(error,
 				"discard waveform export artifact");
@@ -800,17 +844,21 @@ WaveformConversionService::cancel(const ipc::Request &request)
 	job->dto.error_code = "conversion_cancelled";
 	job->dto.error_message = "waveform export was cancelled or discarded";
 	job->dto.completed_at = iso_time(now);
-	job->dto.expires_at = iso_time(now + artifact_ttl);
+	job->dto.expires_at = iso_time(now + options_.artifact_ttl);
 	job->completed = now;
-	return job;
+	signal_completion_locked(job);
+	return job->dto;
 }
 
-ipc::Response WaveformConversionService::read_chunk(const ipc::Request &request)
+WaveformExportChunk WaveformExportTaskManager::read_chunk(
+	std::string_view owner, std::string_view job_id, std::uint64_t offset,
+	std::uint32_t limit)
 {
-	validate_owner(request.owner);
-	validate_job_id(request.job_id);
-	if (request.limit == 0u || request.limit > ipc::maximum_chunk_bytes)
-		throw ServiceFailure(ipc::Status::invalid_request,
+	require_available();
+	validate_owner(owner);
+	validate_job_id(job_id);
+	if (limit == 0u || limit > maximum_chunk_bytes)
+		throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 			"download chunk limit must be 1..524288");
 	std::shared_ptr<JobRecord> job;
 	std::string artifact;
@@ -821,16 +869,12 @@ ipc::Response WaveformConversionService::read_chunk(const ipc::Request &request)
 	{
 		std::scoped_lock lock(mutex_);
 		cleanup_expired_locked();
-		const auto found = jobs_.find(request.job_id);
-		if (found == jobs_.end() || found->second->dto.owner != request.owner)
-			throw ServiceFailure(ipc::Status::not_found,
-				"waveform export job was not found");
-		job = found->second;
+		job = find_owned_locked(job_id, owner);
 		if (job->dto.state != "ready")
-			throw ServiceFailure(ipc::Status::conflict,
+			throw WaveformExportTaskError(WaveformExportStatus::conflict,
 				"waveform export is not ready for download");
-		if (request.offset > job->dto.bytes)
-			throw ServiceFailure(ipc::Status::invalid_request,
+		if (offset > job->dto.bytes)
+			throw WaveformExportTaskError(WaveformExportStatus::invalid_request,
 				"download offset exceeds artifact size");
 		job->streaming = true;
 		job->stream_activity = std::chrono::steady_clock::now();
@@ -842,7 +886,7 @@ ipc::Response WaveformConversionService::read_chunk(const ipc::Request &request)
 	}
 
 	try {
-		Descriptor directory(::open(export_root_.c_str(),
+		Descriptor directory(::open(options_.export_root.c_str(),
 			O_RDONLY | O_CLOEXEC | O_DIRECTORY));
 		Descriptor file(directory.get() < 0 ? -1 : ::openat(directory.get(),
 			artifact.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
@@ -855,24 +899,24 @@ ipc::Response WaveformConversionService::read_chunk(const ipc::Request &request)
 			throw std::runtime_error(
 				"waveform export artifact identity is invalid");
 		const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(
-			request.limit, total_size - request.offset));
+			limit, total_size - offset));
 		std::string content(count, '\0');
 		std::size_t read = 0;
 		while (read != count) {
 			const auto result = ::pread(file.get(), content.data() + read,
-				count - read, static_cast<off_t>(request.offset + read));
+				count - read, static_cast<off_t>(offset + read));
 			if (result < 0 && errno == EINTR)
 				continue;
 			if (result <= 0)
 				throw std::runtime_error("waveform export artifact read failed");
 			read += static_cast<std::size_t>(result);
 		}
-		const bool eof = request.offset + count == total_size;
+		const bool eof = offset + count == total_size;
 		if (eof) {
 			std::scoped_lock lock(mutex_);
 			job->streaming = false;
 		}
-		ipc::Response response;
+		WaveformExportChunk response;
 		response.content = std::move(content);
 		response.filename = std::move(filename);
 		response.media_type = format == ExportFormat::comtrade
@@ -890,14 +934,14 @@ ipc::Response WaveformConversionService::read_chunk(const ipc::Request &request)
 	}
 }
 
-void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
+void WaveformExportTaskManager::convert(const std::shared_ptr<JobRecord> &job)
 {
 	try {
 		FileSink sink(*this, job);
 		ConversionOptions options;
 		options.format = job->format;
 		options.scope = job->scope;
-		options.maximum_output_bytes = maximum_output_bytes;
+		options.maximum_output_bytes = options_.maximum_output_bytes;
 		options.output_stem = output_stem(job->dto.source_basename,
 			job->scope, job->dto.event_id);
 		if (job->event_uuid)
@@ -922,11 +966,9 @@ void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
 		if (job->dto.state == "cancelled") {
 			std::error_code error;
 			(void)std::filesystem::remove(
-				export_root_ / job->artifact_basename, error);
-			if (error)
-				throw std::system_error(error,
-					"remove cancelled waveform export artifact");
-			job->artifact_basename.clear();
+				options_.export_root / job->artifact_basename, error);
+			if (!error)
+				job->artifact_basename.clear();
 			return;
 		}
 		job->dto.state = "ready";
@@ -937,8 +979,9 @@ void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
 		job->dto.bytes = summary.bytes;
 		job->dto.sha256 = sha256;
 		job->dto.completed_at = iso_time(now);
-		job->dto.expires_at = iso_time(now + artifact_ttl);
+		job->dto.expires_at = iso_time(now + options_.artifact_ttl);
 		job->completed = now;
+		signal_completion_locked(job);
 	} catch (const ConversionError &error) {
 		const auto now = std::chrono::system_clock::now();
 		std::scoped_lock lock(mutex_);
@@ -950,8 +993,9 @@ void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
 		job->dto.error_message = error.what();
 		job->dto.missing_fields = error.missing_fields();
 		job->dto.completed_at = iso_time(now);
-		job->dto.expires_at = iso_time(now + artifact_ttl);
+		job->dto.expires_at = iso_time(now + options_.artifact_ttl);
 		job->completed = now;
+		signal_completion_locked(job);
 	} catch (const StorageFull &error) {
 		const auto now = std::chrono::system_clock::now();
 		std::scoped_lock lock(mutex_);
@@ -960,8 +1004,9 @@ void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
 		job->dto.error_code = "storage_full";
 		job->dto.error_message = error.what();
 		job->dto.completed_at = iso_time(now);
-		job->dto.expires_at = iso_time(now + artifact_ttl);
+		job->dto.expires_at = iso_time(now + options_.artifact_ttl);
 		job->completed = now;
+		signal_completion_locked(job);
 	} catch (const std::exception &error) {
 		const auto now = std::chrono::system_clock::now();
 		std::scoped_lock lock(mutex_);
@@ -970,22 +1015,23 @@ void WaveformConversionService::convert(const std::shared_ptr<JobRecord> &job)
 		job->dto.error_code = "internal_error";
 		job->dto.error_message = error.what();
 		job->dto.completed_at = iso_time(now);
-		job->dto.expires_at = iso_time(now + artifact_ttl);
+		job->dto.expires_at = iso_time(now + options_.artifact_ttl);
 		job->completed = now;
+		signal_completion_locked(job);
 	}
 }
 
-void WaveformConversionService::worker_loop()
+void WaveformExportTaskManager::worker_loop(std::stop_token stop_token)
 {
 	try {
-		while (!stopping_) {
+		while (!stop_token.stop_requested()) {
 			std::shared_ptr<JobRecord> job;
 			{
 				std::unique_lock lock(mutex_);
-				condition_.wait(lock, [this] {
-					return stopping_.load() || !queue_.empty();
+				condition_.wait(lock, [this, stop_token] {
+					return stop_token.stop_requested() || !queue_.empty();
 				});
-				if (stopping_)
+				if (stop_token.stop_requested())
 					break;
 				job = queue_.front();
 				queue_.pop_front();
@@ -1000,74 +1046,9 @@ void WaveformConversionService::worker_loop()
 			convert(job);
 		}
 	} catch (const std::exception &error) {
-		{
-			std::scoped_lock lock(failure_mutex_);
-			failure_message_ = error.what();
-		}
-		worker_failed_ = true;
-		request_stop();
+		fail_manager("waveform export worker failed: " +
+			std::string(error.what()));
 	}
 }
 
-void WaveformConversionService::handle(
-	mnc::ipc::UnixStreamServer::Connection connection, mnc::ipc::Frame frame)
-{
-	ipc::Response response;
-	ipc::Command command = ipc::Command::capabilities;
-	try {
-		const auto request = ipc::decode_request(frame);
-		command = request.command;
-		if (!peer_authorized(connection->peer_credentials()))
-			throw ServiceFailure(ipc::Status::permission_denied,
-				"waveform converter command is not authorized for this peer");
-		switch (command) {
-		case ipc::Command::capabilities:
-			response.json = encode_json(ipc::Capabilities{});
-			break;
-		case ipc::Command::submit: {
-			const auto job = submit(request);
-			std::scoped_lock lock(mutex_);
-			response.json = encode_json(job->dto);
-			break;
-		}
-		case ipc::Command::status: {
-			const auto job = find_owned(request.job_id, request.owner);
-			std::scoped_lock lock(mutex_);
-			response.json = encode_json(job->dto);
-			break;
-		}
-		case ipc::Command::read_chunk:
-			response = read_chunk(request);
-			break;
-		case ipc::Command::cancel: {
-			const auto job = cancel(request);
-			std::scoped_lock lock(mutex_);
-			response.json = encode_json(job->dto);
-			break;
-		}
-		}
-	} catch (const ServiceFailure &error) {
-		response.status = error.status;
-		response.message = error.what();
-	} catch (const ConversionError &error) {
-		response.status = error.code() == ConversionErrorCode::source_event_not_found
-			? ipc::Status::not_found : ipc::Status::unprocessable;
-		response.message = error.what();
-		response.json = encode_json(ipc::ErrorDetail{
-			std::string(mnc::waveform::conversion_error_code_name(error.code())),
-			error.missing_fields()});
-	} catch (const StorageFull &error) {
-		response.status = ipc::Status::storage_full;
-		response.message = error.what();
-	} catch (const std::invalid_argument &error) {
-		response.status = ipc::Status::invalid_request;
-		response.message = error.what();
-	} catch (const std::exception &error) {
-		response.status = ipc::Status::internal_error;
-		response.message = error.what();
-	}
-	connection->post_send(ipc::encode_response(response,
-		frame.correlation_id, command));
-}
-
-} // namespace msap1::waveform::daemon
+} // namespace msap1::web

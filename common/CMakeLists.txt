@@ -346,11 +346,6 @@ target_link_libraries(msap1_waveform PRIVATE
 )
 target_include_directories(msap1_waveform PRIVATE ${ZSTD_INCLUDE_DIR})
 
-msap1_library(msap1_waveform_ipc msap1::waveform-ipc
-	msap1/waveform/waveform_conversion_ipc.cpp
-)
-target_link_libraries(msap1_waveform_ipc PUBLIC mnc::ipc)
-
 # Hardware-neutral product protocol and the RPU endpoint adapter.  The public
 # dependencies are intentional: acquisition_ipc.hpp binds the typed command
 # structs to glaze BEVE payloads while mnc::ipc remains unaware of their
@@ -793,17 +788,6 @@ if(BUILD_TESTING)
     target_compile_options(waveform_converter_test PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME waveform_converter_test COMMAND waveform_converter_test)
-
-    add_executable(waveform_conversion_ipc_test
-        ${PROJECT_SOURCE_DIR}/tests/waveform_conversion_ipc_test.cpp)
-    target_link_libraries(waveform_conversion_ipc_test PRIVATE
-        msap1::waveform-ipc)
-    target_include_directories(waveform_conversion_ipc_test PRIVATE
-        ${PROJECT_SOURCE_DIR}/apps/ProtocolGateway/Services/waveform-converter)
-    target_compile_options(waveform_conversion_ipc_test PRIVATE
-        -Wall -Wextra -Wpedantic)
-    add_test(NAME waveform_conversion_ipc_test
-        COMMAND waveform_conversion_ipc_test)
 
     # The ingestor continuity rules are daemon code; compile the pipeline
     # source into the test rather than opening real devices.

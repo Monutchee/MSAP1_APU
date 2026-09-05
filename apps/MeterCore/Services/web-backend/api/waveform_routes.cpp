@@ -349,7 +349,7 @@ std::vector<WaveformExportCapabilityDto> export_capabilities(AppContext &app)
 		"mncwf", "MNCWF", "MNCWF v4/v5", ".mncwf",
 		{"capture", "event"}, false}};
 	try {
-		const auto capabilities = app.waveform_converter.capabilities();
+		const auto capabilities = app.waveform_exports.capabilities();
 		if (!capabilities.healthy)
 			return result;
 		for (std::size_t index = 0; index < capabilities.formats.size(); ++index) {
@@ -432,7 +432,7 @@ std::string authenticated_owner(const webengine::RequestContext &context)
 	return context.user->username;
 }
 
-WaveformExportJobDto export_job(const waveform::ipc::Job &job)
+WaveformExportJobDto export_job(const WaveformExportJob &job)
 {
 	return {
 		job.job_id,
@@ -463,9 +463,9 @@ WaveformExportJobDto export_job(const waveform::ipc::Job &job)
 	};
 }
 
-webengine::http::status converter_error_status(waveform::ipc::Status status)
+webengine::http::status converter_error_status(WaveformExportStatus status)
 {
-	using Status = waveform::ipc::Status;
+	using Status = WaveformExportStatus;
 	switch (status) {
 	case Status::invalid_request: return webengine::http::status::bad_request;
 	case Status::not_found: return webengine::http::status::not_found;
@@ -477,7 +477,6 @@ webengine::http::status converter_error_status(waveform::ipc::Status status)
 		return static_cast<webengine::http::status>(507);
 	case Status::ok: return webengine::http::status::ok;
 	case Status::unavailable:
-	case Status::permission_denied:
 	case Status::internal_error:
 		return webengine::http::status::service_unavailable;
 	}
@@ -485,7 +484,7 @@ webengine::http::status converter_error_status(waveform::ipc::Status status)
 }
 
 webengine::Response converter_error_response(
-	const WaveformConversionGatewayError &error, std::string fallback_code,
+	const WaveformExportTaskError &error, std::string fallback_code,
 	bool retryable)
 {
 	return json_response(converter_error_status(error.status()),
@@ -855,7 +854,7 @@ webengine::Response post_waveform_export(
 				"waveform session is not a completed capture",
 				"source_not_ready", false);
 
-		const auto job = app.waveform_converter.submit(
+		const auto job = app.waveform_exports.submit(
 			authenticated_owner(context), std::to_string(request.session_id),
 			source.session.filename, request.scope, event_id, request.format);
 		auto response = json_response(webengine::http::status::accepted,
@@ -863,10 +862,10 @@ webengine::Response post_waveform_export(
 		response.set(webengine::http::field::location,
 			"/api/v1/waveform-exports?job_id=" + job.job_id);
 		return response;
-	} catch (const WaveformConversionGatewayError &error) {
+	} catch (const WaveformExportTaskError &error) {
 		return converter_error_response(error, "waveform_conversion_rejected",
-			error.status() == waveform::ipc::Status::queue_full ||
-			error.status() == waveform::ipc::Status::unavailable);
+			error.status() == WaveformExportStatus::queue_full ||
+			error.status() == WaveformExportStatus::unavailable);
 	} catch (const std::invalid_argument &error) {
 		return error_response(webengine::http::status::bad_request,
 			error.what(), "invalid_request", false);
@@ -888,9 +887,9 @@ webengine::Response get_waveform_export(
 		const auto id = export_job_id(
 			std::string_view(target.data(), target.size()));
 		return json_response(webengine::http::status::ok,
-			export_job(app.waveform_converter.status(
+			export_job(app.waveform_exports.status(
 				authenticated_owner(context), id)));
-	} catch (const WaveformConversionGatewayError &error) {
+	} catch (const WaveformExportTaskError &error) {
 		return converter_error_response(error,
 			"waveform_conversion_status_failed", false);
 	} catch (const std::invalid_argument &error) {
@@ -911,9 +910,9 @@ webengine::Response delete_waveform_export(
 		const auto id = export_job_id(
 			std::string_view(target.data(), target.size()));
 		return json_response(webengine::http::status::ok,
-			export_job(app.waveform_converter.cancel(
+			export_job(app.waveform_exports.cancel(
 				authenticated_owner(context), id)));
-	} catch (const WaveformConversionGatewayError &error) {
+	} catch (const WaveformExportTaskError &error) {
 		return converter_error_response(error,
 			"waveform_conversion_cancel_failed", false);
 	} catch (const std::invalid_argument &error) {
@@ -934,7 +933,7 @@ webengine::HandlerResult download_waveform_export(
 		const auto id = export_job_id(
 			std::string_view(target.data(), target.size()));
 		const auto owner = authenticated_owner(context);
-		const auto job = app.waveform_converter.status(owner, id);
+		const auto job = app.waveform_exports.status(owner, id);
 		if (job.state != "ready")
 			return error_response(webengine::http::status::conflict,
 				"waveform export is not ready for download",
@@ -945,16 +944,16 @@ webengine::HandlerResult download_waveform_export(
 				: "application/vnd.pqdif";
 		return webengine::StreamingDownload{
 			job.filename, media_type, job.bytes,
-			[&gateway = app.waveform_converter, owner, id,
+			[&tasks = app.waveform_exports, owner, id,
 			 expected_size = job.bytes, expected_sha256 = job.sha256,
 			 expected_filename = job.filename, expected_media_type = media_type](
 				std::uint64_t offset, std::span<std::byte> destination) {
 				const auto requested = static_cast<std::uint32_t>(
 					std::min<std::size_t>(destination.size(),
-						waveform::ipc::maximum_chunk_bytes));
+						WaveformExportTaskManager::maximum_chunk_bytes));
 				if (requested == 0u)
 					return std::size_t{0};
-				const auto chunk = gateway.read_chunk(
+				const auto chunk = tasks.read_chunk(
 					owner, id, offset, requested);
 				if (chunk.total_size != expected_size ||
 				    chunk.sha256 != expected_sha256 ||
@@ -976,7 +975,7 @@ webengine::HandlerResult download_waveform_export(
 					chunk.content.size());
 				return chunk.content.size();
 			}};
-	} catch (const WaveformConversionGatewayError &error) {
+	} catch (const WaveformExportTaskError &error) {
 		return converter_error_response(error,
 			"waveform_export_download_failed", false);
 	} catch (const std::invalid_argument &error) {

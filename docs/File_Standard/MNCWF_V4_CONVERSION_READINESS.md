@@ -213,7 +213,8 @@ exporting an old event.
 
 ## Implemented converter and acceptance gates
 
-The converter service advertises a format only when healthy. Its implementation:
+The Web backend advertises a converted format only while its process-local task
+manager is healthy. The converter implementation:
 
 1. accepts only completed, structurally valid MNCWF v4/v5 whose appropriate
    readiness list is empty;
@@ -228,13 +229,15 @@ The converter service advertises a format only when healthy. Its implementation:
    a waveform-sized derivative in memory;
 7. retains deterministic golden hashes and binary-structure/sample/timestamp
    tests, with external readers reserved for the interoperability job; and
-8. exposes `comtrade`, `comtrade-zip`, and `pqdif` only while the dedicated
-   daemon answers its capability probe. MNCWF remains available independently.
+8. exposes `comtrade`, `comtrade-zip`, and `pqdif` only while the Web-owned
+   task manager is ready. MNCWF remains available independently.
 
-The daemon accepts only basenames opened below `/data/mnc/waveform` with
+The task manager accepts only basenames opened below `/data/mnc/waveform` with
 `openat` and `O_NOFOLLOW`, retains the source descriptor, and publishes
 mode-0600 artifacts atomically under `/data/mnc/waveform-exports`. Artifacts
-expire 30 minutes after completion. One worker, an eight-job queue, owner
-isolation, active/ready deduplication, a 1 GiB quota/output ceiling, a 512 MiB
-free-space reserve, non-streaming oldest-first eviction, cancellation cleanup,
-and startup orphan cleanup bound the service.
+expire 30 minutes after completion. One `std::jthread`, an eight-job queue,
+owner isolation, active/ready deduplication, a 1 GiB quota/output ceiling, a
+512 MiB free-space reserve, non-streaming oldest-first eviction, stop-token
+cancellation, and startup orphan cleanup bound the work. Jobs do not survive a
+Web-backend restart. CLI exports use the converter classes directly and write
+to an exclusive destination without entering this queue.

@@ -1,30 +1,30 @@
 #include "core/cli.hpp"
 #include "core/result_output.hpp"
 
+#include "mnc/waveform/waveform_converter.hpp"
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
 #include "msap1/waveform/mncwf_v4_export.hpp"
-#include "msap1/waveform/waveform_conversion_ipc.hpp"
+#include "msap1/waveform/mncwf_waveform_source.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
-#include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <string_view>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#include <glaze/glaze.hpp>
 #include <fcntl.h>
 #include <openssl/evp.h>
 #include <sys/stat.h>
@@ -45,7 +45,6 @@ struct WaveformExportResult {
 	std::string event_id;
 	std::string format;
 	std::string profile;
-	std::string job_id;
 	std::string file;
 	std::uint64_t bytes = 0;
 	std::string sha256;
@@ -194,10 +193,7 @@ public:
 			output << "  Event:         " << result.event_id << '\n';
 		output << "  Format:        " << result.format << '\n'
 		       << "  Profile:       " << result.profile << '\n';
-		if (!result.job_id.empty())
-			output << "  Job:           " << result.job_id << '\n';
-		output
-		       << "  File:          " << result.file << '\n'
+		output << "  File:          " << result.file << '\n'
 		       << "  Bytes:         " << result.bytes << '\n'
 		       << "  SHA-256:       " << result.sha256 << '\n';
 		if (!result.capture_uuid.empty())
@@ -270,6 +266,17 @@ public:
 	~Descriptor() { if (value_ >= 0) ::close(value_); }
 	Descriptor(const Descriptor &) = delete;
 	Descriptor &operator=(const Descriptor &) = delete;
+	Descriptor(Descriptor &&other) noexcept
+		: value_(std::exchange(other.value_, -1)) {}
+	Descriptor &operator=(Descriptor &&other) noexcept
+	{
+		if (this != &other) {
+			if (value_ >= 0)
+				::close(value_);
+			value_ = std::exchange(other.value_, -1);
+		}
+		return *this;
+	}
 	[[nodiscard]] int get() const noexcept { return value_; }
 
 private:
@@ -290,7 +297,7 @@ std::string digest_text(std::span<const unsigned char> digest)
 	return output.str();
 }
 
-class ExclusiveExport final {
+class ExclusiveExport final : public mnc::waveform::OutputSink {
 public:
 	explicit ExclusiveExport(std::filesystem::path path)
 		: path_(std::move(path)), digest_(EVP_MD_CTX_new(), EVP_MD_CTX_free)
@@ -318,8 +325,11 @@ public:
 			::unlink(path_.c_str());
 	}
 
-	void write(std::span<const std::byte> bytes)
+	void write(std::span<const std::byte> bytes) override
 	{
+		if (bytes.size() > byte_limit() - bytes_)
+			throw std::runtime_error(
+				"waveform export exceeds the 1 GiB output limit");
 		if (EVP_DigestUpdate(digest_.get(), bytes.data(), bytes.size()) != 1)
 			throw std::runtime_error("update waveform export SHA-256");
 		std::size_t consumed = 0;
@@ -334,6 +344,16 @@ public:
 			consumed += static_cast<std::size_t>(count);
 		}
 		bytes_ += bytes.size();
+	}
+
+	[[nodiscard]] std::uint64_t bytes_written() const noexcept override
+	{
+		return bytes_;
+	}
+
+	[[nodiscard]] std::uint64_t byte_limit() const noexcept override
+	{
+		return 1024ull * 1024ull * 1024ull;
 	}
 
 	WrittenExport finish(std::optional<std::string_view> expected_sha256 = {})
@@ -388,15 +408,36 @@ WrittenExport write_export_file(const std::filesystem::path &path,
 	return output.finish(expected_sha256);
 }
 
-waveform::ipc::Job conversion_job(const waveform::ipc::Response &response)
+struct OpenedCapture {
+	Descriptor descriptor;
+	std::uint64_t size = 0;
+};
+
+OpenedCapture open_capture(std::string_view directory_name,
+	std::string_view filename)
 {
-	if (response.status != waveform::ipc::Status::ok)
-		throw std::runtime_error(response.message.empty()
-			? "waveform converter rejected request" : response.message);
-	waveform::ipc::Job result;
-	if (glz::read_json(result, response.json))
-		throw std::runtime_error("invalid waveform converter job response");
-	return result;
+	const std::filesystem::path source_name(filename);
+	if (source_name.empty() || source_name != source_name.filename() ||
+	    source_name.extension() != ".mncwf")
+		throw std::runtime_error(
+			"acquisition daemon returned an invalid waveform filename");
+	Descriptor directory(::open(std::string(directory_name).c_str(),
+		O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+	if (directory.get() < 0)
+		throw std::system_error(errno, std::generic_category(),
+			"open waveform directory");
+	Descriptor source(::openat(directory.get(), source_name.c_str(),
+		O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+	if (source.get() < 0)
+		throw std::system_error(errno, std::generic_category(),
+			"open waveform capture");
+	struct stat status {};
+	if (::fstat(source.get(), &status) != 0 || !S_ISREG(status.st_mode) ||
+	    status.st_size <= 0 || static_cast<std::uint64_t>(status.st_size) >
+		mncwf_v4_max_file_bytes)
+		throw std::runtime_error(
+			"waveform capture is not a nonempty regular file");
+	return {std::move(source), static_cast<std::uint64_t>(status.st_size)};
 }
 
 int run_export(const Options &options, std::ostream &output)
@@ -466,34 +507,13 @@ int run_export(const Options &options, std::ostream &output)
 			result.first_sequence = source->first_sequence();
 			result.last_sequence = source->last_sequence();
 		} else {
-			const std::filesystem::path source_name(session.filename);
-			if (source_name.empty() || source_name != source_name.filename() ||
-			    source_name.extension() != ".mncwf")
-				throw std::runtime_error(
-					"acquisition daemon returned an invalid waveform filename");
-			Descriptor directory(::open(response.waveform_directory.c_str(),
-				O_RDONLY | O_CLOEXEC | O_DIRECTORY));
-			if (directory.get() < 0)
-				throw std::system_error(errno, std::generic_category(),
-					"open waveform directory");
-			Descriptor source(::openat(directory.get(), session.filename.c_str(),
-				O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-			if (source.get() < 0)
-				throw std::system_error(errno, std::generic_category(),
-					"open waveform capture");
-			struct stat status {};
-			if (::fstat(source.get(), &status) != 0 ||
-			    !S_ISREG(status.st_mode) || status.st_size <= 0 ||
-			    static_cast<std::uint64_t>(status.st_size) >
-				mncwf_v4_max_file_bytes)
-				throw std::runtime_error(
-					"waveform capture is not a nonempty regular file");
-			written = write_export_file(destination,
-				static_cast<std::uint64_t>(status.st_size),
+			auto source = open_capture(response.waveform_directory,
+				session.filename);
+			written = write_export_file(destination, source.size,
 				[&source](std::uint64_t offset,
 					std::span<std::byte> destination_buffer) {
 					for (;;) {
-						const auto count = ::pread(source.get(),
+						const auto count = ::pread(source.descriptor.get(),
 							destination_buffer.data(), destination_buffer.size(),
 							static_cast<off_t>(offset));
 						if (count < 0 && errno == EINTR) continue;
@@ -509,75 +529,54 @@ int run_export(const Options &options, std::ostream &output)
 		result.bytes = written.bytes;
 		result.sha256 = std::move(written.sha256);
 	} else {
-		waveform::ipc::WaveformConversionClient converter(
-			options.converter_socket_path);
-		waveform::ipc::Request request;
-		request.command = waveform::ipc::Command::submit;
-		request.owner = "cli-" + std::to_string(::getuid());
-		request.session_id = std::to_string(*options.waveform_session_id);
-		request.source_basename = session.filename;
-		request.scope = scope;
-		request.event_id = event_text;
-		request.format = format;
-		auto job = conversion_job(converter.request(request, options.timeout_ms));
-		while (job.state == "queued" || job.state == "running") {
-			if (stop_was_requested()) {
-				request = {};
-				request.command = waveform::ipc::Command::cancel;
-				request.owner = "cli-" + std::to_string(::getuid());
-				request.job_id = job.job_id;
-				try { (void)converter.request(request, options.timeout_ms); }
-				catch (...) {}
-				throw std::runtime_error("waveform export cancelled");
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			request = {};
-			request.command = waveform::ipc::Command::status;
-			request.owner = "cli-" + std::to_string(::getuid());
-			request.job_id = job.job_id;
-			job = conversion_job(converter.request(request, options.timeout_ms));
-		}
-		if (job.state != "ready")
-			throw std::runtime_error(job.error_code +
-				(job.error_message.empty() ? std::string{}
-					: ": " + job.error_message));
+		const auto export_format = mnc::waveform::export_format_from_name(format);
+		if (!export_format)
+			throw std::logic_error("validated waveform format has no converter");
+		const auto extension = *export_format ==
+			mnc::waveform::ExportFormat::comtrade ? ".cff"
+			: *export_format == mnc::waveform::ExportFormat::comtrade_zip
+				? ".zip" : ".pqd";
+		const auto default_name = "waveform-" +
+			std::to_string(*options.waveform_session_id) +
+			(event_uuid ? "-event-" + event_text : std::string{}) + extension;
 		const std::filesystem::path destination = options.waveform_export_file
 			? std::filesystem::path(*options.waveform_export_file)
-			: std::filesystem::path(job.filename);
-		const auto written = write_export_file(destination, job.bytes,
-			[&converter, &job, &request, &options](std::uint64_t offset,
-				std::span<std::byte> destination_buffer) {
+			: std::filesystem::path(default_name);
+		auto opened = open_capture(response.waveform_directory,
+			session.filename);
+		MncwfWaveformSource source(opened.descriptor.get(), *export_format,
+			event_uuid ? mnc::waveform::ExportScope::event
+				: mnc::waveform::ExportScope::capture,
+			event_uuid);
+		mnc::waveform::ConversionOptions conversion;
+		conversion.format = *export_format;
+		conversion.scope = event_uuid ? mnc::waveform::ExportScope::event
+			: mnc::waveform::ExportScope::capture;
+		conversion.selected_event_uuid = event_uuid;
+		conversion.maximum_output_bytes = 1024ull * 1024ull * 1024ull;
+		conversion.output_stem = destination.stem().string();
+		std::stop_source cancellation;
+		ExclusiveExport destination_file(destination);
+		const auto converter = mnc::waveform::make_converter(*export_format);
+		const auto summary = converter->convert(source, destination_file,
+			conversion, cancellation.get_token(), [&](const auto &) {
 				if (stop_was_requested())
-					throw std::runtime_error("waveform export cancelled");
-				request = {};
-				request.command = waveform::ipc::Command::read_chunk;
-				request.owner = "cli-" + std::to_string(::getuid());
-				request.job_id = job.job_id;
-				request.offset = offset;
-				request.limit = static_cast<std::uint32_t>(
-					destination_buffer.size());
-				const auto chunk = converter.request(request, options.timeout_ms);
-				if (chunk.status != waveform::ipc::Status::ok)
-					throw std::runtime_error(chunk.message);
-				if (chunk.total_size != job.bytes || chunk.sha256 != job.sha256)
-					throw std::runtime_error(
-						"waveform converter changed artifact identity during download");
-				if (chunk.content.size() > destination_buffer.size())
-					throw std::runtime_error(
-						"waveform converter returned an oversized chunk");
-				if (chunk.end_of_file !=
-				    (offset + chunk.content.size() == job.bytes))
-					throw std::runtime_error(
-						"waveform converter returned an invalid EOF marker");
-				std::memcpy(destination_buffer.data(), chunk.content.data(),
-					chunk.content.size());
-				return chunk.content.size();
-			}, job.sha256);
-		result.profile = job.profile;
-		result.job_id = job.job_id;
+					cancellation.request_stop();
+			});
+		if (stop_was_requested())
+			throw std::runtime_error("waveform export cancelled");
+		const auto written = destination_file.finish();
+		if (written.bytes != summary.bytes)
+			throw std::runtime_error(
+				"waveform converter reported an inconsistent output size");
+		result.profile = summary.profile;
 		result.file = destination.string();
 		result.bytes = written.bytes;
 		result.sha256 = written.sha256;
+		result.capture_uuid = mnc::waveform::uuid_string(
+			source.metadata().capture.capture_uuid);
+		result.first_sequence = source.metadata().first_sequence;
+		result.last_sequence = source.metadata().last_sequence;
 	}
 	return render_result(options, result, output,
 		WaveformExportTextGenerator{}, WaveformExportJsonGenerator{});

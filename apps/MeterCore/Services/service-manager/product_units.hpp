@@ -62,9 +62,6 @@ inline void register_product_units(mnc::ServiceManager &manager)
 	manager.register_service({"data-sender",
 		"msap1-data-sender.service", {"settings", "meter-historian"}, true,
 		mnc::ServicePriorityTier::background});
-	manager.register_service({"waveform-converter",
-		"msap1-waveform-converter.service", {"fpga-acquisition"}, true,
-		mnc::ServicePriorityTier::background});
 	manager.register_service({"web-backend",
 		"msap1-web-backend.service",
 		{"fpga-acquisition", "meter-historian", "data-sender"}});

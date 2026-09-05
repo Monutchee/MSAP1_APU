@@ -30,7 +30,6 @@ enum class SideEffect {
 
 struct Options {
 	std::string socket_path;
-	std::string converter_socket_path;
 	OutputFormat output_format = OutputFormat::text;
 	std::optional<std::uint64_t> result_limit;
 	std::optional<double> duration_seconds;

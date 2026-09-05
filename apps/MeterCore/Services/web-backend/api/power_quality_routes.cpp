@@ -421,7 +421,7 @@ webengine::Response get_power_quality_events(AppContext &app,
 				"power-quality event does not exist");
 		PowerQualityEventsDto result{};
 		try {
-			const auto capabilities = app.waveform_converter.capabilities();
+			const auto capabilities = app.waveform_exports.capabilities();
 			if (capabilities.healthy) {
 				for (std::size_t index = 0;
 				     index < capabilities.formats.size(); ++index) {

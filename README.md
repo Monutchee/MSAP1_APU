@@ -525,12 +525,15 @@ Event export validates and read-only maps a completed v4 or v5 master and
 rebuilds only the selected virtual slice's metadata, directory, and CRCs. A v5
 export copies complete middle compressed chunks and regenerates only partial
 boundary chunks. It does not persist a second master on the device. Both the
-API and CLI preserve this direct MNCWF path. A separate one-worker converter
-service produces COMTRADE CFF/BINARY32, a legacy ZIP with separate CFG/DAT
-members, and PQDIF 2025. Web advertises those formats only while the service is
-healthy, keeps jobs across navigation/reload, and streams ready artifacts
-through the authenticated backend. Converter outputs expire after 30 minutes;
-MNCWF masters remain governed only by waveform archive retention.
+API and CLI preserve this direct MNCWF path. A one-worker task manager inside
+the persistent Web backend produces COMTRADE CFF/BINARY32, a legacy ZIP with
+separate CFG/DAT members, and PQDIF 2025. It uses a `std::jthread`, stop tokens,
+and promise/shared-future completion signals; it is not a separate system
+service. Web advertises those formats only while the task manager is healthy,
+keeps jobs across navigation/reload, and streams ready artifacts through the
+authenticated backend. Converter outputs expire after 30 minutes and are
+purged on Web-backend restart; MNCWF masters remain governed only by waveform
+archive retention. The CLI invokes the same converter library directly.
 The acquisition daemon delivers each event/capture UUID association to the
 durable historian on an isolated retry worker, so historian startup or ingest
 lag can never block DMA. Catalogue results and the Web UI join those capture

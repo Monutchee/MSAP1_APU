@@ -129,10 +129,10 @@ int run_web_backend()
 		msap1::web::DatabaseGateway database;
 		msap1::web::MqttGateway mqtt;
 		msap1::web::DataSenderGateway data_sender;
-		msap1::web::WaveformConversionGateway waveform_converter;
+		msap1::web::WaveformExportTaskManager waveform_exports;
 		msap1::web::AppContext context{
 			acquisition, settings, database, mqtt, data_sender,
-			waveform_converter, nginx};
+			waveform_exports, nginx};
 
 		webengine::WebEngine engine(auth);
 		ActiveEngineRegistration active_engine(engine);

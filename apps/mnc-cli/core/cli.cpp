@@ -1,7 +1,6 @@
 #include "core/cli.hpp"
 
 #include "msap1/acquisition/ipc/acquisition_ipc.hpp"
-#include "msap1/waveform/waveform_conversion_ipc.hpp"
 
 #include <glaze/glaze.hpp>
 
@@ -151,17 +150,6 @@ Application::Application()
 		},
 	});
 	global_options_.push_back({
-		"converter-socket", "PATH", "Waveform converter daemon socket",
-		CompletionKind::path,
-		[](Options &options, const std::string &value) {
-			if (value.empty())
-				throw std::invalid_argument(
-					"--converter-socket must not be empty");
-			options.converter_socket_path = value;
-			options.socket_overridden = true;
-		},
-	});
-	global_options_.push_back({
 		"timeout-ms", "MS", "Daemon timeout (default: 3000)",
 		CompletionKind::none,
 		[](Options &options, const std::string &value) {
@@ -211,8 +199,6 @@ Invocation Application::parse(const std::vector<std::string> &arguments) const
 {
 	Options options;
 	options.socket_path = msap1::acquisition_socket_path;
-	options.converter_socket_path =
-		std::string(msap1::waveform::ipc::socket_path);
 	const Command *current = &root_;
 
 	for (std::size_t index = 0; index < arguments.size(); ++index) {

@@ -27,4 +27,3 @@ endif()
 
 add_subdirectory(apps/mnc-cli)
 add_subdirectory(apps/MeterCore)
-add_subdirectory(apps/ProtocolGateway)

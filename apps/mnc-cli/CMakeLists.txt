@@ -20,7 +20,6 @@ target_link_libraries(mnc_cli PUBLIC
     msap1::system
     msap1::settings
 	msap1::waveform
-	msap1::waveform-ipc
     mnc::logging
 	OpenSSL::Crypto
     glaze::glaze

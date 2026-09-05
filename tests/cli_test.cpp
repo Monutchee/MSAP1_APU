@@ -102,7 +102,6 @@ void option_parsing()
 		"ADC diagnostic flow was not parsed");
 
 	const auto waveform_export = application.parse({
-		"--converter-socket", "/tmp/converter.sock",
 		"waveform", "export", "--session", "17", "--event",
 		"01234567-89ab-5def-8123-456789abcdef", "--format", "comtrade-zip",
 		"--file", "/tmp/event.zip"});
@@ -113,9 +112,7 @@ void option_parsing()
 				"01234567-89ab-5def-8123-456789abcdef" &&
 			waveform_export.options.waveform_export_format == "comtrade-zip" &&
 			waveform_export.options.waveform_export_file ==
-				"/tmp/event.zip" &&
-			waveform_export.options.converter_socket_path ==
-				"/tmp/converter.sock",
+				"/tmp/event.zip",
 		"waveform export selection was not parsed");
 	const auto full_capture_export = application.parse({
 		"waveform", "export", "--session", "18", "--format", "pqdif"});
@@ -404,8 +401,7 @@ void completion()
 	require(contains(candidates, "--session") &&
 			contains(candidates, "--event") &&
 			contains(candidates, "--format") &&
-			contains(candidates, "--file") &&
-			contains(candidates, "--converter-socket"),
+			contains(candidates, "--file"),
 		"waveform export completion omitted required options");
 	candidates = application.complete({"log", "--"});
 	require(contains(candidates, "--component") &&
