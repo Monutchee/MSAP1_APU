@@ -1092,17 +1092,73 @@ int main()
 		const auto record = static_cast<std::size_t>(
 			get_u64(incomplete, capture + 8)) +
 			msap1::mncwf_v4_section_header_bytes;
-		put_u32(incomplete, record + 160, 0);
-		put_u32(incomplete, record + 164, 0);
+		for (const auto index : {0u, 1u, 2u, 9u, 10u}) {
+			put_u32(incomplete, record + 160 + index * 8, 0);
+			put_u32(incomplete, record + 164 + index * 8, 0);
+		}
+		put_u32(incomplete, record + 148, 0); // calibration unknown
 		refresh_section_crc(incomplete, capture);
-		const msap1::MncwfV4Reader reader{incomplete};
-		const auto readiness =
-			msap1::assess_mncwf_v4_conversion_readiness(reader);
+		const auto channels = entry_for(incomplete, static_cast<std::uint32_t>(
+			msap1::MncwfV4SectionType::channel_definitions));
+		const auto first_channel = static_cast<std::size_t>(
+			get_u64(incomplete, channels + 8)) + msap1::mncwf_v4_section_header_bytes;
+		for (std::size_t index = 0; index < 2; ++index) {
+			const auto flags = first_channel + index * msap1::mncwf_v4_channel_definition_bytes + 20;
+			put_u32(incomplete, flags, get_u32(incomplete, flags) &
+				~msap1::mncwf_channel_calibration_valid);
+		}
+		refresh_section_crc(incomplete, channels);
+		// This regression needs continuous samples with unknown calibration;
+		// the base parser fixture deliberately contains a transport-loss flag.
+		const auto quality = entry_for(incomplete, static_cast<std::uint32_t>(
+			msap1::MncwfV4SectionType::quality_intervals));
+		const auto quality_record = static_cast<std::size_t>(
+			get_u64(incomplete, quality + 8)) + msap1::mncwf_v4_section_header_bytes;
+		put_u32(incomplete, quality_record + 40, msap1::mncwf_quality_calibration_invalid);
+		refresh_section_crc(incomplete, quality);
+		const auto compressed = msap1::encode_mncwf_v5(document_from(
+			msap1::MncwfV4Reader{incomplete}));
+		for (const auto &bytes : {incomplete, compressed}) {
+			const msap1::MncwfV4Reader reader{bytes};
+			const auto readiness = msap1::assess_mncwf_v4_conversion_readiness(reader);
+			require(readiness.comtrade_ready() && readiness.pqdif_ready(),
+				"v4/v5 allow blank administrative identity and unknown calibration");
+			require(reader.capture_metadata().station_name.empty() &&
+				reader.capture_metadata().calibration_status == msap1::MncwfCalibrationStatus::unknown,
+				"optional metadata is not fabricated");
+			const auto close_file = [](std::FILE *file) { std::fclose(file); };
+			const auto file = std::unique_ptr<std::FILE, decltype(close_file)>(
+				std::tmpfile(), close_file);
+			require(file != nullptr, "create optional-identity source fixture");
+			if (!file) continue;
+			require(std::fwrite(bytes.data(), 1, bytes.size(), file.get()) == bytes.size() &&
+				std::fflush(file.get()) == 0, "write optional-identity source fixture");
+			using namespace mnc::waveform;
+			for (const auto format : {ExportFormat::comtrade,
+				ExportFormat::comtrade_zip, ExportFormat::pqdif}) {
+				for (const auto scope : {ExportScope::capture, ExportScope::event}) {
+					const auto event_id = reader.events().front().event_uuid;
+					msap1::MncwfWaveformSource source(::fileno(file.get()), format,
+						scope, event_id);
+					ConversionOptions options{};
+					options.format = format;
+					options.scope = scope;
+					if (scope == ExportScope::event) options.selected_event_uuid = event_id;
+					VectorOutputSink output;
+					const auto summary = make_converter(format)->convert(source, output, options);
+					require(summary.frames == source.frame_count() && !output.bytes().empty(),
+						"blank-identity v4/v5 capture and event convert through source adapter");
+				}
+			}
+		}
+		put_u32(incomplete, first_channel + 20, get_u32(incomplete, first_channel + 20) &
+			~msap1::mncwf_channel_transform_valid);
+		refresh_section_crc(incomplete, channels);
+		const auto readiness = msap1::assess_mncwf_v4_conversion_readiness(
+			msap1::MncwfV4Reader{incomplete});
 		require(!readiness.comtrade_ready() && !readiness.pqdif_ready() &&
-			std::ranges::find(readiness.comtrade_missing,
-				"capture.station_name") !=
-				readiness.comtrade_missing.end(),
-			"readiness reports missing capture-time identity");
+			std::ranges::find(readiness.comtrade_missing, "channel[0].affine_transform") !=
+				readiness.comtrade_missing.end(), "missing measurement scaling still blocks export");
 	}
 
 	if (failures != 0)

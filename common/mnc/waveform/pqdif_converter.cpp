@@ -1207,8 +1207,9 @@ Element make_data_source(const WaveformMetadata &metadata,
 		child.push_back(scalar_u32(tag_quantity_measured,
 			measured_id(channel.quantity)));
 		child.push_back(string_element(tag_other_channel_id, channel.identifier));
-		child.push_back(string_element(tag_group_name,
-			metadata.capture.circuit_name));
+		if (!metadata.capture.circuit_name.empty())
+			child.push_back(string_element(tag_group_name,
+				metadata.capture.circuit_name));
 		child.push_back(scalar_u32(tag_physical_channel,
 			index < metadata.channels.size() ? channel.source_index :
 				checked_u32(index, "PQDIF derived physical channel")));
@@ -1229,9 +1230,10 @@ Element make_data_source(const WaveformMetadata &metadata,
 	root.push_back(string_element(tag_source_name,
 		metadata.capture.product_name.empty() ? metadata.capture.device_model
 			: metadata.capture.product_name));
-	root.push_back(string_element(tag_location,
-		metadata.capture.site_name.empty() ? metadata.capture.station_name
-			: metadata.capture.site_name));
+	const auto &location = metadata.capture.site_name.empty()
+		? metadata.capture.station_name : metadata.capture.site_name;
+	if (!location.empty())
+		root.push_back(string_element(tag_location, location));
 	root.push_back(string_element(tag_time_zone, utc_offset_name(
 		metadata.timebase_segments.front().utc_offset_seconds)));
 	root.push_back(scalar_real(tag_utc_to_lst,
@@ -1276,7 +1278,10 @@ Element make_settings(const WaveformMetadata &metadata,
 	root.push_back(scalar_timestamp(tag_effective, start));
 	root.push_back(scalar_timestamp(tag_time_installed, start));
 	root.push_back(scalar_bool(tag_use_calibration,
-		metadata.capture.calibration_status == CalibrationStatus::valid));
+		metadata.capture.calibration_status == CalibrationStatus::valid &&
+		std::ranges::all_of(metadata.channels, [](const auto &channel) {
+			return (channel.flags & channel_calibration_valid) != 0u;
+		})));
 	root.push_back(scalar_bool(tag_use_transducer, ratios));
 	root.push_back(collection(tag_channel_settings, std::move(settings)));
 	root.push_back(scalar_real(tag_nominal_frequency,
@@ -1572,8 +1577,6 @@ ConversionSummary PqdifConverter::convert(const WaveformSource &source,
 	std::vector<std::string> missing;
 	if (metadata.capture.topology == Topology::unknown)
 		missing.push_back("capture.topology");
-	if (metadata.capture.calibration_id.empty())
-		missing.push_back("capture.calibration_id");
 	for (std::size_t index = 0; index != metadata.channels.size(); ++index) {
 		const auto &channel = metadata.channels[index];
 		if ((channel.flags & channel_transform_valid) == 0u)
@@ -1584,8 +1587,6 @@ ConversionSummary PqdifConverter::convert(const WaveformSource &source,
 			missing.push_back("channel[" + std::to_string(index) + "].nominal");
 		if ((channel.flags & channel_resolution_valid) == 0u)
 			missing.push_back("channel[" + std::to_string(index) + "].resolution");
-		if ((channel.flags & channel_calibration_valid) == 0u)
-			missing.push_back("channel[" + std::to_string(index) + "].calibration");
 		if (channel.gain.denominator == 0 || channel.offset.denominator == 0 ||
 		    channel.primary_secondary_ratio.denominator == 0 ||
 		    channel.nominal.denominator == 0 ||

@@ -2631,18 +2631,10 @@ assess_mncwf_v4_conversion_readiness(const MncwfV4Reader &reader)
 		result.pqdif_missing.push_back(std::move(field));
 	};
 	const auto &capture = reader.capture_metadata();
-	if (capture.station_name.empty())
-		both("capture.station_name");
-	if (capture.site_name.empty())
-		both("capture.site_name");
-	if (capture.circuit_name.empty())
-		both("capture.circuit_name");
+	// Administrative identity and calibration authority are optional. Unknown
+	// values stay unknown in exports; they do not invalidate captured scaling.
 	if (capture.device_model.empty())
 		both("capture.device_model");
-	if (capture.device_serial.empty())
-		both("capture.device_serial");
-	if (capture.calibration_id.empty())
-		result.pqdif_missing.emplace_back("capture.calibration_id");
 	if (capture.nominal_frequency_numerator == 0u)
 		both("capture.nominal_frequency");
 	if (capture.nominal_voltage_numerator <= 0)
@@ -2695,8 +2687,6 @@ assess_mncwf_v4_conversion_readiness(const MncwfV4Reader &reader)
 			result.pqdif_missing.push_back(prefix + "resolution");
 		if ((channel.flags & mncwf_channel_clipping_valid) == 0u)
 			both(prefix + "clipping");
-		if ((channel.flags & mncwf_channel_calibration_valid) == 0u)
-			result.pqdif_missing.push_back(prefix + "calibration");
 	}
 
 	if (reader.events().empty()) {

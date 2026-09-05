@@ -534,6 +534,14 @@ keeps jobs across navigation/reload, and streams ready artifacts through the
 authenticated backend. Converter outputs expire after 30 minutes and are
 purged on Web-backend restart; MNCWF masters remain governed only by waveform
 archive retention. The CLI invokes the same converter library directly.
+Configuration → Waveform owns archive retention and optional station, site,
+circuit, device serial, and calibration identity. Blank identity and Unknown
+calibration do not block COMTRADE/PQDIF export, including existing v4/v5
+captures. Exports preserve unknown calibration rather than asserting valid
+calibration; measurement scaling, timing, and continuity checks remain strict.
+Identity changes apply only to new captures, never rewrite existing MNCWF
+files, and are never used to fill in metadata during export.
+
 The acquisition daemon delivers each event/capture UUID association to the
 durable historian on an isolated retry worker, so historian startup or ingest
 lag can never block DMA. Catalogue results and the Web UI join those capture

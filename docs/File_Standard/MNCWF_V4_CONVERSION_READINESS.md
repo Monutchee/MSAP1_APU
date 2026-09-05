@@ -39,14 +39,14 @@ one bounded v5 sample chunk at a time.
 `assess_mncwf_v4_conversion_readiness()` returns separate missing-field lists
 for full-fidelity COMTRADE and PQDIF event export. A file is ready only when:
 
-- station, site, circuit, device model, serial, nominal voltage, and nominal
-  frequency are captured rather than inferred later;
+- device model, nominal voltage, and nominal frequency are captured rather
+  than inferred later;
 - every timebase segment has UTC context, TAI correlation, and known time
   quality;
 - every channel has phase, quantity, exact affine conversion,
   primary/secondary ratio, range, and clipping metadata;
-- PQDIF additionally has topology, calibration ID, clock source, channel
-  nominal/resolution/calibration validity; and
+- PQDIF additionally has topology, clock source, and channel nominal/resolution
+  metadata; and
 - at least one typed event exists, every event has taxonomy, TAI/UTC anchors,
   and its evaluated settings snapshot, while COMTRADE also requires an exact
   trigger sequence.
@@ -55,11 +55,26 @@ The binary reader's structural validation runs first. The readiness gate never
 repairs an incomplete file and never reads current device state. The test
 fixture proves both ready output and field-specific failure reporting.
 
+Station/site/circuit IDs and names, device serial, and calibration ID are
+optional provisioning metadata. Blank values do not block either converter,
+including for existing saved files. COMTRADE keeps empty text fields and uses
+the captured device model when serial is absent; PQDIF omits absent optional
+serial/location/group tags. Neither path invents identity or reads live settings.
+Unknown, expired, or invalid calibration is preserved in destination metadata,
+not promoted to valid. PQDIF sets `tagUseCalibration` false unless the capture
+and every channel assert valid calibration. Exact captured scale/offset still
+apply to raw series independently of calibration authority.
+
+Configuration → Waveform owns archive retention and these optional fields.
+Calibration may remain Unknown with an empty ID; any known status requires an
+ID and must reflect actual calibration evidence. Identity changes affect only
+new captures; old MNCWF files remain immutable.
+
 ## COMTRADE CFG readiness
 
 | Destination concept/field group | MNCWF v4 authority | Status and conversion rule |
 |---|---|---|
-| station name | capture `station_name` | Ready, direct; blank fails readiness |
+| station name | capture `station_name` | Direct; blank remains unspecified |
 | recording-device identity | product, model, serial, device UUID, firmware/build | Ready; converter formats a stable `rec_dev_id` from captured values |
 | revision year | converter profile | Converter-owned constant (`2013`), not measurement state |
 | total/analog/status channel counts | channel definitions plus selected event-active projections | Ready, derived before CFG is emitted |
@@ -128,11 +143,11 @@ stable functions of event UUID and descriptor content.
 | `tagVendorID` | no third-party branding in product records | Optional and intentionally omitted |
 | `tagEquipmentID` | device model and stable device UUID | Ready, deterministic GUID mapping |
 | `tagCustomSourceInfo` | product, firmware, build, hashes | Ready |
-| `tagSerialNumberDS` | captured device serial | Ready, direct |
+| `tagSerialNumberDS` | captured device serial | Optional; omitted when blank |
 | `tagVersionDS` | firmware and software build | Ready, direct |
 | `tagNameDS` | product/device model | Ready, direct |
 | `tagOwnerDS` | not a waveform measurement | Optional and intentionally omitted |
-| `tagLocationDS` | station, site, circuit | Ready, direct |
+| `tagLocationDS` | site or station | Optional; omitted when both are blank |
 | `tagTimeZoneDS`, `tagUTCtoLST` | active UTC-to-local offset | Ready; deterministic `UTC±hh:mm` text and numeric offset |
 | coordinates/latitude/longitude | not configured in M18 | Optional and intentionally omitted, never externally looked up |
 | `tagInstrumentTypeID` | product instrument class | Ready, converter mapping |
@@ -141,7 +156,7 @@ stable functions of event UUID and descriptor content.
 | `tagChannelName` | channel name | Ready, direct |
 | `tagPhaseID` | phase enum | Ready, direct mapping |
 | `tagOtherChannelIdentifier` | stable channel UUID and source channel | Ready |
-| `tagGroupName` | station/circuit and channel description | Ready |
+| `tagGroupName` | captured circuit | Optional; omitted when blank |
 | `tagQuantityTypeID` | quantity enum and sample-series shape | Ready, converter ID mapping |
 | `tagQuantityMeasuredID` | current/voltage/status/frequency/ratio enum | Ready, direct mapping |
 | `tagPhysicalChannel` | source-channel number | Ready, direct |
@@ -163,7 +178,7 @@ element identity but are never substituted blindly for a PQDIF semantic ID.
 | PQDIF tag/concept | MNCWF v4 authority | Status and rule |
 |---|---|---|
 | monitor-settings record identity/effective time | configuration SHA-256/ID/generation and creation/event times | Ready |
-| `tagUseCalibration` | capture and channel calibration status/flags | Ready |
+| `tagUseCalibration` | capture and channel calibration status/flags | False unless capture and every channel assert valid calibration |
 | `tagNominalFrequency` | exact nominal-frequency rational | Ready |
 | `tagChannelSettingsArray`, `tagOneChannelSetting`, `tagChannelDefnIdx` | channel order and stable IDs | Ready |
 | trigger type/high/low/deadband fields | typed event descriptor plus exact evaluated settings JSON | Ready; schema-aware converter reads the captured snapshot |

@@ -594,6 +594,59 @@ void test_pqdif(MemorySource &source, std::vector<std::byte> &pqdif)
 }
 
 void write_vector(const std::filesystem::path &path,
+	std::span<const std::byte> bytes);
+
+void test_optional_identity()
+{
+	MemorySource source;
+	auto &metadata = source.mutable_metadata();
+	metadata.capture.station_name.clear();
+	metadata.capture.site_name.clear();
+	metadata.capture.circuit_name.clear();
+	metadata.capture.device_serial.clear();
+	metadata.capture.calibration_id.clear();
+	metadata.capture.calibration_status = CalibrationStatus::unknown;
+	for (auto &channel : metadata.channels)
+		channel.flags &= ~channel_calibration_valid;
+	VectorOutputSink cff;
+	(void)ComtradeConverter{}.convert(source, cff, options(ExportFormat::comtrade));
+	const auto content = text(cff.bytes());
+	require(content.find("\r\n," + metadata.capture.device_model + ",2013\r\n") != std::string::npos,
+		"COMTRADE preserves blank station and uses captured model without inventing serial");
+	require(content.find("calibration.id=\r\ncalibration.status=0\r\n") != std::string::npos,
+		"COMTRADE discloses unknown calibration");
+	VectorOutputSink zip;
+	(void)ComtradeZipConverter{}.convert(source, zip, options(ExportFormat::comtrade_zip));
+	require(!zip.bytes().empty(), "legacy ZIP allows optional identity");
+	VectorOutputSink pqdif;
+	(void)PqdifConverter{}.convert(source, pqdif, options(ExportFormat::pqdif));
+	const auto bytes = std::span<const std::byte>{pqdif.bytes()};
+	const auto source_offset = u32(bytes, 40);
+	const auto settings_offset = u32(bytes, source_offset + 40);
+	const auto settings_body = inflate_record(bytes.subspan(settings_offset + 64,
+		u32(bytes, settings_offset + 36)));
+	const std::array<std::byte, 16> calibration_tag{
+		std::byte{0x80}, std::byte{0x81}, std::byte{0xf2}, std::byte{0x62},
+		std::byte{0xc4}, std::byte{0xf9}, std::byte{0xcf}, std::byte{0x11},
+		std::byte{0x9d}, std::byte{0x89}, std::byte{0x00}, std::byte{0x80},
+		std::byte{0xc7}, std::byte{0x2e}, std::byte{0x70}, std::byte{0xa3}};
+	const auto found = std::search(settings_body.begin(), settings_body.end(),
+		calibration_tag.begin(), calibration_tag.end());
+	require(found != settings_body.end(), "PQDIF retains required use-calibration tag");
+	const auto tag_offset = static_cast<std::size_t>(found - settings_body.begin());
+	require(u32(settings_body, tag_offset + 20) == 0,
+		"PQDIF does not assert calibration for unknown channels");
+	require(text(settings_body).find("calibration.status=0\ncalibration.id=") != std::string::npos,
+		"PQDIF preserves unknown calibration provenance");
+	if (const auto *directory = std::getenv("MNC_WAVEFORM_GOLDEN_DIR")) {
+		std::filesystem::create_directories(directory);
+		write_vector(std::filesystem::path(directory) / "unprovisioned.cff", cff.bytes());
+		write_vector(std::filesystem::path(directory) / "unprovisioned.zip", zip.bytes());
+		write_vector(std::filesystem::path(directory) / "unprovisioned.pqd", pqdif.bytes());
+	}
+}
+
+void write_vector(const std::filesystem::path &path,
 	std::span<const std::byte> bytes)
 {
 	std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -692,6 +745,7 @@ int main()
 		test_short_final_boxcar();
 		test_incomplete_event_status();
 		test_pqdif(source, pqdif);
+		test_optional_identity();
 		test_failures(source);
 		if (const auto *directory = std::getenv("MNC_WAVEFORM_GOLDEN_DIR")) {
 			std::filesystem::create_directories(directory);
